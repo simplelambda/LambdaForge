@@ -1,0 +1,114 @@
+experiment:
+  name: example_mlp
+  output_root: runs/experiments
+  seeds: [7, 17, 27]
+  resume: true
+  rerun_completed: false
+  test_after_fit: true
+  required_artifacts: []
+
+data:
+  train:
+    target: your_project.data.TrainDataset
+    params: {}
+  val:
+    target: your_project.data.ValidationDataset
+    params: {}
+  test:
+    target: your_project.data.TestDataset
+    params: {}
+  datamodule:
+    target: lambdaforge.training.data.LightningDataModule
+    params:
+      batch_size: 64
+      num_workers: 4
+      persistent_workers: true
+      collate_fn:
+        ref: your_project.data.collate_batch
+
+model:
+  target: lambdaforge.nn.models.MLP
+  params:
+    in_features: 32
+    out_features: 1
+    hidden: [128, 64]
+    activation: gelu
+    normalization: layernorm
+    dropout: 0.1
+
+losses:
+  - target: lambdaforge.nn.losses.BinaryCrossEntropyWithLogitsLoss
+    params:
+      output_key: logits
+      target_key: target
+
+train_metrics: []
+val_metrics:
+  - target: lambdaforge.metrics.classification.BinaryAUROC
+    params:
+      pred_key: logits
+      target_key: target
+test_metrics:
+  - target: lambdaforge.metrics.classification.BinaryAUROC
+    params:
+      pred_key: logits
+      target_key: target
+
+optimizer:
+  ref: torch.optim.AdamW
+  params:
+    lr: 0.001
+    weight_decay: 0.0001
+
+task:
+  target: lambdaforge.training.LightningTask
+  params:
+    model_input_key: x
+    model_output_key: logits
+    logging:
+      log_total_loss: true
+      log_individual_losses: true
+      loss_on_step: true
+      loss_on_epoch: true
+      metric_prog_bar: true
+
+trainer:
+  max_epochs: 50
+  accelerator: auto
+  devices: auto
+  precision: 32-true
+  checkpoint_policy: last_and_best
+  checkpoint_monitor: val_auroc
+  checkpoint_mode: max
+  early_stopping_patience: 8
+  early_stopping_monitor: val_auroc
+  early_stopping_mode: max
+  write_epoch_metrics_csv: true
+  epoch_metrics_include: ["train_*", "val_*", "test_*"]
+  epoch_metrics_exclude: ["*_step"]
+  trainer_kwargs:
+    enable_model_summary: true
+
+# Any external Lightning callback can be constructed recursively here.
+callbacks: []
+
+sweep:
+  include_base: true
+  grid:
+    model.params.hidden: [[128, 64], [256, 128]]
+    optimizer.params.lr: [0.001, 0.0003]
+  ablations:
+    - name: no_dropout
+      set:
+        model.params.dropout: 0.0
+
+execution:
+  mode: sequential
+  gpus: [0, 1]
+  jobs_per_gpu: 2
+  devices_per_job: 1
+  grace_seconds: 15
+  cpu_threads_per_job: 2
+  cpu_interop_threads_per_job: 1
+  cpu_cores_per_job: 2
+  dataloader_num_workers_per_job: 2
