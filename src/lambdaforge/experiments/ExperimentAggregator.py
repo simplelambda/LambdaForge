@@ -13,18 +13,25 @@ import csv
 import json
 import math
 import statistics
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.experiments.AggregateResult import AggregateResult
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
+from lambdaforge.experiments.RunStatus import RunStatus
+from lambdaforge.experiments.statistics.paired.PairedAlternative import PairedAlternative
+from lambdaforge.experiments.statistics.paired.PairedTestMethod import PairedTestMethod
+from lambdaforge.experiments.statistics.StatisticalComparisonConfig import (
+    StatisticalComparisonConfig,
+)
+from lambdaforge.experiments.statistics.StatisticalComparisonEngine import (
+    StatisticalComparisonEngine,
+)
+from lambdaforge.experiments.VariantAggregateResult import VariantAggregateResult
 
-AGGREGATE_SCHEMA_VERSION = 3
-STAT_ALPHA = 0.05
-STAT_POWER = 0.80
-NORMAL_Z_95 = 1.959963984540054
-NORMAL_Z_POWER_80 = 0.8416212335729143
-MIN_PAIRED_SEEDS_FOR_VERDICT = 3
+AGGREGATE_SCHEMA_VERSION = 4
 
 
 class ExperimentAggregator:
@@ -94,84 +101,61 @@ class ExperimentAggregator:
     def _metric_mode(self, metric: str, meta: Mapping[str, str]) -> str:
         return "min" if self._is_min_metric(metric, meta) else "max"
 
-    def _binomial_upper_tail(self, n: int, k: int) -> float:
-        return sum(math.comb(n, i) for i in range(k, n + 1)) / (2**n)
-
-    def _binomial_lower_tail(self, n: int, k: int) -> float:
-        return sum(math.comb(n, i) for i in range(0, k + 1)) / (2**n)
-
-    def _sign_test(self, improvements: Sequence[float]) -> dict[str, Any]:
-        eps = 1e-12
-        wins = sum(1 for value in improvements if value > eps)
-        losses = sum(1 for value in improvements if value < -eps)
-        ties = len(improvements) - wins - losses
-        n = wins + losses
-        if n == 0:
-            return {
-                "wins": wins,
-                "losses": losses,
-                "ties": ties,
-                "p_value_two_sided": None,
-                "p_value_better": None,
-                "p_value_worse": None,
-            }
-
-        p_better = self._binomial_upper_tail(n, wins)
-        p_worse = self._binomial_lower_tail(n, wins)
-        p_two_sided = min(1.0, 2.0 * min(p_better, p_worse))
-        return {
-            "wins": wins,
-            "losses": losses,
-            "ties": ties,
-            "p_value_two_sided": p_two_sided,
-            "p_value_better": p_better,
-            "p_value_worse": p_worse,
-        }
-
-    def _paired_ci95(self, improvements: Sequence[float]) -> tuple[float | None, float | None]:
-        if len(improvements) < 2:
-            return None, None
-        mean = statistics.fmean(improvements)
-        std = statistics.stdev(improvements)
-        half_width = NORMAL_Z_95 * std / math.sqrt(len(improvements))
-        return mean - half_width, mean + half_width
-
-    def _recommended_paired_n(self, improvements: Sequence[float]) -> tuple[int | None, str]:
+    def _recommended_paired_n(
+        self,
+        improvements: Sequence[float],
+        protocol: StatisticalComparisonConfig,
+    ) -> tuple[int | None, str]:
         n = len(improvements)
         if n < 2:
             return None, "need_at_least_2_pairs"
 
         mean = statistics.fmean(improvements)
-        if abs(mean) < 1e-12:
+        if abs(mean) <= protocol.zero_tolerance:
             return None, "no_observed_effect"
 
         std = statistics.stdev(improvements)
         # If every observed paired difference is identical, the paired-mean formula
-        # gives zero variance. Still require enough non-zero paired signs for a
-        # one-sided exact sign test at alpha=0.05.
-        if std < 1e-12:
-            sign_n = math.ceil(math.log(STAT_ALPHA) / math.log(0.5))
+        # gives zero variance. Still require enough non-zero paired signs for
+        # the configured one- or two-sided alpha.
+        if std <= protocol.zero_tolerance:
+            tail_alpha = (
+                protocol.alpha / 2.0
+                if protocol.paired_alternative
+                in {PairedAlternative.TWO_SIDED, PairedAlternative.OBSERVED_DIRECTION}
+                else protocol.alpha
+            )
+            sign_n = math.ceil(math.log(tail_alpha) / math.log(0.5))
             return max(n, sign_n), "zero_observed_variance"
 
-        required = math.ceil(((NORMAL_Z_95 + NORMAL_Z_POWER_80) * std / abs(mean)) ** 2)
+        two_sided = protocol.paired_alternative in {
+            PairedAlternative.TWO_SIDED,
+            PairedAlternative.OBSERVED_DIRECTION,
+        }
+        alpha_probability = 1.0 - protocol.alpha / (2.0 if two_sided else 1.0)
+        z_alpha = statistics.NormalDist().inv_cdf(alpha_probability)
+        z_power = statistics.NormalDist().inv_cdf(protocol.target_power)
+        required = math.ceil(((z_alpha + z_power) * std / abs(mean)) ** 2)
         return max(n, required), "paired_mean_power_approx"
 
     def _comparison_verdict(
         self,
         n_pairs: int,
         mean_improvement: float | None,
-        p_better: float | None,
-        p_worse: float | None,
+        p_value: float | None,
         recommended_n: int | None,
+        protocol: StatisticalComparisonConfig,
     ) -> str:
-        if n_pairs < MIN_PAIRED_SEEDS_FOR_VERDICT:
+        if n_pairs < protocol.min_pairs_for_verdict:
             return "insufficient_pairs"
-        if mean_improvement is None or abs(mean_improvement) < 1e-12:
+        if mean_improvement is None or abs(mean_improvement) <= protocol.zero_tolerance:
             return "no_clear_effect"
-        if mean_improvement > 0 and p_better is not None and p_better <= STAT_ALPHA:
-            return "better_than_baseline"
-        if mean_improvement < 0 and p_worse is not None and p_worse <= STAT_ALPHA:
-            return "worse_than_baseline"
+        if p_value is not None and p_value <= protocol.alpha:
+            if protocol.paired_alternative is PairedAlternative.GREATER:
+                return "better_than_baseline" if mean_improvement > 0 else "inconclusive"
+            if protocol.paired_alternative is PairedAlternative.LESS:
+                return "worse_than_baseline" if mean_improvement < 0 else "inconclusive"
+            return "better_than_baseline" if mean_improvement > 0 else "worse_than_baseline"
         if recommended_n is not None and recommended_n > n_pairs:
             return "needs_more_seeds"
         return "inconclusive"
@@ -566,8 +550,11 @@ class ExperimentAggregator:
         if status == "missing":
             return "pending", "missing_result"
 
-        if status != "ok":
-            return "ignored", f"status={status or 'unknown'}"
+        if status == RunStatus.FAILED.value:
+            return "ignored", f"status={status}"
+
+        if status != RunStatus.OK.value:
+            return "pending", f"status={status or RunStatus.UNKNOWN.value}"
 
         if not run_dir.exists():
             return "ignored", "run_dir_missing"
@@ -712,6 +699,8 @@ class ExperimentAggregator:
         seed_rows: Sequence[Mapping[str, Any]],
         metric_keys: Sequence[str],
         metric_meta: Mapping[str, Mapping[str, str]],
+        engine: StatisticalComparisonEngine,
+        protocol: StatisticalComparisonConfig,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         rows_by_variant = self._group_by_variant(seed_rows)
         available_variants = set(rows_by_variant)
@@ -763,14 +752,15 @@ class ExperimentAggregator:
                 variant_values = [item[2] for item in paired]
                 mean_improvement = self._safe_mean(improvements)
                 std_improvement = self._safe_std(improvements)
-                ci_low, ci_high = self._paired_ci95(improvements)
-                recommended_n, recommendation_reason = self._recommended_paired_n(improvements)
-                sign = self._sign_test(improvements)
-                p_directional = (
-                    sign["p_value_better"]
-                    if mean_improvement is not None and mean_improvement >= 0
-                    else sign["p_value_worse"]
+                identity = (baseline_variant, variant, metric)
+                legacy_interval = engine.legacy_ci95(improvements)
+                interval = engine.confidence_interval(improvements, identity=identity)
+                recommended_n, recommendation_reason = self._recommended_paired_n(
+                    improvements,
+                    protocol,
                 )
+                sign = engine.legacy_sign_test(improvements)
+                paired_test = engine.paired_test(improvements)
                 additional = (
                     max(0, int(recommended_n) - len(paired)) if recommended_n is not None else None
                 )
@@ -793,15 +783,15 @@ class ExperimentAggregator:
                         "std_delta": self._safe_std(deltas),
                         "mean_improvement": mean_improvement,
                         "std_improvement": std_improvement,
-                        "ci95_improvement_low": ci_low,
-                        "ci95_improvement_high": ci_high,
-                        "wins": sign["wins"],
-                        "losses": sign["losses"],
-                        "ties": sign["ties"],
-                        "p_value_sign_two_sided": sign["p_value_two_sided"],
-                        "p_value_sign_better": sign["p_value_better"],
-                        "p_value_sign_worse": sign["p_value_worse"],
-                        "p_value_directional": p_directional,
+                        "ci95_improvement_low": legacy_interval.lower,
+                        "ci95_improvement_high": legacy_interval.upper,
+                        "wins": sign.wins,
+                        "losses": sign.losses,
+                        "ties": sign.ties,
+                        "p_value_sign_two_sided": sign.p_value_two_sided,
+                        "p_value_sign_better": sign.p_value_better,
+                        "p_value_sign_worse": sign.p_value_worse,
+                        "p_value_directional": paired_test.p_value,
                         "effect_size_dz": (
                             mean_improvement / std_improvement
                             if mean_improvement is not None and std_improvement not in (None, 0.0)
@@ -813,9 +803,55 @@ class ExperimentAggregator:
                         "verdict": self._comparison_verdict(
                             n_pairs=len(paired),
                             mean_improvement=mean_improvement,
-                            p_better=sign["p_value_better"],
-                            p_worse=sign["p_value_worse"],
+                            p_value=paired_test.p_value,
                             recommended_n=recommended_n,
+                            protocol=protocol,
+                        ),
+                        "confidence_interval_method": interval.method,
+                        "confidence_level": interval.confidence_level,
+                        "confidence_interval_low": interval.lower,
+                        "confidence_interval_high": interval.upper,
+                        "confidence_interval_standard_error": interval.standard_error,
+                        "confidence_interval_status": interval.status,
+                        "confidence_interval_reason": interval.reason,
+                        "bootstrap_resamples": interval.resamples,
+                        "bootstrap_seed": interval.base_seed,
+                        "bootstrap_effective_seed": interval.effective_seed,
+                        "paired_test_method": paired_test.method,
+                        "paired_test_alternative": paired_test.alternative,
+                        "paired_test_calculation_requested": paired_test.calculation_requested,
+                        "paired_test_calculation_used": paired_test.calculation_used,
+                        "paired_test_statistic": paired_test.statistic,
+                        "paired_test_positive_statistic": paired_test.positive_statistic,
+                        "paired_test_negative_statistic": paired_test.negative_statistic,
+                        "paired_test_effective_n": paired_test.n_effective,
+                        "paired_test_zero_count": paired_test.n_zero,
+                        "paired_test_has_rank_ties": paired_test.has_rank_ties,
+                        "paired_test_z_statistic": paired_test.z_statistic,
+                        "paired_test_p_value_two_sided": paired_test.p_value_two_sided,
+                        "paired_test_p_value_better": paired_test.p_value_better,
+                        "paired_test_p_value_worse": paired_test.p_value_worse,
+                        "paired_test_status": paired_test.status,
+                        "paired_test_reason": paired_test.reason,
+                        "paired_test_zero_method": paired_test.zero_method,
+                        "paired_test_continuity_correction": (paired_test.continuity_correction),
+                        "paired_test_exact_max_pairs": paired_test.exact_max_pairs,
+                        "paired_test_zero_tolerance": paired_test.zero_tolerance,
+                        "paired_test_round_decimals": paired_test.round_decimals,
+                        "p_value_wilcoxon_two_sided": (
+                            paired_test.p_value_two_sided
+                            if paired_test.method == PairedTestMethod.WILCOXON.value
+                            else None
+                        ),
+                        "p_value_wilcoxon_better": (
+                            paired_test.p_value_better
+                            if paired_test.method == PairedTestMethod.WILCOXON.value
+                            else None
+                        ),
+                        "p_value_wilcoxon_worse": (
+                            paired_test.p_value_worse
+                            if paired_test.method == PairedTestMethod.WILCOXON.value
+                            else None
                         ),
                     }
                 )
@@ -1020,6 +1056,11 @@ class ExperimentAggregator:
             or existing_aggregate.get("aggregate_version") != AGGREGATE_SCHEMA_VERSION
         ):
             return False
+        existing_state = {
+            key: value for key, value in existing_aggregate.items() if key != "artifacts"
+        }
+        if existing_state != dict(aggregate):
+            return False
 
         plots_required = (
             make_plots
@@ -1177,6 +1218,40 @@ class ExperimentAggregator:
             "recommended_additional_seeds",
             "recommendation_reason",
             "verdict",
+            "confidence_interval_method",
+            "confidence_level",
+            "confidence_interval_low",
+            "confidence_interval_high",
+            "confidence_interval_standard_error",
+            "confidence_interval_status",
+            "confidence_interval_reason",
+            "bootstrap_resamples",
+            "bootstrap_seed",
+            "bootstrap_effective_seed",
+            "paired_test_method",
+            "paired_test_alternative",
+            "paired_test_calculation_requested",
+            "paired_test_calculation_used",
+            "paired_test_statistic",
+            "paired_test_positive_statistic",
+            "paired_test_negative_statistic",
+            "paired_test_effective_n",
+            "paired_test_zero_count",
+            "paired_test_has_rank_ties",
+            "paired_test_z_statistic",
+            "paired_test_p_value_two_sided",
+            "paired_test_p_value_better",
+            "paired_test_p_value_worse",
+            "paired_test_status",
+            "paired_test_reason",
+            "paired_test_zero_method",
+            "paired_test_continuity_correction",
+            "paired_test_exact_max_pairs",
+            "paired_test_zero_tolerance",
+            "paired_test_round_decimals",
+            "p_value_wilcoxon_two_sided",
+            "p_value_wilcoxon_better",
+            "p_value_wilcoxon_worse",
         ]
         path = aggregate_dir / "baseline_comparisons.csv"
         self._write_csv(path, rows, fields)
@@ -1187,6 +1262,7 @@ class ExperimentAggregator:
         aggregate_dir: Path,
         rows: Sequence[Mapping[str, Any]],
         metadata: Mapping[str, Any],
+        protocol: StatisticalComparisonConfig,
     ) -> Path:
         primary_metric = metadata.get("primary_metric")
         primary_rows = [
@@ -1218,13 +1294,16 @@ class ExperimentAggregator:
                 "variant__ablation is compared with variant when that prefix exists; "
                 "otherwise variants are compared with literal base when present"
             ),
-            "alpha": STAT_ALPHA,
-            "target_power": STAT_POWER,
+            "alpha": protocol.alpha,
+            "target_power": protocol.target_power,
+            "statistical_protocol": protocol.to_dict(),
             "tests": {
                 "paired_difference": "variant - baseline",
                 "improvement": "delta for max metrics, -delta for min metrics",
-                "p_value": "exact paired sign test on improvement signs",
-                "q_value": "Benjamini-Hochberg FDR over directional p-values",
+                "confidence_interval": protocol.confidence_interval_method.value,
+                "p_value": protocol.paired_test_method.value,
+                "alternative": protocol.paired_alternative.value,
+                "q_value": "Benjamini-Hochberg FDR over selected comparison p-values",
                 "recommended_total_seeds": (
                     "paired normal-approx power estimate using observed std and effect; "
                     "zero-variance effects require enough signs for one-sided alpha"
@@ -1409,7 +1488,80 @@ class ExperimentAggregator:
         make_plots: bool = True,
         global_plots: bool = True,
         variant_plot_policy: str = "available",
-    ) -> dict[str, Any]:
+        *,
+        final: bool = True,
+    ) -> AggregateResult:
+        """Serialize aggregate publication and optionally finalize retention."""
+        from lambdaforge.experiments.retention.AggregationReceipt import AggregationReceipt
+        from lambdaforge.experiments.retention.ArtifactRetentionManager import (
+            ArtifactRetentionManager,
+        )
+        from lambdaforge.experiments.retention.ArtifactRetentionMode import (
+            ArtifactRetentionMode,
+        )
+        from lambdaforge.experiments.retention.ArtifactRetentionPolicy import (
+            ArtifactRetentionPolicy,
+        )
+
+        normalized = config if isinstance(config, ExperimentConfig) else ExperimentConfig(config)
+        policy = ArtifactRetentionPolicy.from_config(normalized)
+        manager = ArtifactRetentionManager()
+        if final:
+            with manager.activity_lock(normalized, policy, shared=True):
+                with manager.aggregation_lock(normalized, policy):
+                    manager.invalidate_receipt(normalized)
+                    aggregate = self._write_unlocked(
+                        normalized,
+                        results,
+                        make_plots=make_plots,
+                        global_plots=global_plots,
+                        variant_plot_policy=variant_plot_policy,
+                    )
+                    receipt = AggregationReceipt.build(normalized)
+                    receipt.write_json(AggregationReceipt.path_for(normalized))
+                    if policy.mode is ArtifactRetentionMode.PREVIEW:
+                        try:
+                            print(
+                                manager.preview(normalized).summary(),
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                        except Exception as error:
+                            print(
+                                "WARNING: artifact-retention preview failed: "
+                                f"{error.__class__.__name__}: {error}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+        else:
+            with manager.aggregation_lock(normalized, policy):
+                manager.invalidate_receipt(normalized)
+                aggregate = self._write_unlocked(
+                    normalized,
+                    results,
+                    make_plots=make_plots,
+                    global_plots=global_plots,
+                    variant_plot_policy=variant_plot_policy,
+                )
+
+        if final and policy.mode is ArtifactRetentionMode.APPLY:
+            retention = manager.apply(normalized, explicit=False)
+            if retention.status.value not in {"applied", "already_applied"}:
+                print(
+                    "WARNING: artifact retention did not commit: "
+                    f"{retention.status.value}; {', '.join(retention.errors)}",
+                    flush=True,
+                )
+        return aggregate
+
+    def _write_unlocked(
+        self,
+        config: Mapping[str, Any],
+        results: Sequence[Mapping[str, Any]] = (),
+        make_plots: bool = True,
+        global_plots: bool = True,
+        variant_plot_policy: str = "available",
+    ) -> AggregateResult:
         """Write cross-seed aggregates for every sweep variant.
 
         The function intentionally reconstructs the sweep from ``config`` and reads
@@ -1421,6 +1573,9 @@ class ExperimentAggregator:
         if variant_plot_policy not in {"available", "terminal", "none"}:
             raise ValueError("variant_plot_policy must be 'available', 'terminal' or 'none'.")
 
+        config = config if isinstance(config, ExperimentConfig) else ExperimentConfig(config)
+        statistical_protocol = StatisticalComparisonConfig.from_mapping(config)
+        statistical_engine = StatisticalComparisonEngine(statistical_protocol)
         base_dir = ExperimentConfig.suite_dir_for(config)
         aggregate_dir = base_dir / "aggregate"
 
@@ -1492,8 +1647,9 @@ class ExperimentAggregator:
             aggregate["artifacts"] = epoch_artifacts
             aggregates[variant] = aggregate
 
-            with open(variant_dir / "aggregate.json", "w", encoding="utf-8") as f:
-                json.dump(aggregate, f, indent=2)
+            VariantAggregateResult.from_mapping(aggregate).write_json(
+                variant_dir / "aggregate.json"
+            )
 
         aggregate_dir.mkdir(parents=True, exist_ok=True)
         self._write_csv(
@@ -1513,13 +1669,25 @@ class ExperimentAggregator:
         self._write_summary_csvs(base_dir, aggregate_dir, aggregates)
         self._write_summary_wide_csv(aggregate_dir, aggregates)
         baseline_rows, reliability_meta = self._baseline_comparison_rows(
-            seed_rows, metric_keys, metric_meta
+            seed_rows,
+            metric_keys,
+            metric_meta,
+            statistical_engine,
+            statistical_protocol,
         )
         baseline_csv = self._write_baseline_comparison_csv(aggregate_dir, baseline_rows)
         reliability_json = self._write_reliability_json(
-            aggregate_dir, baseline_rows, reliability_meta
+            aggregate_dir,
+            baseline_rows,
+            reliability_meta,
+            statistical_protocol,
         )
 
+        from lambdaforge.experiments.retention.ArtifactRetentionPolicy import (
+            ArtifactRetentionPolicy,
+        )
+
+        retention_policy = ArtifactRetentionPolicy.from_config(config)
         summary = {
             "aggregate_version": AGGREGATE_SCHEMA_VERSION,
             "experiment": str(ExperimentConfig.get_value(config, "experiment.name", "experiment")),
@@ -1544,12 +1712,18 @@ class ExperimentAggregator:
                 "available": reliability_meta.get("available", False),
                 "reason": reliability_meta.get("reason", ""),
                 "primary_metric": reliability_meta.get("primary_metric"),
+                "statistical_protocol": statistical_protocol.to_dict(),
                 "n_comparisons": len(baseline_rows),
                 "n_primary_comparisons": sum(
                     1 for row in baseline_rows if row.get("primary_metric") is True
                 ),
             },
             "plots": None,
+            "retention": {
+                "mode": retention_policy.mode.value,
+                "status": "not_applied",
+                "latest_manifest": None,
+            },
         }
 
         rows = self._summary_rows(aggregates)
@@ -1573,7 +1747,9 @@ class ExperimentAggregator:
                     "epoch_curves": self._write_global_epoch_plots(aggregate_dir, all_epoch_rows),
                 }
 
-        with open(aggregate_dir / "summary.json", "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2)
-
-        return aggregates
+        result = AggregateResult(
+            aggregates,
+            summary={key: value for key, value in summary.items() if key != "variants"},
+        )
+        result.write_summary_json(aggregate_dir / "summary.json")
+        return result

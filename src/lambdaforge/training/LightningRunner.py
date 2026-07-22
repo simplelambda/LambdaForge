@@ -78,7 +78,10 @@ class LightningRunner:
         stop_event: Any | None = None,
     ) -> TrainerType:
         """Run ``trainer.fit`` and return the trainer."""
-        trainer = self.build_trainer(stop_event=stop_event)
+        trainer = self.build_trainer(
+            stop_event=stop_event,
+            continue_epoch_metrics=ckpt_path is not None,
+        )
         trainer.fit(model=task, datamodule=datamodule, ckpt_path=ckpt_path)
         return trainer
 
@@ -94,7 +97,12 @@ class LightningRunner:
         trainer.test(model=task, datamodule=datamodule, ckpt_path=ckpt_path)
         return trainer
 
-    def build_trainer(self, stop_event: Any | None = None) -> TrainerType:
+    def build_trainer(
+        self,
+        stop_event: Any | None = None,
+        *,
+        continue_epoch_metrics: bool = False,
+    ) -> TrainerType:
         """Construct a ``pl.Trainer`` with all configured callbacks."""
         if self.config.matmul_precision:
             torch.set_float32_matmul_precision(self.config.matmul_precision)
@@ -118,6 +126,7 @@ class LightningRunner:
                 EpochMetricsCSV(
                     include=self.config.epoch_metrics_include,
                     exclude=self.config.epoch_metrics_exclude,
+                    continue_existing=continue_epoch_metrics,
                 )
             )
 
@@ -160,11 +169,14 @@ class LightningRunner:
             )
         return pl.Trainer(**framework_kwargs, **extra_kwargs)
 
-    def _build_logger(self) -> LoggerType | bool:
+    def _build_logger(
+        self,
+    ) -> LoggerType | Sequence[LoggerType] | bool | None:
         """Build the metrics logger.
 
         ``"csv"`` is handled by :class:`EpochMetricsCSV` so every epoch is one
         dense row. ``"lightning_csv"`` keeps Lightning's native CSVLogger.
+        Pre-built loggers and logger sequences pass through unchanged.
         """
         if not isinstance(self.config.logger, str):
             return self.config.logger

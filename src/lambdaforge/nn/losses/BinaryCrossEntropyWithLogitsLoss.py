@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 
 from lambdaforge.nn.losses.Loss import Loss
+from lambdaforge.nn.losses.Reduction import Reduction
 
 
 class BinaryCrossEntropyWithLogitsLoss(Loss):
@@ -24,10 +25,10 @@ class BinaryCrossEntropyWithLogitsLoss(Loss):
         Key used to read targets from the batch.
     weight : float
         Multiplicative factor applied to the loss.
-    reduction : str
-        Reduction mode: ``"mean"``, ``"sum"`` or ``"none"``.
-    pos_weight : torch.Tensor | None
-        Optional positive class weight.
+    reduction : Reduction | str
+        Scalar reduction mode: ``"mean"`` or ``"sum"``.
+    pos_weight : torch.Tensor | Sequence[float] | None
+        Optional positive class weights. Sequences are convenient in YAML.
     name : str
         Unique log name, useful when configuring multiple BCE terms.
     """
@@ -37,20 +38,25 @@ class BinaryCrossEntropyWithLogitsLoss(Loss):
         output_key: str = "logits",
         target_key: str = "target",
         weight: float = 1.0,
-        reduction: str = "mean",
-        pos_weight: torch.Tensor | None = None,
+        reduction: Reduction | str = Reduction.MEAN,
+        pos_weight: torch.Tensor | Sequence[float] | None = None,
         name: str = "binary_cross_entropy_with_logits",
     ) -> None:
         super().__init__(name=name, weight=weight)
 
         self.output_key = output_key
         self.target_key = target_key
-        self.reduction = reduction
+        self.reduction = Reduction.from_value(reduction)
 
-        if pos_weight is not None:
-            self.register_buffer("pos_weight", pos_weight)
-        else:
-            self.pos_weight = None
+        resolved_pos_weight = (
+            None
+            if pos_weight is None
+            else torch.as_tensor(pos_weight, dtype=torch.float32).detach().clone()
+        )
+        if resolved_pos_weight is not None and resolved_pos_weight.numel() < 1:
+            raise ValueError("pos_weight cannot be empty.")
+        self.pos_weight: torch.Tensor | None
+        self.register_buffer("pos_weight", resolved_pos_weight)
 
     def forward(
         self,
@@ -66,7 +72,9 @@ class BinaryCrossEntropyWithLogitsLoss(Loss):
         loss = F.binary_cross_entropy_with_logits(
             logits,
             target,
-            pos_weight=self.pos_weight,
-            reduction=self.reduction,
+            pos_weight=(
+                None if self.pos_weight is None else self.pos_weight.to(dtype=logits.dtype)
+            ),
+            reduction=self.reduction.value,
         )
         return self.weight * loss

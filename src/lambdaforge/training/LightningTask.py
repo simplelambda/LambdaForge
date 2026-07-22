@@ -27,7 +27,15 @@ class LightningTask(LightningModuleBase):
 
         outputs = model(batch[model_input_key])
 
-    If ``model_input_key`` is ``None``:
+    If ``model_input_keys`` is a sequence:
+
+        outputs = model(*(batch[key] for key in model_input_keys))
+
+    If ``model_input_keys`` is a mapping:
+
+        outputs = model(**{argument: batch[key] for argument, key in model_input_keys.items()})
+
+    If both routing options are ``None``:
 
         outputs = model(batch)
 
@@ -62,6 +70,10 @@ class LightningTask(LightningModuleBase):
         Optimizer class.
     optimizer_kwargs : dict[str, Any] | None
         Keyword arguments passed to the optimizer.
+    optimizer_group_kwargs : Mapping[str, Mapping[str, Any]] | None
+        Per-group optimizer overrides keyed by names returned from
+        ``model.parameter_groups()``. Remaining trainable task parameters form
+        a ``task`` group.
     scheduler_cls : type | None
         Optional scheduler class.
     scheduler_kwargs : dict[str, Any] | None
@@ -70,7 +82,14 @@ class LightningTask(LightningModuleBase):
         Optional Lightning scheduler config. For example:
         ``{"monitor": "val_loss", "interval": "epoch"}``.
     model_input_key : str | None
-        Batch key passed to the model. If ``None``, the full batch is passed.
+        Single batch key passed to the model. Mutually exclusive with
+        ``model_input_keys``. If both options are ``None``, the full batch is
+        passed.
+    model_input_keys : Sequence[str] | Mapping[str, str] | None
+        Multiple model inputs. A sequence routes positional arguments in the
+        given order; a mapping routes ``model argument -> batch key`` keyword
+        arguments. This keeps graph, multimodal and conditional models usable
+        from YAML without a custom training task.
     model_output_key : str
         Key used when the model returns a raw tensor.
     logging : TaskLoggingConfig | Mapping[str, Any] | None
@@ -87,10 +106,12 @@ class LightningTask(LightningModuleBase):
         test_metrics: Sequence[Metric] | None = None,
         optimizer_cls: type[torch.optim.Optimizer] = torch.optim.AdamW,
         optimizer_kwargs: dict[str, Any] | None = None,
+        optimizer_group_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
         scheduler_cls: type | None = None,
         scheduler_kwargs: dict[str, Any] | None = None,
         scheduler_config: dict[str, Any] | None = None,
         model_input_key: str | None = "x",
+        model_input_keys: Sequence[str] | Mapping[str, str] | None = None,
         model_output_key: str = "logits",
         logging: TaskLoggingConfig | Mapping[str, Any] | None = None,
     ) -> None:
@@ -126,11 +147,42 @@ class LightningTask(LightningModuleBase):
 
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs or {}
+        self.optimizer_group_kwargs = {
+            str(name): dict(group_kwargs)
+            for name, group_kwargs in (optimizer_group_kwargs or {}).items()
+        }
         self.scheduler_cls = scheduler_cls
         self.scheduler_kwargs = scheduler_kwargs or {}
         self.scheduler_config = scheduler_config
 
-        self.model_input_key = model_input_key
+        if model_input_keys is not None and model_input_key not in (None, "x"):
+            raise ValueError("model_input_key and model_input_keys are mutually exclusive.")
+        if isinstance(model_input_keys, Mapping):
+            if not model_input_keys or any(
+                not isinstance(argument, str)
+                or not argument.strip()
+                or not isinstance(key, str)
+                or not key.strip()
+                for argument, key in model_input_keys.items()
+            ):
+                raise ValueError(
+                    "model_input_keys mappings require non-empty string keys and values."
+                )
+            self.model_input_keys: tuple[str, ...] | dict[str, str] | None = dict(model_input_keys)
+            self.model_input_key = None
+        elif model_input_keys is not None:
+            if isinstance(model_input_keys, str):
+                raise TypeError("model_input_keys must be a sequence of keys, not one string.")
+            routed_keys = tuple(model_input_keys)
+            if not routed_keys or any(
+                not isinstance(key, str) or not key.strip() for key in routed_keys
+            ):
+                raise ValueError("model_input_keys sequences require non-empty string values.")
+            self.model_input_keys = routed_keys
+            self.model_input_key = None
+        else:
+            self.model_input_keys = None
+            self.model_input_key = model_input_key
         self.model_output_key = model_output_key
         self.logging = TaskLoggingConfig.from_value(logging)
 
@@ -223,7 +275,7 @@ class LightningTask(LightningModuleBase):
 
     def configure_optimizers(self):
         optimizer = self.optimizer_cls(
-            self.parameters(),
+            self._optimizer_parameters(),
             **self.optimizer_kwargs,
         )
 
@@ -249,8 +301,65 @@ class LightningTask(LightningModuleBase):
             "lr_scheduler": config,
         }
 
+    def _optimizer_parameters(self) -> Any:
+        """Build validated parameter groups only when overrides are requested."""
+        if not self.optimizer_group_kwargs:
+            return self.parameters()
+
+        provider = getattr(self.model, "parameter_groups", None)
+        if provider is None or not callable(provider):
+            raise TypeError(
+                "optimizer_group_kwargs requires model.parameter_groups() to return a mapping."
+            )
+        provided = provider()
+        if not isinstance(provided, Mapping) or not provided:
+            raise TypeError("model.parameter_groups() must return a non-empty mapping.")
+
+        groups: list[dict[str, Any]] = []
+        assigned: set[int] = set()
+        available: set[str] = set()
+        for raw_name, raw_parameters in provided.items():
+            name = str(raw_name)
+            if not name.strip() or name == "task":
+                raise ValueError("Model parameter group names must be non-empty and not 'task'.")
+            parameters = tuple(raw_parameters)
+            if any(not isinstance(parameter, nn.Parameter) for parameter in parameters):
+                raise TypeError(f"Parameter group {name!r} contains a non-Parameter value.")
+            if any(id(parameter) in assigned for parameter in parameters):
+                raise ValueError(f"Parameter group {name!r} repeats parameters from another group.")
+            assigned.update(id(parameter) for parameter in parameters)
+            available.add(name)
+            if parameters:
+                group: dict[str, Any] = {"params": parameters}
+                group.update(self.optimizer_group_kwargs.get(name, {}))
+                groups.append(group)
+
+        remaining = tuple(
+            parameter
+            for parameter in self.parameters()
+            if parameter.requires_grad and id(parameter) not in assigned
+        )
+        available.add("task")
+        if remaining:
+            task_group: dict[str, Any] = {"params": remaining}
+            task_group.update(self.optimizer_group_kwargs.get("task", {}))
+            groups.append(task_group)
+
+        unknown = set(self.optimizer_group_kwargs) - available
+        if unknown:
+            raise ValueError(f"Unknown optimizer parameter groups: {sorted(unknown)}.")
+        if not groups:
+            raise ValueError("No trainable parameters remain for the optimizer.")
+        return groups
+
     def forward_model(self, batch: Mapping[str, Any]) -> Mapping[str, Any]:
-        if self.model_input_key is None:
+        if isinstance(self.model_input_keys, dict):
+            outputs = self.model(
+                **{argument: batch[key] for argument, key in self.model_input_keys.items()}
+            )
+        elif self.model_input_keys is not None:
+            outputs = self.model(*(batch[key] for key in self.model_input_keys))
+        elif self.model_input_key is None:
             outputs = self.model(batch)
         else:
             outputs = self.model(batch[self.model_input_key])

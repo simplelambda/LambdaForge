@@ -18,6 +18,11 @@ from lambdaforge.metrics.classification.binary.BinaryMCC import BinaryMCC
 from lambdaforge.metrics.classification.binary.BinaryPrecision import BinaryPrecision
 from lambdaforge.metrics.classification.binary.BinaryRecall import BinaryRecall
 from lambdaforge.metrics.classification.binary.BinarySpecificity import BinarySpecificity
+from lambdaforge.metrics.classification.binary.StreamingBinaryAUPRC import StreamingBinaryAUPRC
+from lambdaforge.metrics.classification.binary.StreamingBinaryAUROC import StreamingBinaryAUROC
+from lambdaforge.metrics.classification.binary.StreamingBinaryCurveMetric import (
+    StreamingBinaryCurveMetric,
+)
 
 __all__ = [
     "BinaryAccuracy",
@@ -32,4 +37,7 @@ __all__ = [
     "BinaryPrecision",
     "BinaryRecall",
     "BinarySpecificity",
+    "StreamingBinaryAUPRC",
+    "StreamingBinaryAUROC",
+    "StreamingBinaryCurveMetric",
 ]

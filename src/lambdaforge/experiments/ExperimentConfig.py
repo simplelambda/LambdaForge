@@ -9,7 +9,12 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
-import yaml
+from lambdaforge.experiments.migrations.ExperimentConfigMigrationResult import (
+    ExperimentConfigMigrationResult,
+)
+from lambdaforge.experiments.migrations.ExperimentConfigMigrator import (
+    ExperimentConfigMigrator,
+)
 
 
 class ExperimentConfig(Mapping[str, Any]):
@@ -28,22 +33,40 @@ class ExperimentConfig(Mapping[str, Any]):
         self,
         data: Mapping[str, Any],
         source: str | Path | None = None,
+        *,
+        _migration_result: ExperimentConfigMigrationResult | None = None,
     ) -> None:
         if not isinstance(data, Mapping):
             raise TypeError("Experiment config must be a mapping.")
-        self._data = copy.deepcopy(dict(data))
         self.source = Path(source) if source is not None else None
+        if _migration_result is None:
+            try:
+                _migration_result = ExperimentConfigMigrator.default().preview_mapping(
+                    data,
+                    validate=False,
+                )
+            except (TypeError, ValueError) as error:
+                label = str(self.source) if self.source is not None else "<mapping>"
+                raise ValueError(
+                    f"Cannot normalize experiment Schema for {label}: {error}. "
+                    "Preview supported migrations with 'lambdaforge migrate <config>'."
+                ) from error
+        self.migration_result = _migration_result
+        self._data = copy.deepcopy(dict(_migration_result.config))
         self._validate_identity(self._data)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentConfig:
         """Load an experiment from a UTF-8 YAML file."""
         path = Path(path)
-        with path.open("r", encoding="utf-8") as handle:
-            data = yaml.safe_load(handle)
-        if not isinstance(data, Mapping):
-            raise TypeError(f"Experiment config must be a mapping: {path}")
-        return cls(data, source=path)
+        try:
+            result = ExperimentConfigMigrator.default().preview_file(path, validate=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Cannot normalize experiment Schema for {path}: {error}. "
+                "Preview supported migrations with 'lambdaforge migrate <config>'."
+            ) from error
+        return cls(result.config, source=path, _migration_result=result)
 
     def __getitem__(self, key: str) -> Any:
         return self._data[key]
@@ -73,7 +96,7 @@ class ExperimentConfig(Mapping[str, Any]):
 
     def expand(self) -> list[dict[str, Any]]:
         """Expand seeds, grid axes and named ablations into concrete runs."""
-        return self.expand_mapping(self._data)
+        return self._expand_current_mapping(self._data)
 
     @staticmethod
     def get_value(config: Mapping[str, Any], path: str, default: Any = None) -> Any:
@@ -115,7 +138,12 @@ class ExperimentConfig(Mapping[str, Any]):
 
     @classmethod
     def expand_mapping(cls, config: Mapping[str, Any]) -> list[dict[str, Any]]:
-        """Expand a raw experiment mapping into materialized run mappings."""
+        """Normalize and expand a raw mapping into materialized run mappings."""
+        return cls(config).expand()
+
+    @classmethod
+    def _expand_current_mapping(cls, config: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Expand a mapping that already uses the current Schema version."""
         cls._validate_identity(config)
         base_name = str(cls.get_value(config, "experiment.name"))
         runs: list[dict[str, Any]] = []
@@ -238,6 +266,16 @@ class ExperimentConfig(Mapping[str, Any]):
 
     @classmethod
     def _validate_identity(cls, config: Mapping[str, Any]) -> None:
+        from lambdaforge.experiments.migrations.ExperimentSchemaVersion import (
+            ExperimentSchemaVersion,
+        )
+
+        version = ExperimentSchemaVersion.from_config(config)
+        if version != ExperimentSchemaVersion.current():
+            raise ValueError(
+                f"ExperimentConfig requires current Schema "
+                f"{ExperimentSchemaVersion.current()}, found {version}."
+            )
         experiment = config.get("experiment")
         if not isinstance(experiment, Mapping):
             raise TypeError("'experiment' must be a mapping.")

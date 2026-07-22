@@ -21,12 +21,14 @@ from __future__ import annotations
 import atexit
 import ctypes
 import ctypes.util
+import math
 import multiprocessing as mp
 import os
 import signal
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from typing import Any
 
 # Exit code used when a worker self-terminates because its parent vanished
@@ -53,6 +55,9 @@ _CPU_THREAD_ENV_VARS = (
 _CLEANUP_INSTALLED = False
 _CLEANUP_RUNNING = False
 _CLEANUP_GRACE_SECONDS = 5.0
+_CLEANUP_STOP_EVENT: Any | None = None
+_CLEANUP_STOP_REQUESTED = False
+_CLEANUP_STOP_RELAY_STARTED = False
 _PREVIOUS_SIGNAL_HANDLERS: dict[int, Any] = {}
 _THREADPOOL_CONTROLLERS: list[Any] = []
 
@@ -74,13 +79,9 @@ class ProcessGuard:
         except Exception:
             return False
 
-    def _start_orphan_watchdog(self, poll_seconds: float) -> None:
+    def _start_orphan_watchdog(self, poll_seconds: float, expected_parent_pid: int) -> None:
         """Start a daemon thread that exits the process if its parent disappears."""
         if os.name != "posix":
-            return
-        try:
-            original_ppid = os.getppid()
-        except Exception:
             return
 
         def _watch() -> None:
@@ -90,28 +91,55 @@ class ProcessGuard:
                 except Exception:
                     return
                 # Parent gone: reparented to init (1) or to a different pid.
-                if ppid != original_ppid or ppid == 1:
+                if ppid != expected_parent_pid or ppid == 1:
                     os._exit(ORPHAN_EXIT_CODE)
                 time.sleep(poll_seconds)
 
         threading.Thread(target=_watch, name="parent-death-watchdog", daemon=True).start()
 
-    def install_parent_death_guard(self, poll_seconds: float = 1.0) -> None:
+    def install_parent_death_guard(
+        self,
+        poll_seconds: float = 1.0,
+        *,
+        expected_parent_pid: int | None = None,
+    ) -> None:
         """Terminate this process automatically when its parent dies.
 
         Safe to call once per worker at startup. No-op on non-POSIX platforms.
         """
+        poll_seconds = self._validate_seconds(
+            poll_seconds,
+            "poll_seconds",
+            allow_zero=False,
+        )
+        if expected_parent_pid is not None and (
+            not isinstance(expected_parent_pid, int)
+            or isinstance(expected_parent_pid, bool)
+            or expected_parent_pid <= 0
+        ):
+            raise ValueError("expected_parent_pid must be a positive integer or None.")
+
+        try:
+            observed_parent_pid = os.getppid()
+        except Exception:
+            return
+        expected_parent_pid = (
+            observed_parent_pid if expected_parent_pid is None else expected_parent_pid
+        )
+        if os.name == "posix" and observed_parent_pid != expected_parent_pid:
+            os._exit(ORPHAN_EXIT_CODE)
+
         self._set_linux_parent_death_signal(_SIGKILL)
 
         # Handle the race where the parent already died between spawn and here.
         if os.name == "posix":
             try:
-                if os.getppid() == 1:
+                if os.getppid() != expected_parent_pid:
                     os._exit(ORPHAN_EXIT_CODE)
             except Exception:
                 pass
 
-        self._start_orphan_watchdog(poll_seconds)
+        self._start_orphan_watchdog(poll_seconds, expected_parent_pid)
 
     def configure_cpu_thread_limits(
         self,
@@ -259,6 +287,12 @@ class ProcessGuard:
         """
         global _CLEANUP_RUNNING
 
+        grace_seconds = self._validate_seconds(
+            grace_seconds,
+            "grace_seconds",
+            allow_zero=True,
+        )
+
         if _CLEANUP_RUNNING:
             return
         _CLEANUP_RUNNING = True
@@ -281,16 +315,47 @@ class ProcessGuard:
         forced ``multiprocessing.Process.terminate`` does not execute cleanup
         handlers inside the child process.
         """
-        if pid is None:
+        return self.terminate_process_trees(
+            [pid],
+            grace_seconds=grace_seconds,
+            include_parents=include_parent,
+        )
+
+    def terminate_process_trees(
+        self,
+        pids: Sequence[int | None],
+        grace_seconds: float = 1.0,
+        include_parents: bool = False,
+    ) -> bool:
+        """Terminate several process trees under one shared bounded deadline."""
+        grace_seconds = self._validate_seconds(
+            grace_seconds,
+            "grace_seconds",
+            allow_zero=True,
+        )
+        roots = [int(pid) for pid in pids if pid is not None]
+        if not roots:
             return False
         try:
             import psutil
-
-            parent = psutil.Process(int(pid))
-            descendants = parent.children(recursive=True)
         except Exception:
             return False
-        targets = descendants + ([parent] if include_parent else [])
+
+        targets_by_pid: dict[int, Any] = {}
+        for pid in roots:
+            try:
+                parent = psutil.Process(pid)
+                descendants = parent.children(recursive=True)
+            except psutil.Error:
+                continue
+            for process in descendants:
+                targets_by_pid[process.pid] = process
+            if include_parents:
+                targets_by_pid[parent.pid] = parent
+
+        targets = list(targets_by_pid.values())
+        if not targets:
+            return True
         for process in reversed(targets):
             try:
                 process.terminate()
@@ -306,16 +371,28 @@ class ProcessGuard:
             psutil.wait_procs(alive, timeout=1.0)
         return True
 
-    def install_child_process_cleanup(self, grace_seconds: float = 5.0) -> None:
+    def install_child_process_cleanup(
+        self,
+        grace_seconds: float = 5.0,
+        *,
+        stop_event: Any | None = None,
+    ) -> None:
         """Clean descendants on normal exit, SIGINT, SIGTERM and SIGHUP.
 
         This complements :func:`install_parent_death_guard`: the parent-death guard
         makes this process die with its parent, while this cleanup makes any
         dataloader/sub-worker processes die with this process.
         """
-        global _CLEANUP_GRACE_SECONDS, _CLEANUP_INSTALLED
+        global _CLEANUP_GRACE_SECONDS, _CLEANUP_INSTALLED, _CLEANUP_STOP_EVENT
 
-        _CLEANUP_GRACE_SECONDS = float(grace_seconds)
+        _CLEANUP_GRACE_SECONDS = self._validate_seconds(
+            grace_seconds,
+            "grace_seconds",
+            allow_zero=True,
+        )
+        _CLEANUP_STOP_EVENT = stop_event
+        if stop_event is not None:
+            self._start_cleanup_stop_relay()
         if _CLEANUP_INSTALLED:
             return
 
@@ -330,6 +407,34 @@ class ProcessGuard:
 
         _CLEANUP_INSTALLED = True
 
+    def _start_cleanup_stop_relay(self) -> None:
+        """Publish signal requests to a shared event outside the handler."""
+        global _CLEANUP_STOP_RELAY_STARTED
+
+        if _CLEANUP_STOP_RELAY_STARTED:
+            return
+        _CLEANUP_STOP_RELAY_STARTED = True
+
+        def relay() -> None:
+            global _CLEANUP_STOP_REQUESTED
+
+            while True:
+                if _CLEANUP_STOP_REQUESTED:
+                    _CLEANUP_STOP_REQUESTED = False
+                    event = _CLEANUP_STOP_EVENT
+                    if event is not None:
+                        try:
+                            event.set()
+                        except Exception:
+                            pass
+                time.sleep(0.01)
+
+        threading.Thread(
+            target=relay,
+            name="lambdaforge-cleanup-stop-relay",
+            daemon=True,
+        ).start()
+
     def _resolve_positive_int(self, value: int | None, env_name: str) -> int | None:
         if value is None:
             raw = os.environ.get(env_name)
@@ -342,6 +447,18 @@ class ProcessGuard:
 
         value = int(value)
         return value if value > 0 else None
+
+    @staticmethod
+    def _validate_seconds(value: float, name: str, *, allow_zero: bool) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be a finite number.")
+        resolved = float(value)
+        if not math.isfinite(resolved):
+            raise ValueError(f"{name} must be finite.")
+        if resolved < 0 or (resolved == 0 and not allow_zero):
+            qualifier = "non-negative" if allow_zero else "positive"
+            raise ValueError(f"{name} must be {qualifier}.")
+        return resolved
 
     def _terminate_with_psutil(self, grace_seconds: float) -> bool:
         try:
@@ -387,9 +504,9 @@ class ProcessGuard:
         for child in children:
             child.terminate()
 
-        deadline = time.time() + max(0.0, float(grace_seconds))
+        deadline = time.monotonic() + max(0.0, float(grace_seconds))
         for child in children:
-            timeout = max(0.0, deadline - time.time())
+            timeout = max(0.0, deadline - time.monotonic())
             child.join(timeout=timeout)
 
         for child in children:
@@ -406,7 +523,7 @@ class ProcessGuard:
     def _available_cleanup_signals(
         self,
     ) -> tuple[int, ...]:
-        names = ("SIGTERM", "SIGINT", "SIGHUP")
+        names = ("SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK")
         signals = []
         for name in names:
             sig = getattr(signal, name, None)
@@ -415,6 +532,16 @@ class ProcessGuard:
         return tuple(signals)
 
     def _cleanup_signal_handler(self, signum: int, frame) -> None:
+        global _CLEANUP_STOP_REQUESTED
+
+        if _CLEANUP_STOP_EVENT is not None and signum in self._cooperative_signals():
+            # Never acquire multiprocessing synchronization primitives from a
+            # signal handler: the signal may have interrupted the same thread
+            # while it held the Event's internal lock. The daemon relay above
+            # performs the lock-taking operation in normal thread context.
+            _CLEANUP_STOP_REQUESTED = True
+            return
+
         self.terminate_child_process_tree(_CLEANUP_GRACE_SECONDS)
 
         previous = _PREVIOUS_SIGNAL_HANDLERS.get(signum)
@@ -423,3 +550,11 @@ class ProcessGuard:
             return
 
         raise SystemExit(128 + int(signum))
+
+    @staticmethod
+    def _cooperative_signals() -> tuple[int, ...]:
+        signals = [int(signal.SIGINT), int(signal.SIGTERM)]
+        sigbreak = getattr(signal, "SIGBREAK", None)
+        if sigbreak is not None:
+            signals.append(int(sigbreak))
+        return tuple(signals)

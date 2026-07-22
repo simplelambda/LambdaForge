@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lambdaforge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Object-oriented infrastructure for reproducible PyTorch training and YAML experiments."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,10 +18,12 @@ classifiers = [
 ]
 dependencies = [
     "lightning>=2.2,<3",
+    "jsonschema>=4.21",
     "matplotlib>=3.7",
     "numpy>=1.24",
     "psutil>=5.9",
     "PyYAML>=6",
+    "ruamel.yaml>=0.18,<0.19",
     "threadpoolctl>=3.2",
     "torch>=2.1",
     "torchmetrics>=1.2",
@@ -29,6 +31,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mlflow = [
+    "mlflow>=2.10",
+]
+tensorboard = [
+    "tensorboard>=2.14",
+]
+wandb = [
+    "wandb>=0.16",
+]
+tracking = [
+    "mlflow>=2.10",
+    "tensorboard>=2.14",
+    "wandb>=0.16",
+]
 dev = [
     "mypy>=1.10",
     "pytest>=8",
@@ -36,6 +52,8 @@ dev = [
     "ruff>=0.15",
     "types-psutil>=7",
     "types-pywin32>=308",
+    "types-jsonschema>=4.23",
+    "types-PyYAML>=6",
 ]
 
 [project.scripts]
@@ -44,10 +62,26 @@ lambdaforge = "lambdaforge.cli.CommandLineInterface:CommandLineInterface.main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+lambdaforge = [
+    "schemas/*.json",
+    "*/README.md",
+    "*/README.es.md",
+    "*/*/README.md",
+    "*/*/README.es.md",
+]
+
+[tool.setuptools.data-files]
+"share/lambdaforge" = ["AGENTS.md"]
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "cuda: requires a working CUDA device and exercises accelerator-specific integration",
+    "process_integration: real OS signal and process-tree lifecycle tests",
+]
 
 [tool.ruff]
 line-length = 100
@@ -66,4 +100,8 @@ warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
 module = ["psutil", "sklearn.*", "threadpoolctl", "win32api", "win32con", "win32job"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["ruamel.*"]
 ignore_missing_imports = true

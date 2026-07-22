@@ -87,11 +87,7 @@ class EpochStats(CallbackBase):
         try:
             import resource
 
-            rss = float(
-                resource.getrusage(  # type: ignore[attr-defined]
-                    resource.RUSAGE_SELF  # type: ignore[attr-defined]
-                ).ru_maxrss
-            )
+            rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
             if sys.platform == "darwin":
                 return rss / (1024**2)
             return rss / 1024

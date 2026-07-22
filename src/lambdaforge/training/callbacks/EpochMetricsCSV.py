@@ -31,10 +31,12 @@ class EpochMetricsCSV(CallbackBase):
         filename: str = "metrics.csv",
         include: Sequence[str] | None = None,
         exclude: Sequence[str] | None = None,
+        continue_existing: bool = False,
     ) -> None:
         super().__init__()
         self.filename = filename
         self.key_filter = LogKeyFilter(include=include, exclude=exclude)
+        self.continue_existing = bool(continue_existing)
         self._last_completed_epoch: int | None = None
         self._last_validation_epoch: int | None = None
         self._last_written_epoch: int | None = None
@@ -97,8 +99,8 @@ class EpochMetricsCSV(CallbackBase):
         return Path(str(trainer.default_root_dir)) / self.filename
 
     def _should_continue_existing_file(self, trainer: TrainerType) -> bool:
-        root = Path(str(trainer.default_root_dir))
-        return (root / "checkpoints" / "last.ckpt").exists()
+        del trainer
+        return self.continue_existing
 
     def _read_existing_rows(self, path: Path) -> list[dict[str, float | int | str]]:
         with open(path, encoding="utf-8", newline="") as f:

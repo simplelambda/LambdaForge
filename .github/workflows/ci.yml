@@ -1,0 +1,204 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUTF8: "1"
+
+jobs:
+  quality:
+    name: Quality / CPython 3.10
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.1"
+          python -m pip install -e ".[dev]"
+
+      - name: Check formatting
+        run: python -m ruff format --check src tests
+
+      - name: Lint
+        run: python -m ruff check src tests
+
+      - name: Type-check
+        run: python -m mypy src/lambdaforge
+
+  cpu-tests:
+    name: CPU / ${{ matrix.os }} / CPython ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install CPU package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.1"
+          python -m pip install -e ".[dev]"
+
+      - name: Run full test suite
+        run: python -m pytest -q --durations=20 --junitxml=cpu-junit.xml
+
+      - name: Upload test report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cpu-junit-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: cpu-junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  legacy-lightning:
+    name: Legacy pytorch_lightning / 2.2 / CPython 3.10
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the legacy Lightning namespace
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.1"
+          python -m pip install \
+            "pytorch-lightning==2.2.*" \
+            "jsonschema>=4.21" \
+            "matplotlib>=3.7" \
+            "numpy>=1.24" \
+            "psutil>=5.9" \
+            "PyYAML>=6" \
+            "ruamel.yaml>=0.18,<0.19" \
+            "threadpoolctl>=3.2" \
+            "torchmetrics>=1.2" \
+            "pytest>=8"
+          python -m pip install --no-deps -e .
+
+      - name: Verify the fallback adapter
+        run: >-
+          python -c "import importlib.util;
+          assert importlib.util.find_spec('lightning') is None;
+          from lambdaforge.integrations.Lightning import Lightning;
+          assert Lightning.module.__name__ == 'pytorch_lightning';
+          print('Using', Lightning.module.__name__, Lightning.module.__version__)"
+
+      - name: Run full suite through the legacy namespace
+        run: python -m pytest -q --durations=20 --junitxml=legacy-lightning-junit.xml
+
+      - name: Upload legacy compatibility report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: legacy-lightning-junit
+          path: legacy-lightning-junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  package:
+    name: Build and inspect distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build source and wheel distributions
+        run: python -m build
+
+      - name: Check distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Smoke-test wheel contents without source imports
+        run: |
+          python -m pip install --no-deps --target wheel-smoke dist/*.whl
+          python - <<'PY'
+          import sys
+          from importlib.metadata import distribution
+          from importlib.resources import files
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path("wheel-smoke").resolve()))
+          import lambdaforge
+
+          assert files("lambdaforge").joinpath("schemas/experiment.schema.json").is_file()
+          assert files("lambdaforge.experiments.retention").joinpath("README.md").is_file()
+          guide = distribution("lambdaforge").locate_file("share/lambdaforge/AGENTS.md")
+          assert guide.is_file(), guide
+          print(lambdaforge.__version__)
+          PY
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: lambdaforge-distributions-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

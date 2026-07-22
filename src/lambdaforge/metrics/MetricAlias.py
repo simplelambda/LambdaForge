@@ -59,3 +59,7 @@ class MetricAlias(Metric):
     def merge_distributed_state(self, state: Mapping[str, Any]) -> None:
         """Merge one delegated DDP worker state."""
         self.metric.merge_distributed_state(state)
+
+    def synchronize(self) -> None:
+        """Delegate synchronization so specialized collectives remain available."""
+        self.metric.synchronize()

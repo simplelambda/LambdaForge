@@ -34,6 +34,14 @@ class TestModels:
         weights = Scatter.segment_softmax(torch.tensor([0.0, 0.0, 1.0]), index, 2)
         assert torch.allclose(weights, torch.tensor([0.5, 0.5, 1.0]))
 
+        multihead = Scatter.segment_softmax(
+            torch.tensor([[0.0, 1.0], [0.0, 3.0], [1.0, -2.0]]),
+            index,
+            2,
+        )
+        assert torch.allclose(multihead.sum(dim=0), torch.tensor([2.0, 2.0]))
+        assert torch.allclose(multihead[:2].sum(dim=0), torch.ones(2))
+
     def test_batched_knn_has_fixed_k_shape(self) -> None:
         points = torch.tensor([[[0.0], [1.0], [3.0]]])
         indices, distances = BatchedKNN(k=4)(points, points)

@@ -13,14 +13,22 @@ from lambdaforge.metrics.classification.binary import (
     BinaryPrecision,
     BinaryRecall,
     BinarySpecificity,
+    StreamingBinaryAUPRC,
+    StreamingBinaryAUROC,
+    StreamingBinaryCurveMetric,
 )
 from lambdaforge.metrics.classification.multiclass import (
     MulticlassAccuracy,
     MulticlassAUPRC,
     MulticlassAUROC,
     MulticlassBalancedAccuracy,
+    MulticlassCurveAverage,
     MulticlassF1,
     MulticlassMetric,
+    StreamingMulticlassAUPRC,
+    StreamingMulticlassAUROC,
+    StreamingMulticlassCurveMetric,
+    UndefinedClassPolicy,
 )
 
 __all__ = [
@@ -40,6 +48,14 @@ __all__ = [
     "MulticlassAUPRC",
     "MulticlassAUROC",
     "MulticlassBalancedAccuracy",
+    "MulticlassCurveAverage",
     "MulticlassF1",
     "MulticlassMetric",
+    "StreamingBinaryAUPRC",
+    "StreamingBinaryAUROC",
+    "StreamingBinaryCurveMetric",
+    "StreamingMulticlassAUPRC",
+    "StreamingMulticlassAUROC",
+    "StreamingMulticlassCurveMetric",
+    "UndefinedClassPolicy",
 ]

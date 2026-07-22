@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import traceback
 from typing import Any
 
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
+from lambdaforge.experiments.RunResult import RunResult
 from lambdaforge.experiments.RunStatus import RunStatus
 
 
@@ -25,17 +25,15 @@ class ExperimentWorker:
         run_dir.mkdir(parents=True, exist_ok=True)
         with StdIOCapture(run_dir / "train.log", echo=False):
             try:
-                runner.run_single_experiment(self.config, stop_event=stop_event)
+                runner._run_single_experiment_unlocked(self.config, stop_event=stop_event)
             except Exception:
                 traceback.print_exc()
-                payload = {
-                    "name": ExperimentConfig.get_value(self.config, "experiment.name"),
-                    "run_dir": str(run_dir),
-                    "variant": ExperimentConfig.get_value(self.config, "experiment.variant"),
-                    "seed": ExperimentConfig.get_value(self.config, "experiment.seed"),
-                    "status": RunStatus.FAILED.value,
-                    "error": traceback.format_exc().splitlines()[-1],
-                }
-                with (run_dir / "result.json").open("w", encoding="utf-8") as handle:
-                    json.dump(payload, handle, indent=2)
+                RunResult(
+                    name=ExperimentConfig.get_value(self.config, "experiment.name", "experiment"),
+                    run_dir=run_dir,
+                    variant=ExperimentConfig.get_value(self.config, "experiment.variant"),
+                    seed=ExperimentConfig.get_value(self.config, "experiment.seed"),
+                    status=RunStatus.FAILED,
+                    error=traceback.format_exc().splitlines()[-1],
+                ).write_json(run_dir / "result.json")
                 raise

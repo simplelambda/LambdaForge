@@ -52,3 +52,12 @@ class Model(nn.Module, ABC):
         """Enable gradients for every parameter."""
         for parameter in self.parameters():
             parameter.requires_grad = True
+
+    def parameter_groups(self) -> dict[str, tuple[nn.Parameter, ...]]:
+        """Return named model parameters for optimizer-specific overrides.
+
+        Models with meaningful parameter families may override this method.
+        The default exposes one ``default`` group, so ordinary models remain
+        effortless to configure.
+        """
+        return {"default": tuple(self.parameters())}

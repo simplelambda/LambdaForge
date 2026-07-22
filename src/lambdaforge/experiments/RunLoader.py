@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +9,11 @@ import torch
 import yaml
 
 from lambdaforge.experiments.CheckpointChoice import CheckpointChoice
+from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
 from lambdaforge.experiments.ObjectFactory import ObjectFactory
+from lambdaforge.experiments.retention.CheckpointResolver import CheckpointResolver
+from lambdaforge.experiments.RunResult import RunResult
+from lambdaforge.plugins.PluginRegistry import PluginRegistry
 
 
 class RunLoader:
@@ -60,36 +63,40 @@ class RunLoader:
             data = yaml.safe_load(handle)
         if not isinstance(data, dict):
             raise TypeError(f"Materialized config must be a mapping: {path}")
-        return data
+        return ExperimentConfig(data, source=path).as_dict()
+
+    @staticmethod
+    def load_result(run_dir: str | Path) -> RunResult:
+        """Load the typed terminal result stored beside a materialized run."""
+        return RunResult.read_json(Path(run_dir) / "result.json")
 
     @staticmethod
     def resolve_checkpoint(
         run_dir: str | Path,
         which: CheckpointChoice | str = CheckpointChoice.BEST,
     ) -> Path:
-        """Locate the best or last checkpoint, tolerating moved run folders."""
+        """Locate an exact or automatic local checkpoint in a moved run."""
         run_dir = Path(run_dir)
         choice = CheckpointChoice(which)
         result_path = run_dir / "result.json"
-        result: dict[str, Any] = {}
+        result: RunResult | None = None
         if result_path.exists():
-            with result_path.open("r", encoding="utf-8") as handle:
-                loaded = json.load(handle)
-            if isinstance(loaded, dict):
-                result = loaded
-        recorded = result.get(
-            "best_model_path" if choice is CheckpointChoice.BEST else "last_model_path"
-        )
-        if recorded and Path(recorded).exists():
-            return Path(recorded)
-        checkpoint_dir = run_dir / "checkpoints"
-        if choice is CheckpointChoice.LAST and (checkpoint_dir / "last.ckpt").exists():
-            return checkpoint_dir / "last.ckpt"
-        pattern = "best-*.ckpt" if choice is CheckpointChoice.BEST else "*.ckpt"
-        candidates = sorted(checkpoint_dir.glob(pattern), key=lambda path: path.stat().st_mtime)
-        if not candidates:
-            raise FileNotFoundError(f"No {choice.value!r} checkpoint under {checkpoint_dir}")
-        return candidates[-1]
+            try:
+                result = RunResult.read_json(result_path)
+            except (OSError, TypeError, ValueError):
+                result = None
+        resolver = CheckpointResolver(run_dir)
+        if choice is CheckpointChoice.BEST:
+            selected = resolver.best(result)
+        elif choice is CheckpointChoice.LAST:
+            selected = resolver.last(result)
+        else:
+            selected = resolver.best(result) or resolver.last(result) or resolver.latest(result)
+        if selected is None:
+            raise FileNotFoundError(
+                f"No unambiguous {choice.value!r} checkpoint under {resolver.checkpoint_dir}"
+            )
+        return selected
 
     def load_model(
         self,
@@ -102,7 +109,7 @@ class RunLoader:
         """Rebuild the bare model, load its weights and switch it to eval mode."""
         run_dir = self.find_run_dir(experiment, seed, variant)
         config = self.load_config(run_dir)
-        model = ObjectFactory.build(config["model"])
+        model = ObjectFactory.build(config["model"], plugins=PluginRegistry.default())
         state = self._load_state(self.resolve_checkpoint(run_dir, which))
         prefixed = {
             key.removeprefix("model."): value
@@ -126,8 +133,9 @@ class RunLoader:
 
         run_dir = self.find_run_dir(experiment, seed, variant)
         config = self.load_config(run_dir)
-        model = ObjectFactory.build(config["model"])
-        task, _ = ExperimentRunner()._build_task(config, model)
+        plugins = PluginRegistry.default()
+        model = ObjectFactory.build(config["model"], plugins=plugins)
+        task, _ = ExperimentRunner()._build_task(config, model, plugins)
         task.load_state_dict(
             self._load_state(self.resolve_checkpoint(run_dir, which)), strict=strict
         )

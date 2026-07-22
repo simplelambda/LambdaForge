@@ -10,6 +10,7 @@ class Aggregation(str, Enum):
 
     SUM = "sum"
     MEAN = "mean"
+    MAX = "max"
 
     @classmethod
     def _missing_(cls, value: object) -> Aggregation:

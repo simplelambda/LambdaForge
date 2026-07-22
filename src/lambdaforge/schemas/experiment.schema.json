@@ -1,0 +1,513 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.dev/lambdaforge/schemas/experiment-1.1.json",
+  "title": "LambdaForge experiment",
+  "description": "Task-agnostic LambdaForge experiment configuration.",
+  "type": "object",
+  "required": ["schema_version", "experiment", "data", "model", "losses"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.1"},
+    "experiment": {"$ref": "#/$defs/experiment"},
+    "data": {"$ref": "#/$defs/data"},
+    "model": {"$ref": "#/$defs/modelSpec"},
+    "losses": {"$ref": "#/$defs/lossList"},
+    "metrics": {"$ref": "#/$defs/metricList"},
+    "train_metrics": {"$ref": "#/$defs/metricList"},
+    "val_metrics": {"$ref": "#/$defs/metricList"},
+    "test_metrics": {"$ref": "#/$defs/metricList"},
+    "optimizer": {"$ref": "#/$defs/optimizer"},
+    "scheduler": {"$ref": "#/$defs/scheduler"},
+    "task": {"$ref": "#/$defs/componentSpec"},
+    "trainer": {"$ref": "#/$defs/trainer"},
+    "callbacks": {"$ref": "#/$defs/callbackList"},
+    "runner": {"$ref": "#/$defs/componentSpec"},
+    "sweep": {"$ref": "#/$defs/sweep"},
+    "execution": {"$ref": "#/$defs/execution"},
+    "aggregation": {"$ref": "#/$defs/aggregation"},
+    "retention": {"$ref": "#/$defs/retention", "default": {}},
+    "metadata": {"type": "object"},
+    "extensions": {"type": "object"}
+  },
+  "$defs": {
+    "objectSpec": {
+      "type": "object",
+      "required": ["target"],
+      "additionalProperties": false,
+      "properties": {
+        "target": {"type": "string", "minLength": 3, "pattern": "^[^.]+\\..+"},
+        "params": {"type": "object"}
+      }
+    },
+    "pluginReference": {
+      "type": "object",
+      "required": ["kind", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "model",
+            "metric",
+            "activation",
+            "normalization",
+            "loss",
+            "distance",
+            "pooling",
+            "similarity",
+            "kernel",
+            "encoding",
+            "regularization",
+            "dataset",
+            "callback",
+            "logger"
+          ]
+        },
+        "name": {"type": "string", "minLength": 1, "pattern": "^[\\w.-]+$"}
+      }
+    },
+    "pluginSpec": {
+      "type": "object",
+      "required": ["plugin"],
+      "additionalProperties": false,
+      "properties": {
+        "plugin": {"$ref": "#/$defs/pluginReference"},
+        "params": {"type": "object"}
+      }
+    },
+    "modelPluginSpec": {
+      "allOf": [
+        {"$ref": "#/$defs/pluginSpec"},
+        {"properties": {"plugin": {"properties": {"kind": {"const": "model"}}}}}
+      ]
+    },
+    "metricPluginSpec": {
+      "allOf": [
+        {"$ref": "#/$defs/pluginSpec"},
+        {"properties": {"plugin": {"properties": {"kind": {"const": "metric"}}}}}
+      ]
+    },
+    "lossPluginSpec": {
+      "allOf": [
+        {"$ref": "#/$defs/pluginSpec"},
+        {"properties": {"plugin": {"properties": {"kind": {"const": "loss"}}}}}
+      ]
+    },
+    "datasetPluginSpec": {
+      "allOf": [
+        {"$ref": "#/$defs/pluginSpec"},
+        {"properties": {"plugin": {"properties": {"kind": {"const": "dataset"}}}}}
+      ]
+    },
+    "callbackPluginSpec": {
+      "allOf": [
+        {"$ref": "#/$defs/pluginSpec"},
+        {"properties": {"plugin": {"properties": {"kind": {"const": "callback"}}}}}
+      ]
+    },
+    "loggerPluginSpec": {
+      "allOf": [
+        {"$ref": "#/$defs/pluginSpec"},
+        {"properties": {"plugin": {"properties": {"kind": {"const": "logger"}}}}}
+      ]
+    },
+    "modelSpec": {
+      "oneOf": [
+        {"$ref": "#/$defs/objectSpec"},
+        {"$ref": "#/$defs/modelPluginSpec"}
+      ]
+    },
+    "metricSpec": {
+      "oneOf": [
+        {"$ref": "#/$defs/objectSpec"},
+        {"$ref": "#/$defs/metricPluginSpec"}
+      ]
+    },
+    "metricList": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/metricSpec"}
+    },
+    "lossSpec": {
+      "oneOf": [
+        {"$ref": "#/$defs/objectSpec"},
+        {"$ref": "#/$defs/lossPluginSpec"}
+      ]
+    },
+    "lossList": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/lossSpec"}
+    },
+    "datasetSpec": {
+      "oneOf": [
+        {"$ref": "#/$defs/objectSpec"},
+        {"$ref": "#/$defs/datasetPluginSpec"}
+      ]
+    },
+    "callbackSpec": {
+      "oneOf": [
+        {"$ref": "#/$defs/objectSpec"},
+        {"$ref": "#/$defs/callbackPluginSpec"}
+      ]
+    },
+    "callbackList": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/callbackSpec"}
+    },
+    "loggerSpec": {
+      "oneOf": [
+        {"enum": ["csv", "lightning_csv", "none"]},
+        {"type": "boolean"},
+        {"type": "null"},
+        {"$ref": "#/$defs/refSpec"},
+        {"$ref": "#/$defs/objectSpec"},
+        {"$ref": "#/$defs/loggerPluginSpec"},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {"$ref": "#/$defs/objectSpec"},
+              {"$ref": "#/$defs/refSpec"},
+              {"$ref": "#/$defs/loggerPluginSpec"}
+            ]
+          }
+        }
+      ]
+    },
+    "refSpec": {
+      "type": "object",
+      "required": ["ref"],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {"type": "string", "minLength": 3, "pattern": "^[^.]+\\..+"}
+      }
+    },
+    "objectList": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/objectSpec"}
+    },
+    "nonEmptyObjectList": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/objectSpec"}
+    },
+    "componentSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target": {"type": "string", "minLength": 3, "pattern": "^[^.]+\\..+"},
+        "params": {"type": "object"}
+      }
+    },
+    "experiment": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "output_root": {"type": ["string", "null"]},
+        "seed": {"type": ["integer", "null"]},
+        "seeds": {"type": "array", "minItems": 1, "items": {"type": ["integer", "null"]}},
+        "resume": {"type": "boolean"},
+        "rerun_completed": {"type": "boolean"},
+        "test_after_fit": {"type": "boolean"},
+        "required_artifacts": {"type": "array", "items": {"type": "string"}},
+        "ckpt_path": {"type": ["string", "null"]},
+        "base_name": {"type": "string"},
+        "variant": {"type": "string"}
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "train": {"anyOf": [{"$ref": "#/$defs/datasetSpec"}, {"$ref": "#/$defs/refSpec"}, {"type": "null"}]},
+        "val": {"anyOf": [{"$ref": "#/$defs/datasetSpec"}, {"$ref": "#/$defs/refSpec"}, {"type": "null"}]},
+        "test": {"anyOf": [{"$ref": "#/$defs/datasetSpec"}, {"$ref": "#/$defs/refSpec"}, {"type": "null"}]},
+        "datamodule": {"$ref": "#/$defs/componentSpec"}
+      }
+    },
+    "optimizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ref": {"type": "string", "pattern": "^[^.]+\\..+"},
+        "params": {"type": "object"}
+      }
+    },
+    "scheduler": {
+      "type": "object",
+      "required": ["ref"],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {"type": "string", "pattern": "^[^.]+\\..+"},
+        "params": {"type": "object"},
+        "lightning": {"type": ["object", "null"]}
+      }
+    },
+    "trainer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_epochs": {"type": "integer", "minimum": 1},
+        "accelerator": {"type": "string"},
+        "devices": {},
+        "strategy": {"type": "string"},
+        "precision": {"type": "string"},
+        "matmul_precision": {"enum": ["highest", "high", "medium"]},
+        "accumulate_grad_batches": {"type": "integer", "minimum": 1},
+        "gradient_clip_val": {"type": ["number", "null"]},
+        "check_val_every_n_epoch": {"type": "integer", "minimum": 1},
+        "default_root_dir": {"type": ["string", "null"]},
+        "log_every_n_steps": {"type": "integer", "minimum": 1},
+        "checkpoint_policy": {"enum": ["none", "last", "best", "last_and_best", "all"]},
+        "checkpoint_monitor": {"type": ["string", "null"]},
+        "checkpoint_mode": {"enum": ["min", "max", null]},
+        "early_stopping_patience": {"type": ["integer", "null"], "minimum": 0},
+        "early_stopping_min_delta": {"type": "number"},
+        "early_stopping_monitor": {"type": ["string", "null"]},
+        "early_stopping_mode": {"enum": ["min", "max", null]},
+        "num_sanity_val_steps": {"type": "integer", "minimum": 0},
+        "enable_progress_bar": {"type": "boolean"},
+        "deterministic": {"type": ["boolean", "null"]},
+        "logger": {"$ref": "#/$defs/loggerSpec"},
+        "write_epoch_metrics_csv": {"type": "boolean"},
+        "track_epoch_stats": {"type": "boolean"},
+        "print_epoch_table": {"type": "boolean"},
+        "epoch_metrics_include": {"$ref": "#/$defs/stringListOrNull"},
+        "epoch_metrics_exclude": {"$ref": "#/$defs/stringListOrNull"},
+        "epoch_console_include": {"$ref": "#/$defs/stringListOrNull"},
+        "epoch_console_exclude": {"$ref": "#/$defs/stringListOrNull"},
+        "trainer_kwargs": {"type": ["object", "null"]}
+      }
+    },
+    "stringListOrNull": {
+      "type": ["array", "null"],
+      "items": {"type": "string"}
+    },
+    "sweep": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "include_base": {"type": "boolean"},
+        "grid": {
+          "type": "object",
+          "additionalProperties": {"type": "array", "minItems": 1}
+        },
+        "ablations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "set": {"type": "object"}
+            }
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["sequential", "parallel", "ddp"]},
+        "gpus": {"type": ["array", "string", "null"], "items": {"type": "integer", "minimum": 0}},
+        "jobs_per_gpu": {"type": "integer", "minimum": 1},
+        "devices_per_job": {"type": "integer", "minimum": 1},
+        "grace_seconds": {"type": "number", "minimum": 0},
+        "cpu_threads_per_job": {"type": ["integer", "null"], "minimum": 1},
+        "cpu_interop_threads_per_job": {"type": ["integer", "null"], "minimum": 1},
+        "cpu_cores_per_job": {"type": ["integer", "null"], "minimum": 1},
+        "dataloader_num_workers_per_job": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "aggregation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "comparisons": {"$ref": "#/$defs/statisticalComparisons"}
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": ["disabled", "preview", "apply"],
+          "default": "disabled"
+        },
+        "checkpoints": {
+          "$ref": "#/$defs/retentionCheckpoints",
+          "default": {}
+        },
+        "protect": {
+          "type": "array",
+          "default": [],
+          "items": {"type": "string", "minLength": 1}
+        },
+        "rules": {
+          "type": "array",
+          "default": [],
+          "items": {"$ref": "#/$defs/retentionRule"}
+        },
+        "archive": {
+          "$ref": "#/$defs/retentionArchive",
+          "default": {}
+        },
+        "lock_timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 60
+        }
+      }
+    },
+    "retentionCheckpoints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keep": {
+          "enum": ["all", "best", "last", "last_and_best"],
+          "default": "all"
+        },
+        "prune_unselected": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "retentionRule": {
+      "oneOf": [
+        {"$ref": "#/$defs/retentionCompressRule"},
+        {"$ref": "#/$defs/retentionPruneRule"}
+      ]
+    },
+    "retentionCompressRule": {
+      "type": "object",
+      "required": ["action", "include"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {"const": "compress"},
+        "include": {"$ref": "#/$defs/retentionIncludePatterns"},
+        "exclude": {"$ref": "#/$defs/retentionExcludePatterns"},
+        "min_size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "compression": {
+          "$ref": "#/$defs/retentionCompression",
+          "default": {}
+        }
+      }
+    },
+    "retentionPruneRule": {
+      "type": "object",
+      "required": ["action", "include"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {"const": "prune"},
+        "include": {"$ref": "#/$defs/retentionIncludePatterns"},
+        "exclude": {"$ref": "#/$defs/retentionExcludePatterns"},
+        "min_size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      }
+    },
+    "retentionIncludePatterns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "retentionExcludePatterns": {
+      "type": "array",
+      "default": [],
+      "items": {"type": "string", "minLength": 1}
+    },
+    "retentionCompression": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9
+        },
+        "only_if_smaller": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "retentionArchive": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*\\.zip$",
+          "default": "artifacts.zip"
+        },
+        "compression_level": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9,
+          "default": 6
+        }
+      }
+    },
+    "statisticalComparisons": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "alpha": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "target_power": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "min_pairs_for_verdict": {"type": "integer", "minimum": 1},
+        "confidence_interval": {"$ref": "#/$defs/confidenceInterval"},
+        "paired_test": {"$ref": "#/$defs/pairedTest"}
+      }
+    },
+    "confidenceInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "method": {"enum": ["normal", "bootstrap_percentile"]},
+        "confidence_level": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "resamples": {"type": "integer", "minimum": 1, "maximum": 10000000},
+        "seed": {"type": "integer", "minimum": 0},
+        "batch_size": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_batch_elements": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000000
+        }
+      }
+    },
+    "pairedTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "method": {"enum": ["sign", "wilcoxon"]},
+        "alternative": {
+          "enum": ["two_sided", "greater", "less", "observed_direction"]
+        },
+        "calculation": {"enum": ["auto", "exact", "asymptotic"]},
+        "zero_method": {"enum": ["wilcox", "pratt", "zsplit"]},
+        "continuity_correction": {"type": "boolean"},
+        "exact_max_pairs": {"type": "integer", "minimum": 0, "maximum": 200},
+        "zero_tolerance": {"type": "number", "minimum": 0},
+        "round_decimals": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 15
+        }
+      }
+    }
+  }
+}

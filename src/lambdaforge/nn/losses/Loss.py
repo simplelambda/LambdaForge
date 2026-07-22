@@ -143,11 +143,24 @@ class Loss(nn.Module, ABC):
         reduced_dtype = self._autocast_reduced_dtype() or self._tensor_reduced_dtype(outputs)
 
         if reduced_dtype is None or self.supports_precision(reduced_dtype):
-            return super().__call__(outputs, batch, context)
+            result = super().__call__(outputs, batch, context)
+            return self._require_scalar(result)
 
         with self._autocast_disabled():
             safe_outputs = self._upcast_reduced_floats(outputs, self.compute_dtype())
-            return super().__call__(safe_outputs, batch, context)
+            result = super().__call__(safe_outputs, batch, context)
+            return self._require_scalar(result)
+
+    @staticmethod
+    def _require_scalar(result: Any) -> torch.Tensor:
+        """Fail early when a training loss violates the scalar contract."""
+        if not torch.is_tensor(result):
+            raise TypeError("Loss.forward() must return a torch.Tensor.")
+        if result.ndim != 0:
+            raise ValueError(
+                "Loss.forward() must return a scalar tensor; apply a mean or sum reduction."
+            )
+        return result
 
     @abstractmethod
     def forward(

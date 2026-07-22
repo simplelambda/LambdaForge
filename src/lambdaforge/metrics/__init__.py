@@ -16,7 +16,15 @@ from lambdaforge.metrics.classification import (
     MulticlassAUPRC,
     MulticlassAUROC,
     MulticlassBalancedAccuracy,
+    MulticlassCurveAverage,
     MulticlassF1,
+    StreamingBinaryAUPRC,
+    StreamingBinaryAUROC,
+    StreamingBinaryCurveMetric,
+    StreamingMulticlassAUPRC,
+    StreamingMulticlassAUROC,
+    StreamingMulticlassCurveMetric,
+    UndefinedClassPolicy,
 )
 from lambdaforge.metrics.Metric import Metric
 from lambdaforge.metrics.MetricAlias import MetricAlias
@@ -51,9 +59,17 @@ __all__ = [
     "MulticlassAUPRC",
     "MulticlassAUROC",
     "MulticlassBalancedAccuracy",
+    "MulticlassCurveAverage",
     "MulticlassF1",
     "PearsonCorrelation",
     "R2Score",
     "RMSE",
     "SpearmanCorrelation",
+    "StreamingBinaryAUPRC",
+    "StreamingBinaryAUROC",
+    "StreamingBinaryCurveMetric",
+    "StreamingMulticlassAUPRC",
+    "StreamingMulticlassAUROC",
+    "StreamingMulticlassCurveMetric",
+    "UndefinedClassPolicy",
 ]

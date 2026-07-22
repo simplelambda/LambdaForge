@@ -1,0 +1,4 @@
+include AGENTS.md
+include README.es.md
+recursive-include examples *.yaml
+recursive-include icons *.png *.svg

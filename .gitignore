@@ -1,13 +1,46 @@
+# Python bytecode and package builds
 __pycache__/
 *.py[cod]
 *.egg-info/
-.coverage
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-.venv/
+*.egg
 build/
 dist/
-htmlcov/
-runs/
+wheel-smoke/
 
+# Local environments and secrets
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Test, type-check and lint caches/reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.pytest_cache/
+pytest-cache-files-*/
+.pytest_tmp/
+.ruff_cache/
+.tox/
+.nox/
+*-junit.xml
+cuda-evidence.json
+
+# Editors and operating-system metadata
+.directory
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local experiment and provider outputs
+/runs/
+/lightning_logs/
+/mlruns/
+/wandb/
+/tracking/

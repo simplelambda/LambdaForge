@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from numbers import Real
 from typing import Any
 
 from lambdaforge.experiments.ExecutionMode import ExecutionMode
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
+from lambdaforge.training.orchestration.DeviceAssignment import DeviceAssignment
 
 
 @dataclass(slots=True)
@@ -47,23 +50,50 @@ class ExecutionConfig:
 
         raw_gpus = pick("gpus", None)
         if isinstance(raw_gpus, str):
-            gpus = [int(token.strip()) for token in raw_gpus.split(",") if token.strip()]
+            gpus = [
+                cls._strict_int(token.strip(), "execution.gpus")
+                for token in raw_gpus.split(",")
+                if token.strip()
+            ]
         elif raw_gpus is None:
             gpus = None
         else:
-            gpus = [int(device) for device in raw_gpus]
+            normalized_gpus = DeviceAssignment.normalize(
+                raw_gpus,
+                label="execution.gpus",
+            )
+            gpus = list(normalized_gpus or ())
 
         instance = cls(
             mode=ExecutionMode(str(pick("mode", ExecutionMode.SEQUENTIAL.value))),
             gpus=gpus,
-            jobs_per_gpu=int(pick("jobs_per_gpu", 1)),
-            devices_per_job=int(pick("devices_per_job", 1)),
-            grace_seconds=float(pick("grace_seconds", 15.0)),
-            cpu_threads_per_job=cls._optional_int(pick("cpu_threads_per_job", 1)),
-            cpu_interop_threads_per_job=cls._optional_int(pick("cpu_interop_threads_per_job", 1)),
-            cpu_cores_per_job=cls._optional_int(pick("cpu_cores_per_job", 1)),
+            jobs_per_gpu=cls._strict_int(
+                pick("jobs_per_gpu", 1),
+                "execution.jobs_per_gpu",
+            ),
+            devices_per_job=cls._strict_int(
+                pick("devices_per_job", 1),
+                "execution.devices_per_job",
+            ),
+            grace_seconds=cls._finite_number(
+                pick("grace_seconds", 15.0),
+                "execution.grace_seconds",
+            ),
+            cpu_threads_per_job=cls._optional_int(
+                pick("cpu_threads_per_job", 1),
+                "execution.cpu_threads_per_job",
+            ),
+            cpu_interop_threads_per_job=cls._optional_int(
+                pick("cpu_interop_threads_per_job", 1),
+                "execution.cpu_interop_threads_per_job",
+            ),
+            cpu_cores_per_job=cls._optional_int(
+                pick("cpu_cores_per_job", 1),
+                "execution.cpu_cores_per_job",
+            ),
             dataloader_num_workers_per_job=cls._optional_int(
-                pick("dataloader_num_workers_per_job", 0)
+                pick("dataloader_num_workers_per_job", 0),
+                "execution.dataloader_num_workers_per_job",
             ),
         )
         instance.validate()
@@ -71,16 +101,25 @@ class ExecutionConfig:
 
     def validate(self) -> None:
         """Reject unsafe or internally inconsistent resource settings."""
+        self.grace_seconds = self._finite_number(
+            self.grace_seconds,
+            "execution.grace_seconds",
+        )
         if self.grace_seconds < 0:
             raise ValueError("execution.grace_seconds must be non-negative.")
-        if self.mode is ExecutionMode.SEQUENTIAL:
-            return
-        if not self.gpus:
-            raise ValueError(f"execution.mode={self.mode.value!r} requires a non-empty gpus list.")
-        if any(device < 0 for device in self.gpus):
-            raise ValueError("execution.gpus must contain non-negative logical indices.")
-        if len(set(self.gpus)) != len(self.gpus):
-            raise ValueError("execution.gpus cannot contain duplicate indices.")
+        normalized_gpus = DeviceAssignment.normalize(
+            self.gpus,
+            label="execution.gpus",
+        )
+        self.gpus = None if normalized_gpus is None else list(normalized_gpus)
+        self.jobs_per_gpu = self._strict_int(
+            self.jobs_per_gpu,
+            "execution.jobs_per_gpu",
+        )
+        self.devices_per_job = self._strict_int(
+            self.devices_per_job,
+            "execution.devices_per_job",
+        )
         if self.jobs_per_gpu < 1:
             raise ValueError("execution.jobs_per_gpu must be at least 1.")
         if self.devices_per_job < 1:
@@ -92,10 +131,16 @@ class ExecutionConfig:
             "dataloader_num_workers_per_job",
         ):
             value = getattr(self, key)
+            value = self._optional_int(value, f"execution.{key}")
+            setattr(self, key, value)
             if value is not None and value < 0:
                 raise ValueError(f"execution.{key} must be non-negative or null.")
             if key != "dataloader_num_workers_per_job" and value == 0:
                 raise ValueError(f"execution.{key} must be positive or null.")
+        if self.mode is ExecutionMode.SEQUENTIAL:
+            return
+        if not self.gpus:
+            raise ValueError(f"execution.mode={self.mode.value!r} requires a non-empty gpus list.")
         if self.mode is ExecutionMode.DDP and len(self.gpus) % self.devices_per_job:
             raise ValueError("The GPU count must be divisible by devices_per_job in DDP mode.")
 
@@ -135,7 +180,36 @@ class ExecutionConfig:
         return patched
 
     @staticmethod
-    def _optional_int(value: Any) -> int | None:
+    def _optional_int(value: Any, name: str) -> int | None:
         if value is None or str(value).strip().lower() in {"", "none", "null"}:
             return None
-        return int(value)
+        return ExecutionConfig._strict_int(value, name)
+
+    @staticmethod
+    def _strict_int(value: Any, name: str) -> int:
+        if isinstance(value, bool):
+            raise TypeError(f"{name} must be an integer, not a boolean.")
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError as error:
+                raise TypeError(f"{name} must be an integer.") from error
+        if isinstance(value, int):
+            return value
+        if isinstance(value, Real):
+            resolved = float(value)
+            if not math.isfinite(resolved):
+                raise ValueError(f"{name} must be finite.")
+            if not resolved.is_integer():
+                raise ValueError(f"{name} must be an integer without a fractional part.")
+            return int(resolved)
+        raise TypeError(f"{name} must be an integer.")
+
+    @staticmethod
+    def _finite_number(value: Any, name: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{name} must be a finite number, not a boolean or string.")
+        resolved = float(value)
+        if not math.isfinite(resolved):
+            raise ValueError(f"{name} must be finite.")
+        return resolved

@@ -71,11 +71,11 @@ class LightningTrainConfig:
         Whether to show Lightning progress bar.
     deterministic : bool | None
         Deterministic mode passed to Lightning.
-    logger : str
+    logger : str | Logger | Sequence[Logger] | bool | None
         Optional Lightning logger. ``"csv"`` uses only LambdaForge's dense
         epoch CSV, ``"lightning_csv"`` enables Lightning's native CSV logger,
-        and ``"none"`` disables the Lightning logger. A compatible logger
-        object is also accepted.
+        and ``"none"`` disables the Lightning logger. A compatible logger,
+        logger sequence, boolean or `None` is also accepted.
     write_epoch_metrics_csv : bool
         Preserve the canonical dense ``metrics.csv`` artifact independently
         of the selected Lightning logger. Disable explicitly only when the
@@ -138,6 +138,7 @@ class LightningTrainConfig:
 
     def __post_init__(self) -> None:
         """Validate framework-owned settings before creating a Trainer."""
+
         if self.max_epochs < 1:
             raise ValueError("max_epochs must be positive.")
         if self.accumulate_grad_batches < 1:
@@ -154,7 +155,9 @@ class LightningTrainConfig:
             raise ValueError(f"Unknown matmul_precision: {self.matmul_precision!r}.")
         if isinstance(self.logger, str) and self.logger not in {item.value for item in LoggerMode}:
             raise ValueError(f"Unknown logger mode: {self.logger!r}.")
+
         valid_monitor_modes = {item.value for item in MonitorMode}
+
         for field_name in ("checkpoint_mode", "early_stopping_mode"):
             mode = getattr(self, field_name)
             if mode is not None and mode not in valid_monitor_modes:
@@ -170,4 +173,5 @@ class LightningTrainConfig:
                 raise TypeError(f"{field_name} must be a list of patterns, not a string.")
             if patterns is not None:
                 setattr(self, field_name, [str(pattern) for pattern in patterns])
+
         self.trainer_kwargs = dict(self.trainer_kwargs or {})

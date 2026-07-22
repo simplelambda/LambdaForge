@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import traceback
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from lambdaforge.experiments.ExecutionConfig import ExecutionConfig
 from lambdaforge.experiments.ExecutionMode import ExecutionMode
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
 from lambdaforge.experiments.ExperimentWorker import ExperimentWorker
+from lambdaforge.experiments.results.RunFingerprint import RunFingerprint
+from lambdaforge.experiments.RunResult import RunResult
 from lambdaforge.experiments.RunStatus import RunStatus
 from lambdaforge.training.orchestration.TrainingJob import TrainingJob
 from lambdaforge.training.orchestration.TrainingOrchestrator import TrainingOrchestrator
@@ -24,7 +27,7 @@ class ExperimentExecutor:
         run_configs: Sequence[dict[str, Any]],
         execution: ExecutionConfig,
         on_run_finished: Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RunResult]:
         """Execute every materialized config using the selected mode."""
         if execution.mode is ExecutionMode.SEQUENTIAL:
             return self._run_sequential(run_configs, on_run_finished)
@@ -34,18 +37,22 @@ class ExperimentExecutor:
         self,
         run_configs: Sequence[dict[str, Any]],
         on_run_finished: Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RunResult]:
         from lambdaforge.experiments.ExperimentRunner import ExperimentRunner
         from lambdaforge.experiments.StdIOCapture import StdIOCapture
 
         runner = ExperimentRunner()
-        results: list[dict[str, Any]] = []
+        results: list[RunResult] = []
         for config in run_configs:
             run_dir = runner.experiment_run_dir(config)
             run_dir.mkdir(parents=True, exist_ok=True)
             with StdIOCapture(run_dir / "train.log", echo=True):
                 try:
-                    result = runner.run_single_experiment(config)
+                    result = runner._run_single_experiment_unlocked(config)
+                except KeyboardInterrupt:
+                    traceback.print_exc()
+                    self._write_interrupted(config, "KeyboardInterrupt: execution interrupted.")
+                    raise
                 except Exception:
                     traceback.print_exc()
                     self._write_failure(config, traceback.format_exc().splitlines()[-1])
@@ -59,7 +66,7 @@ class ExperimentExecutor:
         run_configs: Sequence[dict[str, Any]],
         execution: ExecutionConfig,
         on_run_finished: Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RunResult]:
         slots = execution.slots()
         patched = [execution.patch_run(config) for config in run_configs]
         jobs = [
@@ -102,40 +109,89 @@ class ExperimentExecutor:
         self,
         config: Mapping[str, Any],
         exit_code: int | None,
-    ) -> dict[str, Any]:
+    ) -> RunResult:
         from lambdaforge.experiments.ExperimentRunner import ExperimentRunner
 
         run_dir = ExperimentRunner().experiment_run_dir(config)
         result_path = run_dir / "result.json"
         if result_path.exists():
-            with result_path.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            if isinstance(data, dict):
-                return data
+            try:
+                persisted = RunResult.read_json(result_path)
+                if exit_code == 0:
+                    return persisted
+                if exit_code is not None and persisted.status is not RunStatus.OK:
+                    return persisted
+            except (OSError, ValueError, TypeError):
+                pass
         status = RunStatus.INTERRUPTED if exit_code is None else RunStatus.FAILED
-        return {
-            "name": ExperimentConfig.get_value(config, "experiment.name"),
-            "run_dir": str(run_dir),
-            "variant": ExperimentConfig.get_value(config, "experiment.variant"),
-            "seed": ExperimentConfig.get_value(config, "experiment.seed"),
-            "status": status.value,
-            "exit_code": exit_code,
-        }
+        attempt_id, fingerprint, started_at, finished_at = self._attempt_fields(config)
+        return RunResult(
+            result_version=2,
+            name=ExperimentConfig.get_value(config, "experiment.name", "experiment"),
+            run_dir=run_dir,
+            variant=ExperimentConfig.get_value(config, "experiment.variant"),
+            seed=ExperimentConfig.get_value(config, "experiment.seed"),
+            status=status,
+            exit_code=exit_code,
+            attempt_id=attempt_id,
+            config_fingerprint=fingerprint,
+            started_at_utc=started_at,
+            finished_at_utc=finished_at,
+        )
 
     def _write_failure(self, config: Mapping[str, Any], error: str) -> None:
         from lambdaforge.experiments.ExperimentRunner import ExperimentRunner
 
         run_dir = ExperimentRunner().experiment_run_dir(config)
-        payload = {
-            "name": ExperimentConfig.get_value(config, "experiment.name"),
-            "run_dir": str(run_dir),
-            "variant": ExperimentConfig.get_value(config, "experiment.variant"),
-            "seed": ExperimentConfig.get_value(config, "experiment.seed"),
-            "status": RunStatus.FAILED.value,
-            "error": error,
-        }
-        with (run_dir / "result.json").open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+        attempt_id, fingerprint, started_at, finished_at = self._attempt_fields(config)
+        RunResult(
+            result_version=2,
+            name=ExperimentConfig.get_value(config, "experiment.name", "experiment"),
+            run_dir=run_dir,
+            variant=ExperimentConfig.get_value(config, "experiment.variant"),
+            seed=ExperimentConfig.get_value(config, "experiment.seed"),
+            status=RunStatus.FAILED,
+            error=error,
+            attempt_id=attempt_id,
+            config_fingerprint=fingerprint,
+            started_at_utc=started_at,
+            finished_at_utc=finished_at,
+        ).write_json(run_dir / "result.json")
+
+    def _write_interrupted(self, config: Mapping[str, Any], error: str) -> None:
+        """Persist a resumable sequential interruption before propagating SIGINT."""
+        from lambdaforge.experiments.ExperimentRunner import ExperimentRunner
+
+        run_dir = ExperimentRunner().experiment_run_dir(config)
+        attempt_id, fingerprint, started_at, finished_at = self._attempt_fields(config)
+        RunResult(
+            result_version=2,
+            name=ExperimentConfig.get_value(config, "experiment.name", "experiment"),
+            run_dir=run_dir,
+            variant=ExperimentConfig.get_value(config, "experiment.variant"),
+            seed=ExperimentConfig.get_value(config, "experiment.seed"),
+            status=RunStatus.INTERRUPTED,
+            error=error,
+            attempt_id=attempt_id,
+            config_fingerprint=fingerprint,
+            started_at_utc=started_at,
+            finished_at_utc=finished_at,
+        ).write_json(run_dir / "result.json")
+
+    @staticmethod
+    def _attempt_fields(config: Mapping[str, Any]) -> tuple[str, str, str, str]:
+        """Create provenance fields for failures that occur outside the runner."""
+        timestamp = datetime.now(timezone.utc)
+        fingerprint = RunFingerprint.digest(config)
+        return (
+            (
+                f"{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}-"
+                f"{fingerprint.removeprefix('sha256:')[:12]}-{uuid4().hex[:8]}"
+            ),
+            fingerprint,
+            timestamp.isoformat(),
+            timestamp.isoformat(),
+        )
 
     @staticmethod
     def _job_name(config: Mapping[str, Any]) -> str:
