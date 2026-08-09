@@ -51,6 +51,7 @@ implementación.
 | `dataset` | `lambdaforge.datasets` | Subclase de `torch.utils.data.Dataset` |
 | `callback` | `lambdaforge.callbacks` | Subclase de `lambdaforge.integrations.Lightning.Callback` |
 | `logger` | `lambdaforge.loggers` | Subclase de `lambdaforge.integrations.Lightning.Logger` |
+| `task` | `lambdaforge.tasks` | Subclase de `lambdaforge.tasks.Task` |
 
 Los grupos están separados deliberadamente: un nombre identifica una implementación dentro de un
 contrato y el mismo nombre puede existir legítimamente en grupos distintos. Los nombres distinguen
@@ -63,7 +64,7 @@ Un paquete externo declara las clases en su propio `pyproject.toml`:
 ```toml
 [project]
 name = "acme-lambdaforge"
-dependencies = ["lambdaforge>=0.1,<0.2"]
+dependencies = ["lambdaforge>=0.4,<0.5"]
 
 [project.entry-points."lambdaforge.models"]
 acme_encoder = "acme_lambdaforge.models:AcmeEncoder"
@@ -85,6 +86,9 @@ artifact_marker = "acme_lambdaforge.callbacks:ArtifactMarker"
 
 [project.entry-points."lambdaforge.loggers"]
 jsonl_logger = "acme_lambdaforge.logging:JsonLinesLogger"
+
+[project.entry-points."lambdaforge.tasks"]
+surface_builder = "acme_lambdaforge.tasks:SurfaceBuilder"
 ```
 
 El valor usa la sintaxis estándar `modulo.importable:atributo` de los entry points. Cada atributo ha
@@ -132,6 +136,17 @@ trainer:
   logger:
     plugin: {kind: logger, name: jsonl_logger}
     params: {path: metrics.jsonl}
+```
+
+Un documento de tarea genérica selecciona el contrato específico en su raíz:
+
+```yaml
+schema_version: "1.0"
+kind: task
+name: build-surfaces
+task:
+  plugin: {kind: task, name: surface_builder}
+  params: {resolution: 1.0}
 ```
 
 `ObjectFactory` resuelve la clase y construye `params` recursivamente igual que con `target`. Cada
@@ -211,6 +226,7 @@ para pérdidas, `kind: dataset` para `data.train/val/test`, `kind: callback` par
 `kind: logger` para `trainer.logger`. Todas las categorías siguen siendo válidas en parámetros
 construidos recursivamente. Un tipo superior incorrecto se informa antes de ejecutar y los objetos
 anidados validan su contrato cuando `ObjectFactory` los resuelve.
+El Schema independiente de tareas 1.0 exige `kind: task` para el plugin de su raíz.
 
 La validación de plantillas puede omitir deliberadamente toda carga externa de `target`, `ref` y
 plugins:
@@ -289,6 +305,8 @@ loggers deberían heredar de `lambdaforge.integrations.Lightning.Callback` y
 `lambdaforge.integrations.Lightning.Logger`, que siguen la selección Lightning moderna/legada de
 LambdaForge. Los entry points exponen clases, no singletons ni factorías. Sus constructores deberían
 ser spawn-safe y posponer archivos, sockets y servicios hasta el ciclo de ejecución normal.
+Los plugins `task` deben heredar de `lambdaforge.tasks.Task`; los `target` de tarea siguen admitiendo
+duck typing para facilitar código local del proyecto.
 
 Para aliases de activación y normalización se comprueban primero el registro explícito del proceso y
 los componentes incorporados. Por ello un paquete descubierto no puede reemplazar silenciosamente

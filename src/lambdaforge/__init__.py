@@ -1,4 +1,4 @@
-"""LambdaForge: object-oriented infrastructure for reproducible ML training."""
+"""LambdaForge: declarative infrastructure for reproducible AI workflows."""
 
 from typing import TYPE_CHECKING
 
@@ -13,11 +13,28 @@ if TYPE_CHECKING:
     from lambdaforge.experiments.retention.ArtifactRetentionPlan import ArtifactRetentionPlan
     from lambdaforge.experiments.retention.ArtifactRetentionResult import ArtifactRetentionResult
     from lambdaforge.experiments.RunResult import RunResult
+    from lambdaforge.hpo.AdaptiveExperimentPlan import AdaptiveExperimentPlan
+    from lambdaforge.hpo.AdaptiveExperimentResult import AdaptiveExperimentResult
     from lambdaforge.LambdaForge import LambdaForge
+    from lambdaforge.tasks.TaskExecutionPlan import TaskExecutionPlan
+    from lambdaforge.tasks.TaskResult import TaskResult
+    from lambdaforge.tasks.TaskRun import TaskRun
+    from lambdaforge.workflows.Workflow import Workflow
+    from lambdaforge.workflows.WorkflowPlan import WorkflowPlan
+    from lambdaforge.workflows.WorkflowResult import WorkflowResult
+    from lambdaforge.workflows.WorkflowValidationReport import WorkflowValidationReport
 
 LazyExports.install(
     __name__,
     {
+        "AdaptiveExperimentPlan": (
+            "lambdaforge.hpo.AdaptiveExperimentPlan",
+            "AdaptiveExperimentPlan",
+        ),
+        "AdaptiveExperimentResult": (
+            "lambdaforge.hpo.AdaptiveExperimentResult",
+            "AdaptiveExperimentResult",
+        ),
         "AggregateResult": (
             "lambdaforge.experiments.AggregateResult",
             "AggregateResult",
@@ -41,11 +58,26 @@ LazyExports.install(
             "lambdaforge.experiments.results.ResultRecord",
             "ResultRecord",
         ),
+        "TaskExecutionPlan": (
+            "lambdaforge.tasks.TaskExecutionPlan",
+            "TaskExecutionPlan",
+        ),
+        "TaskResult": ("lambdaforge.tasks.TaskResult", "TaskResult"),
+        "TaskRun": ("lambdaforge.tasks.TaskRun", "TaskRun"),
+        "Workflow": ("lambdaforge.workflows.Workflow", "Workflow"),
+        "WorkflowPlan": ("lambdaforge.workflows.WorkflowPlan", "WorkflowPlan"),
+        "WorkflowResult": ("lambdaforge.workflows.WorkflowResult", "WorkflowResult"),
+        "WorkflowValidationReport": (
+            "lambdaforge.workflows.WorkflowValidationReport",
+            "WorkflowValidationReport",
+        ),
     },
 )
 
 __version__ = LambdaForgeVersion.CURRENT
 __all__ = [
+    "AdaptiveExperimentPlan",
+    "AdaptiveExperimentResult",
     "AggregateResult",
     "ArtifactRetentionPlan",
     "ArtifactRetentionResult",
@@ -54,5 +86,12 @@ __all__ = [
     "RunResult",
     "ResultCatalog",
     "ResultRecord",
+    "TaskExecutionPlan",
+    "TaskResult",
+    "TaskRun",
+    "Workflow",
+    "WorkflowPlan",
+    "WorkflowResult",
+    "WorkflowValidationReport",
     "__version__",
 ]

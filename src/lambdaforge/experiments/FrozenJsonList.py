@@ -71,6 +71,10 @@ class FrozenJsonList(list[Any]):
         """Return an independent ordinary list for defensive exports."""
         return [copy.deepcopy(value, memo) for value in list.__iter__(self)]
 
+    def __reduce__(self) -> tuple[type[FrozenJsonList], tuple[list[Any]]]:
+        """Rebuild through the validating constructor across process boundaries."""
+        return (type(self), (list(self),))
+
     @staticmethod
     def _reject() -> NoReturn:
         raise TypeError("FrozenJsonList is immutable.")

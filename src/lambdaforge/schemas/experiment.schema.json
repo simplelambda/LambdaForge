@@ -23,6 +23,7 @@
     "callbacks": {"$ref": "#/$defs/callbackList"},
     "runner": {"$ref": "#/$defs/componentSpec"},
     "sweep": {"$ref": "#/$defs/sweep"},
+    "hpo": {"$ref": "#/$defs/hpo"},
     "execution": {"$ref": "#/$defs/execution"},
     "aggregation": {"$ref": "#/$defs/aggregation"},
     "retention": {"$ref": "#/$defs/retention", "default": {}},
@@ -59,7 +60,8 @@
             "regularization",
             "dataset",
             "callback",
-            "logger"
+            "logger",
+            "task"
           ]
         },
         "name": {"type": "string", "minLength": 1, "pattern": "^[\\w.-]+$"}
@@ -307,6 +309,155 @@
         }
       }
     },
+    "hpo": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "controller_seed": {"type": "integer", "minimum": 0},
+        "max_concurrency": {"type": "integer", "minimum": 1},
+        "objective": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "metric": {"type": "string", "minLength": 1},
+            "direction": {"enum": ["minimize", "maximize"]},
+            "risk": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {"enum": ["mean", "mean_minus_std"]},
+                "lambda": {"type": "number", "minimum": 0}
+              }
+            }
+          }
+        },
+        "space": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"$ref": "#/$defs/hpoParameter"}
+        },
+        "initialization": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "strategy": {"enum": ["sobol", "random"]},
+            "trials": {"oneOf": [{"const": "auto"}, {"type": "integer", "minimum": 1}]}
+          }
+        },
+        "search": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "strategy": {"enum": ["bayesian", "sobol", "random"]},
+            "candidate_pool_size": {"type": "integer", "minimum": 1},
+            "refresh_interval": {"type": "integer", "minimum": 1}
+          }
+        },
+        "fidelity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "unit": {"const": "epochs"},
+            "strategy": {"enum": ["adaptive_learning_curve", "fixed", "successive_halving"]},
+            "min": {"type": "integer", "minimum": 1},
+            "max": {"type": "integer", "minimum": 1},
+            "step": {"type": "integer", "minimum": 1}
+          }
+        },
+        "seeds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "strategy": {"enum": ["adaptive_racing", "fixed"]},
+            "values": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer"}},
+            "confirmation_values": {"type": "array", "uniqueItems": true, "items": {"type": "integer"}},
+            "max_search_seeds": {"type": "integer", "minimum": 1},
+            "probability_threshold": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+          }
+        },
+        "acquisition": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "strategy": {"enum": ["cost_aware_knowledge_gradient", "knowledge_gradient", "expected_improvement"]},
+            "exploration_weight": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "pruning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "min_budget_before_drop": {"type": "integer", "minimum": 1},
+            "probability_threshold": {"type": "number", "minimum": 0, "maximum": 1},
+            "equivalence_margin": {"type": "number", "minimum": 0}
+          }
+        },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "per_job_budget": {"$ref": "#/$defs/hpoMemorySize"},
+            "headroom": {"$ref": "#/$defs/hpoMemorySize"},
+            "safety_quantile": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+            "min_observations": {"type": "integer", "minimum": 1},
+            "allocator_cap": {"type": "boolean"},
+            "preflight": {"type": "boolean"},
+            "probe": {"$ref": "#/$defs/componentSpec"},
+            "device_capacities": {"type": "array", "items": {"$ref": "#/$defs/hpoMemorySize"}}
+          }
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_actions": {"type": "integer", "minimum": 1},
+            "max_total_epochs": {"type": "integer", "minimum": 1},
+            "max_gpu_seconds": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "confirmation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"top_k": {"type": "integer", "minimum": 1}}
+        },
+        "components": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "searcher": {"$ref": "#/$defs/componentSpec"},
+            "fidelity_policy": {"$ref": "#/$defs/componentSpec"},
+            "seed_policy": {"$ref": "#/$defs/componentSpec"},
+            "learning_curve_model": {"$ref": "#/$defs/componentSpec"},
+            "cost_model": {"$ref": "#/$defs/componentSpec"},
+            "memory_model": {"$ref": "#/$defs/componentSpec"},
+            "admission_controller": {"$ref": "#/$defs/componentSpec"},
+            "action_selector": {"$ref": "#/$defs/componentSpec"}
+          }
+        }
+      }
+    },
+    "hpoParameter": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"enum": ["float", "int", "categorical", "bool"]},
+        "low": {"type": "number"},
+        "high": {"type": "number"},
+        "scale": {"enum": ["linear", "log"]},
+        "choices": {"type": "array", "minItems": 1},
+        "values": {"type": "array", "minItems": 1},
+        "when": {"type": "object", "minProperties": 1}
+      }
+    },
+    "hpoMemorySize": {
+      "oneOf": [
+        {"type": "integer", "minimum": 0},
+        {"type": "string", "pattern": "^\\s*\\d+(?:\\.\\d+)?\\s*[kKmMgGtT]?[iI]?[bB]?\\s*$"}
+      ]
+    },
     "execution": {
       "type": "object",
       "additionalProperties": false,
@@ -314,6 +465,7 @@
         "mode": {"enum": ["sequential", "parallel", "ddp"]},
         "gpus": {"type": ["array", "string", "null"], "items": {"type": "integer", "minimum": 0}},
         "jobs_per_gpu": {"type": "integer", "minimum": 1},
+        "cpu_jobs": {"type": "integer", "minimum": 1},
         "devices_per_job": {"type": "integer", "minimum": 1},
         "grace_seconds": {"type": "number", "minimum": 0},
         "cpu_threads_per_job": {"type": ["integer", "null"], "minimum": 1},

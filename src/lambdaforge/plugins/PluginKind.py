@@ -22,6 +22,7 @@ class PluginKind(str, Enum):
     DATASET = "dataset"
     CALLBACK = "callback"
     LOGGER = "logger"
+    TASK = "task"
 
     @property
     def entry_point_group(self) -> str:
@@ -54,6 +55,8 @@ class PluginKind(str, Enum):
             return "lambdaforge.callbacks"
         if self is PluginKind.LOGGER:
             return "lambdaforge.loggers"
+        if self is PluginKind.TASK:
+            return "lambdaforge.tasks"
         raise AssertionError(f"Unhandled plugin kind: {self!r}.")
 
     @classmethod

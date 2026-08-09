@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Real
@@ -26,6 +27,7 @@ class ExecutionConfig:
     mode: ExecutionMode = ExecutionMode.SEQUENTIAL
     gpus: list[int] | None = None
     jobs_per_gpu: int = 1
+    cpu_jobs: int = 1
     devices_per_job: int = 1
     grace_seconds: float = 15.0
     cpu_threads_per_job: int | None = 1
@@ -71,6 +73,7 @@ class ExecutionConfig:
                 pick("jobs_per_gpu", 1),
                 "execution.jobs_per_gpu",
             ),
+            cpu_jobs=cls._strict_int(pick("cpu_jobs", 1), "execution.cpu_jobs"),
             devices_per_job=cls._strict_int(
                 pick("devices_per_job", 1),
                 "execution.devices_per_job",
@@ -120,10 +123,13 @@ class ExecutionConfig:
             self.devices_per_job,
             "execution.devices_per_job",
         )
+        self.cpu_jobs = self._strict_int(self.cpu_jobs, "execution.cpu_jobs")
         if self.jobs_per_gpu < 1:
             raise ValueError("execution.jobs_per_gpu must be at least 1.")
         if self.devices_per_job < 1:
             raise ValueError("execution.devices_per_job must be at least 1.")
+        if self.cpu_jobs < 1:
+            raise ValueError("execution.cpu_jobs must be at least 1.")
         for key in (
             "cpu_threads_per_job",
             "cpu_interop_threads_per_job",
@@ -139,6 +145,19 @@ class ExecutionConfig:
                 raise ValueError(f"execution.{key} must be positive or null.")
         if self.mode is ExecutionMode.SEQUENTIAL:
             return
+        if self.mode is ExecutionMode.PARALLEL and not self.gpus:
+            available = (
+                len(os.sched_getaffinity(0))
+                if hasattr(os, "sched_getaffinity")
+                else (os.cpu_count() or 1)
+            )
+            cores = self.cpu_cores_per_job or 1
+            if self.cpu_jobs * cores > available:
+                raise ValueError(
+                    "CPU parallel execution oversubscribes available affinity: "
+                    f"cpu_jobs={self.cpu_jobs}, cpu_cores_per_job={cores}, available={available}."
+                )
+            return
         if not self.gpus:
             raise ValueError(f"execution.mode={self.mode.value!r} requires a non-empty gpus list.")
         if self.mode is ExecutionMode.DDP and len(self.gpus) % self.devices_per_job:
@@ -148,6 +167,8 @@ class ExecutionConfig:
         """Build the fixed logical-device slot pool used by the scheduler."""
         devices = self.gpus or []
         if self.mode is ExecutionMode.PARALLEL:
+            if not devices:
+                return [[] for _ in range(self.cpu_jobs)]
             return [[device] for device in devices for _ in range(self.jobs_per_gpu)]
         step = self.devices_per_job
         return [devices[index : index + step] for index in range(0, len(devices), step)]
@@ -155,8 +176,9 @@ class ExecutionConfig:
     def patch_run(self, config: Mapping[str, Any]) -> dict[str, Any]:
         """Return a subprocess-specific config without mutating the source."""
         patched = copy.deepcopy(dict(config))
+        is_cpu = self.mode is ExecutionMode.PARALLEL and not self.gpus
         device_count = self.devices_per_job if self.mode is ExecutionMode.DDP else 1
-        ExperimentConfig.set_value(patched, "trainer.accelerator", "gpu")
+        ExperimentConfig.set_value(patched, "trainer.accelerator", "cpu" if is_cpu else "gpu")
         ExperimentConfig.set_value(patched, "trainer.devices", device_count)
         ExperimentConfig.set_value(
             patched,

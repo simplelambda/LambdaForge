@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.dev/lambdaforge/schemas/task-1.0.json",
+  "title": "LambdaForge generic task",
+  "description": "A reproducible non-training unit of work such as preprocessing or inference.",
+  "type": "object",
+  "required": ["schema_version", "kind", "name", "task"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "kind": {"const": "task"},
+    "name": {"type": "string", "minLength": 1},
+    "output_root": {"type": "string", "minLength": 1, "default": "runs/tasks"},
+    "resume": {"type": "boolean", "default": true},
+    "rerun_completed": {"type": "boolean", "default": false},
+    "required_artifacts": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "inputs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/localInput"}
+    },
+    "task": {"$ref": "#/$defs/taskSpec"},
+    "execution": {"$ref": "#/$defs/execution"},
+    "metadata": {"type": "object"},
+    "extensions": {"type": "object"}
+  },
+  "$defs": {
+    "localInput": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1}
+      }
+    },
+    "objectSpec": {
+      "type": "object",
+      "required": ["target"],
+      "additionalProperties": false,
+      "properties": {
+        "target": {"type": "string", "minLength": 3, "pattern": "^[^.]+\\..+"},
+        "params": {"type": "object", "default": {}}
+      }
+    },
+    "pluginReference": {
+      "type": "object",
+      "required": ["kind", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "task"},
+        "name": {"type": "string", "minLength": 1, "pattern": "^[\\w.-]+$"}
+      }
+    },
+    "pluginSpec": {
+      "type": "object",
+      "required": ["plugin"],
+      "additionalProperties": false,
+      "properties": {
+        "plugin": {"$ref": "#/$defs/pluginReference"},
+        "params": {"type": "object", "default": {}}
+      }
+    },
+    "taskSpec": {
+      "oneOf": [
+        {"$ref": "#/$defs/objectSpec"},
+        {"$ref": "#/$defs/pluginSpec"}
+      ]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "sequential", "default": "sequential"}
+      }
+    }
+  }
+}

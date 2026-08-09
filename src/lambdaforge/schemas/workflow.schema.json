@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.dev/lambdaforge/schemas/workflow-1.0.json",
+  "title": "LambdaForge workflow",
+  "description": "A dependency graph of complete task or training experiment documents.",
+  "type": "object",
+  "required": ["kind", "schema_version", "name", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "kind": {"const": "workflow"},
+    "schema_version": {"const": "1.0"},
+    "name": {"type": "string", "minLength": 1},
+    "output_root": {"type": "string", "minLength": 1},
+    "max_parallel": {"type": "integer", "minimum": 1},
+    "metadata": {"type": "object"},
+    "nodes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["config"],
+        "additionalProperties": false,
+        "properties": {
+          "config": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object"}]},
+          "needs": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}]},
+          "bindings": {"type": "object"},
+          "resources": {"type": "object"},
+          "continue_on_failure": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

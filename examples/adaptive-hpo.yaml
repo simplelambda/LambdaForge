@@ -1,0 +1,77 @@
+schema_version: "1.1"
+experiment:
+  name: adaptive-example
+  output_root: runs/experiments
+  resume: true
+  rerun_completed: false
+data:
+  train:
+    target: my_project.data.ProjectDataset
+    params: {split: train}
+  val:
+    target: my_project.data.ProjectDataset
+    params: {split: val}
+  datamodule:
+    target: lambdaforge.training.data.LightningDataModule
+    params: {batch_size: 64, num_workers: 4}
+model:
+  target: my_project.models.ProjectModel
+  params: {hidden_features: 128, dropout: 0.1}
+losses:
+  - target: lambdaforge.nn.losses.BinaryCrossEntropyWithLogitsLoss
+    params: {output_key: logits, target_key: target}
+val_metrics:
+  - target: lambdaforge.metrics.BinaryAUROC
+    params: {pred_key: logits, target_key: target}
+optimizer:
+  ref: torch.optim.AdamW
+  params: {lr: 0.001, weight_decay: 0.0001}
+task:
+  target: lambdaforge.training.LightningTask
+  params: {model_input_key: x, model_output_key: logits}
+trainer:
+  max_epochs: 100
+  accelerator: auto
+  devices: auto
+  checkpoint_policy: last_and_best
+  checkpoint_monitor: val_auroc
+  checkpoint_mode: max
+execution:
+  mode: sequential
+  gpus: [0, 1]
+  cpu_threads_per_job: 2
+  cpu_cores_per_job: 2
+hpo:
+  enabled: true
+  controller_seed: 2026
+  max_concurrency: 4
+  objective: {metric: val_auroc, direction: maximize}
+  space:
+    optimizer.params.lr: {type: float, low: 0.00001, high: 0.01, scale: log}
+    optimizer.params.weight_decay: {type: float, low: 0.000001, high: 0.01, scale: log}
+    model.params.hidden_features: {type: int, low: 64, high: 512}
+    model.params.dropout: {type: float, low: 0.0, high: 0.5}
+  initialization: {strategy: sobol, trials: auto}
+  search: {strategy: bayesian, candidate_pool_size: 256, refresh_interval: 1}
+  acquisition: {strategy: cost_aware_knowledge_gradient, exploration_weight: 1.0}
+  fidelity: {unit: epochs, strategy: adaptive_learning_curve, min: 5, max: 100, step: 5}
+  seeds:
+    strategy: adaptive_racing
+    values: [7, 17, 27]
+    max_search_seeds: 3
+    probability_threshold: 0.9
+    confirmation_values: [101, 211]
+  pruning:
+    enabled: true
+    min_budget_before_drop: 10
+    probability_threshold: 0.01
+    equivalence_margin: 0.002
+  memory:
+    per_job_budget: 6GiB
+    headroom: 512MiB
+    safety_quantile: 0.99
+    min_observations: 3
+    allocator_cap: true
+    preflight: false
+  budget: {max_actions: 50, max_total_epochs: 1500, max_gpu_seconds: 200000}
+  confirmation: {top_k: 2}

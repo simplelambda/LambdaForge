@@ -40,6 +40,10 @@ class ObjectFactory:
         unchanged. Resolved plugin classes are instantiated exactly like
         ordinary targets; plugin instances are never shared by the registry.
         """
+        from lambdaforge.configuration.SecretValue import SecretValue
+
+        if isinstance(spec, SecretValue):
+            return spec.value
         registry = plugins or PluginRegistry.default()
         if isinstance(spec, Mapping):
             keys = set(spec)

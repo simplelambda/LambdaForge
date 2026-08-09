@@ -64,6 +64,10 @@ class FrozenJsonMapping(dict[str, Any]):
         """Return an independent ordinary mapping for defensive exports."""
         return {key: copy.deepcopy(value, memo) for key, value in dict.items(self)}
 
+    def __reduce__(self) -> tuple[type[FrozenJsonMapping], tuple[dict[str, Any]]]:
+        """Rebuild through the validating constructor when crossing a process boundary."""
+        return (type(self), (dict(self),))
+
     @staticmethod
     def _reject() -> NoReturn:
         raise TypeError("FrozenJsonMapping is immutable.")

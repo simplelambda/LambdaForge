@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lambdaforge.experiments.ExecutionConfig import ExecutionConfig
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
@@ -19,6 +19,9 @@ from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.experiments.ValidationReport import ValidationReport
 from lambdaforge.plugins.PluginReference import PluginReference
 from lambdaforge.plugins.PluginRegistry import PluginRegistry
+
+if TYPE_CHECKING:
+    from lambdaforge.hpo.AdaptiveOptimizerConfig import AdaptiveOptimizerConfig
 
 
 class ExperimentValidator:
@@ -53,12 +56,7 @@ class ExperimentValidator:
         """Load and validate a UTF-8 YAML file without materializing a run."""
         path = Path(path)
         try:
-            migration = self.migrator.preview_file(path, validate=False)
-            config = ExperimentConfig(
-                migration.config,
-                source=path,
-                _migration_result=migration,
-            )
+            config = ExperimentConfig.from_yaml(path)
         except Exception as error:
             return ValidationReport(source=str(path), errors=(self._format_error(error),))
         return self.validate(config, check_imports=check_imports)
@@ -100,10 +98,24 @@ class ExperimentValidator:
         if not errors:
             try:
                 normalized = ExperimentConfig(data, source=source)
-                runs = normalized.expand()
-                expanded_runs = len(runs)
-                for run in runs:
-                    errors.extend(self._schema_errors(run))
+                hpo = data.get("hpo", {})
+                adaptive = isinstance(hpo, Mapping) and bool(hpo.get("enabled", False))
+                if adaptive:
+                    from lambdaforge.hpo.AdaptiveOptimizerConfig import (
+                        AdaptiveOptimizerConfig,
+                    )
+
+                    optimizer = AdaptiveOptimizerConfig.from_experiment(data)
+                    self._validate_adaptive(data, optimizer)
+                    warnings.append(
+                        "Adaptive HPO is dynamically materialized; no finite expanded-run count "
+                        "exists before execution."
+                    )
+                else:
+                    runs = normalized.expand()
+                    expanded_runs = len(runs)
+                    for run in runs:
+                        errors.extend(self._schema_errors(run))
                 ExecutionConfig.from_mapping(normalized)
                 from lambdaforge.experiments.retention.ArtifactRetentionPolicy import (
                     ArtifactRetentionPolicy,
@@ -128,6 +140,38 @@ class ExperimentValidator:
             target_schema_version=migration.target_version.to_json_value(),
             migration_steps=tuple(step.to_dict() for step in migration.steps),
         )
+
+    @staticmethod
+    def _validate_adaptive(config: Mapping[str, Any], optimizer: AdaptiveOptimizerConfig) -> None:
+        """Reject combinations that cannot preserve adaptive scientific identity."""
+        sweep = config.get("sweep")
+        if isinstance(sweep, Mapping) and any(sweep.values()):
+            raise ValueError("An enabled hpo block cannot be combined with sweep.")
+        checkpoint_policy = ExperimentConfig.get_value(
+            config, "trainer.checkpoint_policy", "last_and_best"
+        )
+        if checkpoint_policy not in {"last", "last_and_best", "all"}:
+            raise ValueError(
+                "Adaptive fidelity requires trainer.checkpoint_policy to retain the last "
+                "checkpoint."
+            )
+        if optimizer.min_budget_before_drop > optimizer.max_budget:
+            raise ValueError("hpo.pruning.min_budget_before_drop cannot exceed fidelity.max.")
+        if optimizer.max_search_seeds > len(optimizer.search_seeds):
+            raise ValueError("hpo.seeds.max_search_seeds exceeds the declared search seeds.")
+        if ExperimentConfig.get_value(config, "execution.mode", "sequential") == "ddp":
+            raise ValueError(
+                "Adaptive HPO currently schedules independent single-process trials; "
+                "execution.mode ddp is unsupported."
+            )
+        if optimizer.memory_preflight and not ExperimentConfig.get_value(config, "execution.gpus"):
+            raise ValueError("hpo.memory.preflight requires explicit execution.gpus.")
+        forbidden = {"hpo", "sweep", "execution", "retention", "aggregation", "metadata"}
+        for parameter in optimizer.space.parameters:
+            if parameter.path.split(".", 1)[0] in forbidden:
+                raise ValueError(
+                    f"Adaptive search path {parameter.path!r} targets an operational section."
+                )
 
     def _schema_errors(self, config: Mapping[str, Any]) -> list[str]:
         return list(self.schema_catalog.validation_errors(config))

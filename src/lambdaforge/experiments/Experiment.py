@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from lambdaforge.experiments.RunLoader import RunLoader
     from lambdaforge.experiments.RunResult import RunResult
     from lambdaforge.experiments.ValidationReport import ValidationReport
+    from lambdaforge.hpo.AdaptiveExperimentPlan import AdaptiveExperimentPlan
+    from lambdaforge.hpo.AdaptiveExperimentResult import AdaptiveExperimentResult
 
 
 class Experiment:
@@ -57,6 +59,16 @@ class Experiment:
         """Return all concrete variant/seed configurations without running them."""
         return self.config.expand()
 
+    def inspect(self) -> list[dict[str, Any]] | AdaptiveExperimentPlan:
+        """Return finite expansion or the resolved adaptive-study plan."""
+        if self._adaptive_enabled():
+            from lambdaforge.hpo.AdaptiveExperimentOptimizer import (
+                AdaptiveExperimentOptimizer,
+            )
+
+            return AdaptiveExperimentOptimizer(self.config).inspect()
+        return self.expand()
+
     def validate(self, *, check_imports: bool = True) -> ValidationReport:
         """Validate schema, expansion, resources and optionally imports."""
         from lambdaforge.experiments.ExperimentValidator import ExperimentValidator
@@ -70,8 +82,15 @@ class Experiment:
         execution_overrides: Mapping[str, Any] | None = None,
         aggregate_plots: bool = True,
         on_run_finished: Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None = None,
-    ) -> list[RunResult]:
-        """Execute the suite and return one typed result per materialized run."""
+    ) -> list[RunResult] | AdaptiveExperimentPlan | AdaptiveExperimentResult:
+        """Execute a finite suite or an enabled adaptive optimization study."""
+        if self._adaptive_enabled():
+            from lambdaforge.hpo.AdaptiveExperimentOptimizer import (
+                AdaptiveExperimentOptimizer,
+            )
+
+            optimizer = AdaptiveExperimentOptimizer(self.config)
+            return optimizer.inspect() if dry_run else optimizer.run()
         return self.runner.run_experiment_config(
             self.config,
             dry_run=dry_run,
@@ -79,6 +98,10 @@ class Experiment:
             aggregate_plots=aggregate_plots,
             on_run_finished=on_run_finished,
         )
+
+    def _adaptive_enabled(self) -> bool:
+        hpo = self.config.get("hpo", {})
+        return isinstance(hpo, Mapping) and bool(hpo.get("enabled", False))
 
     def aggregate(
         self,

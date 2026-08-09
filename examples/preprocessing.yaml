@@ -1,0 +1,36 @@
+schema_version: "1.0"
+kind: task
+name: jsonl-preprocessing
+output_root: ../runs/tasks
+resume: true
+rerun_completed: false
+inputs:
+  - name: raw_records
+    path: preprocessing-input.jsonl
+required_artifacts:
+  - processed
+  - preprocessing-manifest.json
+  - dataset-artifact.json
+task:
+  target: lambdaforge.preprocessing.PreprocessingTask
+  params:
+    source:
+      target: lambdaforge.preprocessing.JsonLinesSource
+      params:
+        path: preprocessing-input.jsonl
+        key_field: id
+    transforms: []
+    sink:
+      target: lambdaforge.preprocessing.JsonDirectorySink
+      params:
+        output_dir: processed
+    shard_count: 1
+    shard_index: 0
+    on_error: fail
+    checkpoint_interval: 1
+    dataset_name: example-records
+    dataset_version: "1"
+execution:
+  mode: sequential
+metadata:
+  purpose: Runnable preprocessing and generic-task example.

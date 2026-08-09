@@ -1,0 +1,15 @@
+kind: workflow
+schema_version: "1.0"
+name: preprocessing-and-training
+output_root: ../runs/workflows
+max_parallel: 2
+metadata:
+  purpose: Connect the runnable preprocessing task to the complete training template.
+nodes:
+  preprocess:
+    config: preprocessing.yaml
+  train:
+    config: experiment.yaml
+    needs: [preprocess]
+    bindings:
+      data.train.params.dataset_manifest: ${nodes.preprocess.artifacts.dataset-artifact.json}

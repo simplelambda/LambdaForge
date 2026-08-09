@@ -19,15 +19,26 @@ if TYPE_CHECKING:
     from lambdaforge.experiments.retention.ArtifactRetentionResult import ArtifactRetentionResult
     from lambdaforge.experiments.RunResult import RunResult
     from lambdaforge.experiments.ValidationReport import ValidationReport
+    from lambdaforge.hpo.AdaptiveExperimentPlan import AdaptiveExperimentPlan
+    from lambdaforge.hpo.AdaptiveExperimentResult import AdaptiveExperimentResult
+    from lambdaforge.tasks.TaskExecutionPlan import TaskExecutionPlan
+    from lambdaforge.tasks.TaskResult import TaskResult
+    from lambdaforge.tasks.TaskRun import TaskRun
+    from lambdaforge.tasks.TaskValidationReport import TaskValidationReport
+    from lambdaforge.workflows.Workflow import Workflow
+    from lambdaforge.workflows.WorkflowPlan import WorkflowPlan
+    from lambdaforge.workflows.WorkflowResult import WorkflowResult
+    from lambdaforge.workflows.WorkflowValidationReport import WorkflowValidationReport
 
 
 class LambdaForge:
     """Framework facade for experiments and YAML object construction.
 
-    Most users start with :meth:`experiment` or :meth:`run`. Lower-level
+    Most users start with :meth:`experiment`, :meth:`task` or :meth:`run`. Lower-level
     components remain available from the documented ``lambdaforge.data``,
     ``lambdaforge.nn``, ``lambdaforge.metrics``, ``lambdaforge.plugins``,
-    ``lambdaforge.training`` and ``lambdaforge.experiments`` namespaces.
+    ``lambdaforge.training``, ``lambdaforge.experiments``, ``lambdaforge.tasks`` and
+    ``lambdaforge.preprocessing`` namespaces.
     """
 
     VERSION = LambdaForgeVersion.CURRENT
@@ -38,26 +49,91 @@ class LambdaForge:
         return Experiment.from_yaml(path)
 
     @staticmethod
+    def task(path: str | Path) -> TaskRun:
+        """Load a ``kind: task`` YAML document into the generic task API."""
+        from lambdaforge.tasks.TaskRun import TaskRun
+
+        return TaskRun.from_yaml(path)
+
+    @staticmethod
+    def workflow(path: str | Path) -> Workflow:
+        """Load a ``kind: workflow`` YAML document into the DAG API."""
+        from lambdaforge.workflows.Workflow import Workflow
+
+        return Workflow.from_yaml(path)
+
+    @staticmethod
+    def load(path: str | Path) -> Experiment | TaskRun | Workflow:
+        """Dispatch YAML to its workflow, task or training experiment API."""
+        from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
+        from lambdaforge.tasks.TaskConfig import TaskConfig
+
+        if TaskConfig.is_task_file(path):
+            return LambdaForge.task(path)
+        resolved_kind = ConfigurationComposer().resolve(path).values.get("kind")
+        return (
+            LambdaForge.workflow(path)
+            if resolved_kind == "workflow"
+            else LambdaForge.experiment(path)
+        )
+
+    @staticmethod
     def run(
         path: str | Path,
         *,
         dry_run: bool = False,
         execution_overrides: Mapping[str, Any] | None = None,
         aggregate_plots: bool = True,
-    ) -> list[RunResult]:
-        """Load and execute a YAML experiment in one call."""
-        return LambdaForge.experiment(path).run(
-            dry_run=dry_run,
-            execution_overrides=execution_overrides,
-            aggregate_plots=aggregate_plots,
-        )
+    ) -> (
+        list[RunResult]
+        | AdaptiveExperimentPlan
+        | AdaptiveExperimentResult
+        | TaskResult
+        | TaskExecutionPlan
+        | WorkflowResult
+        | WorkflowPlan
+    ):
+        """Load and execute an experiment, generic task or workflow in one call."""
+        configured = LambdaForge.load(path)
+        if isinstance(configured, Experiment):
+            return configured.run(
+                dry_run=dry_run,
+                execution_overrides=execution_overrides,
+                aggregate_plots=aggregate_plots,
+            )
+        if execution_overrides and any(value is not None for value in execution_overrides.values()):
+            raise ValueError("Experiment execution overrides cannot be applied to kind: task.")
+        return configured.run(dry_run=dry_run)
 
     @staticmethod
-    def validate(path: str | Path, *, check_imports: bool = True) -> ValidationReport:
-        """Validate one experiment file without creating run artifacts."""
+    def validate(
+        path: str | Path,
+        *,
+        check_imports: bool = True,
+    ) -> ValidationReport | TaskValidationReport | WorkflowValidationReport:
+        """Validate one experiment, task or workflow without creating artifacts."""
+        from lambdaforge.tasks.TaskConfig import TaskConfig
+        from lambdaforge.tasks.TaskValidator import TaskValidator
+
+        if TaskConfig.is_task_file(path):
+            return TaskValidator().validate_file(path, check_imports=check_imports)
+        from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
+
+        if ConfigurationComposer().resolve(path).values.get("kind") == "workflow":
+            from lambdaforge.workflows.WorkflowValidator import WorkflowValidator
+
+            return WorkflowValidator().validate_file(path, check_imports=check_imports)
         from lambdaforge.experiments.ExperimentValidator import ExperimentValidator
 
         return ExperimentValidator().validate_file(path, check_imports=check_imports)
+
+    @staticmethod
+    def inspect(
+        path: str | Path,
+    ) -> list[dict[str, Any]] | AdaptiveExperimentPlan | TaskExecutionPlan | WorkflowPlan:
+        """Expand an experiment or return a task/workflow plan without running."""
+        configured = LambdaForge.load(path)
+        return configured.inspect()
 
     @staticmethod
     def preview_migration(
@@ -92,8 +168,17 @@ class LambdaForge:
         status: str | None = None,
         include_archived: bool = True,
     ) -> tuple[ResultRecord, ...]:
-        """List canonical and historical attempts for one experiment YAML."""
-        return LambdaForge.experiment(path).results(
+        """List canonical and historical attempts for an experiment or task YAML."""
+        from lambdaforge.tasks.TaskRun import TaskRun
+
+        configured = LambdaForge.load(path)
+        if isinstance(configured, Experiment):
+            return configured.results(status=status, include_archived=include_archived)
+        if not isinstance(configured, TaskRun):
+            raise ValueError(
+                "Workflow results are stored per node; query the registry at its output root."
+            )
+        return configured.result_catalog().records(
             status=status,
             include_archived=include_archived,
         )

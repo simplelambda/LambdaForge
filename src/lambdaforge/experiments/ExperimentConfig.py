@@ -57,10 +57,33 @@ class ExperimentConfig(Mapping[str, Any]):
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentConfig:
-        """Load an experiment from a UTF-8 YAML file."""
+        """Load a safely composed experiment from a UTF-8 YAML file."""
+        from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
+        from lambdaforge.experiments.migrations.RoundTripYamlCodec import RoundTripYamlCodec
+
         path = Path(path)
+        source_text = path.read_text(encoding="utf-8")
+        loaded, _ = RoundTripYamlCodec().load_file(path)
+        if "extends" not in loaded and "include" not in loaded and "${" not in source_text:
+            try:
+                result = ExperimentConfigMigrator.default().preview_file(path, validate=False)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Cannot normalize experiment Schema for {path}: {error}. "
+                    "Preview supported migrations with 'lambdaforge migrate <config>'."
+                ) from error
+            return cls(result.config, source=path, _migration_result=result)
+        resolution = ConfigurationComposer().resolve(path)
+        if resolution.contains_secrets:
+            raise ValueError(
+                "Training configuration cannot persist secret values safely. Keep provider "
+                "credentials in their runtime environment instead of experiment YAML."
+            )
         try:
-            result = ExperimentConfigMigrator.default().preview_file(path, validate=False)
+            result = ExperimentConfigMigrator.default().preview_mapping(
+                resolution.materialized(reveal_secrets=True),
+                validate=False,
+            )
         except (TypeError, ValueError) as error:
             raise ValueError(
                 f"Cannot normalize experiment Schema for {path}: {error}. "

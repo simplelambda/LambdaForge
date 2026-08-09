@@ -51,6 +51,12 @@ class RunFingerprint:
     @classmethod
     def payload(cls, config: Mapping[str, Any]) -> dict[str, Any]:
         """Return the normalized scientific payload used by :meth:`digest`."""
+        adaptive_max_budget: Any = None
+        metadata = config.get("metadata")
+        if isinstance(metadata, Mapping):
+            adaptive = metadata.get("adaptive")
+            if isinstance(adaptive, Mapping):
+                adaptive_max_budget = adaptive.get("max_budget")
         selected = {
             str(key): value
             for key, value in config.items()
@@ -63,6 +69,10 @@ class RunFingerprint:
                 for key, value in experiment.items()
                 if str(key) not in cls._OPERATIONAL_EXPERIMENT_KEYS
             }
+        trainer = selected.get("trainer")
+        if adaptive_max_budget is not None and isinstance(trainer, Mapping):
+            selected["trainer"] = dict(trainer)
+            selected["trainer"]["max_epochs"] = adaptive_max_budget
         normalized = cls._normalize(selected)
         if not isinstance(normalized, dict):
             raise TypeError("A run fingerprint requires a top-level mapping.")

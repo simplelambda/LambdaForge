@@ -294,6 +294,10 @@ class PluginRegistry:
             from lambdaforge.integrations.Lightning import LoggerType
 
             return LoggerType
+        if kind is PluginKind.TASK:
+            from lambdaforge.tasks.Task import Task
+
+            return Task
         raise AssertionError(f"Unhandled plugin kind: {kind!r}.")
 
     @classmethod

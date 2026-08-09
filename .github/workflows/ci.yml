@@ -150,6 +150,34 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  adaptive-hpo-provider:
+    name: Optional BoTorch adaptive HPO / CPython 3.11
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install CPU package with adaptive provider
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"
+          python -m pip install -e ".[dev,adaptive-hpo]"
+
+      - name: Exercise the real provider adapter
+        run: python -m pytest -q tests/hpo/test_botorch_searcher.py
+
   package:
     name: Build and inspect distributions
     runs-on: ubuntu-latest
@@ -189,6 +217,9 @@ jobs:
           import lambdaforge
 
           assert files("lambdaforge").joinpath("schemas/experiment.schema.json").is_file()
+          assert files("lambdaforge").joinpath("schemas/task.schema.json").is_file()
+          assert files("lambdaforge.tasks").joinpath("README.md").is_file()
+          assert files("lambdaforge.preprocessing").joinpath("README.md").is_file()
           assert files("lambdaforge.experiments.retention").joinpath("README.md").is_file()
           guide = distribution("lambdaforge").locate_file("share/lambdaforge/AGENTS.md")
           assert guide.is_file(), guide

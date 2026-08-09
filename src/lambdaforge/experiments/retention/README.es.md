@@ -149,10 +149,10 @@ marcador de commit. La compresión y poda genéricas nunca seleccionan checkpoin
 from lambdaforge import Experiment, LambdaForge
 
 experiment = Experiment.from_yaml("experiment.yaml")
-plan = experiment.preview_retention()       # estrictamente solo lectura
+plan = experiment.preview_retention()  # estrictamente solo lectura
 print(plan.status, plan.operations)
 
-result = experiment.apply_retention()       # mutación explícita
+result = experiment.apply_retention()  # mutación explícita
 print(result.status, result.reclaimed_bytes, result.archives)
 
 same_plan = LambdaForge.preview_retention("experiment.yaml")

@@ -152,6 +152,12 @@ Schema and consecutive migration object.
 all grid dimensions form a Cartesian product. `sweep.include_base` controls whether the unmodified
 configuration is included. Every `sweep.ablations` entry adds a named set of dotted-path overrides.
 
+For dynamic multi-fidelity search, use the mutually exclusive top-level `hpo.enabled: true` path.
+It materializes ordinary run directories incrementally, resumes cumulative epoch budgets from last
+checkpoints and stores controller state/events under `.lambdaforge/adaptive/`. The full YAML,
+resource, seed, pruning, recovery and customization contract is in the main README's
+“Adaptive experiment optimization” section and `examples/adaptive-hpo.yaml`.
+
 Expansion uses deep copies: one run cannot mutate another. Experiment names must be non-empty and
 the final `(variant, seed)` identities must be unique. `lambdaforge inspect` prints the concrete
 configurations without executing imported objects.

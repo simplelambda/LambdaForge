@@ -287,6 +287,33 @@ class TestPluginDiscovery:
         assert isinstance(callback, CallbackBase)
         assert isinstance(logger, LoggerType)
 
+    def test_task_plugins_have_a_dedicated_strict_contract(self, monkeypatch) -> None:
+        """Reusable tasks require inheritance while local targets retain duck typing."""
+        entries = [
+            self._entry_point(
+                "user_task",
+                "tests.fixtures.UserPluginTask:UserPluginTask",
+                PluginKind.TASK,
+            ),
+            self._entry_point(
+                "duck_task",
+                "tests.fixtures.UserTask:UserTask",
+                PluginKind.TASK,
+            ),
+        ]
+        calls = self._publish(monkeypatch, entries)
+        registry = PluginRegistry()
+
+        task = ObjectFactory.build(
+            {"plugin": {"kind": "task", "name": "user_task"}},
+            plugins=registry,
+        )
+
+        assert task.__class__.__name__ == "UserPluginTask"
+        assert calls == ["lambdaforge.tasks"]
+        with pytest.raises(PluginResolutionError, match="must subclass"):
+            registry.resolve(PluginReference(PluginKind.TASK, "duck_task"))
+
     def test_non_neural_plugin_contracts_and_schema_positions_are_strict(self, monkeypatch) -> None:
         entries = [
             self._entry_point(
@@ -600,4 +627,4 @@ class TestPluginDiscovery:
         with pytest.raises(ValueError, match="Unexpected"):
             PluginReference.from_value({"kind": "model", "name": "x", "extra": True})
         with pytest.raises(ValueError, match="Unknown plugin kind"):
-            PluginReference.from_value({"kind": "task", "name": "x"})
+            PluginReference.from_value({"kind": "workflow", "name": "x"})

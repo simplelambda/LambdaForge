@@ -77,6 +77,7 @@ class ExperimentExecutor:
         print(
             f"Execution: mode={execution.mode.value}, gpus={execution.gpus}, "
             f"slots={len(slots)}, runs={len(jobs)}, "
+            f"cpu_jobs={execution.cpu_jobs}, "
             f"cpu_threads_per_job={execution.cpu_threads_per_job}, "
             f"cpu_interop_threads_per_job={execution.cpu_interop_threads_per_job}, "
             f"cpu_cores_per_job={execution.cpu_cores_per_job}, "

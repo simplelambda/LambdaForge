@@ -144,10 +144,10 @@ marker. Generic compression and pruning never select checkpoints.
 from lambdaforge import Experiment, LambdaForge
 
 experiment = Experiment.from_yaml("experiment.yaml")
-plan = experiment.preview_retention()       # strictly read-only
+plan = experiment.preview_retention()  # strictly read-only
 print(plan.status, plan.operations)
 
-result = experiment.apply_retention()       # explicit mutation request
+result = experiment.apply_retention()  # explicit mutation request
 print(result.status, result.reclaimed_bytes, result.archives)
 
 same_plan = LambdaForge.preview_retention("experiment.yaml")

@@ -268,6 +268,70 @@ class TrainingOrchestrator:
             self._raise_if_processes_alive(self.processes)
             return exit_codes
 
+    def run_dynamic(
+        self,
+        slots: Sequence[Sequence[int] | None],
+        next_job: Callable[[int, tuple[int, ...] | None], TrainingJob | None],
+        on_job_finished: Callable[[str, int | None, int], None] | None = None,
+    ) -> dict[str, int | None]:
+        """Fill free slots from a live supplier until it declares no more work.
+
+        The supplier is called in the parent process and may use every result observed so
+        far to choose the next job. Returning ``None`` leaves that slot idle for the
+        current scheduling pass. Scheduling terminates only when all slots return
+        ``None`` while no process is running, which makes temporary resource admission
+        failures safe while another job can still release capacity.
+        """
+        normalized_slots = self._normalize_slots(slots)
+        running: dict[int, tuple[str, mp.Process]] = {}
+        exit_codes: dict[str, int | None] = {}
+        names: set[str] = set()
+
+        with self._execution_scope(slot_count=len(normalized_slots)):
+            while True:
+                self._consume_signal_stop_request()
+                if self.stop_event.is_set():
+                    self._stop_with_grace(list(running.values()))
+
+                finished = [
+                    slot_index
+                    for slot_index, (_, process) in running.items()
+                    if not process.is_alive()
+                ]
+                for slot_index in finished:
+                    name, process = running.pop(slot_index)
+                    process.join()
+                    exit_codes[name] = process.exitcode
+                    if on_job_finished is not None:
+                        on_job_finished(name, process.exitcode, slot_index)
+
+                if self.stop_event.is_set():
+                    self._join_processes(list(running.values()))
+                    for name, process in running.values():
+                        exit_codes[name] = process.exitcode
+                    self._raise_if_processes_alive(list(running.values()))
+                    return exit_codes
+
+                launched = False
+                for slot_index, slot in enumerate(normalized_slots):
+                    if slot_index in running:
+                        continue
+                    job = next_job(slot_index, slot)
+                    if job is None:
+                        continue
+                    if job.name in names:
+                        raise ValueError(f"Dynamic training job name is not unique: {job.name!r}.")
+                    names.add(job.name)
+                    process = self._launch(job, slot, slot_index=slot_index)
+                    running[slot_index] = (job.name, process)
+                    launched = True
+
+                if not running and not launched:
+                    self._raise_if_processes_alive(self.processes)
+                    return exit_codes
+                if not finished and not launched:
+                    time.sleep(self.poll_seconds)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

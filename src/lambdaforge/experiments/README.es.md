@@ -152,6 +152,12 @@ para añadir un futuro Schema y su objeto de migración consecutivo.
 vacías y forma su producto cartesiano. `sweep.include_base` decide si se incluye la configuración
 original. Cada elemento de `sweep.ablations` añade overrides con puntos y nombre propio.
 
+Para búsqueda dinámica multi-fidelidad usa la ruta excluyente `hpo.enabled: true`. Materializa runs
+ordinarios incrementalmente, reanuda presupuestos acumulados desde el último checkpoint y guarda
+estado/eventos bajo `.lambdaforge/adaptive/`. El contrato completo de YAML, recursos, semillas,
+pruning, recuperación y personalización está en “Optimización adaptativa de experimentos” del README
+principal y en `examples/adaptive-hpo.yaml`.
+
 Se usan copias profundas: una ejecución no puede mutar otra. El nombre no puede estar vacío y las
 identidades `(variant, seed)` finales han de ser únicas. `lambdaforge inspect` imprime las
 configuraciones concretas sin ejecutar los objetos importados.

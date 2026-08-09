@@ -51,6 +51,7 @@ details.
 | `dataset` | `lambdaforge.datasets` | `torch.utils.data.Dataset` subclass |
 | `callback` | `lambdaforge.callbacks` | `lambdaforge.integrations.Lightning.Callback` subclass |
 | `logger` | `lambdaforge.loggers` | `lambdaforge.integrations.Lightning.Logger` subclass |
+| `task` | `lambdaforge.tasks` | `lambdaforge.tasks.Task` subclass |
 
 Groups are deliberately separate: a name identifies one implementation within one contract, and
 the same name may legitimately exist in different groups. Entry-point names are case-sensitive and
@@ -63,7 +64,7 @@ An external package declares classes in its own `pyproject.toml`:
 ```toml
 [project]
 name = "acme-lambdaforge"
-dependencies = ["lambdaforge>=0.1,<0.2"]
+dependencies = ["lambdaforge>=0.4,<0.5"]
 
 [project.entry-points."lambdaforge.models"]
 acme_encoder = "acme_lambdaforge.models:AcmeEncoder"
@@ -85,6 +86,9 @@ artifact_marker = "acme_lambdaforge.callbacks:ArtifactMarker"
 
 [project.entry-points."lambdaforge.loggers"]
 jsonl_logger = "acme_lambdaforge.logging:JsonLinesLogger"
+
+[project.entry-points."lambdaforge.tasks"]
+surface_builder = "acme_lambdaforge.tasks:SurfaceBuilder"
 ```
 
 The value uses the standard entry-point `importable.module:attribute` syntax. Each attribute must be
@@ -132,6 +136,17 @@ trainer:
   logger:
     plugin: {kind: logger, name: jsonl_logger}
     params: {path: metrics.jsonl}
+```
+
+A generic task document selects the dedicated task contract at its root:
+
+```yaml
+schema_version: "1.0"
+kind: task
+name: build-surfaces
+task:
+  plugin: {kind: task, name: surface_builder}
+  params: {resolution: 1.0}
 ```
 
 `ObjectFactory` resolves the class and recursively builds `params` exactly as it does for `target`.
@@ -210,6 +225,7 @@ The experiment schema constrains `kind: model` for `model`, `kind: metric` for m
 `callbacks` and `kind: logger` for `trainer.logger`. Every category remains valid in recursively
 built parameters. A wrong top-level kind is therefore reported before execution, while nested
 objects are contract-checked when `ObjectFactory` resolves them.
+The independent task Schema 1.0 requires `kind: task` for its root plugin.
 
 Template validation can deliberately skip every external `target`, `ref` and plugin load:
 
@@ -286,6 +302,8 @@ should inherit from `lambdaforge.integrations.Lightning.Callback` and
 `lambdaforge.integrations.Lightning.Logger`, which follow LambdaForge's modern/legacy Lightning
 selection. Entry points expose classes, not singleton instances or factories. Constructors should
 remain spawn-safe and defer files, sockets and services until the normal runtime lifecycle.
+Task plugins must inherit `lambdaforge.tasks.Task`; fully qualified task targets still accept duck
+typing for concise project-local code.
 
 For activation and normalization aliases, explicit process registration and built-in components are
 checked before installed plugins. Consequently, a discovered package cannot silently replace

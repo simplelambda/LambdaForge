@@ -12,12 +12,12 @@
 
 [Español](README.es.md) · English
 
-LambdaForge is SimpleLambda's object-oriented framework for reproducible machine-learning
-training. It combines PyTorch, Lightning and a YAML experiment engine behind one stable Python
-package, so a research project can focus on its dataset and task instead of rebuilding training
-loops, metric logging, seed sweeps, checkpoint loading, plots and multi-GPU process scheduling.
+LambdaForge is SimpleLambda's object-oriented framework for reproducible AI work. It combines
+generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine behind one stable
+Python package, so a research project can focus on its data and science instead of rebuilding
+pipelines, training loops, provenance, result management and process scheduling.
 
-> **Status:** `0.2.0`, usable but pre-1.0. The public namespaces documented below are the intended
+> **Status:** `0.4.0`, usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
 > contain a licence file, so redistribution terms still need to be chosen by SimpleLambda.
 
@@ -28,7 +28,15 @@ loops, metric logging, seed sweeps, checkpoint loading, plots and multi-GPU proc
 - [Integrating into another project](#integrating-into-another-project)
 - [Why AGENTS.md exists](#why-agentsmd-exists)
 - [Quick start](#quick-start)
+- [Generic tasks and preprocessing](#generic-tasks-and-preprocessing)
+- [Workflows and configuration composition](#workflows-and-configuration-composition)
+- [Inference, evaluation, export and HPO](#inference-evaluation-export-and-hpo)
+- [Resources, backends and reliability](#resources-backends-and-reliability)
+- [Artifact stores, registry and reports](#artifact-stores-registry-and-reports)
+- [Observability and reproducibility](#observability-and-reproducibility)
+- [CLI reference](#cli-reference)
 - [Public API](#public-api)
+- [Conceptual execution model](#conceptual-execution-model)
 - [Architecture](#architecture)
 - [YAML experiment reference](#yaml-experiment-reference)
 - [Configuration migrations](#configuration-migrations)
@@ -40,6 +48,7 @@ loops, metric logging, seed sweeps, checkpoint loading, plots and multi-GPU proc
 - [Extension contracts](#extension-contracts)
 - [Review findings](#review-findings)
 - [Development and verification](#development-and-verification)
+  - [Repository and release hygiene](#repository-and-release-hygiene)
   - [Continuous integration](#continuous-integration)
 - [Current limitations](#current-limitations)
 - [Documentation map](#documentation-map)
@@ -49,6 +58,16 @@ loops, metric logging, seed sweeps, checkpoint loading, plots and multi-GPU proc
 
 - A generic Lightning training task for mapping-shaped batches, one or more losses and independent
   train/validation/test metrics.
+- A separate, strict generic-task YAML family for preprocessing and other reproducible non-training
+  work, with dry-run plans, content-addressed inputs, typed artifacts and attempt history.
+- Composable source/transform/sink preprocessing, atomic per-record checkpoints, deterministic
+  shards and a versioned `DatasetArtifact` manifest.
+- Task/experiment workflow DAGs, safe YAML composition/interpolation, semantic provenance/diff and
+  bounded CPU-only or heterogeneous resource planning.
+- Reusable checkpoint inference/evaluation/ensemble/export tasks, finite and adaptive HPO and
+  preview-first local/SLURM execution backends.
+- Verified local/shared/S3-compatible artifact stores, distributed staging cache, a catalog-backed
+  registry, factual reports/dashboard and structured observability/reproducibility profiles.
 - Object construction from trusted YAML using fully qualified `target`/`ref` paths or installed,
   contract-checked entry-point plugins, including reusable datasets, callbacks and loggers.
 - Draft 2020-12 schema validation of structure, expansion, resources and imports before execution.
@@ -72,7 +91,8 @@ loops, metric logging, seed sweeps, checkpoint loading, plots and multi-GPU proc
   and logits policy are explicit experiment parameters.
 - Optional, lazily loaded MLflow, TensorBoard and Weights & Biases logger adapters, selectable alone
   or together without adding a tracking service to the base installation.
-- A small facade (`LambdaForge`), an object API (`Experiment`) and a CLI (`lambdaforge`).
+- A small facade (`LambdaForge`), object APIs (`Experiment`, `TaskRun` and `Workflow`) and one CLI
+  (`lambdaforge`).
 
 LambdaForge is task-agnostic at the configuration and orchestration layers. A user project supplies
 the domain-specific `Dataset`, optional collator and, when the default mapping contract is not
@@ -101,6 +121,21 @@ The package prefers `lightning.pytorch` and retains runtime compatibility with t
 Tracking providers remain optional. Install `lambdaforge[mlflow]`,
 `lambdaforge[tensorboard]`, `lambdaforge[wandb]` or the combined `lambdaforge[tracking]` extra; see
 the [tracking guide](src/lambdaforge/tracking/README.md) before enabling remote publication.
+
+Optional integrations never enter the base dependency set:
+
+| Extra | Adds |
+|---|---|
+| `hpo` | Optuna finite-search adapter. |
+| `adaptive-hpo` | BoTorch/GPyTorch Bayesian acquisition for adaptive HPO; Sobol/random remain available without it. |
+| `s3` | Default boto3 client for `S3ArtifactStore`; an injected compatible client needs no extra. |
+| `parquet` | Pandas/PyArrow registry export. |
+| `onnx` | ONNX/ONNX Script model export. |
+| `mlflow`, `tensorboard`, `wandb`, `tracking` | One tracking provider or all three. |
+| `dev` | Tests, type checking and formatting tools for LambdaForge contributors. |
+
+Install only what the consumer actually uses, for example
+`python -m pip install "lambdaforge[adaptive-hpo,s3]"`.
 
 ## Integrating into another project
 
@@ -139,7 +174,7 @@ immutable artifact instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.2.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.4.0-py3-none-any.whl
 ```
 
 Let the consumer project's lock file or constraints select a PyTorch build compatible with its
@@ -226,6 +261,415 @@ lambdaforge run experiment.yaml --mode parallel --gpus 0,1 --jobs-per-gpu 2
 lambdaforge run experiment.yaml --mode ddp --gpus 0,1 --devices-per-job 2
 ```
 
+## Generic tasks and preprocessing
+
+Training experiments keep Schema 1.1. Reproducible work that does not own a model or Lightning
+trainer uses the independent task Schema 1.0 with an explicit `kind: task`; existing experiment
+files are unchanged. The bundled preprocessing example is directly runnable:
+
+```bash
+lambdaforge validate examples/preprocessing.yaml
+lambdaforge inspect examples/preprocessing.yaml
+lambdaforge run examples/preprocessing.yaml --dry-run
+lambdaforge run examples/preprocessing.yaml
+lambdaforge results examples/preprocessing.yaml --write-index --fail-on-ambiguous
+```
+
+Its core YAML is a recursively constructed source → transforms → sink pipeline:
+
+```yaml
+schema_version: "1.0"
+kind: task
+name: normalize-records
+inputs:
+  - {name: raw, path: data/raw.jsonl}
+task:
+  target: lambdaforge.preprocessing.PreprocessingTask
+  params:
+    source:
+      target: lambdaforge.preprocessing.JsonLinesSource
+      params: {path: data/raw.jsonl, key_field: id}
+    transforms:
+      - target: lambdaforge.preprocessing.CallableTransform
+        params: {function: {ref: my_project.preprocessing.normalize_record}}
+    sink:
+      target: lambdaforge.preprocessing.JsonDirectorySink
+      params: {output_dir: processed}
+```
+
+Every top-level input is resolved relative to the YAML and content-hashed before planning. Changing
+raw bytes selects a new fingerprinted run directory instead of silently reusing stale output. Each
+terminal attempt records configuration, environment/plugins, logs, structured errors, scalar
+metrics and SHA-256 artifacts. `PreprocessingTask` additionally checkpoints stable record keys for
+safe retry, supports deterministic explicit shards and publishes a content-derived
+`dataset-artifact.json`.
+
+Project-specific logic remains in the installed consumer package. Use a `CallableTransform` for a
+small function or implement the public `PreprocessingSource`, `PreprocessingTransform` and
+`PreprocessingSink` contracts. For other batch work, implement `Task.run(TaskContext) -> TaskOutput`
+and use the same task YAML/CLI. See the [generic-task guide](src/lambdaforge/tasks/README.md),
+[preprocessing guide](src/lambdaforge/preprocessing/README.md) and
+[complete example](examples/preprocessing.yaml).
+
+## Workflows and configuration composition
+
+A workflow connects complete task or training documents; it does not introduce a second task
+syntax. Start with one node per independently reproducible operation:
+
+```yaml
+kind: workflow
+schema_version: "1.0"
+name: prepare-and-train
+output_root: runs/workflows
+max_parallel: 2
+nodes:
+  preprocess:
+    config: preprocessing.yaml
+  train:
+    config: experiment.yaml
+    needs: [preprocess]
+    bindings:
+      data.train.params.dataset_manifest: >-
+        ${nodes.preprocess.artifacts.dataset-artifact.json}
+```
+
+Validate/inspect before execution:
+
+```bash
+lambdaforge validate workflow.yaml
+lambdaforge inspect workflow.yaml
+lambdaforge run workflow.yaml --dry-run
+lambdaforge run workflow.yaml
+```
+
+`needs` creates edges; cycles and unknown nodes are rejected. A failed node blocks only its
+descendants, while independent branches continue. `continue_on_failure: true` is an explicit escape
+hatch for a node that can consume failure state. Bindings accept exact
+`${nodes.NAME.outputs.PATH}`, `.metrics.PATH` and `.artifacts.RUN_RELATIVE_PATH` references. Nodes
+retain their own task/experiment fingerprints and resume rules, so rerunning the graph cannot reuse
+scientifically different output. `max_parallel` bounds ready local nodes.
+
+Any task or experiment YAML may use deterministic composition. `extends` files merge first,
+`include` files next, and the leaf document last; paths are relative to the file declaring them.
+Mappings merge recursively, lists replace and `{$delete: true}` removes an inherited key:
+
+```yaml
+# study.yaml
+extends: configs/base.yaml
+include: [configs/local-data.yaml]
+model:
+  params: {dropout: 0.2}
+trainer:
+  obsolete_option: {$delete: true}
+data_root: ${env:DATA_ROOT}
+run_root: ${config:experiment.output_root}
+```
+
+`lambdaforge compose study.yaml` prints the fully resolved, redacted values, source files and
+per-path provenance. `lambdaforge diff left.yaml right.yaml` compares semantic leaves rather than
+text or mapping order. Interpolation is limited to `${config:path}`, `${env:NAME}` and a full-value
+`${secret:NAME}`; Python expressions are never evaluated. Secrets in generic tasks reach the target
+at construction time but persist as `***`. A secret cannot be embedded in a larger string. Training
+and workflow structure reject secrets because their materialized configurations are durable; let
+tracking/provider code read credentials directly from its environment.
+
+Python equivalents are `ConfigurationComposer.resolve()` and `ConfigurationDiff.compare()` from
+`lambdaforge.configuration`, and `LambdaForge.workflow(path)` / `Workflow.from_yaml(path)`.
+
+## Inference, evaluation, export and HPO
+
+Operational model work is a generic task and therefore receives the same input hashing, attempts,
+provenance and artifacts as preprocessing. Declare every checkpoint in task `inputs`, then use its
+YAML-relative path in `checkpoints`:
+
+```yaml
+kind: task
+schema_version: "1.0"
+name: test-inference
+inputs:
+  - {name: checkpoint, path: checkpoints/best.ckpt}
+task:
+  target: lambdaforge.operations.InferenceTask
+  params:
+    model: {target: my_project.models.Model, params: {features: 32}}
+    checkpoints: checkpoints/best.ckpt
+    data: {target: my_project.data.TestDataset}
+    batch_size: 128
+    model_input_key: x
+    model_output_key: logits
+```
+
+`InferenceTask` writes CPU `predictions.pt`; several checkpoints form an ensemble whose matching
+tensor outputs are averaged. `EvaluationTask` adds a `metrics` list and updates the ordinary
+LambdaForge metric contract on a new dataset. `ExportTask` requires `example_inputs` and selects
+`format: torchscript`, `torch_export`, `onnx`, or an injected object exposing
+`export(model, args, path)`. Checkpoints load with `weights_only=True`; plain state dicts and
+Lightning `state_dict` envelopes are accepted.
+
+Deterministic grids/ablations remain the preferred exhaustive mechanism. For sampled search:
+
+```python
+from lambdaforge.hpo import RandomSearch
+
+search = RandomSearch(
+    {
+        "optimizer.params.lr": {"type": "loguniform", "low": 1e-5, "high": 1e-2},
+        "model.params.width": {"type": "choice", "values": [64, 128, 256]},
+    },
+    seed=17,
+)
+trial_configs = search.materialize(base_config, count=20)
+```
+
+Distributions are `choice`, `uniform`, `loguniform` and `int`; a `when` mapping makes a parameter
+conditional on already sampled dotted paths. Trials have stable parameters, seed and SHA-256.
+`OptunaSearch` is an optional adapter for reproducible TPE plus `asha` or `hyperband` pruning; install
+Optuna in the consumer environment. It does not replace LambdaForge scheduling or result identity.
+
+### Adaptive experiment optimization
+
+Use an enabled top-level `hpo` block when a finite grid wastes training budget. Start from
+[`examples/adaptive-hpo.yaml`](examples/adaptive-hpo.yaml), keep the ordinary model/data/loss/task
+sections, and declare only dotted scientific paths:
+
+```yaml
+execution: {mode: sequential, gpus: [0, 1]}
+hpo:
+  enabled: true
+  controller_seed: 2026
+  max_concurrency: 4
+  objective: {metric: val_auroc, direction: maximize}
+  space:
+    optimizer.params.lr: {type: float, low: 0.00001, high: 0.01, scale: log}
+    model.params.hidden_features: {type: int, low: 64, high: 512}
+    model.params.dropout: {type: float, low: 0.0, high: 0.5}
+  initialization: {strategy: sobol, trials: auto}
+  search: {strategy: bayesian, candidate_pool_size: 256}
+  acquisition: {strategy: cost_aware_knowledge_gradient}
+  fidelity: {unit: epochs, strategy: adaptive_learning_curve, min: 5, max: 100, step: 5}
+  seeds:
+    strategy: adaptive_racing
+    values: [7, 17, 27]
+    max_search_seeds: 3
+    confirmation_values: [101, 211]
+  pruning: {enabled: true, min_budget_before_drop: 10, probability_threshold: 0.01}
+  memory: {per_job_budget: 6GiB, headroom: 512MiB, allocator_cap: true}
+  budget: {max_actions: 50, max_total_epochs: 1500}
+  confirmation: {top_k: 2}
+```
+
+Complete adaptive policy reference (defaults apply only when `hpo.enabled: true`):
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `controller_seed` / `max_concurrency` | `0` / `1` | Reproducible controller decisions and maximum live independent actions. |
+| `objective.metric` / `direction` | `val_loss` / `minimize` | Exact epoch-CSV objective and its orientation. |
+| `objective.risk.type` / `lambda` | `mean` / `0` | Scientific objective; `mean_minus_std` is opt-in and changes the question being optimized. |
+| `space` | required | Dotted scientific paths with `float`, `int`, `categorical` or `bool`; numeric scale is `linear` unless `log`; `when` adds a parent condition. |
+| `initialization.strategy` / `trials` | `sobol` / `auto` | Initial design; `auto = max(4, 2 * (effective_dimensions + 1))`. Random is the baseline. |
+| `search.strategy` | `bayesian` | `bayesian`, `sobol` or `random`. |
+| `search.candidate_pool_size` / `refresh_interval` | `128` / `1` | Acquisition raw samples and scored-observation interval used to refit/cache the surrogate. |
+| `acquisition.strategy` / `exploration_weight` | `cost_aware_knowledge_gradient` / `1` | KG, plain KG or expected improvement; global action scoring still accounts for predicted cost/feasibility. |
+| `fidelity.strategy` | `adaptive_learning_curve` | Adaptive curves, `fixed`, or deterministic `successive_halving` baseline. |
+| `fidelity.min` / `max` / `step` | `5` / `100` / `min` | Cumulative epoch boundaries; only `unit: epochs` is currently supported. |
+| `seeds.strategy` / `values` | `adaptive_racing` / `[0]` | Shared ordered search seeds; `fixed` runs every declared seed. |
+| `seeds.confirmation_values` / `max_search_seeds` | `[]` / number of search seeds | Disjoint final seeds and the search repetition ceiling. |
+| `seeds.probability_threshold` | `0.9` | Competitiveness threshold for spending another adaptive seed. |
+| `pruning.enabled` / `min_budget_before_drop` | `true` / fidelity minimum | Whether and when posterior competitive pruning may start. |
+| `pruning.probability_threshold` / `equivalence_margin` | `0.01` / `0` | Conservative posterior drop threshold and practical-equivalence margin. |
+| `memory.per_job_budget` / `headroom` | `0` / `0` | Logical cold-start reservation/optional allocator ceiling and extra scheduling headroom. Zero disables a logical byte limit. |
+| `memory.safety_quantile` / `min_observations` | `0.99` / `3` | Conservative empirical reservation quantile and evidence needed before leaving cold start. |
+| `memory.allocator_cap` / `preflight` | `true` / `false` | Child-process PyTorch ceiling and optional isolated project-supplied probe. |
+| `memory.device_capacities` | discovered or unconstrained CPU | Explicit usable bytes per listed GPU when cluster discovery is unavailable. |
+| `budget.max_actions` / `max_total_epochs` | `50` / actions × max fidelity | Hard study limits including pending commitments. |
+| `budget.max_gpu_seconds` | unset | Optional measured/predicted GPU-time ceiling. |
+| `confirmation.top_k` | `1` | Number of posterior configurations frozen for disjoint-seed confirmation. |
+| `components.*` | built-ins | Trusted `target`/`params` replacements for the eight policy/model boundaries listed below. |
+
+The controller compares `START_NEW`, real checkpoint `RESUME`, `ADD_SEED` and final `CONFIRM`
+actions by predicted information gain divided by cost and multiplied by memory feasibility. Sobol
+initialization avoids correlated random starts. Optional Bayesian search fits a BoTorch GP, accounts
+for pending asynchronous points and uses knowledge gradient or expected improvement; dependency or
+numerical failure is recorded and falls back to Sobol. Install it with
+`pip install "lambdaforge[adaptive-hpo]"`. `sobol` and `random` remain dependency-free baselines.
+`PAUSE` is realized cooperatively at the selected epoch boundary and `DROP` prevents future
+promotion; LambdaForge does not kill a promising process mid-optimizer-step merely to reshuffle a
+slot. Small fidelity increments bound the latency before a newer decision can take effect.
+
+Fidelity targets are cumulative epochs. Every partial action writes a normal last checkpoint and
+full `metrics.csv`; promotion restores model, optimizer, scheduler, scaler and Lightning loop state,
+then runs only missing epochs. `trainer.checkpoint_policy` must be `last`, `last_and_best` or `all`.
+HPO pruning is separate from early stopping: it waits for `min_budget_before_drop` and a low
+posterior probability of competitiveness. The learning-curve model retains complete curves and
+protects slow starters with conservative uncertainty.
+
+Adaptive seed racing uses the same declared order across configurations and spends another seed
+only where ranking uncertainty warrants it. Confirmation runs posterior top K configurations at
+full budget on disjoint seeds that were not used to select those configurations.
+
+`memory.per_job_budget` is a cold-start reservation and, with `allocator_cap: true`, a public
+PyTorch child-process allocator ceiling. Peak allocated/reserved bytes and OOMs update an empirical
+model. Explicit `device_capacities` support restricted clusters. LambdaForge requires no
+`nvidia-smi`, custom environment variables, MIG/MPS or administrator service; allocator limits are
+defensive rather than physical isolation, and batch size is never changed silently.
+For an explicit representative check, set `preflight: true` and `probe: {target: ...}`. The target
+must construct a zero-argument callable that performs representative model/batch forward, backward
+and optimizer work on the visible CUDA device; it runs in an isolated child once per configured GPU
+before admission begins. This is deliberately project-supplied because LambdaForge cannot infer a
+scientifically representative batch for an arbitrary dataset/model.
+Adaptive actions currently use independent single-process CPU/GPU trials; `execution.mode: ddp` is
+rejected for enabled HPO because group reservation and per-rank allocator ceilings would otherwise
+be misleading. Static experiments retain normal DDP support.
+
+```bash
+lambdaforge validate examples/adaptive-hpo.yaml --no-imports
+lambdaforge inspect examples/adaptive-hpo.yaml
+lambdaforge run examples/adaptive-hpo.yaml --dry-run
+lambdaforge run experiments/my-adaptive-study.yaml
+```
+
+`inspect` and `--dry-run` return a plan without state or training. A real study persists atomic
+`state.json`, append-only `events.jsonl` and `summary.json` under
+`SUITE/.lambdaforge/adaptive/STUDY_ID/`; individual actions remain normal auditable run directories.
+Relaunching the same YAML reconciles terminal pending work and continues deterministically. Do not
+edit state/result files manually. Scientific search changes create another study ID; concurrency or
+declared capacity changes do not. Summaries report actual actions, epochs, full-training equivalents,
+GPU seconds, OOMs and fallbacks—not invented counterfactual savings. They also contain per-config
+search/confirmation seed usage, merged learning curves, peak-memory observations and confirmation
+mean, sample deviation, standard error, normal 95% interval and paired differences over shared
+seeds. A one-seed confirmation deliberately reports undefined dispersion/interval fields as null.
+Use the existing aggregation/statistics layer for bootstrap or non-parametric publication analyses.
+Enabled HPO and sweep are intentionally mutually exclusive.
+
+Defaults are policies, not hard-coded domain assumptions. `hpo.components` accepts trusted
+`target`/`params` specs for `searcher`, `fidelity_policy`, `seed_policy`, `learning_curve_model`,
+`cost_model`, `memory_model`, `admission_controller` and `action_selector`. Implement the same
+public method used by the built-in class (inspect its signature with `lambdaforge target ...`) and
+keep the class in the consumer's installed package. Searchers implement `propose(space, state,
+count)`; fidelity policies implement `resume_candidates(state)` and may add `dominated(state,
+model)`; seed policies implement `candidates(state, model)`. Predictive models consume durable
+state, admission returns feasibility/reservation and selectors rank actions. These are duck-typed
+policy boundaries: a custom object does not need to inherit a concrete built-in class. This keeps
+domain priors replaceable without subclassing the runner or depending on Lightning internals.
+
+## Resources, backends and reliability
+
+GPU parallel and DDP modes retain their previous contract. CPU-only parallel sweeps now omit
+`gpus` and set an explicit slot count:
+
+```yaml
+execution:
+  mode: parallel
+  cpu_jobs: 4
+  cpu_cores_per_job: 2
+  cpu_threads_per_job: 2
+  cpu_interop_threads_per_job: 1
+  dataloader_num_workers_per_job: 0
+```
+
+LambdaForge rejects `cpu_jobs * cpu_cores_per_job` above the process's available affinity. Each CPU
+slot hides CUDA and patches Lightning to `accelerator: cpu`; GPU slots continue to use
+`jobs_per_gpu`, and DDP uses `devices_per_job`.
+
+For portable planning use `ResourceRequest` and `ResourcePlanner`. Requests declare CPU, RAM, GPU
+count/memory, storage and optional runtime. The planner either validates manual waves or performs
+deterministic capacity-safe first-fit packing and returns peak capacity plus runtime/storage
+estimates. Estimates are reported only when declared; the framework does not invent benchmarks.
+
+`LocalExecutionBackend` and `SlurmExecutionBackend` implement `ExecutionBackend`. SLURM always
+generates `submit.sbatch` first; `dry_run=False` is required to call `sbatch`. Constructor options
+cover partition, nodes, array, dependency, container argv prefix, environment and requeue. Commands
+are argument vectors and generated arguments are shell-quoted. `cancel(job_id)` and
+`requeue_job(job_id)` require numeric IDs. Multi-node launcher details remain explicit in the command
+rather than guessed by the framework.
+
+`FailureClassifier` distinguishes cancellation, preemption, CPU/GPU OOM, transient, user and
+unknown failures. `RetryPolicy` retries only configured categories for a bounded attempt count with
+exponential backoff. `AttemptMode` names the semantic difference: resume reuses compatible state,
+restart starts clean, retry repeats a failed intention, and fork creates a new identity. Unknown and
+user errors are not retryable by default.
+
+## Artifact stores, registry and reports
+
+`ArtifactReference` is the portable tuple `(store, key, sha256, size, media_type)`. An
+`ArtifactStore` publishes immutable content, verifies existence and stages a checked local copy.
+`LocalArtifactStore` supports local/shared filesystems; `S3ArtifactStore` accepts an injected
+S3-compatible client or optional `boto3`. Neither provider is selected implicitly. Store keys reject
+absolute/traversal paths and every stage validates size and SHA-256.
+
+`DistributedArtifactCache(root, upstream)` coordinates one cache copy per key using shared-filesystem
+leases. It atomically publishes, detects/repairs corruption and invalidates only the cache, never the
+authoritative store. The base store contract deliberately has no delete method, so referenced
+content is not removed by local experiment retention.
+
+Research discovery remains disk-backed:
+
+```bash
+lambdaforge results experiments/study.yaml --write-index --fail-on-ambiguous
+lambdaforge registry runs --output analysis/registry.csv
+lambdaforge dashboard runs --output analysis/dashboard.html
+```
+
+`ExperimentRegistry` reads `ResultCatalog` plus config/result metadata; it is not a second database.
+`RegistryQuery` filters status, experiment name, required tags, exact metadata and fingerprint.
+Export supports JSON/CSV and optional Parquet (`pandas` plus a Parquet engine). Select explicit
+attempts before publication.
+
+`ExperimentComparator.compare(groups, metric=...)` produces counts, means, standard deviations,
+configured normal confidence intervals, mean effects and semantic config differences.
+`ReportBuilder.write()` creates Markdown/HTML and a factual mean/interval plot. It never chooses a
+winner or writes a scientific conclusion. `LocalDashboard` is a static, read-only table of registry
+records, paths and metrics; tracking services remain optional complementary views.
+
+## Observability and reproducibility
+
+Every generic task now writes bounded `events.jsonl` start/finish records alongside `task.log`;
+failures include the explicit failure category. `EventLogger` is available for consumer events and
+uses a cross-process lock. `ResourceMonitor.sample()` returns CPU, RSS, threads, optional CUDA
+allocated/reserved/peak memory and optional throughput no faster than its configured interval.
+`ProfilerAdapter` is the provider boundary; `TorchProfilerAdapter` uses a finite schedule and writes
+TensorBoard-compatible traces.
+
+```python
+from lambdaforge.reproducibility import ReproducibilityProfile, SeedDeriver
+
+profile = ReproducibilityProfile.named("strict", seed=7)
+profile.apply()
+loader_seed = SeedDeriver(7).derive("dataloader", "train", 0)
+fingerprints = profile.fingerprints(materialized_config)
+```
+
+Profiles are `fast`, `repeatable` and `strict`; strict enables deterministic torch algorithms.
+Seed derivation uses SHA-256, not process-randomized `hash()`. `fingerprints()` records full
+infrastructure identity separately from science with execution/device fields removed.
+`EnvironmentExporter.export(path, format=...)` supports `pip`, `conda` and a container-oriented JSON
+snapshot without changing the environment.
+
+## CLI reference
+
+| Command | Purpose | Writes by default |
+|---|---|---:|
+| `init DIRECTORY` | Scaffold an installable consumer package; refuses collisions without `--force`. | yes |
+| `validate CONFIG` | Schema/import/resource/DAG checks. | no |
+| `inspect CONFIG` | Expanded runs or immutable task/workflow plan. | no |
+| `run CONFIG --dry-run` | Exact execution plan. | no |
+| `run CONFIG` | Execute experiment, task or workflow. | yes |
+| `compose CONFIG` | Redacted materialization plus provenance. | no |
+| `diff LEFT RIGHT` | Semantic configuration differences. | no |
+| `explain experiment|task|workflow PATH` | JSON Schema fragment for a dotted property. | no |
+| `target IMPORT.PATH` | Constructor signature and docstring. | no |
+| `migrate CONFIG` | Preview migration; `--output` is explicit. | no |
+| `plugins` | Entry-point metadata without provider import. | no |
+| `results SOURCE` | Audit attempts/duplicates; `--write-index` writes a snapshot. | no |
+| `aggregate CONFIG` | Rebuild experiment aggregates. | yes |
+| `retain CONFIG` | Retention preview; only `--apply` mutates artifacts. | no |
+| `registry ROOT [--output FILE]` | Query JSON or export JSON/CSV/Parquet. | only with output |
+| `dashboard ROOT --output FILE` | Static read-only HTML snapshot. | yes |
+
+`lambdaforge init my-project` is the fastest safe integration path. Rename `my_project`, implement
+the generated task target, install the new project with `pip install -e .`, and validate its YAML.
+The scaffold includes `.gitignore` rules for environments, caches, builds and run output.
+
 ## Public API
 
 The supported entry points are deliberately narrow:
@@ -234,10 +678,23 @@ The supported entry points are deliberately narrow:
 |---|---|
 | `from lambdaforge import LambdaForge` | Load, run or construct objects through the facade. |
 | `from lambdaforge import Experiment` | Inspect, execute, aggregate and load one experiment suite. |
+| `from lambdaforge import TaskRun, TaskResult, TaskExecutionPlan` | Validate, inspect, execute and audit one generic task. |
+| `from lambdaforge import Workflow, WorkflowPlan, WorkflowResult, WorkflowValidationReport` | Validate, plan and run a task/experiment DAG. |
 | `from lambdaforge import RunResult, AggregateResult` | Typed immutable results with legacy dict/JSON compatibility. |
 | `from lambdaforge import ResultCatalog, ResultRecord` | Identity-aware discovery and explicit selection of attempt history. |
 | `from lambdaforge import ArtifactRetentionPlan, ArtifactRetentionResult` | Typed immutable retention previews and outcomes. |
 | `lambdaforge.data` | Dataset adapters and bounded cache objects. |
+| `lambdaforge.tasks` | Generic task, context, plan, result and artifact contracts. |
+| `lambdaforge.preprocessing` | Composable record preprocessing and dataset manifests. |
+| `lambdaforge.configuration` | Includes, safe interpolation, redaction, provenance and semantic diff. |
+| `lambdaforge.workflows` | DAG configuration, nodes, plans and results. |
+| `lambdaforge.operations` | Inference, evaluation, ensembles and model export tasks. |
+| `lambdaforge.hpo` | Finite random/Optuna and persistent adaptive multi-fidelity optimization. |
+| `lambdaforge.execution` | Resource planning, local/SLURM backends and retry policy. |
+| `lambdaforge.storage` | Artifact references, stores and distributed staging cache. |
+| `lambdaforge.registry` | Catalog-backed queries, comparisons, reports and dashboard. |
+| `lambdaforge.observability` | Structured events, monitoring and profiler adapters. |
+| `lambdaforge.reproducibility` | Profiles, derived seeds, fingerprints and environment export. |
 | `lambdaforge.nn` | Models and the YAML component registry. |
 | `lambdaforge.metrics` | Base metric contract and built-in metrics. |
 | `lambdaforge.plugins` | Lazy discovery, run usage sessions, descriptors and resolution errors. |
@@ -250,10 +707,12 @@ The supported entry points are deliberately narrow:
 `LambdaForge.build(spec)` exposes the generic object factory:
 
 ```python
-model = LambdaForge.build({
-    "target": "lambdaforge.nn.models.MLP",
-    "params": {"in_features": 32, "out_features": 1, "hidden": [64, 32]},
-})
+model = LambdaForge.build(
+    {
+        "target": "lambdaforge.nn.models.MLP",
+        "params": {"in_features": 32, "out_features": 1, "hidden": [64, 32]},
+    }
+)
 ```
 
 Import from these namespaces instead of relying on file locations. Internal modules may move while
@@ -282,6 +741,77 @@ lambdaforge plugins
 lambdaforge plugins --kind metric --json
 ```
 
+## Conceptual execution model
+
+LambdaForge separates **scientific intent**, **operational scheduling** and **terminal evidence**.
+This is the small mental model behind experiments, workflows and adaptive optimization.
+
+Let `c` be a fully composed scientific configuration and `o` its operational controls, such as
+output paths, concurrency or retention. Its scientific identity is conceptually:
+
+$$
+f_{science} = \operatorname{SHA256}(\operatorname{canonical}(c))
+$$
+
+Operational changes in `o` do not silently create a different scientific claim. Changing the model,
+data, optimizer, loss, sampled hyperparameters or seed does. A run is skipped or resumed only when
+this identity and the required artifacts/checkpoint contract still match; otherwise LambdaForge
+creates another attempt and preserves the previous terminal result.
+
+For an ordinary experiment, expansion produces a finite set of jobs:
+
+$$
+\mathcal{J} = \mathcal{V} \times \mathcal{S}
+$$
+
+where `V` is the set of base/grid/ablation variants and `S` the declared seeds. `sequential` executes
+one job in the caller, `parallel` assigns independent jobs to explicit CPU/GPU slots, and `ddp`
+assigns one job to a group of devices. Static experiment slots obey declared counts such as
+`cpu_jobs`, `jobs_per_gpu` and `devices_per_job`; they do not invent a VRAM estimate. When portable
+resource planning is requested, each job has a declared resource vector `r_j` and the planner seeks
+an assignment `z_{jd}` satisfying, for every resource/device `d`:
+
+$$
+\sum_j z_{jd} r_j \le C_d
+$$
+
+with `C_d` the declared capacity. The built-in planner uses deterministic first-fit/waves rather
+than claiming an expensive globally optimal packing.
+
+Adaptive HPO replaces the finite job list with repeated decisions. A hyperparameter configuration
+is `x`, a seed is `s`, the cumulative fidelity is `b <= B`, and the observed objective is
+`Y(x,s,b)`. The scientific target is the full-budget seed expectation:
+
+$$
+\mu(x) = \mathbb{E}_s[Y(x,s,B)]
+$$
+
+At decision `t`, history `D_t` contains complete learning curves, seeds, pending work, elapsed cost,
+memory peaks and failures. Candidate actions include starting `x`, resuming `(x,s)`, adding a seed or
+confirming a finalist. Their common approximate utility is:
+
+$$
+U(a \mid D_t) =
+\frac{I(a \mid D_t)}{\mathbb{E}[C(a) \mid D_t]}
+\,P(\text{action fits available memory} \mid D_t)
+$$
+
+`I` is expected information/improvement (Knowledge Gradient or a conservative uncertainty proxy),
+and `C` is predicted incremental time. Memory admission reserves a conservative value
+`R_M = Q_q(M | D_t) + headroom`; actions are packed only while their reservations fit the selected
+device. This probability affects ranking, while the reservation is a hard scheduling constraint.
+
+The online loop is therefore: incorporate finished evidence → update curve/cost/memory beliefs →
+generate new/resume/seed actions → reject unsafe or over-budget actions → rank by utility → best-fit
+pack free resources → dispatch. A free slot can receive new work immediately; it does not wait for a
+global rung. Pause is a normal checkpointed fidelity boundary, so later promotion continues from
+`b` to `b + delta` instead of recomputing `0` to `b + delta`.
+
+Uncertainty controls exploration and extra seeds but does not penalize the scientific mean unless
+`mean_minus_std` is explicitly selected. Finally, search hyperparameters are frozen and disjoint
+confirmation seeds estimate the result that should be analysed. These models are transparent,
+replaceable approximations—not a promise that one heuristic is optimal for every research domain.
+
 ## Architecture
 
 ```text
@@ -292,16 +822,27 @@ LambdaForge/
 │   ├── EnvironmentManifest.py     # typed run provenance
 │   ├── LambdaForge.py            # single discoverable facade
 │   ├── cli/                      # command-line object
+│   ├── configuration/            # composition, secrets, provenance and diff
 │   ├── data/                     # safe adapters and bounded cache backends
+│   ├── execution/                # resource plans, backends and retry policies
 │   ├── experiments/              # YAML, sweeps, execution, aggregation, retention
 │   ├── integrations/             # third-party compatibility adapters
 │   ├── metrics/                  # metric contracts; binary/multiclass/regression families
 │   ├── nn/                       # models, losses and neural components
+│   ├── hpo/                      # finite and action-centric adaptive optimization
+│   ├── observability/            # JSONL events, resources and profilers
+│   ├── operations/               # inference, evaluation and export tasks
 │   ├── plugins/                  # lazy installed-package extension discovery
+│   ├── preprocessing/            # source/transform/sink pipelines and dataset identity
 │   ├── runtime/                  # shared cross-process filesystem locks
-│   ├── schemas/                  # packaged experiment JSON Schema
+│   ├── registry/                 # result queries, comparisons, reports and dashboard
+│   ├── reproducibility/          # profiles, seed derivation and environment exports
+│   ├── schemas/                  # packaged experiment and generic-task JSON Schemas
+│   ├── tasks/                    # non-training task plans, execution, results and artifacts
+│   ├── storage/                  # artifact stores/references and distributed cache
 │   ├── tracking/                 # optional provider logger adapters and dependency guards
-│   └── training/                 # Lightning core plus callbacks/data/orchestration
+│   ├── training/                 # Lightning core plus callbacks/data/orchestration
+│   └── workflows/                # task/experiment DAG planning and local execution
 ├── tests/                        # unit, process and real training smoke tests
 └── pyproject.toml                # package and tool configuration
 ```
@@ -694,7 +1235,7 @@ the ambiguity enforceable in CI. `--write-index` atomically publishes
 same fresh filesystem scan:
 
 ```python
-records = experiment.results()                 # includes archived attempts
+records = experiment.results()  # includes archived attempts
 duplicates = experiment.result_catalog().duplicate_groups()
 chosen = experiment.result_catalog().select(attempt_id="20260722T...")
 ```
@@ -914,7 +1455,7 @@ replica. Cache only deterministic loading/preprocessing, never random augmentati
 ### Installed plugins
 
 External distributions can publish models, metrics, neural components, datasets, Lightning
-callbacks and Lightning loggers through the canonical groups documented in the
+callbacks/loggers and generic tasks through the canonical groups documented in the
 [plugin guide](src/lambdaforge/plugins/README.md). Datasets must inherit PyTorch `Dataset`;
 callbacks/loggers inherit the public `lambdaforge.integrations.Lightning` bases. Discovery reads
 metadata only; resolving a selected plugin imports provider code and therefore has the same trust
@@ -1005,11 +1546,47 @@ crash recovery, mmap leases, lazy/mapped datasets, streaming metric state and re
 preview/apply, receipt, lock, ZIP-verification, rollback and concurrent-idempotence scenarios.
 Plugin tests additionally cover exact distribution metadata, cache hits, validation/run isolation,
 failed construction and a real `spawn` child manifest.
+Adaptive-HPO tests cover deterministic Sobol/provider refresh, slow starters, shared seed racing,
+cost/feasibility ordering, conservative memory packing, async dispatch, durable state, scientific
+confirmation summaries, real checkpoint continuation without recomputation and optional real
+CUDA/BoTorch paths.
 The process-integration tests create a real launcher/worker/descendant tree. POSIX delivers an
 actual process-group `killpg(SIGINT)`; Windows asks the launcher to raise a targeted Python SIGBREAK
 because a native console control event would affect the whole test group. A separate scenario
 hard-terminates the launcher and verifies that every recorded descendant and temporary file is gone.
 Emergency cleanup in each test also prevents a failed assertion from leaving workers behind.
+
+### Repository and release hygiene
+
+Git should contain the framework source, tests, Schemas, examples, human/agent documentation,
+workflows, icons and packaging metadata. It must not contain virtual environments, credentials,
+bytecode/tool caches, built wheels, profiler/test reports or local experiment/tracking output. The
+root `.gitignore` covers those generated categories, including `.lambdaforge/`, `runs/`, provider
+directories, dashboards and SLURM stdout/stderr. The generated consumer scaffold applies the same
+essential rules.
+
+Do not solve hygiene by ignoring broad scientific extensions such as `*.yaml`, `*.json`, `*.csv`,
+`*.pt` or an entire `data/` tree: Schemas, experiment protocols, small test fixtures and reviewed
+reference assets may legitimately need version control. Put runtime output below `runs/` and decide
+explicitly whether every larger dataset/checkpoint is an external artifact or a reviewed repository
+asset. `.env.example` may document variable names, but real `.env*` files are ignored and must never
+contain committed credentials.
+
+Before a release commit, review both visible and ignored state rather than relying on a clean-looking
+IDE:
+
+```bash
+git status --short
+git status --ignored --short
+git diff --check
+ruff format --check . && ruff check .
+mypy src/lambdaforge && pytest -q
+python -m pip wheel . --no-deps --wheel-dir /tmp/lambdaforge-wheel-check
+```
+
+The wheel must contain the packaged Schemas, specialist READMEs, `AGENTS.md`, changelog,
+architecture documents and runnable examples. Selecting and adding a licence remains the only owner
+legal decision before third-party redistribution; do not infer a licence from public source access.
 
 ### Continuous integration
 
@@ -1052,32 +1629,44 @@ modules.
 - Pickle remains the compatibility default and can execute code; select the safe NumPy/Torch codec
   for supported sample trees or keep pickle strictly local and trusted. A checksum is not
   authentication; HMAC must be configured explicitly and provides no encryption.
-- Fingerprints are explicit snapshots because arbitrary transform semantics cannot be inferred.
-  Filesystem coordination is for cooperating local processes, not a cross-machine/NFS cache.
+- Dataset/transform fingerprints remain explicit because arbitrary transform semantics cannot be
+  inferred. `DatasetCache` coordinates cooperating processes on one filesystem; cross-machine
+  staging uses `DistributedArtifactCache` with a shared lease directory and an explicit upstream.
 - Lightning is the only built-in training backend.
 - The default task assumes mapping-shaped batches; it routes one or several model inputs, while
   tuple batches and manual/multiple-optimizer flows need a custom task object.
 - Exact binary and multiclass curve metrics still retain predictions. Their fixed-memory streaming
   alternatives introduce binning approximation; multiclass state grows as `O(num_classes * num_bins)`.
-- Entry-point discovery covers reusable neural contracts plus datasets, callbacks and loggers.
-  Tasks, data modules and runners remain fully supported through `target` and intentionally have no
-  dedicated group.
+- Entry-point discovery covers reusable neural contracts, datasets, callbacks, loggers and generic
+  tasks. Data modules and experiment runners remain fully supported through `target` and
+  intentionally have no dedicated groups.
 - Plugin provenance covers resolutions in the run process/context; user-created child processes
   require explicit IPC if their independently loaded plugins must be attributed to the parent.
 - Statistical summaries are useful exploratory tools, not a substitute for a study-specific
   protocol. Normal intervals and asymptotic Wilcoxon remain approximations when explicitly selected
   or chosen by `auto` for larger paired samples.
-- Schemas 1.0 and 1.1 are packaged and migration supports the deterministic
-  `unversioned -> 1.0 -> 1.1` path. There is no downgrade, in-place rewrite, remote source or
-  secret redaction.
-- Artifact retention is local-filesystem only and currently uses ZIP/Deflate. Preview can become
-  stale by design; apply replans and revalidates under locks. Remote/object stores need distinct
-  lease and atomicity contracts.
+- Experiment Schemas 1.0/1.1 and task/workflow 1.0 are current. Experiment migrations have no
+  downgrade, in-place rewrite or remote source. Composed task secrets redact safely; experiment and
+  workflow snapshots reject secrets and expect provider credentials to remain in the environment.
+- Experiment retention is local-filesystem only and uses ZIP/Deflate. Preview can become stale by
+  design; apply replans under locks. `ArtifactStore`/`S3ArtifactStore` provide publication/staging,
+  but remote deletion and lifecycle policy deliberately remain provider-owned.
 - MLflow, TensorBoard and Weights & Biases tracking adapters are optional. Provider
   authentication/network/storage, remote retention and service availability remain external;
   tracker failures fail the owning run, and LambdaForge retention cannot remove uploaded artifacts.
-  No distributed job scheduler, hyperparameter optimiser or provider-neutral remote artifact store
-  is bundled.
+  Tracking is not the result source of truth.
+- Workflow execution is bounded and local. The SLURM backend generates/submits safe individual
+  plans, but the current workflow runner does not automatically translate a DAG into remote jobs,
+  discover cluster topology or synthesize provider-specific multi-node launch commands.
+- Finite random/Optuna remains available. Adaptive HPO dynamically schedules local independent
+  trials; integration with workflow DAG resources, DDP actions and remote pruning callbacks is not
+  implicit.
+- The S3-compatible store depends on client semantics and checksum metadata; it does not yet expose
+  multipart-resume, provider-side leases or destructive lifecycle operations. The distributed cache
+  requires a coherent shared filesystem for its lease directory.
+- The local dashboard is a static read-only snapshot, not a long-running multi-user service. Its
+  comparison intervals are objective normal approximations; use the experiment aggregation
+  bootstrap/Wilcoxon tools and a study protocol for publication claims.
 - Advanced graph families are native sparse cores without paper-checkpoint/benchmark parity.
   GraphTransformer is local to `edge_index`; PNA statistics are explicit training-split inputs; EGNN
   covers E(n) scalar-feature equivariance, not scale equivariance or higher-order tensor features.
@@ -1091,22 +1680,72 @@ modules.
 ## Documentation map
 
 - [Single-file agent manual](AGENTS.md)
+- [Technical architecture and class collaboration](docs/ARCHITECTURE.md)
+- [Adaptive optimizer internals](docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.md)
+- [Changelog](CHANGELOG.md) · [Versioning/deprecation](docs/GOVERNANCE.md) · [Security](SECURITY.md)
 - [Experiment system](src/lambdaforge/experiments/README.md) · [Español](src/lambdaforge/experiments/README.es.md)
 - [Configuration migrations](src/lambdaforge/experiments/migrations/README.md) · [Español](src/lambdaforge/experiments/migrations/README.es.md)
 - [Artifact retention](src/lambdaforge/experiments/retention/README.md) · [Español](src/lambdaforge/experiments/retention/README.es.md)
 - [Statistical comparisons](src/lambdaforge/experiments/statistics/README.md) · [Español](src/lambdaforge/experiments/statistics/README.es.md)
 - [Data and caching](src/lambdaforge/data/README.md) · [Español](src/lambdaforge/data/README.es.md)
+- [Generic tasks](src/lambdaforge/tasks/README.md) · [Español](src/lambdaforge/tasks/README.es.md)
+- [Preprocessing](src/lambdaforge/preprocessing/README.md) · [Español](src/lambdaforge/preprocessing/README.es.md)
 - [Training and processes](src/lambdaforge/training/README.md) · [Español](src/lambdaforge/training/README.es.md)
 - [Neural components](src/lambdaforge/nn/README.md) · [Español](src/lambdaforge/nn/README.es.md)
 - [Metrics](src/lambdaforge/metrics/README.md) · [Español](src/lambdaforge/metrics/README.es.md)
 - [Installed plugins](src/lambdaforge/plugins/README.md) · [Español](src/lambdaforge/plugins/README.es.md)
 - [Optional experiment tracking](src/lambdaforge/tracking/README.md) · [Español](src/lambdaforge/tracking/README.es.md)
 - [Complete YAML example](examples/experiment.yaml)
+- [Runnable preprocessing example](examples/preprocessing.yaml)
+- [Workflow example](examples/workflow.yaml)
+- [Adaptive HPO example](examples/adaptive-hpo.yaml)
 
 Each sub-guide links back here and to its translation. Class docstrings are the most precise source
 for individual constructor arguments.
 
 ## Roadmap
+
+The roadmap lives here so status cannot drift into a separate planning document. “Completed” means
+a public implementation, documentation and focused tests; it does not claim that every external
+provider or research method is built in.
+
+| Priority | Capability | 0.4 status |
+|---:|---|---|
+| 1 | Generic task contract | Completed |
+| 2 | Independent task Schema/configuration | Completed |
+| 3 | Task validation | Completed |
+| 4 | Immutable task plans | Completed |
+| 5 | Unified facade and CLI dispatch | Completed |
+| 6 | Task results and provenance | Completed |
+| 7 | Typed, hashed artifacts | Completed |
+| 8 | Composable preprocessing | Completed |
+| 9 | Resume and deterministic shards | Completed |
+| 10 | Versioned dataset artifacts | Completed |
+| 11 | Workflow DAG | Completed: local bounded runner and task/experiment nodes |
+| 12 | Configuration composition | Completed: include/extends/merge/delete/cycles |
+| 13 | Safe interpolation and secrets | Completed with persist-safe task redaction |
+| 14 | Provenance and semantic diff | Completed |
+| 15 | First-class CPU scheduling | Completed |
+| 16 | Resource declarations/plans/packing/estimates | Completed |
+| 17 | Execution backend contract | Completed |
+| 18 | SLURM/HPC adapter | Completed at explicit plan/submission boundary |
+| 19 | Failure/retry/preemption semantics | Completed: taxonomy, retry, attempt modes and SLURM requeue |
+| 20 | Inference/evaluation/ensemble/export tasks | Completed |
+| 21 | HPO | Completed: finite random/Optuna plus asynchronous action-centric multi-fidelity optimization, adaptive seeds, cost/VRAM admission, persistence and optional BoTorch |
+| 22 | Distributed cache | Completed at shared-filesystem lease boundary |
+| 23 | Artifact stores and references | Completed: local/shared/S3-compatible staging |
+| 24 | Experiment registry and exports | Completed |
+| 25 | Cross-experiment comparison/reports | Completed without generated conclusions |
+| 26 | Optional local dashboard | Completed as static read-only HTML |
+| 27 | Structured observability | Completed: events/resources/profiler/OOM taxonomy |
+| 28 | Reproducibility profiles | Completed |
+| 29 | CLI/IDE ergonomics and examples | Completed: init/explain/target/compose/diff and tested examples |
+| 30 | Adoption/governance | Code/docs complete; owner licence selection remains a legal decision |
+
+Future additions should be driven by demonstrated research needs and preserve the boundaries in the
+[technical architecture](docs/ARCHITECTURE.md), rather than reopening this closed 1–30 checklist.
+
+## 0.2 roadmap history
 
 Completed in this iteration: JSON Schema validation, typed environment and run/aggregate results, the extended CI
 matrix, hardened `DatasetCache` plus file/mmap adapters, lazy entry-point discovery, run-isolated
