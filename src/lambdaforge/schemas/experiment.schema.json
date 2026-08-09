@@ -405,7 +405,33 @@
             "allocator_cap": {"type": "boolean"},
             "preflight": {"type": "boolean"},
             "probe": {"$ref": "#/$defs/componentSpec"},
-            "device_capacities": {"type": "array", "items": {"$ref": "#/$defs/hpoMemorySize"}}
+            "device_capacities": {"type": "array", "items": {"$ref": "#/$defs/hpoMemorySize"}},
+            "unknown_capacity": {"enum": ["declared_budget", "fail_closed"]},
+            "resource_features": {
+              "type": "object",
+              "additionalProperties": {"type": "string", "minLength": 1}
+            },
+            "probe_policy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mode": {"enum": ["auto", "always", "never"]},
+                "relative_uncertainty_threshold": {"type": "number", "minimum": 0},
+                "near_limit_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+                "oom_probability_threshold": {"type": "number", "minimum": 0, "maximum": 1}
+              }
+            },
+            "structural": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "parameter_count_feature": {"type": "string", "minLength": 1},
+                "bytes_per_parameter": {"type": "integer", "minimum": 1},
+                "gradient_copies": {"type": "number", "minimum": 0},
+                "optimizer_copies": {"type": "number", "minimum": 0},
+                "buffer_bytes": {"$ref": "#/$defs/hpoMemorySize"}
+              }
+            }
           }
         },
         "budget": {
@@ -443,7 +469,7 @@
       "required": ["type"],
       "additionalProperties": false,
       "properties": {
-        "type": {"enum": ["float", "int", "categorical", "bool"]},
+        "type": {"enum": ["float", "int", "ordinal", "categorical", "bool"]},
         "low": {"type": "number"},
         "high": {"type": "number"},
         "scale": {"enum": ["linear", "log"]},

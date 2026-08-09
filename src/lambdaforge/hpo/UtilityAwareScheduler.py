@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from lambdaforge.hpo.AdaptiveAction import AdaptiveAction
 from lambdaforge.hpo.AdaptiveAssignment import AdaptiveAssignment
 from lambdaforge.hpo.AdaptiveResource import AdaptiveResource
+from lambdaforge.hpo.MemoryCapacityKind import MemoryCapacityKind
 
 
 class UtilityAwareScheduler:
@@ -31,9 +32,13 @@ class UtilityAwareScheduler:
                 for resource in resources
                 if len(reservations[resource.name]) < resource.max_jobs
                 and (
-                    resource.memory_capacity_bytes <= 0
-                    or sum(reservations[resource.name]) + action.memory_reservation_bytes
-                    <= resource.memory_capacity_bytes
+                    resource.memory_capacity.kind is MemoryCapacityKind.UNBOUNDED
+                    or (
+                        resource.memory_capacity.kind is MemoryCapacityKind.KNOWN
+                        and resource.memory_capacity.bytes is not None
+                        and sum(reservations[resource.name]) + action.memory_reservation_bytes
+                        <= resource.memory_capacity.bytes
+                    )
                 )
             ]
             if not feasible:
@@ -42,11 +47,11 @@ class UtilityAwareScheduler:
                 feasible,
                 key=lambda resource: (
                     (
-                        resource.memory_capacity_bytes
+                        (resource.memory_capacity.bytes or 0)
                         - sum(reservations[resource.name])
                         - action.memory_reservation_bytes
                     )
-                    if resource.memory_capacity_bytes
+                    if resource.memory_capacity.kind is MemoryCapacityKind.KNOWN
                     else 0,
                     resource.name,
                 ),

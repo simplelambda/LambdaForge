@@ -73,5 +73,14 @@ hpo:
     min_observations: 3
     allocator_cap: true
     preflight: false
+    unknown_capacity: declared_budget
+    resource_features:
+      batch_size: data.datamodule.params.batch_size
+      hidden_width: model.params.hidden_features
+    probe_policy:
+      mode: never
+      relative_uncertainty_threshold: 0.25
+      near_limit_fraction: 0.85
+      oom_probability_threshold: 0.05
   budget: {max_actions: 50, max_total_epochs: 1500, max_gpu_seconds: 200000}
   confirmation: {top_k: 2}

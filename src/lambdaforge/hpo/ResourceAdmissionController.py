@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import math
+
 from lambdaforge.hpo.AdaptiveAction import AdaptiveAction
 from lambdaforge.hpo.AdaptiveOptimizerState import AdaptiveOptimizerState
-from lambdaforge.hpo.EmpiricalMemoryModel import EmpiricalMemoryModel
+from lambdaforge.hpo.FeatureAwareMemoryModel import FeatureAwareMemoryModel
+from lambdaforge.hpo.MemoryCapacity import MemoryCapacity
+from lambdaforge.hpo.MemoryCapacityKind import MemoryCapacityKind
 from lambdaforge.hpo.PredictiveEstimate import PredictiveEstimate
 
 
 class ResourceAdmissionController:
-    """Combine logical memory limits and learned feasibility without CUDA assumptions."""
+    """Apply probabilistic feasibility and hard reservation independently of scheduling."""
 
     def __init__(
         self,
@@ -28,29 +32,45 @@ class ResourceAdmissionController:
         self,
         action: AdaptiveAction,
         state: AdaptiveOptimizerState,
-        model: EmpiricalMemoryModel,
+        model: FeatureAwareMemoryModel,
         *,
-        available_bytes: int,
+        available_bytes: int | MemoryCapacity | None,
     ) -> tuple[bool, float, int, PredictiveEstimate]:
-        """Return admission, probability and reservation for one resource."""
-        estimate = model.predict(action, state)
-        if available_bytes <= 0:
-            return True, 1.0, 0, estimate
-        headroom = model.headroom_bytes
-        predicted_peak_upper = max(0.0, estimate.upper - headroom)
-        device_peak_limit = max(0, available_bytes - headroom)
-        probability = estimate.probability_at_most(device_peak_limit)
-        logical_admitted = True
-        if self.logical_limit_bytes > 0:
-            logical_admitted = predicted_peak_upper <= self.logical_limit_bytes
-            probability = min(
-                probability,
-                estimate.probability_at_most(self.logical_limit_bytes),
-            )
-        reservation = max(0, int(estimate.upper))
-        admitted = (
-            logical_admitted
-            and probability >= self.minimum_feasibility
-            and reservation <= available_bytes
+        """Return admission, fit probability and conservative byte reservation.
+
+        ``None`` means UNKNOWN, ``MemoryCapacity.unbounded()`` is the only unbounded state, and an
+        integer zero is the exact capacity KNOWN(0).
+        """
+        capacity = (
+            available_bytes
+            if isinstance(available_bytes, MemoryCapacity)
+            else MemoryCapacity.unknown()
+            if available_bytes is None
+            else MemoryCapacity.known(available_bytes)
         )
+        estimate = model.predict(action, state)
+        if not math.isfinite(estimate.upper):
+            raise ValueError("Predicted memory reservation must be finite.")
+        reservation = max(0, math.ceil(estimate.upper))
+        probability = 1.0
+        hard_limit: int | None = None
+        if capacity.kind is MemoryCapacityKind.UNKNOWN:
+            return False, 0.0, reservation, estimate
+        if capacity.kind is MemoryCapacityKind.KNOWN:
+            assert capacity.bytes is not None
+            hard_limit = capacity.bytes
+            if estimate.upper <= 0 and estimate.source == "logical_budget_cold_start":
+                reservation = capacity.bytes
+        if self.logical_limit_bytes > 0:
+            hard_limit = (
+                self.logical_limit_bytes
+                if hard_limit is None
+                else min(hard_limit, self.logical_limit_bytes)
+            )
+        if hard_limit is not None:
+            headroom = int(getattr(model, "headroom_bytes", 0))
+            probability = estimate.probability_at_most(max(0, hard_limit - headroom))
+            admitted = reservation <= hard_limit and probability >= self.minimum_feasibility
+        else:
+            admitted = True
         return admitted, probability, reservation, estimate

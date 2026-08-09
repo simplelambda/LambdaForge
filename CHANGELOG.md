@@ -8,7 +8,29 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
-No changes yet.
+### Changed
+
+- Hardened adaptive HPO around a real mixed multi-fidelity surrogate: categorical Hamming
+  geometry, explicit conditional activity, ordinal parameters, all observed fidelity points,
+  pending evaluations, cost-aware multi-fidelity KG and named safe-numerics fallback.
+- Replaced recent-slope curve extrapolation with probabilistic Bayesian curves and corrected
+  hierarchical seed uncertainty to combine between-seed variance with within-seed estimation
+  variance exactly once. Seed racing and pruning now prefer paired shared-seed posteriors.
+- Replaced heterogeneous `improvement + uncertainty` action scoring with a documented one-step
+  Gaussian moment Knowledge Gradient approximation shared by START/RESUME/ADD_SEED.
+- Replaced global empirical VRAM estimates with feature-aware conservative prediction, explicit
+  UNKNOWN/UNBOUNDED/KNOWN capacity states, candidate-aware smart preflight and durable censored OOM
+  lower bounds. The PyTorch allocator fraction remains a final defensive ceiling.
+- Added deterministic synthetic hardening tests plus real single-GPU concurrent trials,
+  candidate-aware probe, isolated OOM and cumulative checkpoint-resume coverage. Multi-GPU and
+  SLURM execution remain opt-in infrastructure validations rather than simulated claims.
+
+### Fixed
+
+- Removed the redundant `1/n` factor that made within-seed uncertainty overconfident.
+- Prevented missing memory discovery and exact zero capacity from being interpreted as unlimited.
+- Constrained NumPy below 2.5 while Python 3.10 remains supported, because NumPy 2.5 type stubs use
+  syntax unavailable to the project's Python 3.10 static-analysis target.
 
 ## [0.4.0] - 2026-08-09
 

@@ -69,9 +69,8 @@ class AdaptiveFidelityPolicy:
             if self.config.direction == "maximize"
             else min(estimates, key=lambda key: estimates[key].mean)
         )
-        incumbent = estimates[incumbent_id]
         output: list[tuple[str, float]] = []
-        for config_id, estimate in estimates.items():
+        for config_id in estimates:
             if config_id == incumbent_id:
                 continue
             maximum_budget = max(
@@ -79,9 +78,11 @@ class AdaptiveFidelityPolicy:
             )
             if maximum_budget < self.config.min_budget_before_drop:
                 continue
-            probability = model.probability_competitive(
-                estimate,
-                incumbent,
+            probability = model.probability_configuration_competitive(
+                state,
+                config_id,
+                incumbent_id,
+                max_budget=self.config.max_budget,
                 margin=self.config.equivalence_margin,
                 direction=self.config.direction,
             )

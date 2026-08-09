@@ -453,7 +453,13 @@ hpo:
     max_search_seeds: 3
     confirmation_values: [101, 211]
   pruning: {enabled: true, min_budget_before_drop: 10, probability_threshold: 0.01}
-  memory: {per_job_budget: 6GiB, headroom: 512MiB, allocator_cap: true}
+  memory:
+    per_job_budget: 6GiB
+    headroom: 512MiB
+    allocator_cap: true
+    resource_features:
+      batch_size: data.datamodule.params.batch_size
+      hidden_width: model.params.hidden_features
   budget: {max_actions: 50, max_total_epochs: 1500}
   confirmation: {top_k: 2}
 ```
@@ -465,7 +471,7 @@ Complete adaptive policy reference (defaults apply only when `hpo.enabled: true`
 | `controller_seed` / `max_concurrency` | `0` / `1` | Reproducible controller decisions and maximum live independent actions. |
 | `objective.metric` / `direction` | `val_loss` / `minimize` | Exact epoch-CSV objective and its orientation. |
 | `objective.risk.type` / `lambda` | `mean` / `0` | Scientific objective; `mean_minus_std` is opt-in and changes the question being optimized. |
-| `space` | required | Dotted scientific paths with `float`, `int`, `categorical` or `bool`; numeric scale is `linear` unless `log`; `when` adds a parent condition. |
+| `space` | required | Dotted scientific paths with `float`, `int`, ordered `ordinal`, unordered `categorical` or `bool`; numeric scale is `linear` unless `log`; `when` adds a parent condition. |
 | `initialization.strategy` / `trials` | `sobol` / `auto` | Initial design; `auto = max(4, 2 * (effective_dimensions + 1))`. Random is the baseline. |
 | `search.strategy` | `bayesian` | `bayesian`, `sobol` or `random`. |
 | `search.candidate_pool_size` / `refresh_interval` | `128` / `1` | Acquisition raw samples and scored-observation interval used to refit/cache the surrogate. |
@@ -478,19 +484,29 @@ Complete adaptive policy reference (defaults apply only when `hpo.enabled: true`
 | `pruning.enabled` / `min_budget_before_drop` | `true` / fidelity minimum | Whether and when posterior competitive pruning may start. |
 | `pruning.probability_threshold` / `equivalence_margin` | `0.01` / `0` | Conservative posterior drop threshold and practical-equivalence margin. |
 | `memory.per_job_budget` / `headroom` | `0` / `0` | Logical cold-start reservation/optional allocator ceiling and extra scheduling headroom. Zero disables a logical byte limit. |
-| `memory.safety_quantile` / `min_observations` | `0.99` / `3` | Conservative empirical reservation quantile and evidence needed before leaving cold start. |
-| `memory.allocator_cap` / `preflight` | `true` / `false` | Child-process PyTorch ceiling and optional isolated project-supplied probe. |
-| `memory.device_capacities` | discovered or unconstrained CPU | Explicit usable bytes per listed GPU when cluster discovery is unavailable. |
+| `memory.safety_quantile` / `min_observations` | `0.99` / `3` | Conservative feature-aware reservation quantile and evidence needed before leaving cold start. |
+| `memory.resource_features` | `{}` | Generic feature name → candidate/base dotted path, for example batch size, tokens or resolution. |
+| `memory.allocator_cap` / `preflight` | `true` / `false` | Defensive child PyTorch ceiling and backwards-compatible switch for candidate-aware isolated probes. |
+| `memory.probe_policy.mode` | `auto` if preflight, else `never` | `auto`, `always` or `never`; auto uses cold start, uncertainty, OOD, limit proximity and OOM probability. |
+| `memory.unknown_capacity` | `declared_budget` | Use a positive declared budget when discovery fails, or `fail_closed`; UNKNOWN never means unbounded. |
+| `memory.device_capacities` | discovered or UNBOUNDED CPU | Explicit usable bytes per listed GPU when cluster discovery is unavailable. `KNOWN(0)` remains a real zero. |
+| `memory.structural.*` | parameter/gradient/optimizer state defaults | Optional parameter-count estimate; activations and workspaces remain outside it and trigger conservative probing. |
 | `budget.max_actions` / `max_total_epochs` | `50` / actions × max fidelity | Hard study limits including pending commitments. |
 | `budget.max_gpu_seconds` | unset | Optional measured/predicted GPU-time ceiling. |
 | `confirmation.top_k` | `1` | Number of posterior configurations frozen for disjoint-seed confirmation. |
 | `components.*` | built-ins | Trusted `target`/`params` replacements for the eight policy/model boundaries listed below. |
 
-The controller compares `START_NEW`, real checkpoint `RESUME`, `ADD_SEED` and final `CONFIRM`
-actions by predicted information gain divided by cost and multiplied by memory feasibility. Sobol
-initialization avoids correlated random starts. Optional Bayesian search fits a BoTorch GP, accounts
-for pending asynchronous points and uses knowledge gradient or expected improvement; dependency or
-numerical failure is recorded and falls back to Sobol. Install it with
+The controller compares `START_NEW`, real checkpoint `RESUME` and `ADD_SEED` through the same
+one-step Gaussian moment approximation to Knowledge Gradient, divided by predicted cost and
+multiplied by memory feasibility. This is explicitly recorded as `gaussian_moment_knowledge_gradient`,
+not presented as exact BoTorch KG over heterogeneous actions. Confirmation remains a separate
+scientific phase. Sobol initialization avoids correlated random starts. Optional Bayesian search
+fits all observed curve points to `f(x,b)`: numeric spaces use a fidelity GP, mixed spaces use
+Hamming categorical geometry plus an explicit fidelity feature, and multi-fidelity KG projects to
+full budget with an inverse-cost utility. Categories are canonical and permutation-invariant;
+conditional values have a distinct inactive state and activity mask. Pending actions enter
+`X_pending`. A normal fit is retried with safer jitter before a named `HPO_SURROGATE_FALLBACK` to
+Sobol. Install it with
 `pip install "lambdaforge[adaptive-hpo]"`. `sobol` and `random` remain dependency-free baselines.
 `PAUSE` is realized cooperatively at the selected epoch boundary and `DROP` prevents future
 promotion; LambdaForge does not kill a promising process mid-optimizer-step merely to reshuffle a
@@ -499,24 +515,29 @@ slot. Small fidelity increments bound the latency before a newer decision can ta
 Fidelity targets are cumulative epochs. Every partial action writes a normal last checkpoint and
 full `metrics.csv`; promotion restores model, optimizer, scheduler, scaler and Lightning loop state,
 then runs only missing epochs. `trainer.checkpoint_policy` must be `last`, `last_and_best` or `all`.
-HPO pruning is separate from early stopping: it waits for `min_budget_before_drop` and a low
-posterior probability of competitiveness. The learning-curve model retains complete curves and
-protects slow starters with conservative uncertainty.
+HPO pruning is separate from early stopping: it waits for `min_budget_before_drop` and drops only
+below the configured posterior probability of practical competitiveness. Partial per-seed curves
+use Bayesian basis posteriors rather than recent-slope extrapolation, preserving uncertainty for
+warm-up, curvature, plateaus and non-monotonic schedules. Shared seeds are compared as paired
+differences when possible.
 
 Adaptive seed racing uses the same declared order across configurations and spends another seed
 only where ranking uncertainty warrants it. Confirmation runs posterior top K configurations at
 full budget on disjoint seeds that were not used to select those configurations.
 
 `memory.per_job_budget` is a cold-start reservation and, with `allocator_cap: true`, a public
-PyTorch child-process allocator ceiling. Peak allocated/reserved bytes and OOMs update an empirical
-model. Explicit `device_capacities` support restricted clusters. LambdaForge requires no
+PyTorch child-process allocator ceiling. Exact peaks and consumer-declared `resource_features`
+train a conservative non-negative log-linear predictor; out-of-distribution candidates inflate
+uncertainty. An OOM under `L` bytes is retained as censored evidence `M(x,z) > L`, not discarded.
+Explicit `device_capacities` support restricted clusters. LambdaForge requires no
 `nvidia-smi`, custom environment variables, MIG/MPS or administrator service; allocator limits are
 defensive rather than physical isolation, and batch size is never changed silently.
-For an explicit representative check, set `preflight: true` and `probe: {target: ...}`. The target
-must construct a zero-argument callable that performs representative model/batch forward, backward
-and optimizer work on the visible CUDA device; it runs in an isolated child once per configured GPU
-before admission begins. This is deliberately project-supplied because LambdaForge cannot infer a
-scientifically representative batch for an arbitrary dataset/model.
+For representative checks, set `preflight: true`, provide `probe: {target: ...}` and optionally tune
+`probe_policy`. The callable receives `(materialized_candidate, resource_context)` and must build
+that candidate plus a representative batch, then perform forward/backward/optimizer work. It runs
+in an isolated child on the selected logical GPU only when the deterministic policy requires it.
+Legacy zero-argument probes remain accepted. This is project-supplied because LambdaForge cannot
+infer a scientifically representative batch for an arbitrary dataset/model.
 Adaptive actions currently use independent single-process CPU/GPU trials; `execution.mode: ddp` is
 rejected for enabled HPO because group reservation and per-rank allocator ceilings would otherwise
 be misleading. Static experiments retain normal DDP support.
@@ -548,7 +569,9 @@ public method used by the built-in class (inspect its signature with `lambdaforg
 keep the class in the consumer's installed package. Searchers implement `propose(space, state,
 count)`; fidelity policies implement `resume_candidates(state)` and may add `dominated(state,
 model)`; seed policies implement `candidates(state, model)`. Predictive models consume durable
-state, admission returns feasibility/reservation and selectors rank actions. These are duck-typed
+state; memory models read action `parameters`/`resource_features`, preserve censored lower bounds
+and return a conservative estimate. Admission returns feasibility/reservation and selectors rank
+actions. These are duck-typed
 policy boundaries: a custom object does not need to inherit a concrete built-in class. This keeps
 domain priors replaceable without subclassing the runner or depending on Lightning internals.
 
@@ -796,10 +819,25 @@ U(a \mid D_t) =
 \,P(\text{action fits available memory} \mid D_t)
 $$
 
-`I` is expected information/improvement (Knowledge Gradient or a conservative uncertainty proxy),
-and `C` is predicted incremental time. Memory admission reserves a conservative value
+`I` is a Value of Information: BoTorch multi-fidelity KG proposes new `x`, while heterogeneous
+START/RESUME/ADD_SEED actions use a documented one-step Gaussian moment KG approximation. It is not
+the former `improvement + uncertainty` heuristic. `C` is predicted incremental time. Memory
+admission reserves a conservative value
 `R_M = Q_q(M | D_t) + headroom`; actions are packed only while their reservations fit the selected
 device. This probability affects ranking, while the reservation is a hard scheduling constraint.
+
+The optional Bayesian surrogate observes every available `Y(x,s,b)` rather than replacing a curve
+with one extrapolated target. Unordered categories use Hamming geometry, ordinal categories retain
+their order, and inactive conditional dimensions carry a separate state/mask. For seed estimates
+with within-seed variances `v_s` and estimated population variance `tau²`, LambdaForge propagates
+the mean uncertainty once:
+
+$$
+\operatorname{Var}(\bar\mu) = \frac{\tau^2}{n} + \frac{\sum_s v_s}{n^2}
+$$
+
+Memory capacity is a tagged value—`UNKNOWN`, `UNBOUNDED` or `KNOWN(N)`—so failure to discover a GPU
+cannot silently disable safeguards and `KNOWN(0)` cannot become unlimited.
 
 The online loop is therefore: incorporate finished evidence → update curve/cost/memory beliefs →
 generate new/resume/seed actions → reject unsafe or over-budget actions → rank by utility → best-fit
@@ -1546,10 +1584,13 @@ crash recovery, mmap leases, lazy/mapped datasets, streaming metric state and re
 preview/apply, receipt, lock, ZIP-verification, rollback and concurrent-idempotence scenarios.
 Plugin tests additionally cover exact distribution metadata, cache hits, validation/run isolation,
 failed construction and a real `spawn` child manifest.
-Adaptive-HPO tests cover deterministic Sobol/provider refresh, slow starters, shared seed racing,
-cost/feasibility ordering, conservative memory packing, async dispatch, durable state, scientific
-confirmation summaries, real checkpoint continuation without recomputation and optional real
-CUDA/BoTorch paths.
+Adaptive-HPO tests cover categorical permutation/conditional masks, mixed multi-fidelity BoTorch,
+pending points and safe fallback; analytical seed uncertainty, slow starters, paired racing,
+probabilistic pruning and Gaussian action VoI; feature-aware/censored memory, explicit capacity
+states, async dispatch, durable state and confirmation. Synthetic collaborators avoid neural
+training for controller logic. Real CUDA paths cover cumulative checkpoint continuation without
+repeated epochs, candidate-aware preflight, isolated OOM, allocator caps and concurrent single-GPU
+trials. A two-GPU smoke test runs only where two logical devices are visible.
 The process-integration tests create a real launcher/worker/descendant tree. POSIX delivers an
 actual process-group `killpg(SIGINT)`; Windows asks the launcher to raise a targeted Python SIGBREAK
 because a native console control event would affect the whole test group. A separate scenario
@@ -1661,6 +1702,9 @@ modules.
 - Finite random/Optuna remains available. Adaptive HPO dynamically schedules local independent
   trials; integration with workflow DAG resources, DDP actions and remote pruning callbacks is not
   implicit.
+- Mixed BoTorch models fidelity and categorical Hamming geometry. The Gaussian action KG and
+  Bayesian curve bases are documented approximations, not an exact universal joint posterior for
+  every training domain. Resource features and representative probes remain consumer-owned.
 - The S3-compatible store depends on client semantics and checksum metadata; it does not yet expose
   multipart-resume, provider-side leases or destructive lifecycle operations. The distributed cache
   requires a coherent shared filesystem for its lease directory.

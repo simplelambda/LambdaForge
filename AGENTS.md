@@ -138,16 +138,23 @@ records = task.result_catalog().records(include_archived=True)
 
 Use enabled `hpo` only for training experiments and never together with `sweep`. Keep the ordinary
 data/model/loss/metric/optimizer/task/trainer configuration. In `hpo.space`, map dotted scientific
-paths to `float`, `int`, `categorical` or `bool`; numeric dimensions accept linear/log scale and a
-dimension may use `when` conditions on an earlier one. The objective metric must be an exact column
-from dense `metrics.csv` (normally `val_<metric.name>` or `val_loss`).
+paths to `float`, `int`, ordered `ordinal`, unordered `categorical` or `bool`; numeric dimensions
+accept linear/log scale and a dimension may use `when` conditions on an earlier one. The objective
+metric must be an exact column from dense `metrics.csv` (normally `val_<metric.name>` or
+`val_loss`).
 
 ```yaml
 hpo:
   enabled: true
   objective: {metric: val_auroc, direction: maximize}
   space:
+    optimizer.params.kind: {type: categorical, choices: [AdamW, SGD]}
     optimizer.params.lr: {type: float, low: 1.0e-5, high: 1.0e-2, scale: log}
+    optimizer.params.momentum:
+      type: float
+      low: 0.0
+      high: 0.99
+      when: {optimizer.params.kind: SGD}
     model.params.width: {type: int, low: 64, high: 512}
   initialization: {strategy: sobol, trials: auto}
   search: {strategy: bayesian}
@@ -156,20 +163,31 @@ hpo:
     strategy: adaptive_racing
     values: [7, 17, 27]
     confirmation_values: [101, 211]
-  memory: {per_job_budget: 6GiB, headroom: 512MiB, allocator_cap: true}
+  memory:
+    per_job_budget: 6GiB
+    headroom: 512MiB
+    allocator_cap: true
+    resource_features: {batch_size: data.datamodule.params.batch_size}
   budget: {max_actions: 50, max_total_epochs: 1500}
 ```
 
-`inspect`/`run --dry-run` are read-only plans. Real run actions are START_NEW, checkpoint RESUME,
-ADD_SEED and CONFIRM, selected as information/cost times memory feasibility. Cumulative epoch
+`inspect`/`run --dry-run` are read-only plans. Real search actions are START_NEW, checkpoint RESUME
+and ADD_SEED, selected by one shared Gaussian-moment Knowledge Gradient approximation divided by
+cost and multiplied by memory feasibility; CONFIRM is a separate scientific phase. Cumulative epoch
 promotion does not recompute completed epochs; require checkpoint policy last/last_and_best/all.
 Search seeds are shared and ordered; confirmation seeds must be disjoint. Install
-`lambdaforge[adaptive-hpo]` for BoTorch GP/KG. Its absence/failure is recorded and falls back to
-Sobol; Sobol/random need no provider. Memory budgets use bytes or KB/MB/GB/TB/KiB/MiB/GiB/TiB.
-Explicit device capacities work when cluster discovery is unavailable. Never assume allocator caps
+`lambdaforge[adaptive-hpo]` for mixed `f(x,b)` BoTorch GP/multi-fidelity KG. Unordered categories
+use Hamming geometry; ordinal values keep order; inactive conditions have a sentinel and mask; live
+actions enter `X_pending`. Fit failure retries safe numerics then records `HPO_SURROGATE_FALLBACK`
+before Sobol. Memory budgets use bytes or KB/MB/GB/TB/KiB/MiB/GiB/TiB. Capacity is explicitly
+UNKNOWN, UNBOUNDED or KNOWN(N); choose `unknown_capacity: declared_budget` or `fail_closed`.
+`resource_features` maps generic names to candidate/base dotted paths. Never assume allocator caps
 are physical isolation and never auto-reduce batch size.
-If `memory.preflight: true`, `memory.probe` is required and must build a zero-argument callable that
-performs a representative CUDA forward/backward/step; it runs isolated once per configured GPU.
+If `memory.preflight: true`, `memory.probe` is required. Its callable should accept
+`(materialized_candidate, resource_context)`, build that candidate and execute representative CUDA
+forward/backward/step. A deterministic policy probes cold, uncertain, OOD or near-limit candidates
+in isolated children; legacy zero-argument probes remain compatible. OOM under budget `L` persists
+as censored evidence `M(x,z) > L`.
 
 Controller state/events/summary live at `SUITE/.lambdaforge/adaptive/STUDY_ID`; each action remains
 an ordinary seed run with config, environment, metrics, checkpoint, attempts and result. Relaunch
@@ -178,7 +196,10 @@ the identical YAML to reconcile/resume; do not select or edit files manually. Re
 `summary.json` includes seed usage, merged curves, memory evidence and confirmation mean/sample
 deviation/standard error/normal interval plus shared-seed paired differences. Use the experiment
 statistics APIs for publication-grade bootstrap or non-parametric follow-up.
-The main defaults are Bayesian search after Sobol `auto=max(4,2*(dimension+1))`, adaptive curves at
+The provider-neutral curve model is Bayesian rather than a recent-slope heuristic. For seed
+posteriors it uses `Var(mean)=tau²/n+sum(v_s)/n²`, and paired shared-seed differences feed racing
+and pruning. The main defaults are Bayesian search after Sobol
+`auto=max(4,2*(dimension+1))`, adaptive curves at
 5→100 epochs, one shared search seed, no confirmation seeds, conservative pruning after the minimum
 budget, 50 actions and one concurrent job. `search.refresh_interval` deterministically refits/caches
 the surrogate every N scored observations. Read the complete default table in the root README before
@@ -192,8 +213,10 @@ these duck-typed boundaries:
   `dominated(state, learning_model) -> tuple[(config_id, probability), ...]`;
 - seed policy: `candidates(state, learning_model) -> tuple[AdaptiveAction, ...]`;
 - learning curve model: `predict_configuration(...)` and `probability_competitive(...)`;
-- cost/memory model: `predict(action, state) -> PredictiveEstimate`;
-- admission controller: `assess(action, state, memory_model, *, available_bytes=...)`;
+- cost/memory model: `predict(action, state) -> PredictiveEstimate`; memory sees candidate
+  `parameters` plus generic `resource_features` and should preserve censored lower bounds;
+- admission controller: `assess(action, state, memory_model, *, available_bytes=...)`, where the
+  built-in also accepts typed `MemoryCapacity`;
 - action selector: `rank(actions, state, *, learning_model, cost_model, memory_model, admission,
   available_bytes) -> tuple[AdaptiveAction, ...]`.
 

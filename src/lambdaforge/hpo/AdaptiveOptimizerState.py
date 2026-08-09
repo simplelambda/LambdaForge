@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from lambdaforge.hpo.AdaptiveAction import AdaptiveAction
+from lambdaforge.hpo.AdaptiveMemoryObservation import AdaptiveMemoryObservation
 from lambdaforge.hpo.AdaptiveObservation import AdaptiveObservation
 from lambdaforge.hpo.AdaptivePhase import AdaptivePhase
 
@@ -17,7 +18,7 @@ from lambdaforge.hpo.AdaptivePhase import AdaptivePhase
 class AdaptiveOptimizerState:
     """Own atomic, versioned controller knowledge and deterministic counters."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(
         self,
@@ -34,6 +35,7 @@ class AdaptiveOptimizerState:
         total_epochs: int = 0,
         total_gpu_seconds: float = 0.0,
         fallback_count: int = 0,
+        memory_observations: tuple[AdaptiveMemoryObservation, ...] = (),
     ) -> None:
         self.study_fingerprint = study_fingerprint
         self.controller_seed = int(controller_seed)
@@ -47,6 +49,7 @@ class AdaptiveOptimizerState:
         self.total_epochs = int(total_epochs)
         self.total_gpu_seconds = float(total_gpu_seconds)
         self.fallback_count = int(fallback_count)
+        self.memory_observations = list(memory_observations)
 
     def next_action_id(self) -> str:
         """Advance and return a deterministic decision identifier."""
@@ -100,6 +103,7 @@ class AdaptiveOptimizerState:
             "total_epochs": self.total_epochs,
             "total_gpu_seconds": self.total_gpu_seconds,
             "fallback_count": self.fallback_count,
+            "memory_observations": [item.to_dict() for item in self.memory_observations],
         }
 
     def save(self, path: str | Path) -> Path:
@@ -122,7 +126,8 @@ class AdaptiveOptimizerState:
     def load(cls, path: str | Path) -> AdaptiveOptimizerState:
         """Load a compatible state envelope or fail without guessing migrations."""
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        if payload.get("optimizer_state_version") != cls.VERSION:
+        version = payload.get("optimizer_state_version")
+        if version not in {1, cls.VERSION}:
             raise ValueError("Unsupported adaptive optimizer state version.")
         return cls(
             study_fingerprint=str(payload["study_fingerprint"]),
@@ -144,4 +149,8 @@ class AdaptiveOptimizerState:
             total_epochs=int(payload.get("total_epochs", 0)),
             total_gpu_seconds=float(payload.get("total_gpu_seconds", 0.0)),
             fallback_count=int(payload.get("fallback_count", 0)),
+            memory_observations=tuple(
+                AdaptiveMemoryObservation.from_mapping(value)
+                for value in payload.get("memory_observations", ())
+            ),
         )

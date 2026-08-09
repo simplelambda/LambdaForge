@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 from statistics import fmean, stdev
 from typing import Any
@@ -13,6 +14,7 @@ from lambdaforge.hpo.AdaptiveActionKind import AdaptiveActionKind
 from lambdaforge.hpo.AdaptiveActionSelector import AdaptiveActionSelector
 from lambdaforge.hpo.AdaptiveEventLog import AdaptiveEventLog
 from lambdaforge.hpo.AdaptiveFidelityPolicy import AdaptiveFidelityPolicy
+from lambdaforge.hpo.AdaptiveMemoryObservation import AdaptiveMemoryObservation
 from lambdaforge.hpo.AdaptiveObservation import AdaptiveObservation
 from lambdaforge.hpo.AdaptiveOptimizerConfig import AdaptiveOptimizerConfig
 from lambdaforge.hpo.AdaptiveOptimizerState import AdaptiveOptimizerState
@@ -20,10 +22,11 @@ from lambdaforge.hpo.AdaptivePhase import AdaptivePhase
 from lambdaforge.hpo.AdaptiveSeedRacer import AdaptiveSeedRacer
 from lambdaforge.hpo.BoTorchSearcher import BoTorchSearcher
 from lambdaforge.hpo.EmpiricalCostModel import EmpiricalCostModel
-from lambdaforge.hpo.EmpiricalMemoryModel import EmpiricalMemoryModel
+from lambdaforge.hpo.FeatureAwareMemoryModel import FeatureAwareMemoryModel
 from lambdaforge.hpo.FixedBudgetFidelityPolicy import FixedBudgetFidelityPolicy
 from lambdaforge.hpo.FixedSeedPolicy import FixedSeedPolicy
 from lambdaforge.hpo.LearningCurveModel import LearningCurveModel
+from lambdaforge.hpo.MemoryCapacity import MemoryCapacity
 from lambdaforge.hpo.RandomAdaptiveSearcher import RandomAdaptiveSearcher
 from lambdaforge.hpo.ResourceAdmissionController import ResourceAdmissionController
 from lambdaforge.hpo.SobolSearcher import SobolSearcher
@@ -49,11 +52,16 @@ class AdaptiveExperimentController:
         self.event_log = event_log
         self.learning_model = LearningCurveModel(exploration_weight=config.exploration_weight)
         self.cost_model = EmpiricalCostModel()
-        self.memory_model = EmpiricalMemoryModel(
+        self.memory_model = FeatureAwareMemoryModel(
             cold_start_bytes=config.memory_per_job_bytes,
             headroom_bytes=config.memory_headroom_bytes,
             safety_quantile=config.memory_safety_quantile,
             min_observations=config.memory_min_observations,
+            parameter_count_feature=config.memory_parameter_count_feature,
+            bytes_per_parameter=config.memory_bytes_per_parameter,
+            gradient_copies=config.memory_gradient_copies,
+            optimizer_copies=config.memory_optimizer_copies,
+            buffer_bytes=config.memory_buffer_bytes,
         )
         self.admission = ResourceAdmissionController(
             logical_limit_bytes=config.memory_per_job_bytes
@@ -83,12 +91,16 @@ class AdaptiveExperimentController:
             ),
             raw_samples=config.candidate_pool_size,
             max_budget=config.max_budget,
+            min_budget=config.min_budget,
+            budget_step=config.budget_step,
             refresh_interval=config.surrogate_refresh_interval,
         )
         self.custom_searcher: Any | None = None
         self._apply_component_overrides()
 
-    def select_next(self, *, available_bytes: int = 0) -> AdaptiveAction | None:
+    def select_next(
+        self, *, available_bytes: int | MemoryCapacity | None = None
+    ) -> AdaptiveAction | None:
         """Select and persist one action; callers may request again for another free resource."""
         self._apply_conservative_drops()
         if (
@@ -177,6 +189,33 @@ class AdaptiveExperimentController:
                 "CONFIG_DROPPED",
                 {"config_id": observation.config_id, "reason": "oom_gpu"},
             )
+        if observation.oom and observation.memory_limit_bytes is not None:
+            self.state.memory_observations.append(
+                AdaptiveMemoryObservation(
+                    observation.config_id,
+                    observation.parameters,
+                    action.resource_features,
+                    lower_bound_bytes=observation.memory_limit_bytes,
+                    censored=True,
+                    source="training_oom",
+                )
+            )
+        elif observation.peak_reserved_bytes > 0:
+            self.state.memory_observations.append(
+                AdaptiveMemoryObservation(
+                    observation.config_id,
+                    observation.parameters,
+                    action.resource_features,
+                    peak_bytes=observation.peak_reserved_bytes,
+                    source="training",
+                )
+            )
+        self.state.save(self.state_path)
+
+    def observe_memory(self, observation: AdaptiveMemoryObservation) -> None:
+        """Persist candidate preflight evidence without creating a scientific score."""
+        self.state.memory_observations.append(observation)
+        self.event_log.append("MEMORY_OBSERVATION", observation.to_dict())
         self.state.save(self.state_path)
 
     def recover_observation(self, observation: AdaptiveObservation) -> None:
@@ -334,7 +373,7 @@ class AdaptiveExperimentController:
         }
 
     def _memory_observations(self) -> list[dict[str, Any]]:
-        return [
+        training = [
             {
                 "config_id": observation.config_id,
                 "seed": observation.seed,
@@ -348,6 +387,11 @@ class AdaptiveExperimentController:
             or observation.peak_reserved_bytes > 0
             or observation.oom
         ]
+        return (
+            [item.to_dict() for item in self.state.memory_observations]
+            if self.state.memory_observations
+            else training
+        )
 
     def _candidate_actions(self) -> tuple[AdaptiveAction, ...]:
         if self.state.phase is AdaptivePhase.CONFIRMATION:
@@ -361,14 +405,14 @@ class AdaptiveExperimentController:
             parameters = self._initial_searcher().propose(self.config.space, self.state, count=1)
             output.extend(self._new_actions(parameters))
             if output:
-                return tuple(output)
+                return tuple(self._with_resource_features(action) for action in output)
         else:
             try:
                 parameters = self._searcher().propose(self.config.space, self.state, count=1)
             except Exception as error:
                 self.state.fallback_count += 1
                 self.event_log.append(
-                    "SEARCH_FALLBACK",
+                    "HPO_SURROGATE_FALLBACK",
                     {
                         "error_type": type(error).__name__,
                         "error": str(error),
@@ -388,10 +432,18 @@ class AdaptiveExperimentController:
         )
         remaining_epochs = self.config.max_total_epochs - committed_epochs
         return tuple(
-            action
+            self._with_resource_features(action)
             for action in output
             if (action.config_id, action.seed) not in pending_keys
             and action.target_budget - action.current_budget <= remaining_epochs
+        )
+
+    def _with_resource_features(self, action: AdaptiveAction) -> AdaptiveAction:
+        if action.resource_features:
+            return action
+        return replace(
+            action,
+            resource_features=self.config.resolve_resource_features(action.parameters),
         )
 
     def _new_actions(self, candidates: tuple[dict[str, object], ...]) -> tuple[AdaptiveAction, ...]:
@@ -458,7 +510,7 @@ class AdaptiveExperimentController:
         )
         remaining_epochs = self.config.max_total_epochs - committed_epochs
         return tuple(
-            action
+            self._with_resource_features(action)
             for action in output
             if action.target_budget - action.current_budget <= remaining_epochs
         )

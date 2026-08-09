@@ -414,7 +414,7 @@ Optuna en el proyecto consumidor. No sustituye identidad, resultados ni scheduli
 
 Usa un bloque superior `hpo` habilitado cuando un grid finito malgaste presupuesto. Parte de
 [`examples/adaptive-hpo.yaml`](examples/adaptive-hpo.yaml): el experimento ordinario no cambia y
-`hpo.space` enumera rutas científicas con tipos `float`, `int`, `categorical` o `bool`, escala
+`hpo.space` enumera rutas científicas con tipos `float`, `int`, `ordinal`, `categorical` o `bool`, escala
 lineal/logarítmica y condiciones `when`. `validate` comprueba el Schema e `inspect`/`run --dry-run`
 muestran el plan sin crear estado ni entrenar.
 
@@ -426,7 +426,7 @@ Referencia completa de la política adaptativa (los defaults se aplican sólo co
 | `controller_seed` / `max_concurrency` | `0` / `1` | Decisiones reproducibles y máximo de acciones independientes vivas. |
 | `objective.metric` / `direction` | `val_loss` / `minimize` | Objetivo exacto del CSV de épocas y su orientación. |
 | `objective.risk.type` / `lambda` | `mean` / `0` | Objetivo científico; `mean_minus_std` es opt-in y cambia la pregunta optimizada. |
-| `space` | obligatorio | Rutas científicas con `float`, `int`, `categorical` o `bool`; escala numérica `linear` salvo `log`; `when` añade condición padre. |
+| `space` | obligatorio | Rutas con `float`, `int`, `ordinal` ordenado, `categorical` no ordenado o `bool`; escala numérica `linear` salvo `log`; `when` añade condición padre. |
 | `initialization.strategy` / `trials` | `sobol` / `auto` | Diseño inicial; `auto = max(4, 2 * (dimensiones_efectivas + 1))`. Random es el baseline. |
 | `search.strategy` | `bayesian` | `bayesian`, `sobol` o `random`. |
 | `search.candidate_pool_size` / `refresh_interval` | `128` / `1` | Muestras raw e intervalo de observaciones puntuadas para reajustar/cachear el surrogate. |
@@ -439,19 +439,27 @@ Referencia completa de la política adaptativa (los defaults se aplican sólo co
 | `pruning.enabled` / `min_budget_before_drop` | `true` / fidelidad mínima | Si se permite pruning competitivo posterior y cuándo puede empezar. |
 | `pruning.probability_threshold` / `equivalence_margin` | `0.01` / `0` | Umbral conservador de descarte y margen de equivalencia práctica. |
 | `memory.per_job_budget` / `headroom` | `0` / `0` | Reserva lógica/techo opcional del allocator y margen extra; cero desactiva el límite lógico. |
-| `memory.safety_quantile` / `min_observations` | `0.99` / `3` | Cuantil conservador y evidencia necesaria para abandonar cold start. |
-| `memory.allocator_cap` / `preflight` | `true` / `false` | Techo PyTorch en el hijo y probe aislado opcional aportado por el proyecto. |
-| `memory.device_capacities` | descubierto o CPU sin restricción | Bytes utilizables explícitos por GPU listada cuando el cluster no permite descubrirlos. |
+| `memory.safety_quantile` / `min_observations` | `0.99` / `3` | Cuantil feature-aware conservador y evidencia necesaria para abandonar cold start. |
+| `memory.resource_features` | `{}` | Nombre genérico → ruta candidata/base, por ejemplo batch size, tokens o resolución. |
+| `memory.allocator_cap` / `preflight` | `true` / `false` | Techo PyTorch defensivo y switch compatible para probes aislados candidate-aware. |
+| `memory.probe_policy.mode` | `auto` con preflight, si no `never` | `auto`, `always` o `never`; auto considera cold start, incertidumbre, OOD, cercanía al límite y OOM. |
+| `memory.unknown_capacity` | `declared_budget` | Usa el budget positivo declarado si falla discovery, o `fail_closed`; UNKNOWN nunca equivale a ilimitado. |
+| `memory.device_capacities` | descubierto o CPU UNBOUNDED | Bytes explícitos por GPU; `KNOWN(0)` continúa siendo un cero real. |
+| `memory.structural.*` | estados de parámetros/gradientes/optimizador | Estimación opcional por número de parámetros; activaciones/workspaces quedan fuera y fuerzan cautela. |
 | `budget.max_actions` / `max_total_epochs` | `50` / acciones × fidelidad máxima | Límites duros, incluidos compromisos pending. |
 | `budget.max_gpu_seconds` | sin definir | Techo opcional de tiempo GPU medido/predicho. |
 | `confirmation.top_k` | `1` | Configuraciones posteriores congeladas para confirmación con seeds disjuntas. |
 | `components.*` | built-ins | Reemplazos `target`/`params` confiables para las ocho fronteras listadas debajo. |
 
-El controlador compara acciones `START_NEW`, `RESUME` real desde checkpoint, `ADD_SEED` y
-`CONFIRM` por ganancia de información estimada dividida por coste y multiplicada por viabilidad de
-memoria. Comienza con Sobol. `search.strategy: bayesian` usa opcionalmente GP/knowledge gradient de
-BoTorch, considera trabajos asíncronos pendientes y registra un fallback seguro a Sobol si falta el
-extra o falla numéricamente. Instálalo con `pip install "lambdaforge[adaptive-hpo]"`; `sobol` y
+El controlador compara `START_NEW`, `RESUME` y `ADD_SEED` con la misma aproximación Knowledge
+Gradient de momentos gaussianos, dividida por coste y multiplicada por viabilidad. Se registra como
+`gaussian_moment_knowledge_gradient`, sin presentarla como KG exacto de BoTorch; la confirmación es
+una fase científica separada. Comienza con Sobol. El search bayesiano aprende todos los puntos
+`f(x,b)`: usa kernel de fidelidad en espacios numéricos y geometría Hamming más fidelidad explícita
+en espacios mixtos. Las categorías son canónicas e invariantes a permutación y las condiciones
+tienen estado inactivo/máscara. Los trabajos pendientes entran en `X_pending`. Un ajuste fallido se
+reintenta con numérica segura antes de registrar `HPO_SURROGATE_FALLBACK` y usar Sobol. Instálalo con
+`pip install "lambdaforge[adaptive-hpo]"`; `sobol` y
 `random` no añaden dependencias.
 `PAUSE` ocurre cooperativamente en el límite de época elegido y `DROP` impide promociones futuras;
 no se mata un proceso a mitad de un optimizer step sólo para reordenar un slot. Los incrementos de
@@ -461,17 +469,23 @@ La fidelidad son épocas acumuladas: cada pausa deja el último checkpoint y la 
 promoción restaura modelo, optimizador, scheduler, scaler y estado del bucle y sólo calcula las
 épocas restantes. Exige `checkpoint_policy: last`, `last_and_best` o `all`. El pruning HPO es
 distinto del early stopping y espera el presupuesto mínimo y una probabilidad posterior
-conservadora. El racing usa el mismo orden de semillas para todos y repite sólo donde reduce
+conservadora. Las curvas parciales usan regresión bayesiana de bases, no extrapolación de la última
+pendiente, y conservan incertidumbre ante warm-up, curvatura, plateaus y no monotonía. El racing usa
+el mismo orden de semillas para todos, aprovecha diferencias pareadas y repite sólo donde reduce
 incertidumbre. La confirmación ejecuta el top K a presupuesto completo con semillas disjuntas no
 empleadas para seleccionar candidatos.
 
 `memory.per_job_budget` reserva VRAM en frío y puede aplicar un techo público del allocator PyTorch
-dentro del hijo. Picos y OOM alimentan el modelo empírico; `device_capacities` declara capacidad en
+dentro del hijo. Picos y `resource_features` genéricas alimentan un predictor conservador; una
+configuración fuera de distribución aumenta su incertidumbre. Un OOM bajo `L` bytes se conserva
+como observación censurada `M(x,z) > L`. `device_capacities` declara capacidad en
 clústeres restringidos. No hacen falta `nvidia-smi`, variables propias, MIG/MPS ni privilegios de
 administración. El techo es defensivo, no aislamiento físico, y nunca cambia silenciosamente el
 batch size.
-Con `preflight: true` y `probe: {target: ...}`, un callable sin argumentos del proyecto ejecuta
-forward/backward/step representativos en un hijo aislado por GPU antes de admitir trabajos; el
+Con `preflight: true` y `probe: {target: ...}`, el callable recibe
+`(materialized_candidate, resource_context)`, construye esa candidata y ejecuta
+forward/backward/step representativos en un hijo aislado sobre la GPU lógica elegida. La política
+determinista evita probes innecesarios; los probes antiguos sin argumentos siguen admitidos. El
 framework no inventa un batch supuestamente representativo para un dominio arbitrario.
 Las acciones adaptativas actuales son trials independientes de un proceso; se rechaza DDP en HPO
 porque la reserva de grupo y el techo por rank no serían fiables. Los experimentos estáticos siguen
@@ -491,7 +505,9 @@ contiene todos los ajustes y el diseño interno está en
 
 Los defaults son políticas reemplazables. `hpo.components` admite `target`/`params` del paquete
 instalado del consumidor para `searcher`, políticas de fidelidad/semillas, modelos de curva/coste/
-memoria, controlador de admisión y selector. Implementa el mismo método público de la clase built-in
+memoria, controlador de admisión y selector. El modelo de memoria lee `parameters` y
+`resource_features`, conserva lower bounds censurados y devuelve una estimación conservadora.
+Implementa el mismo método público de la clase built-in
 (consulta su firma con `lambdaforge target`): searcher usa `propose(space, state, count)`, fidelidad
 usa `resume_candidates(state)` y opcionalmente `dominated(state, model)`, y seeds usa
 `candidates(state, model)`. Son fronteras por duck typing: no hay que heredar una clase built-in ni
@@ -722,10 +738,24 @@ U(a \mid D_t) =
 \,P(\text{la acción cabe en la memoria disponible} \mid D_t)
 $$
 
-`I` es información/mejora esperada (Knowledge Gradient o proxy conservador de incertidumbre) y `C`
-es tiempo incremental predicho. La admisión reserva `R_M = Q_q(M | D_t) + headroom`; sólo empaqueta
+`I` es Value of Information: BoTorch usa KG multi-fidelity para proponer `x`, mientras las acciones
+START/RESUME/ADD_SEED comparten una aproximación KG gaussiana de un paso documentada; ya no es la
+heurística `improvement + uncertainty`. `C` es tiempo incremental predicho. La admisión reserva
+`R_M = Q_q(M | D_t) + headroom`; sólo empaqueta
 acciones cuyas reservas caben. La probabilidad influye en el ranking y la reserva funciona como
 restricción dura del scheduler.
+
+El surrogate opcional observa cada `Y(x,s,b)` disponible en lugar de sustituir la curva por un
+único target extrapolado. Las categorías no ordenadas usan Hamming, las ordinales conservan orden y
+una condición inactiva tiene estado/máscara propios. Con varianzas internas `v_s` y varianza real
+entre seeds `tau²`, la incertidumbre de la media se propaga una sola vez:
+
+$$
+\operatorname{Var}(\bar\mu) = \frac{\tau^2}{n} + \frac{\sum_s v_s}{n^2}
+$$
+
+La capacidad de memoria es `UNKNOWN`, `UNBOUNDED` o `KNOWN(N)`: fallar al descubrir una GPU no
+desactiva protecciones y `KNOWN(0)` no puede confundirse con ilimitado.
 
 El bucle online es: incorporar evidencia terminada → actualizar curvas/coste/memoria → generar
 acciones nuevas/resume/seed → rechazar acciones inseguras o sin presupuesto → ordenar por utilidad
@@ -1487,10 +1517,13 @@ leases mmap, datasets lazy/mapeados, estado de métricas streaming y escenarios 
 receipt, locks, verificación ZIP, rollback e idempotencia concurrente de retención. Las pruebas de
 plugins cubren metadata exacta, aciertos de caché,
 aislamiento validación/run, fallos de construcción y un manifiesto real en hijo `spawn`.
-Las pruebas de HPO adaptativo cubren Sobol/refresco de proveedor deterministas, slow starters,
-racing de seeds compartidas, orden por coste/factibilidad, packing conservador de memoria, dispatch
-asíncrono, estado durable, resúmenes de confirmación, continuación real de checkpoints sin recomputar
-y vías opcionales CUDA/BoTorch reales.
+Las pruebas de HPO cubren permutación categórica/máscaras condicionales, BoTorch mixto
+multi-fidelity, pending y fallback; incertidumbre analítica entre seeds, slow starters, racing
+pareado, pruning, VoI, memoria feature-aware/censurada, estados de capacidad, dispatch asíncrono,
+persistencia y confirmación. Los colaboradores sintéticos evitan entrenar redes para probar lógica.
+Las rutas CUDA reales cubren resume acumulativo sin repetir épocas, preflight candidate-aware, OOM
+aislado, allocator cap y trials concurrentes en una GPU. El smoke de dos GPU sólo corre con dos
+dispositivos visibles.
 Las pruebas de integración crean un árbol real launcher/worker/descendiente. POSIX entrega un
 `killpg(SIGINT)` real al grupo de procesos; Windows pide al launcher que provoque un SIGBREAK Python
 dirigido porque un evento nativo de control afectaría a todo el grupo de pruebas. Otro escenario
@@ -1601,6 +1634,9 @@ implementaciones.
   launchers multi-nodo específicos.
 - Random/Optuna finito permanece. HPO adaptativo agenda trials locales independientes; integrar
   recursos del DAG, acciones DDP y callbacks remotos de pruning no es implícito.
+- BoTorch mixto modela fidelidad y geometría Hamming. El KG gaussiano de acciones y las bases de
+  curva son aproximaciones documentadas, no un posterior conjunto universal exacto. Las features
+  de recursos y probes representativos siguen siendo responsabilidad del consumidor.
 - El store S3 depende del cliente/metadata y no implementa multipart-resume, leases provider-side ni
   lifecycle destructivo. La caché distribuida necesita un filesystem coherente para leases.
 - El dashboard es un snapshot HTML estático, no servicio multiusuario. Sus intervalos de comparación

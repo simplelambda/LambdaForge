@@ -29,6 +29,7 @@ class AdaptiveAction:
     utility: float = 0.0
     memory_reservation_bytes: int = 0
     reasons: Mapping[str, Any] = field(default_factory=dict)
+    resource_features: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.action_id or not self.config_id:
@@ -44,6 +45,7 @@ class AdaptiveAction:
             raise ValueError("Adaptive action memory reservation cannot be negative.")
         object.__setattr__(self, "parameters", FrozenJsonMapping(self.parameters))
         object.__setattr__(self, "reasons", FrozenJsonMapping(self.reasons))
+        object.__setattr__(self, "resource_features", FrozenJsonMapping(self.resource_features))
 
     def with_scores(
         self,
@@ -71,6 +73,7 @@ class AdaptiveAction:
             utility,
             memory_reservation_bytes,
             reasons,
+            self.resource_features,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -90,6 +93,7 @@ class AdaptiveAction:
             "utility": self.utility,
             "memory_reservation_bytes": self.memory_reservation_bytes,
             "reasons": dict(self.reasons),
+            "resource_features": dict(self.resource_features),
         }
 
     @classmethod
@@ -110,4 +114,5 @@ class AdaptiveAction:
             utility=float(value.get("utility", 0.0)),
             memory_reservation_bytes=int(value.get("memory_reservation_bytes", 0)),
             reasons=value.get("reasons", {}),
+            resource_features=value.get("resource_features", {}),
         )

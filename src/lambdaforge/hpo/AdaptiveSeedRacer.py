@@ -37,7 +37,6 @@ class AdaptiveSeedRacer:
             if self.config.direction == "maximize"
             else min(estimates, key=lambda key: estimates[key].mean)
         )
-        incumbent = estimates[incumbent_id]
         output: list[AdaptiveAction] = []
         for config_id, parameters in sorted(state.configurations.items()):
             if config_id not in estimates:
@@ -49,9 +48,11 @@ class AdaptiveSeedRacer:
             }
             if not completed_seeds or len(completed_seeds) >= self.config.max_search_seeds:
                 continue
-            probability = model.probability_competitive(
-                estimates[config_id],
-                incumbent,
+            probability = model.probability_configuration_competitive(
+                state,
+                config_id,
+                incumbent_id,
+                max_budget=self.config.max_budget,
                 margin=self.config.equivalence_margin,
                 direction=self.config.direction,
             )

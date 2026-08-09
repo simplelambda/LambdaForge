@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from lambdaforge.hpo.AdaptiveAction import AdaptiveAction
-from lambdaforge.hpo.AdaptiveActionKind import AdaptiveActionKind
 from lambdaforge.hpo.AdaptiveOptimizerState import AdaptiveOptimizerState
 from lambdaforge.hpo.EmpiricalCostModel import EmpiricalCostModel
-from lambdaforge.hpo.EmpiricalMemoryModel import EmpiricalMemoryModel
+from lambdaforge.hpo.FeatureAwareMemoryModel import FeatureAwareMemoryModel
+from lambdaforge.hpo.GaussianValueOfInformation import GaussianValueOfInformation
 from lambdaforge.hpo.LearningCurveModel import LearningCurveModel
+from lambdaforge.hpo.MemoryCapacity import MemoryCapacity
 from lambdaforge.hpo.ResourceAdmissionController import ResourceAdmissionController
 
 
@@ -30,6 +31,10 @@ class AdaptiveActionSelector:
         self.exploration_weight = exploration_weight
         self.risk_type = risk_type
         self.risk_lambda = risk_lambda
+        self.value_model = GaussianValueOfInformation(
+            max_budget=max_budget,
+            exploration_weight=exploration_weight,
+        )
 
     def rank(
         self,
@@ -38,9 +43,9 @@ class AdaptiveActionSelector:
         *,
         learning_model: LearningCurveModel,
         cost_model: EmpiricalCostModel,
-        memory_model: EmpiricalMemoryModel,
+        memory_model: FeatureAwareMemoryModel,
         admission: ResourceAdmissionController,
-        available_bytes: int,
+        available_bytes: int | MemoryCapacity | None,
     ) -> tuple[AdaptiveAction, ...]:
         """Return admitted actions in deterministic descending utility order."""
         estimates = {
@@ -50,36 +55,21 @@ class AdaptiveActionSelector:
             for config_id in state.configurations
         }
 
-        def oriented(mean: float, standard_deviation: float) -> float:
-            value = mean if self.direction == "maximize" else -mean
-            return value - (
-                self.risk_lambda * standard_deviation if self.risk_type == "mean_minus_std" else 0.0
-            )
-
-        incumbent = max(
-            (oriented(value.mean, value.standard_deviation) for value in estimates.values()),
-            default=0.0,
-        )
         scored: list[AdaptiveAction] = []
         for action in actions:
             prediction = learning_model.predict_configuration(
                 state, action.config_id, max_budget=self.max_budget
             )
-            improvement = max(
-                0.0,
-                oriented(prediction.mean, prediction.standard_deviation) - incumbent,
+            estimates.setdefault(action.config_id, prediction)
+            information_gain = self.value_model.estimate(
+                action,
+                state,
+                learning_model,
+                estimates,
+                direction=self.direction,
+                risk_type=self.risk_type,
+                risk_lambda=self.risk_lambda,
             )
-            uncertainty = prediction.standard_deviation * self.exploration_weight
-            if action.kind is AdaptiveActionKind.ADD_SEED:
-                seed_count = len({item.seed for item in state.observations_for(action.config_id)})
-                information_gain = uncertainty / ((seed_count + 1) ** 0.5)
-            elif action.kind is AdaptiveActionKind.RESUME:
-                fraction = (action.target_budget - action.current_budget) / self.max_budget
-                information_gain = improvement + uncertainty * max(fraction, 0.1)
-            elif action.kind is AdaptiveActionKind.CONFIRM:
-                information_gain = uncertainty * 1.25 + improvement
-            else:
-                information_gain = improvement + uncertainty
             cost = cost_model.predict(action, state)
             admitted, probability, reservation, memory = admission.assess(
                 action,
@@ -99,8 +89,8 @@ class AdaptiveActionSelector:
                         "predicted_final": prediction.to_dict(),
                         "predicted_cost": cost.to_dict(),
                         "predicted_memory": memory.to_dict(),
-                        "incumbent_oriented_mean": incumbent,
-                        "acquisition": "information_gain/cost*feasibility",
+                        "acquisition": "gaussian_one_step_kg/cost*feasibility",
+                        "value_of_information": "gaussian_moment_knowledge_gradient",
                     },
                 )
             )

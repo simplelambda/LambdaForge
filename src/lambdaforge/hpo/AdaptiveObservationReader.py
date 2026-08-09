@@ -71,6 +71,11 @@ class AdaptiveObservationReader:
             oom=oom,
             run_dir=str(directory),
             error=error or None,
+            memory_limit_bytes=(
+                int(resource["memory_budget_bytes"])
+                if oom and int(resource.get("memory_budget_bytes", 0)) > 0
+                else None
+            ),
         )
 
     @staticmethod

@@ -164,8 +164,10 @@ class ExperimentValidator:
                 "Adaptive HPO currently schedules independent single-process trials; "
                 "execution.mode ddp is unsupported."
             )
-        if optimizer.memory_preflight and not ExperimentConfig.get_value(config, "execution.gpus"):
-            raise ValueError("hpo.memory.preflight requires explicit execution.gpus.")
+        if optimizer.memory_probe_mode != "never" and not ExperimentConfig.get_value(
+            config, "execution.gpus"
+        ):
+            raise ValueError("An enabled hpo memory probe policy requires explicit execution.gpus.")
         forbidden = {"hpo", "sweep", "execution", "retention", "aggregation", "metadata"}
         for parameter in optimizer.space.parameters:
             if parameter.path.split(".", 1)[0] in forbidden:

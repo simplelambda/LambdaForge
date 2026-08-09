@@ -24,11 +24,16 @@ from lambdaforge.hpo.AdaptiveExperimentController import AdaptiveExperimentContr
 from lambdaforge.hpo.AdaptiveExperimentPlan import AdaptiveExperimentPlan
 from lambdaforge.hpo.AdaptiveExperimentResult import AdaptiveExperimentResult
 from lambdaforge.hpo.AdaptiveExperimentWorker import AdaptiveExperimentWorker
+from lambdaforge.hpo.AdaptiveMemoryObservation import AdaptiveMemoryObservation
+from lambdaforge.hpo.AdaptiveObservation import AdaptiveObservation
 from lambdaforge.hpo.AdaptiveObservationReader import AdaptiveObservationReader
 from lambdaforge.hpo.AdaptiveOptimizerConfig import AdaptiveOptimizerConfig
 from lambdaforge.hpo.AdaptiveOptimizerState import AdaptiveOptimizerState
 from lambdaforge.hpo.AdaptiveResource import AdaptiveResource
 from lambdaforge.hpo.AdaptiveRunMaterializer import AdaptiveRunMaterializer
+from lambdaforge.hpo.AdaptiveTrialStatus import AdaptiveTrialStatus
+from lambdaforge.hpo.MemoryCapacity import MemoryCapacity
+from lambdaforge.hpo.MemoryProbePolicy import MemoryProbePolicy
 from lambdaforge.hpo.TorchMemoryPreflight import TorchMemoryPreflight
 from lambdaforge.hpo.UtilityAwareScheduler import UtilityAwareScheduler
 from lambdaforge.training.orchestration.TrainingJob import TrainingJob
@@ -72,6 +77,12 @@ class AdaptiveExperimentOptimizer:
         self._reservations: dict[int, int] = {}
         self._requeue: list[AdaptiveAction] = []
         self.scheduler = UtilityAwareScheduler()
+        self.probe_policy = MemoryProbePolicy(
+            mode=self.config.memory_probe_mode,
+            relative_uncertainty_threshold=self.config.memory_probe_relative_uncertainty,
+            near_limit_fraction=self.config.memory_probe_near_limit_fraction,
+            oom_probability_threshold=self.config.memory_probe_oom_probability,
+        )
 
     def inspect(self) -> AdaptiveExperimentPlan:
         """Resolve an informative plan without writing state or probing CUDA."""
@@ -117,6 +128,9 @@ class AdaptiveExperimentOptimizer:
                     "max_concurrency": self.config.max_concurrency,
                     "logical_memory_budget_bytes": self.config.memory_per_job_bytes,
                     "explicit_capacities": list(self.config.device_capacities),
+                    "unknown_capacity_policy": self.config.unknown_memory_policy,
+                    "resource_features": dict(self.config.resource_feature_paths),
+                    "probe_policy": self.config.memory_probe_mode,
                 },
                 "study_dir": str(self.study_dir),
             }
@@ -132,7 +146,6 @@ class AdaptiveExperimentOptimizer:
         lock.acquire()
         try:
             manager.invalidate_receipt(self.experiment)
-            self._preflight(execution)
             self._recover_pending(execution)
             orchestrator = TrainingOrchestrator(
                 grace_seconds=execution.grace_seconds,
@@ -143,27 +156,54 @@ class AdaptiveExperimentOptimizer:
 
             def supply(slot_index: int, slot: tuple[int, ...] | None) -> TrainingJob | None:
                 device_index = slot[0] if slot else None
-                capacity = capacities.get(device_index, 0)
+                capacity = capacities.get(device_index, MemoryCapacity.unknown())
                 active = sum(
                     value
                     for index, value in self._reservations.items()
                     if self._slot_device(slots[index]) == device_index
                 )
-                available = max(0, capacity - active) if capacity else 0
-                action = self._next_action(available)
-                if action is None:
-                    return None
-                run_config = self.materializer.materialize(self.base, action, self.config)
-                if execution.mode is not ExecutionMode.SEQUENTIAL:
-                    run_config = execution.patch_run(run_config)
-                self._configs[action.action_id] = run_config
-                self._actions[action.action_id] = action
-                self._reservations[slot_index] = action.memory_reservation_bytes
-                memory_budget = self.config.memory_per_job_bytes if self.config.allocator_cap else 0
-                return TrainingJob(
-                    action.action_id,
-                    AdaptiveExperimentWorker(run_config, memory_budget),
-                )
+                available = capacity.remaining(active)
+                while True:
+                    action = self._next_action(available)
+                    if action is None:
+                        return None
+                    run_config = self.materializer.materialize(self.base, action, self.config)
+                    if execution.mode is not ExecutionMode.SEQUENTIAL:
+                        run_config = execution.patch_run(run_config)
+                    probe = self._probe_action(
+                        action, run_config, device_index, available, execution
+                    )
+                    if probe is not None and probe.get("status") == "oom":
+                        self.controller.observe(
+                            AdaptiveObservation(
+                                action.action_id,
+                                action.config_id,
+                                action.parameters,
+                                action.seed,
+                                action.current_budget,
+                                None,
+                                (),
+                                AdaptiveTrialStatus.OOM_GPU,
+                                peak_allocated_bytes=int(probe.get("peak_allocated_bytes", 0)),
+                                peak_reserved_bytes=int(probe.get("peak_reserved_bytes", 0)),
+                                oom=True,
+                                error=str(probe.get("error", "memory preflight OOM")),
+                                memory_limit_bytes=int(
+                                    probe.get("lower_bound_bytes", self.config.memory_per_job_bytes)
+                                ),
+                            )
+                        )
+                        continue
+                    self._configs[action.action_id] = run_config
+                    self._actions[action.action_id] = action
+                    self._reservations[slot_index] = action.memory_reservation_bytes
+                    memory_budget = (
+                        self.config.memory_per_job_bytes if self.config.allocator_cap else 0
+                    )
+                    return TrainingJob(
+                        action.action_id,
+                        AdaptiveExperimentWorker(run_config, memory_budget),
+                    )
 
             def finished(name: str, exit_code: int | None, slot_index: int) -> None:
                 action = self._actions.pop(name)
@@ -213,14 +253,15 @@ class AdaptiveExperimentOptimizer:
             else:
                 self._requeue.append(action)
 
-    def _next_action(self, available_bytes: int) -> AdaptiveAction | None:
+    def _next_action(self, available_bytes: MemoryCapacity) -> AdaptiveAction | None:
         assignments = self.scheduler.pack(
             self._requeue,
             [
                 AdaptiveResource(
                     "free-slot",
                     None,
-                    memory_capacity_bytes=available_bytes,
+                    memory_capacity_bytes=available_bytes.bytes,
+                    memory_capacity_kind=available_bytes.kind,
                 )
             ],
         )
@@ -233,37 +274,89 @@ class AdaptiveExperimentOptimizer:
             return None
         return self.controller.select_next(available_bytes=available_bytes)
 
-    def _preflight(self, execution: ExecutionConfig) -> None:
-        if not self.config.memory_preflight:
-            return
+    def _probe_action(
+        self,
+        action: AdaptiveAction,
+        run_config: dict[str, Any],
+        device: int | None,
+        capacity: MemoryCapacity,
+        execution: ExecutionConfig,
+    ) -> dict[str, Any] | None:
+        if self.config.memory_probe_mode == "never":
+            return None
+        if device is None:
+            raise ValueError("CUDA memory probes require an adaptive GPU resource.")
+        if not self.probe_policy.should_probe(
+            action,
+            self.state,
+            self.controller.memory_model,
+            capacity,
+        ):
+            self.event_log.append(
+                "MEMORY_PREFLIGHT_SKIPPED",
+                {"action_id": action.action_id, "reason": "predictor_confident"},
+            )
+            return None
         assert isinstance(self.config.memory_probe_spec, Mapping)
         results = TorchMemoryPreflight().run(
             dict(self.config.memory_probe_spec),
-            devices=list(execution.gpus or ()),
+            devices=[device],
             budget_bytes=self.config.memory_per_job_bytes,
-            output_dir=self.study_dir / "preflight",
+            output_dir=self.study_dir / "preflight" / action.action_id,
             grace_seconds=execution.grace_seconds,
+            configuration=run_config,
+            resource_context={
+                "capacity": capacity.kind.value,
+                "capacity_bytes": capacity.bytes,
+                "memory_budget_bytes": self.config.memory_per_job_bytes,
+                "resource_features": dict(action.resource_features),
+            },
+            label=action.action_id,
         )
+        result = results[device]
         self.event_log.append(
             "MEMORY_PREFLIGHT_COMPLETED",
-            {"devices": {str(key): value for key, value in results.items()}},
+            {"action_id": action.action_id, "device": device, "result": result},
         )
+        if result.get("status") == "ok":
+            peak = int(result.get("peak_reserved_bytes", 0))
+            if peak > 0:
+                self.controller.observe_memory(
+                    AdaptiveMemoryObservation(
+                        action.config_id,
+                        action.parameters,
+                        action.resource_features,
+                        peak_bytes=peak,
+                        source="candidate_preflight",
+                    )
+                )
+        return result
 
     def _resources(
         self, execution: ExecutionConfig
-    ) -> tuple[list[list[int]], dict[int | None, int]]:
+    ) -> tuple[list[list[int]], dict[int | None, MemoryCapacity]]:
         gpus = list(execution.gpus or ())
         if not gpus:
-            return ([[] for _ in range(self.config.max_concurrency)], {None: 0})
+            return (
+                [[] for _ in range(self.config.max_concurrency)],
+                {None: MemoryCapacity.unbounded()},
+            )
         slots = [[gpus[index % len(gpus)]] for index in range(self.config.max_concurrency)]
-        capacities: dict[int | None, int] = {}
+        capacities: dict[int | None, MemoryCapacity] = {}
         for position, device in enumerate(gpus):
             if position < len(self.config.device_capacities):
-                capacities[device] = self.config.device_capacities[position]
+                capacities[device] = MemoryCapacity.known(self.config.device_capacities[position])
             elif torch.cuda.is_available():
-                capacities[device] = int(torch.cuda.get_device_properties(device).total_memory)
+                capacities[device] = MemoryCapacity.known(
+                    int(torch.cuda.get_device_properties(device).total_memory)
+                )
+            elif (
+                self.config.unknown_memory_policy == "declared_budget"
+                and self.config.memory_per_job_bytes > 0
+            ):
+                capacities[device] = MemoryCapacity.known(self.config.memory_per_job_bytes)
             else:
-                capacities[device] = 0
+                capacities[device] = MemoryCapacity.unknown()
         return slots, capacities
 
     @staticmethod

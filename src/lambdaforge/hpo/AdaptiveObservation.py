@@ -31,6 +31,7 @@ class AdaptiveObservation:
     oom: bool = False
     run_dir: str | None = None
     error: str | None = None
+    memory_limit_bytes: int | None = None
     observed_at_utc: str = ""
 
     def __post_init__(self) -> None:
@@ -44,6 +45,8 @@ class AdaptiveObservation:
             raise ValueError("Adaptive learning-curve points must be finite and non-negative.")
         if self.peak_allocated_bytes < 0 or self.peak_reserved_bytes < 0:
             raise ValueError("Adaptive memory observations cannot be negative.")
+        if self.memory_limit_bytes is not None and self.memory_limit_bytes < 0:
+            raise ValueError("Adaptive memory limits cannot be negative.")
         object.__setattr__(self, "parameters", FrozenJsonMapping(self.parameters))
         if not self.observed_at_utc:
             object.__setattr__(self, "observed_at_utc", datetime.now(timezone.utc).isoformat())
@@ -66,6 +69,7 @@ class AdaptiveObservation:
             "oom": self.oom,
             "run_dir": self.run_dir,
             "error": self.error,
+            "memory_limit_bytes": self.memory_limit_bytes,
             "observed_at_utc": self.observed_at_utc,
         }
 
@@ -91,5 +95,10 @@ class AdaptiveObservation:
             oom=bool(value.get("oom", False)),
             run_dir=str(value["run_dir"]) if value.get("run_dir") is not None else None,
             error=str(value["error"]) if value.get("error") is not None else None,
+            memory_limit_bytes=(
+                int(value["memory_limit_bytes"])
+                if value.get("memory_limit_bytes") is not None
+                else None
+            ),
             observed_at_utc=str(value.get("observed_at_utc", "")),
         )

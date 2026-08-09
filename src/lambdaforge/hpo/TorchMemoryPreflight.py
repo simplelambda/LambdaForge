@@ -27,16 +27,25 @@ class TorchMemoryPreflight:
         budget_bytes: int,
         output_dir: str | Path,
         grace_seconds: float = 15.0,
+        configuration: dict[str, Any] | None = None,
+        resource_context: dict[str, Any] | None = None,
+        label: str = "probe",
     ) -> dict[int, dict[str, Any]]:
         """Execute isolated probes and fail if any process or telemetry reports failure."""
         if not devices:
             raise ValueError("CUDA memory preflight requires explicit execution.gpus.")
         directory = Path(output_dir)
-        paths = {device: directory / f"gpu-{device}.json" for device in devices}
+        paths = {device: directory / f"{label}-gpu-{device}.json" for device in devices}
         jobs = [
             TrainingJob(
                 f"memory-preflight-{device}",
-                MemoryPreflightWorker(probe_spec, budget_bytes, paths[device]),
+                MemoryPreflightWorker(
+                    probe_spec,
+                    budget_bytes,
+                    paths[device],
+                    configuration,
+                    {**(resource_context or {}), "logical_device": device},
+                ),
             )
             for device in devices
         ]
@@ -45,10 +54,12 @@ class TorchMemoryPreflight:
         output: dict[int, dict[str, Any]] = {}
         for device in devices:
             name = f"memory-preflight-{device}"
-            if codes.get(name) != 0 or not paths[device].exists():
+            if not paths[device].exists():
                 raise RuntimeError(f"CUDA memory preflight failed on logical GPU {device}.")
             value = json.loads(paths[device].read_text(encoding="utf-8"))
-            if not isinstance(value, dict) or value.get("status") != "ok":
+            if not isinstance(value, dict) or value.get("status") not in {"ok", "oom"}:
                 raise RuntimeError(f"Invalid CUDA memory preflight result for GPU {device}.")
+            if codes.get(name) == 0 and value.get("status") != "ok":
+                raise RuntimeError(f"Inconsistent CUDA memory preflight result for GPU {device}.")
             output[device] = value
         return output

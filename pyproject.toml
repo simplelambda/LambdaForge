@@ -20,7 +20,7 @@ dependencies = [
     "lightning>=2.2,<3",
     "jsonschema>=4.21",
     "matplotlib>=3.7",
-    "numpy>=1.24",
+    "numpy>=1.24,<2.5",
     "psutil>=5.9",
     "PyYAML>=6",
     "ruamel.yaml>=0.18,<0.19",
@@ -106,7 +106,7 @@ lambdaforge = [
 
 [tool.pytest.ini_options]
 addopts = "-ra"
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 markers = [
     "cuda: requires a working CUDA device and exercises accelerator-specific integration",

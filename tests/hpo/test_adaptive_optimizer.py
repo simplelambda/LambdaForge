@@ -13,6 +13,7 @@ from lambdaforge.experiments.results.RunFingerprint import RunFingerprint
 from lambdaforge.hpo import (
     AdaptiveAction,
     AdaptiveActionKind,
+    AdaptiveMemoryObservation,
     AdaptiveObservation,
     AdaptiveOptimizerConfig,
     AdaptiveOptimizerState,
@@ -25,8 +26,13 @@ from lambdaforge.hpo.AdaptiveResource import AdaptiveResource
 from lambdaforge.hpo.AdaptiveRunMaterializer import AdaptiveRunMaterializer
 from lambdaforge.hpo.AdaptiveSeedRacer import AdaptiveSeedRacer
 from lambdaforge.hpo.EmpiricalMemoryModel import EmpiricalMemoryModel
+from lambdaforge.hpo.FeatureAwareMemoryModel import FeatureAwareMemoryModel
 from lambdaforge.hpo.FixedSeedPolicy import FixedSeedPolicy
+from lambdaforge.hpo.GaussianValueOfInformation import GaussianValueOfInformation
 from lambdaforge.hpo.LearningCurveModel import LearningCurveModel
+from lambdaforge.hpo.MemoryCapacity import MemoryCapacity
+from lambdaforge.hpo.MemoryCapacityKind import MemoryCapacityKind
+from lambdaforge.hpo.PredictiveEstimate import PredictiveEstimate
 from lambdaforge.hpo.ResourceAdmissionController import ResourceAdmissionController
 from lambdaforge.hpo.SobolSearcher import SobolSearcher
 from lambdaforge.hpo.UtilityAwareScheduler import UtilityAwareScheduler
@@ -95,6 +101,55 @@ def test_search_space_and_sobol_are_deterministic_and_resume_from_state() -> Non
     assert all(1e-4 <= float(value["optimizer.params.lr"]) <= 1e-2 for value in proposed)
 
 
+def test_unordered_category_permutation_preserves_encoding_and_sampling() -> None:
+    first = SearchSpace.from_mapping(
+        {"optimizer": {"type": "categorical", "choices": ["AdamW", "SGD", "Lion"]}}
+    )
+    second = SearchSpace.from_mapping(
+        {"optimizer": {"type": "categorical", "choices": ["Lion", "AdamW", "SGD"]}}
+    )
+
+    assert first.to_dict() == second.to_dict()
+    assert first.encode({"optimizer": "AdamW"}) == second.encode({"optimizer": "AdamW"})
+    assert first.decode((0.1,)) == second.decode((0.1,))
+    codes = [first.encode({"optimizer": value})[0] for value in ("AdamW", "SGD", "Lion")]
+    assert len(set(codes)) == 3
+    assert first.categorical_indices == (0,)
+
+
+def test_conditional_inactivity_has_sentinel_and_explicit_activity_mask() -> None:
+    space = SearchSpace.from_mapping(
+        {
+            "optimizer": {"type": "categorical", "choices": ["SGD", "AdamW"]},
+            "momentum": {
+                "type": "float",
+                "low": 0.0,
+                "high": 1.0,
+                "when": {"optimizer": "SGD"},
+            },
+        }
+    )
+
+    inactive = space.encode({"optimizer": "AdamW"})
+    active = space.encode({"optimizer": "SGD", "momentum": 0.0})
+    assert inactive[1:] == (0.0, 0.0)
+    assert active[1:] == (0.0, 1.0)
+    assert space.decode((0.1, 0.75)) == {"optimizer": "AdamW"}
+    assert space.categorical_assignments() == (
+        {0: 0.0, 2: 0.0},
+        {0: 1.0, 2: 1.0},
+    )
+
+
+def test_ordinal_parameter_retains_declared_order() -> None:
+    space = SearchSpace.from_mapping(
+        {"capacity": {"type": "ordinal", "choices": ["small", "medium", "large"]}}
+    )
+    assert space.encode({"capacity": "small"}) == (0.0,)
+    assert space.encode({"capacity": "medium"}) == (0.5,)
+    assert space.encode({"capacity": "large"}) == (1.0,)
+
+
 def test_state_round_trip_preserves_pending_observations_and_counters(tmp_path) -> None:
     state = AdaptiveOptimizerState(study_fingerprint="study", controller_seed=11)
     action = AdaptiveAction("a1", AdaptiveActionKind.START_NEW, "c1", {"x": 1}, 7, 0, 2)
@@ -154,6 +209,48 @@ def test_learning_curve_keeps_improving_slow_starter_competitive() -> None:
     assert slow.mean > plateau.mean
 
 
+def test_seed_uncertainty_propagation_matches_analytic_variance() -> None:
+    estimates = [
+        PredictiveEstimate.normal(1.0, 2.0, quantile=0.95, source="synthetic"),
+        PredictiveEstimate.normal(3.0, 4.0, quantile=0.95, source="synthetic"),
+    ]
+    combined = LearningCurveModel(noise_floor=1e-9).combine_seed_estimates(
+        estimates,
+        between_seed_variance=9.0,
+    )
+    expected_variance = 9.0 / 2 + (2.0**2 + 4.0**2) / 2**2
+    assert combined.mean == pytest.approx(2.0)
+    assert combined.standard_deviation**2 == pytest.approx(expected_variance)
+
+
+def test_gaussian_value_of_information_is_non_negative_for_all_search_actions() -> None:
+    state = AdaptiveOptimizerState(study_fingerprint="study", controller_seed=0)
+    state.configurations = {"a": {"x": 1}, "b": {"x": 2}}
+    predictions = {
+        "a": PredictiveEstimate.normal(0.8, 0.2, quantile=0.95, source="synthetic"),
+        "b": PredictiveEstimate.normal(0.7, 0.5, quantile=0.95, source="synthetic"),
+    }
+    value_model = GaussianValueOfInformation(max_budget=10)
+    model = LearningCurveModel()
+
+    values = [
+        value_model.estimate(
+            AdaptiveAction(f"a-{kind.value}", kind, "b", {"x": 2}, 7, current, target),
+            state,
+            model,
+            predictions,
+            direction="maximize",
+        )
+        for kind, current, target in (
+            (AdaptiveActionKind.START_NEW, 0, 2),
+            (AdaptiveActionKind.RESUME, 2, 5),
+            (AdaptiveActionKind.ADD_SEED, 0, 2),
+        )
+    ]
+    assert all(value >= 0 for value in values)
+    assert any(value > 0 for value in values)
+
+
 def test_validator_and_inspect_expose_adaptive_plan_without_writes(tmp_path) -> None:
     base = _base(tmp_path)
     report = ExperimentValidator().validate(base)
@@ -167,6 +264,30 @@ def test_validator_and_inspect_expose_adaptive_plan_without_writes(tmp_path) -> 
     report = ExperimentValidator().validate(invalid, check_imports=False)
     assert not report.is_valid
     assert "cannot be combined with sweep" in report.summary()
+
+
+def test_schema_accepts_ordinal_and_probe_policy_requires_gpu(tmp_path) -> None:
+    base = _base(tmp_path)
+    hpo = dict(base["hpo"])  # type: ignore[arg-type]
+    hpo["space"] = {
+        "model.params.hidden": {
+            "type": "ordinal",
+            "choices": [[4], [8], [16]],
+        }
+    }
+    base["hpo"] = hpo
+    assert ExperimentValidator().validate(base, check_imports=False).is_valid
+
+    memory = {
+        "per_job_budget": "1GiB",
+        "probe": {"target": "tests.fixtures.CudaMemoryProbe.CudaMemoryProbe"},
+        "probe_policy": {"mode": "always"},
+    }
+    hpo["memory"] = memory
+    base["hpo"] = hpo
+    report = ExperimentValidator().validate(base, check_imports=False)
+    assert not report.is_valid
+    assert "requires explicit execution.gpus" in report.summary()
 
 
 def test_adaptive_fidelity_fingerprint_is_stable_and_resume_does_not_repeat_epochs(
@@ -220,6 +341,37 @@ def test_seed_racing_uses_next_shared_seed_only_after_full_budget() -> None:
     assert actions[0].seed == 17
 
 
+def test_seed_racing_spends_on_uncertain_competitor_not_dominated_candidate() -> None:
+    value = _hpo()
+    value["objective"] = {"metric": "score", "direction": "maximize"}
+    value["seeds"] = {
+        "values": [7, 17],
+        "max_search_seeds": 2,
+        "probability_threshold": 0.1,
+    }
+    config = AdaptiveOptimizerConfig(value)
+    state = AdaptiveOptimizerState(study_fingerprint="study", controller_seed=0)
+    state.configurations = {"a": {"x": 1}, "b": {"x": 2}, "c": {"x": 3}}
+    for config_id, score in (("a", 0.9), ("b", -5.0), ("c", 0.85)):
+        state.observations.append(
+            AdaptiveObservation(
+                config_id,
+                config_id,
+                state.configurations[config_id],
+                7,
+                3,
+                score,
+                ((1, score - 0.05), (3, score)),
+                AdaptiveTrialStatus.COMPLETED,
+            )
+        )
+
+    actions = AdaptiveSeedRacer(config).candidates(state, LearningCurveModel())
+    selected = {action.config_id for action in actions}
+    assert "c" in selected
+    assert "b" not in selected
+
+
 def test_fixed_seed_policy_uses_the_same_replaceable_policy_signature() -> None:
     value = _hpo()
     value["seeds"] = {"strategy": "fixed", "values": [7, 17]}
@@ -255,6 +407,46 @@ def test_custom_fidelity_policy_can_offer_probabilistic_drops_without_inheritanc
 
     controller._apply_conservative_drops()
     assert state.dropped_configurations == {"drop-me"}
+
+
+def test_surrogate_failure_records_named_fallback_and_continues(tmp_path) -> None:
+    class FailingSearcher:
+        def propose(self, space, state, *, count=1):
+            del space, state, count
+            raise RuntimeError("synthetic numerical failure")
+
+    value = _hpo()
+    value["pruning"] = {"enabled": False}
+    config = AdaptiveOptimizerConfig(value)
+    state = AdaptiveOptimizerState(study_fingerprint="study", controller_seed=0)
+    state.configurations = {"a": {"x": 0.1}, "b": {"x": 0.9}}
+    for config_id, score in (("a", 0.5), ("b", 0.4)):
+        state.observations.append(
+            AdaptiveObservation(
+                config_id,
+                config_id,
+                state.configurations[config_id],
+                7,
+                1,
+                score,
+                ((1, score),),
+                AdaptiveTrialStatus.PAUSED,
+            )
+        )
+    event_path = tmp_path / "events.jsonl"
+    controller = AdaptiveExperimentController(
+        config,
+        state,
+        state_path=tmp_path / "state.json",
+        event_log=AdaptiveEventLog(event_path),
+    )
+    controller.custom_searcher = FailingSearcher()
+
+    selected = controller.select_next(available_bytes=MemoryCapacity.unbounded())
+
+    assert selected is not None
+    assert state.fallback_count == 1
+    assert "HPO_SURROGATE_FALLBACK" in event_path.read_text(encoding="utf-8")
 
 
 def test_utility_scheduler_packs_by_utility_and_conservative_memory() -> None:
@@ -326,6 +518,71 @@ def test_synthetic_memory_admission_rejects_infeasible_cold_start() -> None:
     )
     assert accepted[:3] == (True, 1.0, 19)
     assert rejected[0] is False
+
+
+def test_feature_aware_memory_extrapolates_and_censored_oom_is_a_lower_bound() -> None:
+    state = AdaptiveOptimizerState(study_fingerprint="study", controller_seed=0)
+    for index, (width, peak) in enumerate(((64, 1_000), (128, 2_000), (256, 4_000))):
+        state.memory_observations.append(
+            AdaptiveMemoryObservation(
+                f"c{index}",
+                {"width": width},
+                {"tokens": width},
+                peak_bytes=peak,
+            )
+        )
+    model = FeatureAwareMemoryModel(
+        cold_start_bytes=500,
+        min_observations=3,
+        safety_quantile=0.99,
+    )
+    small = AdaptiveAction(
+        "small",
+        AdaptiveActionKind.START_NEW,
+        "small",
+        {"width": 128},
+        1,
+        0,
+        1,
+        resource_features={"tokens": 128},
+    )
+    large = AdaptiveAction(
+        "large",
+        AdaptiveActionKind.START_NEW,
+        "large",
+        {"width": 2048},
+        1,
+        0,
+        1,
+        resource_features={"tokens": 2048},
+    )
+    assert model.predict(large, state).upper > model.predict(small, state).upper
+
+    state.memory_observations.append(
+        AdaptiveMemoryObservation(
+            "large",
+            large.parameters,
+            large.resource_features,
+            lower_bound_bytes=20_000,
+            censored=True,
+            source="synthetic_oom",
+        )
+    )
+    assert model.predict(large, state).mean > 20_000
+
+
+def test_unknown_unbounded_and_known_zero_memory_are_distinct() -> None:
+    assert MemoryCapacity.unknown().kind is MemoryCapacityKind.UNKNOWN
+    assert MemoryCapacity.unbounded().kind is MemoryCapacityKind.UNBOUNDED
+    assert MemoryCapacity.known(0).kind is MemoryCapacityKind.KNOWN
+    action = AdaptiveAction("a", AdaptiveActionKind.START_NEW, "c", {}, 1, 0, 1)
+    state = AdaptiveOptimizerState(study_fingerprint="study", controller_seed=0)
+    admission = ResourceAdmissionController()
+    model = EmpiricalMemoryModel(cold_start_bytes=1)
+
+    assert admission.assess(action, state, model, available_bytes=None)[0] is False
+    assert admission.assess(action, state, model, available_bytes=MemoryCapacity.unbounded())[0]
+    assert admission.assess(action, state, model, available_bytes=0)[0] is False
 
 
 def test_summary_reports_confirmation_statistics_curves_seeds_and_memory(tmp_path) -> None:

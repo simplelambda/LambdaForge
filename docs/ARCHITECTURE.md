@@ -160,7 +160,12 @@ usuario; ambos producen configuraciones que usan la planificación existente.
 materializarse de antemano. `AdaptiveExperimentController` posee la política y el replay state;
 searchers sólo proponen configuraciones, fidelity/seed policies sólo proponen continuaciones,
 modelos de curva/coste/memoria sólo predicen y `ResourceAdmissionController` sólo decide
-viabilidad. `AdaptiveRunMaterializer` convierte la acción aceptada en un experimento ordinario y
+viabilidad. `SearchSpace` separa muestreo de representación mixta; `BoTorchSearcher` modela
+`f(x,b)` y pending; `LearningCurveModel` mantiene posteriors de curvas/seeds;
+`GaussianValueOfInformation` compara START/RESUME/ADD_SEED; `FeatureAwareMemoryModel` aprende
+`M(x,z)` con OOM censurado; `MemoryProbePolicy` decide probes concretos y `MemoryCapacity` evita
+confundir UNKNOWN, UNBOUNDED y KNOWN(0). Ninguna de esas responsabilidades pertenece al scheduler.
+`AdaptiveRunMaterializer` convierte la acción aceptada en un experimento ordinario y
 `AdaptiveExperimentWorker` lo ejecuta en el runner existente. `TrainingOrchestrator.run_dynamic`
 aporta slots vivos sin conocer HPO. `AdaptiveObservationReader` devuelve la evidencia canónica al
 controlador. Esta separación permite probar matemáticas con datos sintéticos y conserva una sola

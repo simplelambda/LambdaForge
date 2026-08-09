@@ -17,8 +17,9 @@ class AdaptiveOptimizerConfig:
 
     _BYTES = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([kmgt]?i?b)?\s*$", re.IGNORECASE)
 
-    def __init__(self, value: Mapping[str, Any]) -> None:
+    def __init__(self, value: Mapping[str, Any], *, base: Mapping[str, Any] | None = None) -> None:
         self.raw = dict(value)
+        self._base = dict(base or {})
         self.enabled = bool(value.get("enabled", False))
         objective = self._mapping(value.get("objective", {}), "hpo.objective")
         self.metric = str(objective.get("metric", "val_loss"))
@@ -146,6 +147,59 @@ class AdaptiveOptimizerConfig:
         if not isinstance(raw_capacities, Sequence) or isinstance(raw_capacities, (str, bytes)):
             raise TypeError("hpo.memory.device_capacities must be a sequence.")
         self.device_capacities = tuple(self.parse_bytes(item) for item in raw_capacities)
+        raw_resource_features = self._mapping(
+            memory.get("resource_features", {}), "hpo.memory.resource_features"
+        )
+        self.resource_feature_paths = {
+            str(name): str(path) for name, path in raw_resource_features.items()
+        }
+        if any(not name or not path for name, path in self.resource_feature_paths.items()):
+            raise ValueError("hpo.memory.resource_features requires non-empty names and paths.")
+        probe_policy = self._mapping(memory.get("probe_policy", {}), "hpo.memory.probe_policy")
+        self.memory_probe_mode = str(
+            probe_policy.get("mode", "auto" if self.memory_preflight else "never")
+        )
+        if self.memory_probe_mode not in {"auto", "always", "never"}:
+            raise ValueError("hpo.memory.probe_policy.mode must be auto, always or never.")
+        if self.memory_preflight and self.memory_probe_mode == "never":
+            raise ValueError("hpo.memory.preflight contradicts probe_policy.mode: never.")
+        if self.memory_probe_mode != "never" and not isinstance(self.memory_probe_spec, Mapping):
+            raise ValueError("An enabled memory probe policy requires hpo.memory.probe.")
+        if self.memory_probe_mode != "never" and self.memory_per_job_bytes <= 0:
+            raise ValueError("Candidate memory probes require a positive per_job_budget.")
+        self.memory_probe_relative_uncertainty = self._non_negative_float(
+            probe_policy.get("relative_uncertainty_threshold", 0.25),
+            "hpo.memory.probe_policy.relative_uncertainty_threshold",
+        )
+        self.memory_probe_near_limit_fraction = self._probability(
+            probe_policy.get("near_limit_fraction", 0.85),
+            "hpo.memory.probe_policy.near_limit_fraction",
+        )
+        self.memory_probe_oom_probability = self._probability(
+            probe_policy.get("oom_probability_threshold", 0.05),
+            "hpo.memory.probe_policy.oom_probability_threshold",
+            include_zero=True,
+        )
+        self.unknown_memory_policy = str(memory.get("unknown_capacity", "declared_budget"))
+        if self.unknown_memory_policy not in {"declared_budget", "fail_closed"}:
+            raise ValueError("hpo.memory.unknown_capacity must be declared_budget or fail_closed.")
+        structural = self._mapping(memory.get("structural", {}), "hpo.memory.structural")
+        self.memory_parameter_count_feature = str(
+            structural.get("parameter_count_feature", "parameter_count")
+        )
+        self.memory_bytes_per_parameter = self._positive_int(
+            structural.get("bytes_per_parameter", 4),
+            "hpo.memory.structural.bytes_per_parameter",
+        )
+        self.memory_gradient_copies = self._non_negative_float(
+            structural.get("gradient_copies", 1.0),
+            "hpo.memory.structural.gradient_copies",
+        )
+        self.memory_optimizer_copies = self._non_negative_float(
+            structural.get("optimizer_copies", 2.0),
+            "hpo.memory.structural.optimizer_copies",
+        )
+        self.memory_buffer_bytes = self.parse_bytes(structural.get("buffer_bytes", 0))
 
         budget = self._mapping(value.get("budget", {}), "hpo.budget")
         self.max_actions = self._positive_int(
@@ -177,7 +231,22 @@ class AdaptiveOptimizerConfig:
         value = config.get("hpo", {})
         if not isinstance(value, Mapping):
             raise TypeError("hpo must be a mapping.")
-        return cls(value)
+        return cls(value, base=config)
+
+    def resolve_resource_features(self, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        """Resolve generic candidate resource features from sampled or base configuration."""
+        output: dict[str, Any] = {}
+        for name, path in self.resource_feature_paths.items():
+            if path in parameters:
+                output[name] = parameters[path]
+            else:
+                value = self._dotted_value(self._base, path)
+                if value is None:
+                    raise ValueError(
+                        f"Resource feature {name!r} path {path!r} is missing from the candidate."
+                    )
+                output[name] = value
+        return output
 
     @classmethod
     def parse_bytes(cls, value: Any) -> int:
@@ -279,3 +348,12 @@ class AdaptiveOptimizerConfig:
         if len(output) != len(set(output)):
             raise ValueError(f"{label} cannot contain duplicates.")
         return output
+
+    @staticmethod
+    def _dotted_value(value: Mapping[str, Any], path: str) -> Any:
+        current: Any = value
+        for part in path.split("."):
+            if not isinstance(current, Mapping) or part not in current:
+                return None
+            current = current[part]
+        return current
