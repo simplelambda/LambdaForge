@@ -17,7 +17,7 @@ generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine be
 Python package, so a research project can focus on its data and science instead of rebuilding
 pipelines, training loops, provenance, result management and process scheduling.
 
-> **Status:** `0.4.0`, usable but pre-1.0. The public namespaces documented below are the intended
+> **Status:** `0.4.1`, usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
 > contain a licence file, so redistribution terms still need to be chosen by SimpleLambda.
 
@@ -26,8 +26,8 @@ pipelines, training loops, provenance, result management and process scheduling.
 - [What LambdaForge provides](#what-lambdaforge-provides)
 - [Installation](#installation)
 - [Integrating into another project](#integrating-into-another-project)
-- [Why AGENTS.md exists](#why-agentsmd-exists)
 - [Quick start](#quick-start)
+- [Plain-language glossary](#plain-language-glossary)
 - [Generic tasks and preprocessing](#generic-tasks-and-preprocessing)
 - [Workflows and configuration composition](#workflows-and-configuration-composition)
 - [Inference, evaluation, export and HPO](#inference-evaluation-export-and-hpo)
@@ -51,6 +51,7 @@ pipelines, training loops, provenance, result management and process scheduling.
   - [Repository and release hygiene](#repository-and-release-hygiene)
   - [Continuous integration](#continuous-integration)
 - [Current limitations](#current-limitations)
+- [Why AGENTS.md exists](#why-agentsmd-exists)
 - [Documentation map](#documentation-map)
 - [Roadmap](#roadmap)
 
@@ -174,7 +175,7 @@ immutable artifact instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.4.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.4.1-py3-none-any.whl
 ```
 
 Let the consumer project's lock file or constraints select a PyTorch build compatible with its
@@ -194,78 +195,179 @@ several independent projects, use a wheel/version per environment. For reusable 
 extensions, publish entry-point plugins; for one project, ordinary installed `my_project.*` targets
 are simpler. The [extension contracts](#extension-contracts) show both routes.
 
-## Why AGENTS.md exists
-
-An AI coding agent should not need to read hundreds of implementation modules and every specialist
-README before it can configure a model or add a loss. That approach consumes context and money,
-increases the chance that an early constraint is forgotten, and encourages the agent to infer APIs
-from internal files that are not stable.
-
-[AGENTS.md](AGENTS.md) is therefore the framework's single, token-efficient operational manual. It
-contains the complete capability map, the supported public boundaries, installation and YAML
-workflow, extension recipes, result-publication rules, verification commands and a small routing
-table for the rare case that deeper detail is needed. The intended agent workflow is:
-
-1. Read `AGENTS.md` once.
-2. Select an existing public object or extension contract from its catalogue.
-3. Inspect only that object's signature/docstring or the one owner guide named by the routing table.
-4. Validate and test through the documented public commands.
-
-This does not replace the bilingual READMEs for humans or the precise class docstrings. It is a
-compressed index and safety contract that prevents repository-wide context loading. Agents working
-in this checkout discover it automatically; when LambdaForge is consumed from another workspace,
-give the agent this file explicitly or reference its repository path from that project's own
-`AGENTS.md`. Wheels also install the same source file under `share/lambdaforge/AGENTS.md`; obtain
-its exact environment path without importing the framework with:
-
-```bash
-python -c "from importlib.metadata import distribution; print(distribution('lambdaforge').locate_file('share/lambdaforge/AGENTS.md'))"
-```
-
 ## Quick start
 
-Copy [the complete example](examples/experiment.yaml), replace its `your_project.*` paths,
-then validate and inspect the expanded suite before starting any process:
+### The ideas you need before running a command
 
-```powershell
-lambdaforge validate examples\experiment.yaml
-lambdaforge inspect examples\experiment.yaml
-lambdaforge run examples\experiment.yaml --dry-run
-lambdaforge run examples\experiment.yaml
+LambdaForge reads a **configuration file**: a plain-text YAML document that says what work should
+be performed, which Python objects implement it, which parameters they receive, where results go
+and which resources may be used. YAML is indentation-sensitive; use spaces, never tabs.
+
+There are three document types:
+
+| Document | Use it for | Example |
+|---|---|---|
+| **Task** | One reproducible operation that is not necessarily training. | Preprocess data, export a model or generate a report. |
+| **Experiment** | Train and evaluate models across configurations and seeds. | Compare two MLP widths with three random seeds. |
+| **Workflow** | Connect complete tasks or experiments into a dependency graph. | Preprocess first, then train with the produced dataset. |
+
+Every document starts with a `schema_version`. A **Schema** is simply the list of allowed fields,
+types and required values. Validation uses it to catch misspellings and invalid combinations before
+expensive work starts; users do not need to write or edit the JSON Schema.
+
+Object specifications use three recurring keys:
+
+```yaml
+task:
+  target: my_project.tasks.ReportTask   # import this hypothetical class and construct it
+  params:                              # pass these values to its constructor
+    output_name: result.json
 ```
 
-The equivalent Python API is:
+- `target` is the full Python import path of a class to construct.
+- `params` is the mapping passed as keyword arguments to that class.
+- `ref` imports a function, class or value without constructing it; for example
+  `ref: torch.optim.AdamW` passes the optimizer class to the training task.
+
+Configurations are trusted code because their imports may execute Python. Use files you created or
+reviewed, and keep project-specific objects in the separately installed consumer package.
+
+### Run the generated example
+
+Start with the generated task because it works without requiring a dataset or GPU:
+
+```bash
+lambdaforge init my-ai-project
+cd my-ai-project
+python -m pip install -e .
+```
+
+`init` creates an installable `my_project` package, a small `ExampleTask`,
+`experiments/task.yaml`, editor Schema settings and a suitable `.gitignore`. Installing the project
+with `-e .` makes `my_project.tasks.ExampleTask` importable while you edit it.
+
+The generated YAML means:
+
+```yaml
+kind: task                          # select the generic-task document family
+schema_version: "1.0"              # validate against task Schema 1.0
+name: example                       # stable human-readable task name
+task:
+  target: my_project.tasks.ExampleTask
+required_artifacts: [output.json]   # success requires this file to exist
+```
+
+Use the commands in this order:
+
+| Command | What it answers | Starts work? | Writes results? |
+|---|---|---:|---:|
+| `lambdaforge validate CONFIG` | Is the YAML structurally valid, and can referenced Python objects be imported? | No | No |
+| `lambdaforge inspect CONFIG` | What exact run(s), fingerprints and resources would be used? | No | No |
+| `lambdaforge run CONFIG --dry-run` | Can the execution layer prepare the same immutable plan without launching user work? | No | No |
+| `lambdaforge run CONFIG` | Execute or safely resume the planned work. | Yes | Yes |
+| `lambdaforge results CONFIG` | Which attempts exist and are any successful results ambiguous? | No | Only with `--write-index` |
+
+Now exercise the complete safe path:
+
+```bash
+lambdaforge validate experiments/task.yaml
+lambdaforge inspect experiments/task.yaml
+lambdaforge run experiments/task.yaml --dry-run
+lambdaforge run experiments/task.yaml
+lambdaforge results experiments/task.yaml --write-index --fail-on-ambiguous
+```
+
+The real run creates a fingerprinted directory below `runs/tasks/example/`. It contains the
+materialized configuration, environment provenance, log, event stream, `result.json` and the
+declared `output.json`. Repeating the command reuses a matching successful result only while its
+identity and artifact digests remain valid.
+
+### Move from the example task to model training
+
+An experiment uses the same workflow, but it also needs datasets, a model, losses, metrics and
+trainer settings. Copy [the complete experiment example](examples/experiment.yaml) into the
+consumer project and replace every `your_project.*` path with classes from its installed package.
+That example is a template, not a runnable built-in dataset: LambdaForge intentionally does not
+guess the meaning or shape of domain data.
+
+```bash
+cp /path/to/LambdaForge/examples/experiment.yaml experiments/baseline.yaml
+lambdaforge validate experiments/baseline.yaml
+lambdaforge inspect experiments/baseline.yaml
+lambdaforge run experiments/baseline.yaml --dry-run
+lambdaforge run experiments/baseline.yaml
+```
+
+The equivalent Python calls use the same configuration and safety boundaries:
 
 ```python
 from lambdaforge import LambdaForge
 
-experiment = LambdaForge.experiment("examples/experiment.yaml")
-report = experiment.validate()
-expanded_runs = experiment.expand()
-results = experiment.run()
-print(results[0].status, results[0]["status"])
+experiment = LambdaForge.experiment("experiments/baseline.yaml")
+report = experiment.validate()  # ValidationReport; no training
+planned_runs = experiment.expand()  # one materialized mapping per variant and seed
+results = experiment.run(dry_run=True)
+results = experiment.run()  # list of typed RunResult values
+print(results[0].status, results[0].run_dir)
 ```
 
-Rebuild aggregate files without retraining:
+After training, `aggregate` rebuilds cross-seed tables and plots without retraining, `results`
+audits attempts, and `retain` prepares an artifact-removal/compression plan. Retention remains
+read-only unless `--apply` is explicit:
 
-```powershell
-lambdaforge aggregate examples\experiment.yaml
-lambdaforge retain examples\experiment.yaml          # read-only plan
-lambdaforge results examples\experiment.yaml --write-index
+```bash
+lambdaforge aggregate experiments/baseline.yaml
+lambdaforge results experiments/baseline.yaml --write-index --fail-on-ambiguous
+lambdaforge retain experiments/baseline.yaml
 ```
 
-CLI execution flags override only the corresponding YAML resource fields:
+Resource flags such as `--mode parallel` or `--gpus 0,1` override only their corresponding YAML
+execution fields. Add them after the sequential configuration works; the
+[execution section](#execution-and-process-safety) explains their process and GPU semantics.
 
-```powershell
-lambdaforge run experiment.yaml --mode parallel --gpus 0,1 --jobs-per-gpu 2
-lambdaforge run experiment.yaml --mode ddp --gpus 0,1 --devices-per-job 2
-```
+## Plain-language glossary
+
+| Term | Meaning in LambdaForge |
+|---|---|
+| **Configuration** | The YAML values that describe requested work. |
+| **Schema** | Machine-readable rules used to reject invalid configuration before execution. It is not a dataset schema. |
+| **Task** | One reproducible non-training operation. |
+| **Experiment** | A training study that may expand into several runs. |
+| **Workflow** | A dependency graph whose nodes are complete tasks or experiments. |
+| **Suite** | All runs produced by one experiment configuration. |
+| **Variant** | One concrete base/grid/ablation hyperparameter combination. |
+| **Seed** | A recorded random initialization/repetition identifier. |
+| **Run** | One variant and seed executed together. |
+| **Attempt** | One try at a run or task; retries keep their own terminal metadata. |
+| **Fingerprint** | A deterministic hash of scientific identity used to prevent incompatible reuse. |
+| **Artifact** | A verified output file or directory, such as a checkpoint, dataset or report. |
+| **Checkpoint** | Saved training state used for inference or exact continuation. |
+| **Aggregation** | Combining completed run metrics into cross-seed summaries, comparisons and plots. |
+| **Provenance** | Recorded configuration, code/environment and plugin information explaining how output was produced. |
+| **HPO** | Hyperparameter optimization: choosing promising configurations from a declared search space. |
+| **Fidelity** | The cumulative training budget already given to a candidate, normally epochs. |
+| **Dry-run** | A read-only execution-plan check; it never calls the configured task or starts training. |
+
+`target`, `ref` and `plugin` are object-resolution forms, not document types. A `target` constructs
+an importable class, a `ref` imports an existing object, and a `plugin` resolves a named extension
+published by another installed distribution.
 
 ## Generic tasks and preprocessing
 
-Training experiments keep Schema 1.1. Reproducible work that does not own a model or Lightning
-trainer uses the independent task Schema 1.0 with an explicit `kind: task`; existing experiment
-files are unchanged. The bundled preprocessing example is directly runnable:
+A generic task is the smallest reproducible unit in LambdaForge: one Python object receives a
+`TaskContext`, performs bounded work and returns outputs, metrics and artifact declarations. It is
+the right choice whenever the operation is not a Lightning training loop. Training experiments use
+experiment Schema 1.1; generic tasks use the independent task Schema 1.0 and explicitly declare
+`kind: task` so the CLI knows which document it received.
+
+Preprocessing is a specialized task assembled from three understandable roles:
+
+1. A **source** yields records with stable identifiers.
+2. Zero or more **transforms** change each record.
+3. A **sink** writes results and can verify whether an earlier record is already complete.
+
+The bundled example reads JSON Lines and writes one atomic JSON file per record without changing its
+value. It is directly runnable from this checkout and deliberately needs no project code:
 
 ```bash
 lambdaforge validate examples/preprocessing.yaml
@@ -275,7 +377,8 @@ lambdaforge run examples/preprocessing.yaml
 lambdaforge results examples/preprocessing.yaml --write-index --fail-on-ambiguous
 ```
 
-Its core YAML is a recursively constructed source → transforms → sink pipeline:
+Its core YAML is a recursively constructed source → transforms → sink pipeline. An empty transform
+list means “copy/serialize the records”; the commented addition shows where project logic belongs:
 
 ```yaml
 schema_version: "1.0"
@@ -289,9 +392,10 @@ task:
     source:
       target: lambdaforge.preprocessing.JsonLinesSource
       params: {path: data/raw.jsonl, key_field: id}
-    transforms:
-      - target: lambdaforge.preprocessing.CallableTransform
-        params: {function: {ref: my_project.preprocessing.normalize_record}}
+    transforms: []
+    # To transform values, install the consumer package and replace [] with:
+    # - target: lambdaforge.preprocessing.CallableTransform
+    #   params: {function: {ref: my_project.preprocessing.normalize_record}}
     sink:
       target: lambdaforge.preprocessing.JsonDirectorySink
       params: {output_dir: processed}
@@ -772,9 +876,9 @@ This is the small mental model behind experiments, workflows and adaptive optimi
 Let `c` be a fully composed scientific configuration and `o` its operational controls, such as
 output paths, concurrency or retention. Its scientific identity is conceptually:
 
-$$
-f_{science} = \operatorname{SHA256}(\operatorname{canonical}(c))
-$$
+```text
+scientific fingerprint = SHA-256(canonical scientific configuration)
+```
 
 Operational changes in `o` do not silently create a different scientific claim. Changing the model,
 data, optimizer, loss, sampled hyperparameters or seed does. A run is skipped or resumed only when
@@ -783,9 +887,9 @@ creates another attempt and preserves the previous terminal result.
 
 For an ordinary experiment, expansion produces a finite set of jobs:
 
-$$
-\mathcal{J} = \mathcal{V} \times \mathcal{S}
-$$
+```text
+jobs = variants × seeds
+```
 
 where `V` is the set of base/grid/ablation variants and `S` the declared seeds. `sequential` executes
 one job in the caller, `parallel` assigns independent jobs to explicit CPU/GPU slots, and `ddp`
@@ -794,9 +898,9 @@ assigns one job to a group of devices. Static experiment slots obey declared cou
 resource planning is requested, each job has a declared resource vector `r_j` and the planner seeks
 an assignment `z_{jd}` satisfying, for every resource/device `d`:
 
-$$
-\sum_j z_{jd} r_j \le C_d
-$$
+```text
+sum of resources reserved by jobs on device d ≤ declared capacity of device d
+```
 
 with `C_d` the declared capacity. The built-in planner uses deterministic first-fit/waves rather
 than claiming an expensive globally optimal packing.
@@ -805,19 +909,20 @@ Adaptive HPO replaces the finite job list with repeated decisions. A hyperparame
 is `x`, a seed is `s`, the cumulative fidelity is `b <= B`, and the observed objective is
 `Y(x,s,b)`. The scientific target is the full-budget seed expectation:
 
-$$
-\mu(x) = \mathbb{E}_s[Y(x,s,B)]
-$$
+```text
+scientific value of configuration x = expected Y(x, seed, full budget) across seeds
+```
 
 At decision `t`, history `D_t` contains complete learning curves, seeds, pending work, elapsed cost,
 memory peaks and failures. Candidate actions include starting `x`, resuming `(x,s)`, adding a seed or
 confirming a finalist. Their common approximate utility is:
 
-$$
-U(a \mid D_t) =
-\frac{I(a \mid D_t)}{\mathbb{E}[C(a) \mid D_t]}
-\,P(\text{action fits available memory} \mid D_t)
-$$
+```text
+utility(action | history)
+    = value of information(action | history)
+      / expected incremental cost(action | history)
+      × probability(action fits available memory | history)
+```
 
 `I` is a Value of Information: BoTorch multi-fidelity KG proposes new `x`, while heterogeneous
 START/RESUME/ADD_SEED actions use a documented one-step Gaussian moment KG approximation. It is not
@@ -829,12 +934,18 @@ device. This probability affects ranking, while the reservation is a hard schedu
 The optional Bayesian surrogate observes every available `Y(x,s,b)` rather than replacing a curve
 with one extrapolated target. Unordered categories use Hamming geometry, ordinal categories retain
 their order, and inactive conditional dimensions carry a separate state/mask. For seed estimates
-with within-seed variances `v_s` and estimated population variance `tau²`, LambdaForge propagates
-the mean uncertainty once:
+with within-seed estimation variances `v₁, …, vₙ` and estimated population variance `tau²`,
+LambdaForge propagates uncertainty as:
 
-$$
-\operatorname{Var}(\bar\mu) = \frac{\tau^2}{n} + \frac{\sum_s v_s}{n^2}
-$$
+```text
+variance of the estimated mean = tau² / n + (v₁ + ... + vₙ) / n²
+```
+
+Here `n` is the number of seeds. The first term is uncertainty caused by real variation from one
+seed to another; the second is the remaining uncertainty inside the individual curve estimates.
+For example, with two seeds, `tau² = 4` and `v₁ = v₂ = 1`, the result is
+`4/2 + (1+1)/4 = 2.5`. The `v` term is divided by `n²` exactly once because the arithmetic mean
+weights each seed by `1/n`.
 
 Memory capacity is a tagged value—`UNKNOWN`, `UNBOUNDED` or `KNOWN(N)`—so failure to discover a GPU
 cannot silently disable safeguards and `KNOWN(0)` cannot become unlimited.
@@ -1720,6 +1831,34 @@ modules.
   `TrainingOrchestrator` instance is not re-entrant, and a detached external daemon is outside its
   process-tree contract. Real CUDA and multi-GPU/DDP remain host-dependent; CUDA is covered only
   after the manual self-hosted workflow has succeeded.
+
+## Why AGENTS.md exists
+
+An AI coding agent should not need to read hundreds of implementation modules and every specialist
+README before it can configure a model or add a loss. That approach consumes context and money,
+increases the chance that an early constraint is forgotten, and encourages the agent to infer APIs
+from internal files that are not stable.
+
+[AGENTS.md](AGENTS.md) is therefore the framework's single, token-efficient operational manual. It
+contains the complete capability map, the supported public boundaries, installation and YAML
+workflow, extension recipes, result-publication rules, verification commands and a small routing
+table for the rare case that deeper detail is needed. The intended agent workflow is:
+
+1. Read `AGENTS.md` once.
+2. Select an existing public object or extension contract from its catalogue.
+3. Inspect only that object's signature/docstring or the one owner guide named by the routing table.
+4. Validate and test through the documented public commands.
+
+This does not replace the bilingual READMEs for humans or the precise class docstrings. It is a
+compressed index and safety contract that prevents repository-wide context loading. Agents working
+in this checkout discover it automatically; when LambdaForge is consumed from another workspace,
+give the agent this file explicitly or reference its repository path from that project's own
+`AGENTS.md`. Wheels also install the same source file under `share/lambdaforge/AGENTS.md`; obtain
+its exact environment path without importing the framework with:
+
+```bash
+python -c "from importlib.metadata import distribution; print(distribution('lambdaforge').locate_file('share/lambdaforge/AGENTS.md'))"
+```
 
 ## Documentation map
 

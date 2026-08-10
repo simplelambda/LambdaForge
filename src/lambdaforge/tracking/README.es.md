@@ -9,6 +9,7 @@ siendo local y no exige servicios: ningún SDK de tracking se importa hasta cons
 
 ## Contenidos
 
+- [Empieza aquí](#empieza-aquí)
 - [Alcance y objetos públicos](#alcance-y-objetos-públicos)
 - [Instalación](#instalación)
 - [Selección YAML](#selección-yaml)
@@ -20,6 +21,17 @@ siendo local y no exige servicios: ningún SDK de tracking se importa hasta cons
 - [Loggers propios y plugins](#loggers-propios-y-plugins)
 - [Fallos de dependencias y proveedores](#fallos-de-dependencias-y-proveedores)
 - [Referencias oficiales](#referencias-oficiales)
+
+## Empieza aquí
+
+El tracking copia métricas y metadata seleccionadas a un proveedor de visualización. No sustituye
+`config.yaml`, `metrics.csv`, `environment.json` ni `result.json`, que siguen siendo la autoridad
+local de reproducibilidad y resultados. Empieza con el logger CSV incluido. Añade un proveedor sólo
+cuando el proyecto haya decidido dónde pueden almacenarse datos y cómo entregar credenciales.
+
+TensorBoard suele ser local. MLflow y W&B pueden funcionar local/offline o remoto según sus
+parámetros. Instalar un extra sólo habilita el adaptador; no crea cuentas, sube información ni usa la
+red hasta configurarlo y construirlo.
 
 ## Alcance y objetos públicos
 

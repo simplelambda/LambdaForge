@@ -10,6 +10,7 @@ appropriate.
 
 ## Contents
 
+- [Start here](#start-here)
 - [Object map](#object-map)
 - [DatasetCache](#datasetcache)
 - [RAM quota semantics](#ram-quota-semantics)
@@ -25,6 +26,18 @@ appropriate.
 - [Invalidation and lifecycle](#invalidation-and-lifecycle)
 - [Determinism and cache keys](#determinism-and-cache-keys)
 - [Security and extension contracts](#security-and-extension-contracts)
+
+## Start here
+
+A **dataset** is the object that answers “how many samples exist?” and “give me sample number
+`i`”. LambdaForge follows PyTorch's map-style `Dataset` contract and does not prescribe what a
+sample means. A **cache** is an optional wrapper around such a dataset: after a deterministic sample
+has been loaded once, serialized bytes may be reused instead of repeating expensive I/O or parsing.
+
+Begin with an ordinary dataset and `num_workers: 0`. Add `DatasetCache` only after measuring that
+sample loading is a bottleneck and identifying a deterministic stage safe to reuse. RAM cache is
+private to each process; disk/mmap backends coordinate a shared byte quota. Neither replaces the
+operating-system page cache, preprocessing artifacts or correct DataLoader sizing.
 
 ## Object map
 

@@ -7,6 +7,7 @@ planifica y reduce sus resultados en disco. No contiene lógica específica de m
 
 ## Contenidos
 
+- [Empieza aquí](#empieza-aquí)
 - [Objetos principales](#objetos-principales)
 - [Ciclo de vida](#ciclo-de-vida)
 - [Migraciones de configuración](#migraciones-de-configuración)
@@ -21,6 +22,19 @@ planifica y reduce sus resultados en disco. No contiene lógica específica de m
 - [Carga](#carga)
 - [Especificaciones de plugins](#especificaciones-de-plugins)
 - [Fronteras de extensión](#fronteras-de-extensión)
+
+## Empieza aquí
+
+Un **experimento** es una pregunta científica descrita por una configuración. LambdaForge la
+expande en una **suite** de runs. Una **variante** es una combinación de hiperparámetros/ablación;
+una **seed**, una repetición de esa variante; un **run**, su ejecución concreta. Si se reintenta el
+mismo run, cada ejecución es un **intento** y se conserva la metadata terminal anterior.
+
+Para el uso normal comienza con `Experiment.from_yaml()` o los comandos `lambdaforge`. La tabla de
+objetos explica responsabilidades internas para quien mantenga el framework; el usuario no debe
+instanciar todas las clases. El ciclo seguro es validar → inspeccionar → dry-run → ejecutar → auditar
+resultados → agregar. Sólo `run` entrena y la retención sólo modifica artefactos al aplicar un plan
+de forma explícita.
 
 ## Objetos principales
 

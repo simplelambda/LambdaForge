@@ -16,6 +16,7 @@ reference repository or reproduction of published results.
 
 ## Contents
 
+- [Start here](#start-here)
 - [Design and public API](#design-and-public-api)
 - [Construction from Python and YAML](#construction-from-python-and-yaml)
 - [Shape and routing contracts](#shape-and-routing-contracts)
@@ -43,6 +44,19 @@ reference repository or reproduction of published results.
 - [Extending the catalogue](#extending-the-catalogue)
 - [Further roadmap: not implemented](#further-roadmap-not-implemented)
 - [Primary references](#primary-references)
+
+## Start here
+
+This package contains PyTorch building blocks; it does not choose an architecture from a dataset or
+own the training loop. A **component** transforms tensors inside a network, a **model** maps model
+inputs to predictions, and a **loss** turns predictions plus batch targets into a scalar for
+optimization. Shapes and keys remain explicit because only the consumer knows their domain meaning.
+
+For a first model, construct a small `MLP` in Python, run one synthetic batch and inspect its output
+before putting the same constructor arguments under YAML `model.params`. Use a project-local
+`nn.Module` when built-ins do not match the research design. Inherit `Model` only when its
+prediction, freezing, parameter-count and optimizer-group conveniences are useful; ordinary
+`nn.Module` classes remain valid.
 
 ## Design and public API
 

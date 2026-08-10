@@ -7,6 +7,18 @@ preprocesado, descargas, extracción de features, inferencia, evaluación, expor
 operación batch. Usan un Schema estricto independiente y reutilizan la factoría, provenance de
 entorno/plugins, resultados atómicos, historial de intentos y ResultCatalog.
 
+## Empieza aquí
+
+Una tarea tiene cuatro partes visibles: **inputs** declarados, el **objeto de tarea** Python,
+**outputs/métricas** devueltos y **artefactos** verificados en disco. Contenido de inputs y
+configuración determinan el fingerprint. Los outputs son valores JSON pequeños para lógica
+posterior; los artefactos son ficheros/directorios con hash. `required_artifacts` añade una condición
+de éxito, no es una lista de ficheros que LambdaForge cree automáticamente.
+
+Usa una tarea para una operación acotada, un experimento cuando necesites la semántica de training
+Lightning y un workflow cuando varias operaciones completas dependan entre sí. El ejemplo mínimo
+supone que `mi_proyecto.preprocessing.SurfaceTask` pertenece a un paquete consumidor instalado.
+
 ## Tarea mínima
 
 ```yaml

@@ -10,6 +10,7 @@ directories.
 
 ## Contents
 
+- [Start here](#start-here)
 - [Compatibility contract](#compatibility-contract)
 - [Safe CLI workflow](#safe-cli-workflow)
 - [Preview formats and exit codes](#preview-formats-and-exit-codes)
@@ -19,6 +20,17 @@ directories.
 - [Validation and failure modes](#validation-and-failure-modes)
 - [Adding a future migration](#adding-a-future-migration)
 - [Current scope](#current-scope)
+
+## Start here
+
+The package version (`0.4.1`) and a YAML `schema_version` describe different things. The package
+version identifies the installed LambdaForge release. The Schema version identifies the shape of a
+configuration document. Upgrade a document only when `validate` reports an old/unsupported shape
+or when reviewing a repository-wide framework upgrade.
+
+`lambdaforge migrate old.yaml` is a read-only preview. It never trains and does not overwrite the
+source. Persist the proposed YAML to a different file with `--output`, review the diff, validate the
+new file and only then replace project references if desired.
 
 ## Compatibility contract
 

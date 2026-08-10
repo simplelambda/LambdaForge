@@ -8,6 +8,7 @@ using a plugin never requires editing LambdaForge.
 
 ## Contents
 
+- [Start here](#start-here)
 - [Public objects](#public-objects)
 - [Entry-point groups](#entry-point-groups)
 - [Publishing a plugin](#publishing-a-plugin)
@@ -18,6 +19,23 @@ using a plugin never requires editing LambdaForge.
 - [Loaded-plugin provenance](#loaded-plugin-provenance)
 - [Loading, caching and security](#loading-caching-and-security)
 - [Contracts and precedence](#contracts-and-precedence)
+
+## Start here
+
+Most projects do **not** need a plugin. If a class lives in the same installed research project,
+reference it directly with `target: my_project.module.Class`. Create a plugin only when another
+Python distribution should publish a named reusable extension that consumers can select without
+knowing its module path.
+
+| Situation | Prefer |
+|---|---|
+| One project owns the class | Fully qualified YAML `target`. |
+| Several projects install a reusable package | Entry-point `plugin`. |
+| Pass an existing callable without constructing it | YAML `ref`. |
+
+Plugin discovery reads installed distribution metadata lazily. Resolution imports third-party
+Python code, so install only trusted packages and audit the recorded distribution/version
+provenance with every run.
 
 ## Public objects
 
@@ -64,7 +82,7 @@ An external package declares classes in its own `pyproject.toml`:
 ```toml
 [project]
 name = "acme-lambdaforge"
-dependencies = ["lambdaforge>=0.4,<0.5"]
+dependencies = ["lambdaforge>=0.4.1,<0.5"]
 
 [project.entry-points."lambdaforge.models"]
 acme_encoder = "acme_lambdaforge.models:AcmeEncoder"

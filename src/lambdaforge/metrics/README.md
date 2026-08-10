@@ -7,6 +7,7 @@ of Lightning and can be used in any loop that supplies output and batch mappings
 
 ## Contents
 
+- [Start here](#start-here)
 - [Metric contract](#metric-contract)
 - [Distributed metrics](#distributed-metrics)
 - [Binary classification](#binary-classification)
@@ -14,6 +15,18 @@ of Lightning and can be used in any loop that supplies output and batch mappings
 - [Multiclass classification](#multiclass-classification)
 - [Regression](#regression)
 - [Writing a metric](#writing-a-metric)
+
+## Start here
+
+A **loss** is a differentiable scalar used to update model parameters. A **metric** measures
+behaviour for reporting or model selection and normally detaches its inputs. Metrics accumulate
+state over batches: call `reset`, then `update` for every batch, then `compute` once. Calling
+`compute` on one batch is not an epoch metric unless the epoch contains only that batch.
+
+Choose the metric family from the prediction problem, then check its input keys and logits policy.
+For large datasets, “streaming” curve metrics trade bounded memory for configurable approximation;
+exact AUROC/AUPRC retain all predictions. In distributed training, use a metric with mergeable
+distributed state rather than averaging already-reduced per-process ratios.
 
 ## Metric contract
 

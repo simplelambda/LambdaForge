@@ -10,6 +10,7 @@ apropiado usar un backend persistente.
 
 ## Índice
 
+- [Empieza aquí](#empieza-aquí)
 - [Mapa de objetos](#mapa-de-objetos)
 - [DatasetCache](#datasetcache)
 - [Semántica de la cuota RAM](#semántica-de-la-cuota-ram)
@@ -25,6 +26,18 @@ apropiado usar un backend persistente.
 - [Invalidación y ciclo de vida](#invalidación-y-ciclo-de-vida)
 - [Determinismo y claves de caché](#determinismo-y-claves-de-caché)
 - [Seguridad y contratos de extensión](#seguridad-y-contratos-de-extensión)
+
+## Empieza aquí
+
+Un **dataset** es el objeto que responde «¿cuántas muestras existen?» y «dame la muestra `i`».
+LambdaForge sigue el contrato `Dataset` indexable de PyTorch y no impone qué significa una muestra.
+Una **caché** es un envoltorio opcional: después de cargar una muestra determinista, puede reutilizar
+sus bytes serializados en vez de repetir I/O o parsing costoso.
+
+Comienza con un dataset normal y `num_workers: 0`. Añade `DatasetCache` sólo después de medir que la
+carga es el cuello de botella e identificar una etapa determinista segura. La caché RAM pertenece a
+cada proceso; los backends disk/mmap coordinan una cuota compartida. Ninguno sustituye la page cache
+del sistema operativo, los artefactos de preprocesado ni un DataLoader bien dimensionado.
 
 ## Mapa de objetos
 

@@ -56,8 +56,10 @@ class TestDocumentation:
             assert namespaces <= {name for name in namespaces if name in guide}
 
     def test_readme_indices_reference_existing_headings(self) -> None:
-        for relative in ("README.md", "README.es.md"):
-            text = (self.ROOT / relative).read_text(encoding="utf-8")
+        for document in sorted(self.ROOT.rglob("README*.md")):
+            if ".git" in document.parts:
+                continue
+            text = document.read_text(encoding="utf-8")
             headings: set[str] = set()
             fenced = False
             for line in text.splitlines():
@@ -68,9 +70,16 @@ class TestDocumentation:
                     continue
                 label = re.sub(r"<[^>]+>", "", match.group(1)).replace("`", "")
                 slug = re.sub(r"[^\w\- ]", "", label.lower())
-                headings.add(re.sub(r"[\s-]+", "-", slug).strip("-"))
+                headings.add(re.sub(r"\s", "-", slug).strip("-"))
             anchors = set(re.findall(r"\]\(#([^)]+)\)", text))
+            relative = document.relative_to(self.ROOT)
             assert anchors <= headings, f"Broken {relative} anchors: {sorted(anchors - headings)}"
+
+    def test_root_readmes_use_portable_seed_uncertainty_notation(self) -> None:
+        for relative in ("README.md", "README.es.md"):
+            text = (self.ROOT / relative).read_text(encoding="utf-8")
+            assert "tau² / n + (v₁ + ... + vₙ) / n²" in text
+            assert "\\operatorname{Var}" not in text
 
     def test_agent_manual_contains_each_operational_route_and_example(self) -> None:
         manual = (self.ROOT / "AGENTS.md").read_text(encoding="utf-8")

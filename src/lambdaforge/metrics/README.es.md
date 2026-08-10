@@ -7,6 +7,7 @@ independientes de Lightning y sirven en cualquier bucle que proporcione mapas de
 
 ## Contenidos
 
+- [Empieza aquí](#empieza-aquí)
 - [Contrato de métrica](#contrato-de-métrica)
 - [Métricas distribuidas](#métricas-distribuidas)
 - [Clasificación binaria](#clasificación-binaria)
@@ -14,6 +15,18 @@ independientes de Lightning y sirven en cualquier bucle que proporcione mapas de
 - [Clasificación multiclase](#clasificación-multiclase)
 - [Regresión](#regresión)
 - [Escribir una métrica](#escribir-una-métrica)
+
+## Empieza aquí
+
+Una **pérdida** es un escalar diferenciable usado para actualizar parámetros. Una **métrica** mide
+el comportamiento para informar o seleccionar modelos y normalmente separa sus entradas del grafo.
+Las métricas acumulan estado entre lotes: llama a `reset`, después a `update` para cada lote y a
+`compute` una vez. Calcularla en un lote no equivale a una métrica de época salvo que sólo haya uno.
+
+Elige la familia según el problema y comprueba sus claves de entrada y política de logits. En
+datasets grandes, las métricas de curva «streaming» cambian memoria acotada por una aproximación
+configurable; AUROC/AUPRC exactas retienen todas las predicciones. En entrenamiento distribuido usa
+estado fusionable, no el promedio de ratios ya reducidos por proceso.
 
 ## Contrato de métrica
 

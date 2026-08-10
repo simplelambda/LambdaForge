@@ -21,6 +21,21 @@ lambdaforge run examples/preprocessing.yaml --dry-run
 lambdaforge run examples/preprocessing.yaml
 ```
 
+## Empieza aquí
+
+Piensa en el preprocesado como una cinta transportadora. La **fuente** decide qué registros existen
+y asigna a cada uno una clave estable. Cada **transformación** recibe un registro y devuelve su
+valor modificado. El **destino** escribe el resultado y puede demostrar después si esa clave ya está
+completa. `PreprocessingTask` coordina la cinta, guarda progreso y produce un manifiesto
+`DatasetArtifact` que describe el dataset completo.
+
+El ejemplo del repositorio se ejecuta directamente con su input incluido y una lista de
+transformaciones vacía; no necesita un paquete consumidor. La configuración inferior muestra
+después dónde añadir una transformación de proyecto opcional. Como en toda configuración,
+`validate` la comprueba, `inspect` explica el plan, `run --dry-run` ejercita la planificación y
+`run` ejecuta. Empieza con una transformación y un proceso; introduce shards sólo después de
+verificar claves estables y reanudación.
+
 ## Pipeline incluido
 
 `JsonLinesSource` lee un JSON por línea no vacía y usa un campo o el número estable de línea como

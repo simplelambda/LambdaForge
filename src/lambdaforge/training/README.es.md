@@ -7,6 +7,7 @@ independientes con recursos acotados y un apagado explícito.
 
 ## Contenidos
 
+- [Empieza aquí](#empieza-aquí)
 - [Mapa de objetos](#mapa-de-objetos)
 - [Contrato de entrenamiento predeterminado](#contrato-de-entrenamiento-predeterminado)
 - [Varias entradas y grupos del optimizador](#varias-entradas-y-grupos-del-optimizador)
@@ -18,6 +19,19 @@ independientes con recursos acotados y un apagado explícito.
 - [Apagado y limpieza](#apagado-y-limpieza)
 - [Verificación del ciclo de vida](#verificación-del-ciclo-de-vida)
 - [Personalización](#personalización)
+
+## Empieza aquí
+
+El entrenamiento separa cuatro responsabilidades. El **dataset/data module** entrega lotes; el
+**modelo** produce predicciones; `LightningTask` enruta campos del lote por pérdidas, métricas,
+optimizador y scheduler; el **trainer/runner** posee épocas, dispositivos, callbacks y checkpoints.
+Separarlas permite reemplazar una sin reescribir las demás.
+
+El contrato predeterminado espera un lote tipo mapa, por ejemplo
+`{"x": tensor, "target": tensor}`. Empieza secuencialmente en CPU, una época y `num_workers: 0`, y
+valida allí claves y formas. Después activa GPU, workers o trabajos paralelos de uno en uno.
+`accelerator`, `devices` y los slots de ejecución son opciones distintas: el trainer controla un
+run; el orquestador, cuántos runs independientes existen simultáneamente.
 
 ## Mapa de objetos
 

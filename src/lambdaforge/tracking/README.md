@@ -9,6 +9,7 @@ service-free: no tracking SDK is imported until its adapter is constructed.
 
 ## Contents
 
+- [Start here](#start-here)
 - [Scope and public objects](#scope-and-public-objects)
 - [Installation](#installation)
 - [YAML selection](#yaml-selection)
@@ -20,6 +21,17 @@ service-free: no tracking SDK is imported until its adapter is constructed.
 - [Custom loggers and plugins](#custom-loggers-and-plugins)
 - [Dependency and provider failures](#dependency-and-provider-failures)
 - [Official references](#official-references)
+
+## Start here
+
+Tracking copies selected metrics and metadata to a visualization provider. It does not replace
+LambdaForge's local `config.yaml`, `metrics.csv`, `environment.json` or `result.json`, which remain
+the reproducibility and result authority. Start with the built-in local CSV logger. Add one provider
+only when the project has decided where data may be stored and how credentials are supplied.
+
+TensorBoard is normally local. MLflow and W&B may be local/offline or remote depending on their
+parameters. Installing an extra only makes its adapter available; no account, upload or network
+publication happens until that adapter is configured and constructed.
 
 ## Scope and public objects
 

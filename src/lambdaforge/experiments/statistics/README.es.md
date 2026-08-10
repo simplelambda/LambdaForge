@@ -9,6 +9,7 @@ escalares ya materializadas; no carga modelos, datasets ni checkpoints.
 
 ## Contenidos
 
+- [Empieza aquí](#empieza-aquí)
 - [Contrato de comparación](#contrato-de-comparación)
 - [Referencia YAML completa](#referencia-yaml-completa)
 - [Emparejamiento y semántica de improvement](#emparejamiento-y-semántica-de-improvement)
@@ -17,6 +18,18 @@ escalares ya materializadas; no carga modelos, datasets ni checkpoints.
 - [Artefactos y compatibilidad](#artefactos-y-compatibilidad)
 - [API Python](#api-python)
 - [Interpretación](#interpretación)
+
+## Empieza aquí
+
+Esta capa compara escalares que ya existen; no crea evidencia. Una seed es una muestra del
+procedimiento de entrenamiento. Cuando las variantes usan las mismas seeds, LambdaForge compara las
+diferencias por seed, eliminando efectos compartidos y aportando normalmente más información que
+tratar ambos grupos como independientes.
+
+Un intervalo cuantifica incertidumbre bajo sus supuestos; un p-value no es un tamaño de efecto ni la
+probabilidad de que un modelo sea mejor. Decide métrica, dirección, emparejamiento, intervalo/test y
+número mínimo de seeds antes de mirar los resultados. Lee la sección final de interpretación antes
+de usar un veredicto generado en un artículo.
 
 ## Contrato de comparación
 

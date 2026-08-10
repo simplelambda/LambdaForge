@@ -74,7 +74,7 @@ reproducible release, build/install a versioned LambdaForge wheel instead of the
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.4.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.4.1-py3-none-any.whl
 ```
 
 Let the consumer lock the correct PyTorch wheel. `nvidia-smi` only proves the driver is visible;
@@ -196,9 +196,10 @@ the identical YAML to reconcile/resume; do not select or edit files manually. Re
 `summary.json` includes seed usage, merged curves, memory evidence and confirmation mean/sample
 deviation/standard error/normal interval plus shared-seed paired differences. Use the experiment
 statistics APIs for publication-grade bootstrap or non-parametric follow-up.
-The provider-neutral curve model is Bayesian rather than a recent-slope heuristic. For seed
-posteriors it uses `Var(mean)=tau²/n+sum(v_s)/n²`, and paired shared-seed differences feed racing
-and pruning. The main defaults are Bayesian search after Sobol
+The provider-neutral curve model is Bayesian rather than a recent-slope heuristic. For `n` seed
+posteriors it uses `variance of mean = tau²/n + (v₁+...+vₙ)/n²`: `tau²` is estimated variation
+between seeds and each `v_s` is that seed curve's estimation variance. Paired shared-seed
+differences feed racing and pruning. The main defaults are Bayesian search after Sobol
 `auto=max(4,2*(dimension+1))`, adaptive curves at
 5→100 epochs, one shared search seed, no confirmation seeds, conservative pruning after the minimum
 budget, 50 actions and one concurrent job. `search.refresh_interval` deterministically refits/caches

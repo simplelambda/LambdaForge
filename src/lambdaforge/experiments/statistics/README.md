@@ -9,6 +9,7 @@ load models, datasets or checkpoints.
 
 ## Contents
 
+- [Start here](#start-here)
 - [Comparison contract](#comparison-contract)
 - [Complete YAML reference](#complete-yaml-reference)
 - [Pairing and improvement semantics](#pairing-and-improvement-semantics)
@@ -17,6 +18,18 @@ load models, datasets or checkpoints.
 - [Artifacts and compatibility](#artifacts-and-compatibility)
 - [Python API](#python-api)
 - [Interpretation](#interpretation)
+
+## Start here
+
+This layer compares scalar results that already exist; it does not create evidence. A seed is one
+sample from the training procedure. When variants use the same seeds, LambdaForge compares their
+per-seed differences, which removes shared seed effects and is usually more informative than
+treating both groups as unrelated.
+
+An interval quantifies uncertainty under its stated assumptions; a p-value is not an effect size or
+the probability that a model is better. Decide the metric, direction, pairing, interval/test and
+minimum usable seed count before examining outcomes. Read the final interpretation section before
+using a generated verdict in a paper.
 
 ## Comparison contract
 

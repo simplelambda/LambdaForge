@@ -9,6 +9,7 @@ preview-first, task-agnostic and disabled unless configured or explicitly reques
 
 ## Contents
 
+- [Start here](#start-here)
 - [YAML contract](#yaml-contract)
 - [Eligibility](#eligibility)
 - [Protected artifacts](#protected-artifacts)
@@ -18,6 +19,16 @@ preview-first, task-agnostic and disabled unless configured or explicitly reques
 - [Transaction and recovery](#transaction-and-recovery)
 - [Produced artifacts](#produced-artifacts)
 - [Limits](#limits)
+
+## Start here
+
+Retention answers “which large files may be removed or compressed after a complete study?” It is
+not cleanup by age and it never decides which scientific result is best. LambdaForge protects
+canonical metadata and requires a complete aggregation receipt before applying a policy.
+
+Always run `lambdaforge retain CONFIG` first: this produces a read-only plan. Inspect every selected
+path and only then use `--apply`. Keep the transaction result with the study. If the intended file
+cannot be expressed by a narrow include rule, do not broaden the rule merely to make it match.
 
 ## YAML contract
 

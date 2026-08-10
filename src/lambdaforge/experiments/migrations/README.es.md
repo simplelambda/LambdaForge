@@ -10,6 +10,7 @@ de LambdaForge. Una migración no construye objetos configurados, resuelve plugi
 
 ## Contenidos
 
+- [Empieza aquí](#empieza-aquí)
 - [Contrato de compatibilidad](#contrato-de-compatibilidad)
 - [Flujo CLI seguro](#flujo-cli-seguro)
 - [Formatos de previsualización y códigos de salida](#formatos-de-previsualización-y-códigos-de-salida)
@@ -19,6 +20,17 @@ de LambdaForge. Una migración no construye objetos configurados, resuelve plugi
 - [Validación y modos de fallo](#validación-y-modos-de-fallo)
 - [Añadir una migración futura](#añadir-una-migración-futura)
 - [Alcance actual](#alcance-actual)
+
+## Empieza aquí
+
+La versión del paquete (`0.4.1`) y el `schema_version` de un YAML describen cosas diferentes. La
+primera identifica el release instalado de LambdaForge; la segunda, la forma de un documento de
+configuración. Migra un documento cuando `validate` indique una forma antigua/no soportada o al
+revisar una actualización del framework en todo el proyecto.
+
+`lambdaforge migrate antiguo.yaml` sólo previsualiza: no entrena ni sobrescribe el origen. Guarda la
+propuesta en otro fichero con `--output`, revisa el diff, valida el fichero nuevo y sólo entonces
+sustituye las referencias del proyecto si procede.
 
 ## Contrato de compatibilidad
 

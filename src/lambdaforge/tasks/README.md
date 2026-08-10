@@ -7,6 +7,18 @@ preprocessing, downloads, feature extraction, inference, evaluation, export, fig
 batch operation. They use an independent strict Schema and reuse the framework's object factory,
 environment/plugin provenance, atomic results, attempt history and ResultCatalog.
 
+## Start here
+
+A task has four visible parts: declared **inputs**, the configured Python **task object**, returned
+**outputs/metrics**, and verified **artifacts** on disk. Input contents and configuration determine
+the task fingerprint. Outputs are small JSON-compatible values for downstream logic; artifacts are
+files/directories with hashes. `required_artifacts` is an additional success condition, not a list
+of files LambdaForge creates automatically.
+
+Use a task for one bounded operation. Use an experiment when Lightning training semantics are
+needed, and a workflow when several complete operations depend on one another. The minimal example
+below assumes `my_project.preprocessing.SurfaceTask` belongs to an installed consumer package.
+
 ## Minimal task
 
 ```yaml

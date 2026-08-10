@@ -21,6 +21,21 @@ lambdaforge run examples/preprocessing.yaml --dry-run
 lambdaforge run examples/preprocessing.yaml
 ```
 
+## Start here
+
+Think of preprocessing as a conveyor belt. The **source** decides which records exist and gives each
+one a stable key. Each **transform** receives one record and returns its changed value. The **sink**
+writes the final record and can later prove whether that key is already complete. `PreprocessingTask`
+coordinates the belt, checkpoints progress and produces a `DatasetArtifact` manifest describing the
+whole output dataset.
+
+The checked-in example is directly runnable with its bundled input and an empty transform list; it
+needs no consumer package. The configuration shown below then demonstrates where an optional
+project transform belongs. As with every LambdaForge configuration, `validate` checks it, `inspect`
+explains the plan, `run --dry-run` exercises planning and plain `run` executes it. Start with one
+transform and one process; introduce shards only after stable record keys and restart behaviour
+have been verified.
+
 ## Built-in pipeline
 
 `JsonLinesSource` reads one JSON value per non-empty line and uses either a configured mapping field

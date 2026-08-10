@@ -124,16 +124,18 @@ and group reservation must be enforced consistently; static LambdaForge DDP rema
 
 ## Statistical contracts
 
-The target is `mu(x)=E_s[Y(x,s,B)]`. For seed posterior means with estimation variances `v_s` and
-between-seed variance `tau²`, the equally weighted mean uses
+The target is `mu(x)=E_s[Y(x,s,B)]`. For `n` seed posterior means with estimation variances
+`v₁, …, vₙ` and between-seed variance `tau²`, the equally weighted mean uses
 
 ```text
-Var(mean) = tau² / n + sum_s(v_s) / n².
+variance of estimated mean = tau² / n + (v₁ + ... + vₙ) / n²
 ```
 
-The previous implementation divided the within-seed term by `n` again after it had already entered
-the mean. Shared seeds now use posterior paired differences before falling back to independent
-configuration posteriors. Irreversible pruning requires both minimum fidelity and
+The first term represents population variation between seeds; the second propagates the uncertainty
+of the individual curve estimates through an arithmetic mean. The previous implementation divided
+that within-seed term by `n` again after it had already entered the mean. Shared seeds now use
+posterior paired differences before falling back to independent configuration posteriors.
+Irreversible pruning requires both minimum fidelity and
 `P(mu(x) >= mu(incumbent)-epsilon | D) < delta_drop`.
 
 For action `a`, selection approximates

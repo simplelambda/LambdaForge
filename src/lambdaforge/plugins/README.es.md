@@ -8,6 +8,7 @@ completas; instalar o usar un plugin nunca requiere editar LambdaForge.
 
 ## Contenidos
 
+- [Empieza aquí](#empieza-aquí)
 - [Objetos públicos](#objetos-públicos)
 - [Grupos de entry points](#grupos-de-entry-points)
 - [Publicar un plugin](#publicar-un-plugin)
@@ -18,6 +19,23 @@ completas; instalar o usar un plugin nunca requiere editar LambdaForge.
 - [Procedencia de plugins cargados](#procedencia-de-plugins-cargados)
 - [Carga, caché y seguridad](#carga-caché-y-seguridad)
 - [Contratos y precedencia](#contratos-y-precedencia)
+
+## Empieza aquí
+
+La mayoría de proyectos **no** necesita un plugin. Si una clase vive en el mismo proyecto de
+investigación instalado, referencia directamente `target: mi_proyecto.modulo.Clase`. Crea un plugin
+sólo cuando otra distribución Python deba publicar una extensión reutilizable con nombre y sus
+consumidores no deban conocer la ruta del módulo.
+
+| Situación | Opción preferida |
+|---|---|
+| Una clase pertenece a un proyecto | `target` YAML completo. |
+| Varios proyectos instalan un paquete reutilizable | `plugin` mediante entry point. |
+| Se pasa un callable existente sin construirlo | `ref` YAML. |
+
+El descubrimiento lee metadata de distribuciones instaladas de forma lazy. Resolver importa código
+Python externo: instala sólo paquetes de confianza y audita la distribución/versión registrada con
+cada run.
 
 ## Objetos públicos
 
@@ -64,7 +82,7 @@ Un paquete externo declara las clases en su propio `pyproject.toml`:
 ```toml
 [project]
 name = "acme-lambdaforge"
-dependencies = ["lambdaforge>=0.4,<0.5"]
+dependencies = ["lambdaforge>=0.4.1,<0.5"]
 
 [project.entry-points."lambdaforge.models"]
 acme_encoder = "acme_lambdaforge.models:AcmeEncoder"

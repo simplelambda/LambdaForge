@@ -8,6 +8,8 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-10
+
 ### Changed
 
 - Hardened adaptive HPO around a real mixed multi-fidelity surrogate: categorical Hamming
@@ -24,6 +26,9 @@ metadata rather than invented release numbers.
 - Added deterministic synthetic hardening tests plus real single-GPU concurrent trials,
   candidate-aware probe, isolated OOM and cumulative checkpoint-resume coverage. Multi-GPU and
   SLURM execution remain opt-in infrastructure validations rather than simulated claims.
+- Reworked the human documentation around a beginner-first path that explains YAML, Schemas,
+  document types, object specifications, command side effects and output interpretation before
+  presenting advanced subsystem contracts.
 
 ### Fixed
 
@@ -123,7 +128,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/simplelambda/LambdaForge/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/simplelambda/LambdaForge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/simplelambda/LambdaForge/compare/510b8e8d2ebbd76eb86dfcfa6fb309d1e6d680e6...v0.3.0
 [0.2.0]: https://github.com/simplelambda/LambdaForge/commit/510b8e8d2ebbd76eb86dfcfa6fb309d1e6d680e6

@@ -17,6 +17,7 @@ referencia de sus autores ni reproducción de resultados publicados.
 
 ## Índice
 
+- [Empieza aquí](#empieza-aquí)
 - [Diseño y API pública](#diseño-y-api-pública)
 - [Construcción desde Python y YAML](#construcción-desde-python-y-yaml)
 - [Contratos de formas y enrutamiento](#contratos-de-formas-y-enrutamiento)
@@ -44,6 +45,18 @@ referencia de sus autores ni reproducción de resultados publicados.
 - [Extender el catálogo](#extender-el-catálogo)
 - [Roadmap adicional: no implementado](#roadmap-adicional-no-implementado)
 - [Referencias primarias](#referencias-primarias)
+
+## Empieza aquí
+
+Este paquete contiene bloques PyTorch; no elige una arquitectura a partir del dataset ni posee el
+bucle de entrenamiento. Un **componente** transforma tensores dentro de una red, un **modelo**
+convierte entradas en predicciones y una **pérdida** transforma predicciones y targets del lote en
+un escalar optimizable. Formas y claves son explícitas porque sólo el consumidor conoce su dominio.
+
+Para el primer modelo, construye un `MLP` pequeño en Python, ejecuta un lote sintético e inspecciona
+su salida antes de llevar los mismos argumentos a `model.params` en YAML. Usa un `nn.Module` local
+si los built-ins no encajan con la investigación. Hereda `Model` sólo si resultan útiles sus ayudas
+de predicción, freeze, conteo y grupos de optimizador; un `nn.Module` ordinario sigue siendo válido.
 
 ## Diseño y API pública
 

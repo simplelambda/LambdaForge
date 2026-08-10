@@ -10,6 +10,7 @@ permanece desactivada salvo configuración o petición explícita.
 
 ## Contenidos
 
+- [Empieza aquí](#empieza-aquí)
 - [Contrato YAML](#contrato-yaml)
 - [Elegibilidad](#elegibilidad)
 - [Artefactos protegidos](#artefactos-protegidos)
@@ -19,6 +20,17 @@ permanece desactivada salvo configuración o petición explícita.
 - [Transacción y recuperación](#transacción-y-recuperación)
 - [Artefactos producidos](#artefactos-producidos)
 - [Límites](#límites)
+
+## Empieza aquí
+
+La retención responde «¿qué ficheros grandes pueden eliminarse o comprimirse después de completar
+el estudio?». No limpia por antigüedad ni decide qué resultado científico es mejor. LambdaForge
+protege la metadata canónica y exige un receipt de agregación completa antes de aplicar una política.
+
+Ejecuta siempre primero `lambdaforge retain CONFIG`: produce un plan de sólo lectura. Revisa cada
+ruta seleccionada y sólo después usa `--apply`. Conserva el resultado de la transacción con el
+estudio. Si un fichero no puede expresarse con una regla include estrecha, no amplíes la regla sólo
+para conseguir que coincida.
 
 ## Contrato YAML
 

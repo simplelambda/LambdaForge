@@ -7,6 +7,7 @@ reduces their on-disk results. It contains no task-specific model or dataset log
 
 ## Contents
 
+- [Start here](#start-here)
 - [Main objects](#main-objects)
 - [Lifecycle](#lifecycle)
 - [Configuration migrations](#configuration-migrations)
@@ -21,6 +22,18 @@ reduces their on-disk results. It contains no task-specific model or dataset log
 - [Loading](#loading)
 - [Plugin specifications](#plugin-specifications)
 - [Extension boundaries](#extension-boundaries)
+
+## Start here
+
+An **experiment** is one scientific question described by one configuration. LambdaForge expands it
+into a **suite** of runs. A **variant** is one hyperparameter/ablation combination; a **seed** is one
+repeat of that variant; a **run** is their concrete execution. If the same run is retried, each
+execution is an **attempt** and previous terminal metadata is preserved.
+
+For normal use, start with `Experiment.from_yaml()` or the `lambdaforge` commands. The object table
+below describes internal responsibilities for maintainers; users do not need to instantiate every
+class. The safe lifecycle is validate → inspect → dry-run → run → audit results → aggregate. Only
+`run` starts training, while retention changes artifacts only with explicit apply semantics.
 
 ## Main objects
 

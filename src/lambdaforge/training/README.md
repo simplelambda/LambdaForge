@@ -7,6 +7,7 @@ bounded resources and explicit shutdown behaviour.
 
 ## Contents
 
+- [Start here](#start-here)
 - [Object map](#object-map)
 - [Default training contract](#default-training-contract)
 - [Multiple inputs and optimizer groups](#multiple-inputs-and-optimizer-groups)
@@ -18,6 +19,19 @@ bounded resources and explicit shutdown behaviour.
 - [Shutdown and cleanup](#shutdown-and-cleanup)
 - [Lifecycle verification](#lifecycle-verification)
 - [Customisation](#customisation)
+
+## Start here
+
+Training has four separate responsibilities. The **dataset/data module** supplies batches; the
+**model** produces predictions; `LightningTask` routes batch fields through losses, metrics,
+optimizer and scheduler; the **trainer/runner** owns epochs, devices, callbacks and checkpoints.
+Keeping these roles separate lets a project replace one without rewriting the others.
+
+The default contract expects each batch to be a mapping such as `{"x": tensor, "target": tensor}`.
+Start sequentially on CPU with one epoch and `num_workers: 0`; validate keys and tensor shapes there.
+Then enable GPU, workers or parallel jobs one concern at a time. `accelerator`, `devices` and
+execution slots are different settings: the trainer controls one run, while the orchestrator
+controls how many independent runs exist at once.
 
 ## Object map
 

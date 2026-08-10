@@ -364,7 +364,7 @@ build-backend = "setuptools.build_meta"
 name = "my-ai-project"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["lambdaforge>=0.4,<0.5"]
+dependencies = ["lambdaforge>=0.4.1,<0.5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
