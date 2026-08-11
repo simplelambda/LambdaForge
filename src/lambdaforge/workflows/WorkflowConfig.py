@@ -8,7 +8,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.configuration.AuthoringConfigNormalizer import AuthoringConfigNormalizer
 from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
+from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
 from lambdaforge.workflows.WorkflowNode import WorkflowNode
 from lambdaforge.workflows.WorkflowSchemaCatalog import WorkflowSchemaCatalog
 
@@ -19,6 +21,10 @@ class WorkflowConfig:
     CURRENT_VERSION = "1.0"
 
     def __init__(self, data: Mapping[str, Any], *, source: str | Path | None = None) -> None:
+        materialized = AuthoringConfigNormalizer().normalize(data, source=source)
+        if materialized.kind is not ConfigurationKind.WORKFLOW:
+            raise ValueError("Configuration does not describe a workflow.")
+        data = materialized.values
         schema_errors = WorkflowSchemaCatalog().validation_errors(data)
         if schema_errors:
             raise ValueError("Invalid workflow configuration:\n- " + "\n- ".join(schema_errors))
@@ -70,6 +76,7 @@ class WorkflowConfig:
                     "needs": node.needs,
                     "bindings": dict(node.bindings),
                     "resources": dict(node.resources),
+                    "on": node.cluster,
                 }
                 for node in self.nodes
             ],

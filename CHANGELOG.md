@@ -8,6 +8,43 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-11
+
+### Added
+
+- A beginner-facing `AuthoringConfig` layer that compiles concise task, preprocessing, workflow and
+  experiment YAML into the existing strict `MaterializedConfig`; `inspect --resolved` exposes the
+  exact boundary and target strings are shortened only in unambiguous object fields.
+- Named task inputs/outputs through `TaskContext.input()` and `TaskContext.output()`, logical
+  `DatasetReference` values, environment-aware `DataCatalog` locations and pluggable strict,
+  manifest, dataset-ID and explicit-version identity providers.
+- Git/distribution/explicit `CodeIdentity`, separate scientific and execution identities, and
+  `explain changes` so reuse decisions are auditable without making hashes part of normal UX.
+- Explicit `--force`, `--restart` and `--no-resume` lifecycle controls, bounded preprocessing
+  workers/workload intent and normalized portable CPU, memory, GPU, storage, duration and process
+  resource requests.
+- A provider-neutral local control plane with local/SSH transports, local/SLURM schedulers,
+  content-addressed execution bundles, cluster/execution profiles, persistent job records and
+  reconnectable status/log/cancel/retry services.
+- `doctor`, `clusters`, `jobs` and preview-first `data` commands; explicit rsync dataset replication;
+  cluster-aware `run --on`/`--profile`; and expanded project scaffolding templates.
+
+### Changed
+
+- Preprocessing may resolve logical input/output names instead of repeating physical paths; legacy
+  strict YAML and path-oriented context methods remain supported.
+- SLURM resource translation now includes process count and CPU cores per process.
+- Human, agent and technical documentation now explain authoring, identity, idempotency, resource
+  translation, remote execution, data placement and intentional distributed-workflow limits.
+
+### Security
+
+- Remote submission remains explicit, SSH keeps the user's normal host-key policy, argument vectors
+  replace shell fragments, large implicit input transfers fail closed and data replication requires
+  `--apply`.
+- Mixed-cluster DAG execution is deliberately refused until durable coordinator recovery and
+  artifact transfer can be guaranteed; placement remains visible in read-only plans.
+
 ## [0.4.1] - 2026-08-10
 
 ### Changed
@@ -128,7 +165,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/simplelambda/LambdaForge/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/simplelambda/LambdaForge/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/simplelambda/LambdaForge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/simplelambda/LambdaForge/compare/510b8e8d2ebbd76eb86dfcfa6fb309d1e6d680e6...v0.3.0

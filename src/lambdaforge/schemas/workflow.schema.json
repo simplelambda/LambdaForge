@@ -25,6 +25,7 @@
           "needs": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}]},
           "bindings": {"type": "object"},
           "resources": {"type": "object"},
+          "on": {"type": "string", "minLength": 1, "default": "local"},
           "continue_on_failure": {"type": "boolean"}
         }
       }

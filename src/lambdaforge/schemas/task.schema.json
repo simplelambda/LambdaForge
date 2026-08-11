@@ -31,11 +31,34 @@
   "$defs": {
     "localInput": {
       "type": "object",
-      "required": ["path"],
+      "oneOf": [
+        {"required": ["path"]},
+        {"required": ["dataset"]}
+      ],
       "additionalProperties": false,
       "properties": {
         "name": {"type": "string", "minLength": 1},
-        "path": {"type": "string", "minLength": 1}
+        "path": {"type": "string", "minLength": 1},
+        "dataset": {"type": "string", "pattern": "^dataset:[^:]+$"},
+        "identity": {
+          "oneOf": [
+            {"enum": ["strict", "manifest", "dataset_id", "version"]},
+            {
+              "type": "object",
+              "required": ["strategy"],
+              "additionalProperties": false,
+              "properties": {
+                "strategy": {"enum": ["strict", "manifest", "dataset_id", "version"]},
+                "manifest": {"type": "string", "minLength": 1},
+                "version": {"type": "string", "minLength": 1},
+                "namespace": {"type": "string", "minLength": 1}
+              }
+            }
+          ]
+        },
+        "manifest": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "namespace": {"type": "string", "minLength": 1}
       }
     },
     "objectSpec": {

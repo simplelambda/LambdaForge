@@ -15,15 +15,29 @@ from lambdaforge.tasks.TaskContext import TaskContext
 class JsonLinesSource(PreprocessingSource):
     """Read one JSON value per non-empty line with optional mapping key selection."""
 
-    def __init__(self, path: str | Path, key_field: str | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        key_field: str | None = None,
+        input_name: str | None = None,
+    ) -> None:
+        if path is None and input_name is None:
+            raise ValueError("JsonLinesSource requires path or input_name.")
+        if path is not None and input_name is not None:
+            raise ValueError("JsonLinesSource path and input_name are mutually exclusive.")
         if key_field is not None and not key_field.strip():
             raise ValueError("JsonLinesSource.key_field cannot be empty.")
-        self.path = Path(path)
+        self.path = Path(path) if path is not None else None
+        self.input_name = input_name
         self.key_field = key_field
 
     def records(self, context: TaskContext) -> Iterable[PreprocessingRecord]:
         """Yield parsed JSON values in source order with stable keys."""
-        path = context.declared_input_path(self.path)
+        path = (
+            context.input(self.input_name)
+            if self.input_name is not None
+            else context.declared_input_path(self.path or "")
+        )
         with path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 if not line.strip():

@@ -49,6 +49,33 @@ class TaskFingerprint:
             for key, value in config.items()
             if str(key) not in cls._OPERATIONAL_KEYS
         }
+        if "_resolved_inputs" in selected:
+            selected.pop("inputs", None)
+        extensions = selected.get("extensions")
+        if isinstance(extensions, Mapping):
+            cleaned_extensions = dict(extensions)
+            authoring = cleaned_extensions.get("authoring")
+            if isinstance(authoring, Mapping):
+                scientific_authoring = {
+                    str(key): item
+                    for key, item in authoring.items()
+                    if str(key)
+                    not in {
+                        "outputs",
+                        "resources",
+                        "data_catalog",
+                        "environment",
+                        "code_version",
+                    }
+                }
+                if scientific_authoring:
+                    cleaned_extensions["authoring"] = scientific_authoring
+                else:
+                    cleaned_extensions.pop("authoring", None)
+            if cleaned_extensions:
+                selected["extensions"] = cleaned_extensions
+            else:
+                selected.pop("extensions", None)
         normalized = cls._normalize(selected)
         if not isinstance(normalized, dict):
             raise TypeError("A task fingerprint requires a top-level mapping.")

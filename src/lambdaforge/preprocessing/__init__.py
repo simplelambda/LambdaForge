@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from lambdaforge.preprocessing.PreprocessingSource import PreprocessingSource
     from lambdaforge.preprocessing.PreprocessingTask import PreprocessingTask
     from lambdaforge.preprocessing.PreprocessingTransform import PreprocessingTransform
+    from lambdaforge.preprocessing.PreprocessingWorkload import PreprocessingWorkload
 
 LazyExports.install(
     __name__,
@@ -69,6 +70,10 @@ LazyExports.install(
             "lambdaforge.preprocessing.PreprocessingTransform",
             "PreprocessingTransform",
         ),
+        "PreprocessingWorkload": (
+            "lambdaforge.preprocessing.PreprocessingWorkload",
+            "PreprocessingWorkload",
+        ),
     },
 )
 
@@ -85,4 +90,5 @@ __all__ = [
     "PreprocessingSource",
     "PreprocessingTask",
     "PreprocessingTransform",
+    "PreprocessingWorkload",
 ]

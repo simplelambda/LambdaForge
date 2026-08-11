@@ -127,6 +127,7 @@ class TaskRunner:
                         resume=config.resume,
                         metadata=config.get("metadata", {}),
                         inputs=tuple(value.to_dict() for value in config.resolved_inputs),
+                        outputs=config.outputs,
                         stop_event=stop_event,
                     )
                     if context.stop_requested:

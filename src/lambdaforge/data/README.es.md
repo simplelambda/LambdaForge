@@ -11,6 +11,7 @@ apropiado usar un backend persistente.
 ## Índice
 
 - [Empieza aquí](#empieza-aquí)
+- [Identidad lógica y ubicación](#identidad-lógica-y-ubicación)
 - [Mapa de objetos](#mapa-de-objetos)
 - [DatasetCache](#datasetcache)
 - [Semántica de la cuota RAM](#semántica-de-la-cuota-ram)
@@ -38,6 +39,30 @@ Comienza con un dataset normal y `num_workers: 0`. Añade `DatasetCache` sólo d
 carga es el cuello de botella e identificar una etapa determinista segura. La caché RAM pertenece a
 cada proceso; los backends disk/mmap coordinan una cuota compartida. Ninguno sustituye la page cache
 del sistema operativo, los artefactos de preprocesado ni un DataLoader bien dimensionado.
+
+## Identidad lógica y ubicación
+
+La identidad responde «¿qué bytes/versión científica son?» y la ubicación «¿dónde los lee este
+entorno?». Separarlas permite mover datos intactos de `/data` a `/scratch` sin invalidar resultados.
+
+Los inputs usan `StrictContentHashIdentityProvider` por defecto. Para datos grandes e inmutables se
+puede usar un manifiesto revisado, el ID derivado de contenido producido por preprocesado o una
+versión externa explícita. Esta última confía en que el propietario cambie la versión al cambiar
+contenido. `DataIdentityProviderRegistry` permite integrar identidades institucionales.
+
+```yaml
+datasets:
+  corpus:
+    identity: {strategy: version, namespace: lab/corpus, version: "2026-08-11"}
+    locations:
+      local: /data/corpus
+      atlas: /datasets/project/corpus
+```
+
+`DataCatalog` resuelve `dataset:corpus`; `DataService` lista ubicaciones y delega una replicación
+explícita a `DataTransferProvider`. El proveedor incluido usa `rsync`. Un run nunca adivina ni copia
+datos grandes: `lambdaforge data ... replicate` previsualiza y `--apply` ejecuta lo revisado sin
+reescribir automáticamente el catálogo.
 
 ## Mapa de objetos
 

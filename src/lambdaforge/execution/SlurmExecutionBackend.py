@@ -59,7 +59,8 @@ class SlurmExecutionBackend(ExecutionBackend):
             "#!/bin/bash",
             "set -euo pipefail",
             f"#SBATCH --nodes={self.nodes}",
-            f"#SBATCH --cpus-per-task={resources.cpu_cores}",
+            f"#SBATCH --ntasks={resources.processes}",
+            f"#SBATCH --cpus-per-task={max(1, resources.cpu_cores // resources.processes)}",
         ]
         if resources.ram_bytes:
             lines.append(f"#SBATCH --mem={max(1, (resources.ram_bytes + 1048575) // 1048576)}M")

@@ -82,7 +82,7 @@ An external package declares classes in its own `pyproject.toml`:
 ```toml
 [project]
 name = "acme-lambdaforge"
-dependencies = ["lambdaforge>=0.4.1,<0.5"]
+dependencies = ["lambdaforge>=0.5,<0.6"]
 
 [project.entry-points."lambdaforge.models"]
 acme_encoder = "acme_lambdaforge.models:AcmeEncoder"

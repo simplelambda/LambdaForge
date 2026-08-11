@@ -1,0 +1,19 @@
+# LambdaForge 0.5 concise authoring: every physical path is declared once.
+name: copy-jsonl-records
+output_root: runs/tasks
+inputs:
+  raw: preprocessing-input.jsonl
+outputs:
+  processed: processed
+preprocess:
+  # Replace builtins.dict with an installed project callable to change each record.
+  function: builtins.dict
+  input: raw
+  output: processed
+  key_field: id
+  workers: 2
+  workload: io
+resources:
+  cpus: 2
+  memory: 1GiB
+  time: 5m

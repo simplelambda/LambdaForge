@@ -9,12 +9,15 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.configuration.AuthoringConfigNormalizer import AuthoringConfigNormalizer
+from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
 from lambdaforge.experiments.migrations.ExperimentConfigMigrationResult import (
     ExperimentConfigMigrationResult,
 )
 from lambdaforge.experiments.migrations.ExperimentConfigMigrator import (
     ExperimentConfigMigrator,
 )
+from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 
 
 class ExperimentConfig(Mapping[str, Any]):
@@ -39,6 +42,9 @@ class ExperimentConfig(Mapping[str, Any]):
         if not isinstance(data, Mapping):
             raise TypeError("Experiment config must be a mapping.")
         self.source = Path(source) if source is not None else None
+        normalizer = AuthoringConfigNormalizer()
+        if normalizer.detect(data) is not ConfigurationKind.EXPERIMENT:
+            raise ValueError("Configuration does not describe a training experiment.")
         if _migration_result is None:
             try:
                 _migration_result = ExperimentConfigMigrator.default().preview_mapping(
@@ -52,7 +58,8 @@ class ExperimentConfig(Mapping[str, Any]):
                     "Preview supported migrations with 'lambdaforge migrate <config>'."
                 ) from error
         self.migration_result = _migration_result
-        self._data = copy.deepcopy(dict(_migration_result.config))
+        materialized = normalizer.normalize(_migration_result.config, source=self.source)
+        self._data = copy.deepcopy(dict(materialized.values))
         self._validate_identity(self._data)
 
     @classmethod
@@ -119,7 +126,19 @@ class ExperimentConfig(Mapping[str, Any]):
 
     def expand(self) -> list[dict[str, Any]]:
         """Expand seeds, grid axes and named ablations into concrete runs."""
-        return self._expand_current_mapping(self._data)
+        runs = self._expand_current_mapping(self._data)
+        source_dir = (
+            self.source.parent.resolve() if self.source is not None else Path.cwd().resolve()
+        )
+        for run in runs:
+            extensions = run.setdefault("extensions", {})
+            if isinstance(extensions, dict):
+                explicit = extensions.get("code_version")
+                extensions["_lambdaforge_code_identity"] = CodeIdentity.capture(
+                    source_dir,
+                    explicit_version=str(explicit) if explicit is not None else None,
+                ).to_dict()
+        return runs
 
     @staticmethod
     def get_value(config: Mapping[str, Any], path: str, default: Any = None) -> Any:

@@ -1,8 +1,64 @@
 """Composable, inspectable and secret-aware configuration."""
 
-from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
-from lambdaforge.configuration.ConfigurationDiff import ConfigurationDiff
-from lambdaforge.configuration.ResolvedConfiguration import ResolvedConfiguration
-from lambdaforge.configuration.SecretValue import SecretValue
+from typing import TYPE_CHECKING
 
-__all__ = ["ConfigurationComposer", "ConfigurationDiff", "ResolvedConfiguration", "SecretValue"]
+from lambdaforge.LazyExports import LazyExports
+
+if TYPE_CHECKING:
+    from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
+    from lambdaforge.configuration.AuthoringConfigNormalizer import AuthoringConfigNormalizer
+    from lambdaforge.configuration.AuthoringSchemaCatalog import AuthoringSchemaCatalog
+    from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
+    from lambdaforge.configuration.ConfigurationDiff import ConfigurationDiff
+    from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
+    from lambdaforge.configuration.MaterializedConfig import MaterializedConfig
+    from lambdaforge.configuration.ResolvedConfiguration import ResolvedConfiguration
+    from lambdaforge.configuration.SecretValue import SecretValue
+
+LazyExports.install(
+    __name__,
+    {
+        "AuthoringConfig": ("lambdaforge.configuration.AuthoringConfig", "AuthoringConfig"),
+        "AuthoringConfigNormalizer": (
+            "lambdaforge.configuration.AuthoringConfigNormalizer",
+            "AuthoringConfigNormalizer",
+        ),
+        "AuthoringSchemaCatalog": (
+            "lambdaforge.configuration.AuthoringSchemaCatalog",
+            "AuthoringSchemaCatalog",
+        ),
+        "ConfigurationComposer": (
+            "lambdaforge.configuration.ConfigurationComposer",
+            "ConfigurationComposer",
+        ),
+        "ConfigurationDiff": (
+            "lambdaforge.configuration.ConfigurationDiff",
+            "ConfigurationDiff",
+        ),
+        "ConfigurationKind": (
+            "lambdaforge.configuration.ConfigurationKind",
+            "ConfigurationKind",
+        ),
+        "MaterializedConfig": (
+            "lambdaforge.configuration.MaterializedConfig",
+            "MaterializedConfig",
+        ),
+        "ResolvedConfiguration": (
+            "lambdaforge.configuration.ResolvedConfiguration",
+            "ResolvedConfiguration",
+        ),
+        "SecretValue": ("lambdaforge.configuration.SecretValue", "SecretValue"),
+    },
+)
+
+__all__ = [
+    "AuthoringConfig",
+    "AuthoringConfigNormalizer",
+    "AuthoringSchemaCatalog",
+    "ConfigurationComposer",
+    "ConfigurationDiff",
+    "ConfigurationKind",
+    "MaterializedConfig",
+    "ResolvedConfiguration",
+    "SecretValue",
+]

@@ -22,6 +22,7 @@ class WorkflowNode:
     needs: tuple[str, ...] = ()
     bindings: Mapping[str, Any] = field(default_factory=dict)
     resources: Mapping[str, Any] = field(default_factory=dict)
+    cluster: str = "local"
     continue_on_failure: bool = False
 
     def __post_init__(self) -> None:
@@ -33,6 +34,8 @@ class WorkflowNode:
             raise TypeError("Workflow node config must be a path or mapping.")
         object.__setattr__(self, "bindings", FrozenJsonMapping(self.bindings))
         object.__setattr__(self, "resources", FrozenJsonMapping(self.resources))
+        if not self.cluster.strip():
+            raise ValueError("Workflow node cluster names cannot be empty.")
 
     @classmethod
     def from_mapping(cls, name: str, value: Mapping[str, Any], source_dir: Path) -> WorkflowNode:
@@ -52,6 +55,7 @@ class WorkflowNode:
             needs=tuple(str(item) for item in raw_needs),
             bindings=value.get("bindings", {}),
             resources=value.get("resources", {}),
+            cluster=str(value.get("on", "local")),
             continue_on_failure=bool(value.get("continue_on_failure", False)),
         )
 

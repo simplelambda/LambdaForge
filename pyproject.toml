@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lambdaforge"
-version = "0.4.1"
-description = "Declarative infrastructure for reproducible AI tasks, preprocessing and training."
+version = "0.5.0"
+description = "Reproducible AI workflows from local authoring to multi-cluster execution."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "SimpleLambda" }]
@@ -94,7 +94,10 @@ lambdaforge = [
 "share/lambdaforge/examples" = [
     "examples/adaptive-hpo.yaml",
     "examples/experiment.yaml",
+    "examples/data-catalog.yaml",
+    "examples/lambdaforge.clusters.yaml",
     "examples/preprocessing-input.jsonl",
+    "examples/preprocessing-simple.yaml",
     "examples/preprocessing.yaml",
     "examples/workflow.yaml",
 ]

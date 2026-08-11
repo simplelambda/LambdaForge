@@ -29,6 +29,27 @@ valor modificado. El **destino** escribe el resultado y puede demostrar después
 completa. `PreprocessingTask` coordina la cinta, guarda progreso y produce un manifiesto
 `DatasetArtifact` que describe el dataset completo.
 
+Para JSONL normal empieza con la forma concisa y nombra cada ruta una vez:
+
+```yaml
+name: normalizar-registros
+inputs: {raw: data/raw.jsonl}
+outputs: {processed: processed}
+preprocess:
+  function: mi_proyecto.preprocessing.normalizar
+  input: raw
+  output: processed
+  key_field: id
+  workers: 4
+  workload: io
+```
+
+`workers: 1` procesa secuencialmente. Un valor mayor usa un pool de hilos acotado; `workload`
+registra intención `auto`, `io`, `cpu` o `gpu`, pero no elige procesos, dispositivos ni batch size
+en secreto. Para cómputo Python CPU aislado o batching GPU usa shards explícitos de workflow o una
+tarea de proyecto. Manifiesto, verificación atómica y política de error no cambian.
+Las transformaciones y sinks propios usados con varios workers deben ser thread-safe.
+
 El ejemplo del repositorio se ejecuta directamente con su input incluido y una lista de
 transformaciones vacía; no necesita un paquete consumidor. La configuración inferior muestra
 después dónde añadir una transformación de proyecto opcional. Como en toda configuración,

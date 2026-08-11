@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.configuration.AuthoringConfigNormalizer import AuthoringConfigNormalizer
+from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
 from lambdaforge.experiments.ExperimentValidator import ExperimentValidator
 from lambdaforge.experiments.ValidationReport import ValidationReport
@@ -49,7 +51,7 @@ class WorkflowValidator:
             try:
                 data, source, resolution = node.materialize()
                 report: TaskValidationReport | ValidationReport
-                if data.get("kind") == "task":
+                if AuthoringConfigNormalizer().detect(data) is ConfigurationKind.TASK:
                     task_config = TaskConfig(data, source=source, resolution=resolution)
                     report = task_validator.validate(task_config, check_imports=check_imports)
                 else:

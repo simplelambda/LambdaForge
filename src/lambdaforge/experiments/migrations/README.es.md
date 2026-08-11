@@ -23,7 +23,7 @@ de LambdaForge. Una migración no construye objetos configurados, resuelve plugi
 
 ## Empieza aquí
 
-La versión del paquete (`0.4.1`) y el `schema_version` de un YAML describen cosas diferentes. La
+La versión del paquete (`0.5.0`) y el `schema_version` de un YAML describen cosas diferentes. La
 primera identifica el release instalado de LambdaForge; la segunda, la forma de un documento de
 configuración. Migra un documento cuando `validate` indique una forma antigua/no soportada o al
 revisar una actualización del framework en todo el proyecto.

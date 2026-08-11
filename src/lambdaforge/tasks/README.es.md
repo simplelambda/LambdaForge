@@ -19,6 +19,19 @@ Usa una tarea para una operación acotada, un experimento cuando necesites la se
 Lightning y un workflow cuando varias operaciones completas dependan entre sí. El ejemplo mínimo
 supone que `mi_proyecto.preprocessing.SurfaceTask` pertenece a un paquete consumidor instalado.
 
+La versión 0.5 también acepta autoría concisa. `inspect --resolved` muestra la tarea estricta que se
+genera; la validación y ejecución siguen usando el mismo runner:
+
+```yaml
+name: preparar-superficies
+inputs: {raw: data/raw}
+outputs: {surfaces: surfaces}
+task:
+  target: mi_proyecto.preprocessing.SurfaceTask
+  params: {resolution: 1.0}
+resources: {cpus: 4, memory: 8GiB}
+```
+
 ## Tarea mínima
 
 ```yaml
@@ -69,7 +82,8 @@ class SurfaceTask(Task):
         self.resolution = resolution
 
     def run(self, context: TaskContext) -> TaskOutput:
-        output = context.output_path("surfaces", create_parent=True)
+        raw = context.input("raw")
+        output = context.output("surfaces", create=True)
         output.mkdir(exist_ok=True)
         # El trabajo específico del proyecto escribe bajo output.
         return TaskOutput(
@@ -78,6 +92,10 @@ class SurfaceTask(Task):
             artifacts=[ArtifactDeclaration("surfaces", kind=ArtifactType.DATASET)],
         )
 ```
+
+`context.input(name)` resuelve/verifica un input lógico declarado. `context.output(name,
+create=True)` resuelve un output configurado bajo el run y crea su padre. Los métodos de paths
+anteriores siguen por compatibilidad; una tarea no debe deducir manualmente directorios con hash.
 
 Heredar se recomienda para plugins pero es opcional con `target`: se admite un objeto externo con
 `run(context)` y también la forma duck-typed concisa `run()` sin argumentos. Puede devolver

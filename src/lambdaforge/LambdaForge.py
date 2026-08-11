@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +11,9 @@ from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 
 if TYPE_CHECKING:
+    from lambdaforge.configuration.MaterializedConfig import MaterializedConfig
+    from lambdaforge.controlplane.JobHandle import JobHandle
+    from lambdaforge.execution.ResourceRequest import ResourceRequest
     from lambdaforge.experiments.migrations.ExperimentConfigMigrationResult import (
         ExperimentConfigMigrationResult,
     )
@@ -50,14 +53,14 @@ class LambdaForge:
 
     @staticmethod
     def task(path: str | Path) -> TaskRun:
-        """Load a ``kind: task`` YAML document into the generic task API."""
+        """Load a concise or strict task YAML document into the generic task API."""
         from lambdaforge.tasks.TaskRun import TaskRun
 
         return TaskRun.from_yaml(path)
 
     @staticmethod
     def workflow(path: str | Path) -> Workflow:
-        """Load a ``kind: workflow`` YAML document into the DAG API."""
+        """Load a concise or strict workflow YAML document into the DAG API."""
         from lambdaforge.workflows.Workflow import Workflow
 
         return Workflow.from_yaml(path)
@@ -65,15 +68,16 @@ class LambdaForge:
     @staticmethod
     def load(path: str | Path) -> Experiment | TaskRun | Workflow:
         """Dispatch YAML to its workflow, task or training experiment API."""
-        from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
+        from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
+        from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
         from lambdaforge.tasks.TaskConfig import TaskConfig
 
         if TaskConfig.is_task_file(path):
             return LambdaForge.task(path)
-        resolved_kind = ConfigurationComposer().resolve(path).values.get("kind")
+        resolved_kind = AuthoringConfig.from_yaml(path).materialize().kind
         return (
             LambdaForge.workflow(path)
-            if resolved_kind == "workflow"
+            if resolved_kind is ConfigurationKind.WORKFLOW
             else LambdaForge.experiment(path)
         )
 
@@ -117,9 +121,10 @@ class LambdaForge:
 
         if TaskConfig.is_task_file(path):
             return TaskValidator().validate_file(path, check_imports=check_imports)
-        from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
+        from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
+        from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
 
-        if ConfigurationComposer().resolve(path).values.get("kind") == "workflow":
+        if AuthoringConfig.from_yaml(path).materialize().kind is ConfigurationKind.WORKFLOW:
             from lambdaforge.workflows.WorkflowValidator import WorkflowValidator
 
             return WorkflowValidator().validate_file(path, check_imports=check_imports)
@@ -134,6 +139,34 @@ class LambdaForge:
         """Expand an experiment or return a task/workflow plan without running."""
         configured = LambdaForge.load(path)
         return configured.inspect()
+
+    @staticmethod
+    def materialize(path: str | Path) -> MaterializedConfig:
+        """Compile concise authoring YAML to the exact strict runner configuration."""
+        from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
+
+        return AuthoringConfig.from_yaml(path).materialize()
+
+    @staticmethod
+    def submit(
+        path: str | Path,
+        *,
+        on: str,
+        resources: ResourceRequest | None = None,
+        dry_run: bool = False,
+        run_arguments: Sequence[str] = (),
+    ) -> JobHandle:
+        """Submit through the persistent local control plane and return a job handle."""
+        from lambdaforge.controlplane.ControlPlane import ControlPlane
+
+        handle, _ = ControlPlane().submit(
+            path,
+            cluster=on,
+            resources=resources,
+            dry_run=dry_run,
+            run_arguments=run_arguments,
+        )
+        return handle
 
     @staticmethod
     def preview_migration(

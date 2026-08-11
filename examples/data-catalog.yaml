@@ -1,0 +1,10 @@
+# Logical identity stays stable even when physical locations differ.
+datasets:
+  raw-corpus:
+    identity:
+      strategy: version
+      namespace: example/raw-corpus
+      version: "1"
+    locations:
+      local: /data/raw-corpus
+      atlas: /datasets/project/raw-corpus

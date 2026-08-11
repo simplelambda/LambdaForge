@@ -11,6 +11,7 @@ appropriate.
 ## Contents
 
 - [Start here](#start-here)
+- [Logical identity and placement](#logical-identity-and-placement)
 - [Object map](#object-map)
 - [DatasetCache](#datasetcache)
 - [RAM quota semantics](#ram-quota-semantics)
@@ -38,6 +39,41 @@ Begin with an ordinary dataset and `num_workers: 0`. Add `DatasetCache` only aft
 sample loading is a bottleneck and identifying a deterministic stage safe to reuse. RAM cache is
 private to each process; disk/mmap backends coordinate a shared byte quota. Neither replaces the
 operating-system page cache, preprocessing artifacts or correct DataLoader sizing.
+
+## Logical identity and placement
+
+A dataset's identity answers “which scientific bytes/version is this?”; its location answers
+“where can this environment read it?”. LambdaForge keeps them separate so moving an unchanged
+dataset from `/data` to `/scratch` does not invalidate results.
+
+Task inputs use `StrictContentHashIdentityProvider` by default. Large immutable datasets may choose
+`ManifestIdentityProvider`, the content-derived `DatasetIdIdentityProvider` emitted by
+preprocessing, or `ExplicitVersionIdentityProvider`. The last option trusts the owner to change the
+external version whenever content changes. `DataIdentityProviderRegistry` is the extension boundary
+for institutional identity systems.
+
+```yaml
+inputs:
+  corpus:
+    path: /datasets/corpus
+    identity: {strategy: manifest, manifest: corpus.sha256}
+```
+
+A `DataCatalog` maps a portable `dataset:NAME` reference to environment-specific locations:
+
+```yaml
+datasets:
+  corpus:
+    identity: {strategy: version, namespace: lab/corpus, version: "2026-08-11"}
+    locations:
+      local: /data/corpus
+      atlas: /datasets/project/corpus
+```
+
+`DataService` lists placements and delegates explicit preview-first replication to a
+`DataTransferProvider`; the built-in provider uses `rsync`. A run never guesses or performs a large
+transfer. `lambdaforge data --catalog CATALOG replicate ...` previews, and `--apply` performs the
+reviewed transfer. The catalog is not rewritten automatically.
 
 ## Object map
 

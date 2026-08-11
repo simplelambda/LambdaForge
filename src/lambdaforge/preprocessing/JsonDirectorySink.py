@@ -19,11 +19,16 @@ from lambdaforge.tasks.TaskContext import TaskContext
 class JsonDirectorySink(PreprocessingSink):
     """Atomically store each record under a filename derived from its stable key."""
 
-    def __init__(self, output_dir: str | Path = "processed") -> None:
+    def __init__(
+        self,
+        output_dir: str | Path = "processed",
+        output_name: str | None = None,
+    ) -> None:
         output = Path(output_dir)
         if output.is_absolute() or not output.parts or ".." in output.parts:
             raise ValueError("JsonDirectorySink.output_dir must be run-relative.")
         self.output_dir = output
+        self.output_name = output_name
 
     def write(self, record: PreprocessingRecord, context: TaskContext) -> None:
         """Atomically publish one JSON-compatible record envelope."""
@@ -64,10 +69,10 @@ class JsonDirectorySink(PreprocessingSink):
 
     def finalize(self, context: TaskContext) -> tuple[ArtifactDeclaration, ...]:
         """Declare the complete JSON directory as one dataset-like artifact."""
-        context.output_path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        self._output_root(context).mkdir(parents=True, exist_ok=True)
         return (
             ArtifactDeclaration(
-                path=self.output_dir,
+                path=self._output_root(context).relative_to(context.run_dir),
                 kind=ArtifactType.DIRECTORY,
                 media_type="application/json",
             ),
@@ -75,4 +80,11 @@ class JsonDirectorySink(PreprocessingSink):
 
     def _record_path(self, key: str, context: TaskContext) -> Path:
         digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        return context.output_path(self.output_dir / f"{digest}.json")
+        return self._output_root(context) / f"{digest}.json"
+
+    def _output_root(self, context: TaskContext) -> Path:
+        return (
+            context.output(self.output_name)
+            if self.output_name
+            else context.output_path(self.output_dir)
+        )

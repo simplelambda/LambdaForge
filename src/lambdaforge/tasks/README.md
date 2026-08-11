@@ -19,6 +19,19 @@ Use a task for one bounded operation. Use an experiment when Lightning training 
 needed, and a workflow when several complete operations depend on one another. The minimal example
 below assumes `my_project.preprocessing.SurfaceTask` belongs to an installed consumer package.
 
+Version 0.5 also accepts concise authoring. `inspect --resolved` shows the strict task generated
+from it; validation and execution still use the same runner:
+
+```yaml
+name: prepare-surfaces
+inputs: {raw: data/raw}
+outputs: {surfaces: surfaces}
+task:
+  target: my_project.preprocessing.SurfaceTask
+  params: {resolution: 1.0}
+resources: {cpus: 4, memory: 8GiB}
+```
+
 ## Minimal task
 
 ```yaml
@@ -69,15 +82,21 @@ class SurfaceTask(Task):
         self.resolution = resolution
 
     def run(self, context: TaskContext) -> TaskOutput:
-        output = context.output_path("surfaces", create_parent=True)
+        raw = context.input("raw")
+        output = context.output("surfaces", create=True)
         output.mkdir(exist_ok=True)
-        # Project-specific work writes below output.
+        # Project-specific work reads raw and writes below output.
         return TaskOutput(
             outputs={"surface_dir": "surfaces"},
             metrics={"resolution": self.resolution},
             artifacts=[ArtifactDeclaration("surfaces", kind=ArtifactType.DATASET)],
         )
 ```
+
+`context.input(name)` resolves and verifies a declared logical input. `context.output(name,
+create=True)` resolves a configured relative output below the run directory and creates its parent.
+Legacy path methods remain for strict pre-0.5 tasks. A task must never bypass these methods to infer
+another run's fingerprint directory.
 
 Inheritance is recommended for plugins but optional for a `target`: an external object with
 `run(context)` is accepted, and a zero-argument `run()` is the concise duck-typed form. It may

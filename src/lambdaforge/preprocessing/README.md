@@ -29,6 +29,28 @@ writes the final record and can later prove whether that key is already complete
 coordinates the belt, checkpoints progress and produces a `DatasetArtifact` manifest describing the
 whole output dataset.
 
+For ordinary JSONL work, start with the concise form and name every path once:
+
+```yaml
+name: normalize-records
+inputs: {raw: data/raw.jsonl}
+outputs: {processed: processed}
+preprocess:
+  function: my_project.preprocessing.normalize_record
+  input: raw
+  output: processed
+  key_field: id
+  workers: 4
+  workload: io
+```
+
+`workers: 1` is deterministic sequential processing. Larger values use a bounded thread pool;
+`workload` records `auto`, `io`, `cpu` or `gpu` intent but does not silently choose processes,
+devices or batch sizes. Threads suit waiting-heavy transforms. For CPU isolation, true parallel
+Python compute or GPU batching, use explicit workflow shards or a project task with domain-specific
+batching. Record manifests, atomic sink verification and error policy remain identical.
+Custom transforms and sinks used with multiple workers must therefore be thread-safe.
+
 The checked-in example is directly runnable with its bundled input and an empty transform list; it
 needs no consumer package. The configuration shown below then demonstrates where an optional
 project transform belongs. As with every LambdaForge configuration, `validate` checks it, `inspect`

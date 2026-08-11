@@ -23,15 +23,16 @@ Las reglas estructurales son:
 - mutaciones destructivas siempre preview-first o explícitas;
 - proveedores pesados detrás de adaptadores/inyección y dependencias opcionales.
 
-La auditoría AST de 0.4 no encuentra nombres de clase pública duplicados ni módulos con varias clases
-públicas. Todos los símbolos nuevos tienen uso interno o reexport público; no hay un segundo runner
-de tareas, catálogo de resultados, factory de objetos o lock de ficheros.
+La auditoría AST de 0.5 no encuentra nombres de clase pública duplicados ni módulos de implementación
+con varias clases públicas. Todos los símbolos nuevos tienen uso interno o reexport público; no hay
+un segundo runner de tareas, catálogo de resultados, factory de objetos o lock de ficheros.
 
 ## Flujo completo
 
 ```text
 YAML confiable
   -> ConfigurationComposer (si hay composición)
+  -> AuthoringConfigNormalizer -> MaterializedConfig
   -> WorkflowConfig / TaskConfig / ExperimentConfig
   -> Validator + plan inmutable
   -> WorkflowRunner / TaskRunner / ExperimentRunner
@@ -66,6 +67,35 @@ eliminado o cambiado ignorando orden de claves.
 Un experimento exige modelo/loss/trainer y se expande por semillas/variantes; una tarea arbitraria no
 debe fingir esos conceptos. `WorkflowConfig` tampoco hereda de ellos: coordina documentos completos
 pero no redefine su Schema.
+
+### Autoría y representación interna
+
+`AuthoringConfig` posee el documento pensado para personas. Sólo carga/compone y delega en
+`AuthoringConfigNormalizer`; éste detecta `ConfigurationKind`, expande defaults y abreviaturas
+inequívocas y devuelve el valor inmutable `MaterializedConfig`. Los config/runners existentes sólo
+reciben ese IR estricto. Esta frontera evita duplicar ejecución y permite que `inspect --resolved`
+explique exactamente qué se validará. `AuthoringSchemaCatalog` describe la superficie permisiva,
+pero el Schema de tarea/experimento/workflow materializado conserva la última palabra.
+
+Las migraciones de experimento ocurren antes de aplicar defaults de autoría. Así un YAML histórico
+conserva versión origen, pasos y diff, aunque el runner termine recibiendo Schema 1.1. La detección
+prioriza el bloque `experiment` sobre `task`, porque un experimento Lightning también posee una tarea
+interna; las formas concisas de tarea sólo se aceptan cuando no existe esa señal.
+
+### Identidad científica, código y datos
+
+`DatasetReference` nombra datos sin ubicación. `DataCatalog` traduce ese nombre a un
+`DatasetLocation` para un entorno y `DataIdentityProviderRegistry` elige cómo demostrar contenido:
+bytes estrictos, manifiesto revisado, ID de `DatasetArtifact` o versión externa. `TaskInput` conserva
+ambas piezas, pero `TaskFingerprint` usa identidad lógica y no el mount point cuando la resolución
+está disponible. `TaskContext.input/output` es la interfaz de código usuario; concentra contención,
+declaración y resolución para que source/sink no repitan paths.
+
+`CodeIdentity.capture` prueba por orden versión explícita, Git limpio/dirty y evidencia de paquete
+instalable. `ScientificIdentity` agrupa configuración materializada, datos y código;
+`ExecutionIdentity` agrupa cluster, recursos y política de entorno. `IdentityExplainer` compara
+hojas científicas exactas para justificar un cache miss. Mantener estos valores separados impide
+que cambiar de cola invalide ciencia o que cambiar código reutilice silenciosamente un éxito.
 
 ## Construcción de objetos y plugins
 
@@ -142,6 +172,37 @@ se citan y no se usa `shell=True`. Cancelar/reencolar exige un job id numérico.
 transitorio. `RetryPolicy` limita intentos y backoff y pasa lineage al callable. Resume reutiliza
 estado compatible; restart parte sin él; retry repite un fallo bajo la misma intención; fork crea
 una nueva configuración/identidad. No deben usarse como sinónimos.
+
+## Plano de control, jobs y movimiento de datos
+
+`ControlPlane` es un servicio de aplicación local y no un nuevo runner. Pide a
+`ExecutionBundleBuilder` un bundle content-addressed con IR y entradas pequeñas; resuelve un
+`ClusterProfile`; obtiene `Transport` y `Scheduler` mediante `ControlPlaneFactory`; y delega la
+persistencia en `JobService`. El comando remoto vuelve a entrar por la CLI ordinaria, por lo que
+validación, fingerprints, training y resultados no se bifurcan.
+
+`Transport` posee conectividad, ejecución argv y copia; `LocalTransport` usa subprocess/filesystem y
+`SshTransport` OpenSSH/scp con host keys normales. `Scheduler` posee submit/state/log/cancel;
+`LocalScheduler` ejecuta síncrono y `SlurmScheduler` genera/envía `sbatch` y reconecta con
+`squeue`/`sacct`. Separarlos permite combinar SSH+SLURM, local+local o proveedores institucionales y
+probar cada fallo con fakes sin simular un clúster real.
+
+`JobRecord` es evidencia operacional serializable; `JobHandle` es la referencia ligera y `JobState`
+un vocabulario portable. `JobStore` escribe JSON atómico y `JobService` refresca/reconecta, lee logs,
+cancela o crea un retry enlazado sin modificar el intento anterior. No sustituye `TaskResult` o
+`RunResult`, que siguen siendo evidencia científica.
+
+`DataService` coordina consultas y transferencias de `DataCatalog`; `DataTransferProvider` posee el
+mecanismo y `RsyncDataTransferProvider` la implementación inicial. Replicar exige aplicación
+explícita y no reescribe el catálogo. Los datos grandes tampoco entran implícitamente en bundles.
+Esta separación evita que una simple selección de clúster cause una copia costosa y ambigua.
+
+`WorkflowNode.on` y `WorkflowPlan.placements` preparan placement, pero `WorkflowRunner` rechaza nodos
+no locales. Ejecutar un DAG distribuido correctamente necesita transferir artefactos enlazados y un
+coordinador durable capaz de recuperar dependencias tras reinicio; polling en memoria no satisface
+esa invariante. Del mismo modo, 0.5 verifica entornos existentes pero no instala software remoto ni
+autoelige cluster por capacidad/cola. Son límites deliberados, no responsabilidades ocultas en el
+runner.
 
 ## Operaciones de modelos e HPO
 

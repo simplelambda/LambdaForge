@@ -74,3 +74,38 @@ def test_workflow_validation_reports_invalid_node_without_execution(tmp_path: Pa
     assert not report.is_valid
     assert "node invalid" in report.summary()
     assert not (tmp_path / "runs").exists()
+
+
+def test_workflow_accepts_a_concise_task_node(tmp_path: Path) -> None:
+    """Workflow dispatch must apply the same authoring detection as the top-level facade."""
+    task = tmp_path / "concise.yaml"
+    task.write_text(
+        yaml.safe_dump(
+            {
+                "name": "concise-node",
+                "output_root": str(tmp_path / "tasks"),
+                "task": {
+                    "target": "tests.fixtures.UserTask.UserTask",
+                    "params": {"message": "concise"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "concise-pipeline",
+                "nodes": {"work": {"config": "concise.yaml"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    workflow = Workflow.from_yaml(workflow_path)
+    assert workflow.validate().is_valid
+    result = workflow.run()
+
+    assert isinstance(result, WorkflowResult)
+    assert result.nodes["work"]["outputs"]["message"] == "concise"

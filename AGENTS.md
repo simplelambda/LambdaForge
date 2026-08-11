@@ -11,7 +11,9 @@ LambdaForge is an installable, task-agnostic PyTorch/Lightning library. It provi
 composable preprocessing, reusable neural objects and a YAML engine for validation, construction,
 seed/sweep/HPO expansion, workflow DAGs, CPU/GPU/SLURM planning, training, aggregation, statistical
 comparisons, tracking, result auditing, checkpoint/model operations, artifact stores/cache and
-retention. A consumer project owns its datasets and domain code.
+retention. Version 0.5 also provides concise authoring, logical data/code identity and a local
+multi-cluster control plane with persistent jobs. A consumer project owns its datasets and domain
+code.
 
 Supported Python starts at 3.10. The documented public namespaces are `lambdaforge`,
 `lambdaforge.data`, `lambdaforge.nn`, `lambdaforge.metrics`, `lambdaforge.training`,
@@ -19,14 +21,16 @@ Supported Python starts at 3.10. The documented public namespaces are `lambdafor
 `lambdaforge.configuration`, `lambdaforge.workflows`, `lambdaforge.operations`, `lambdaforge.hpo`,
 `lambdaforge.execution`, `lambdaforge.storage`, `lambdaforge.registry`,
 `lambdaforge.observability`, `lambdaforge.reproducibility`, `lambdaforge.plugins`,
-`lambdaforge.tracking` and `lambdaforge.integrations`. Do not import from private file locations.
+`lambdaforge.tracking`, `lambdaforge.controlplane` and `lambdaforge.integrations`. Do not import
+from private file locations.
 
 ## Fast decision path
 
 | Need | Use |
 |---|---|
 | Run a configured study | `lambdaforge run experiment.yaml` |
-| Run reproducible non-training work | use `kind: task`, then the same validate/inspect/run commands |
+| See concise YAML as strict runner input | `lambdaforge inspect CONFIG --resolved` |
+| Run reproducible non-training work | concise `task`/`preprocess`, or strict `kind: task` |
 | Preprocess JSONL or file trees | start from `examples/preprocessing.yaml` |
 | Add project preprocessing | implement a transform or the source/transform/sink contracts below |
 | Compose preprocessing -> training | `kind: workflow`; validate/inspect/run its YAML |
@@ -52,6 +56,10 @@ Supported Python starts at 3.10. The documented public namespaces are `lambdafor
 | Remove/compress artifacts | preview `lambdaforge retain ...`; apply only with `--apply` |
 | Load a trained model | `Experiment.load_model(seed=..., variant=..., which="best")` |
 | Add a model/loss/metric | follow the contracts below; reference it by importable `target` |
+| Diagnose this or a remote environment | `lambdaforge doctor [--on CLUSTER]` |
+| Preview/submit remote work | `lambdaforge run CONFIG --on CLUSTER --dry-run`; remove dry-run to submit |
+| Reconnect to scheduled work | `lambdaforge jobs list/status/logs/cancel/retry` |
+| Declare large-data locations | `DataCatalog`; inspect/replicate with `lambdaforge data` |
 
 ## Install into a consumer project
 
@@ -74,7 +82,7 @@ reproducible release, build/install a versioned LambdaForge wheel instead of the
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.4.1-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.5.0-py3-none-any.whl
 ```
 
 Let the consumer lock the correct PyTorch wheel. `nvidia-smi` only proves the driver is visible;
@@ -88,6 +96,62 @@ Optional extras are `hpo` (Optuna), `adaptive-hpo` (BoTorch), `s3` (boto3), `par
 (Pandas/PyArrow), `onnx`, individual/all `mlflow`/`tensorboard`/`wandb` tracking providers and
 `dev`. Install only used providers, for example `lambdaforge[adaptive-hpo,s3]`; Sobol/random HPO,
 local stores and base training do not need those extras.
+
+## Version 0.5 authoring, identity and placement
+
+Prefer the smallest authoring document that still states the scientific intent. `AuthoringConfig`
+normalizes it into one strict `MaterializedConfig`; it does not create another runner. Always use
+`inspect --resolved` when an abbreviation/default is relevant to the task. Old strict task,
+experiment and workflow YAML remains valid.
+
+```yaml
+name: normalize-records
+inputs: {raw: data/raw.jsonl}
+outputs: {processed: processed}
+preprocess:
+  function: my_project.preprocessing.normalize_record
+  input: raw
+  output: processed
+  key_field: id
+  workers: 4
+  workload: io
+resources: {cpus: 4, memory: 8GiB, time: 30m}
+```
+
+New tasks should call `context.input("raw")` and `context.output("processed", create=True)`.
+Physical paths are resolved from top-level declarations and never repeated inside preprocessing.
+Legacy `declared_input_path`/`input_path`/`output_path` remain compatible. Local path inputs use
+strict content identity by default. For large immutable inputs choose a reviewed manifest,
+`dataset-artifact.json` ID or explicit external version, or use `dataset:NAME` plus a `DataCatalog`;
+never silently downgrade identity because hashing is expensive.
+
+Scientific identity contains materialized scientific config, logical dataset identity and
+`CodeIdentity`. Code capture is a clean Git commit, dirty commit plus working-tree content hash,
+explicit `code_version`, or installable-project version/source evidence. `ExecutionIdentity`
+contains cluster/resources/environment and does not change scientific reuse. Explain exact changes
+with `lambdaforge explain changes CURRENT [--against PREVIOUS]`.
+
+Default `run` reuses verified success and resumes compatible partial state. `--no-resume` disables
+partial continuation but still reuses success; `--force` creates another attempt; `--restart`
+creates another attempt without partial state. Do not emulate these operations by deleting or
+renaming fingerprint directories.
+
+Remote execution is explicit:
+
+```bash
+lambdaforge clusters list
+lambdaforge doctor --on atlas
+lambdaforge run experiment.yaml --on atlas --dry-run
+lambdaforge run experiment.yaml --on atlas --cpus 8 --memory 32GiB --resource-gpus 1
+lambdaforge jobs status JOB_ID
+```
+
+`ClusterCatalog` selects a transport, scheduler, absolute workspace, Python command and data
+environment. `ExecutionBundleBuilder` stages strict YAML and bounded small inputs; large data must
+already have a catalog location or be replicated explicitly with preview then `--apply`.
+`ControlPlane`/`JobService` are the provider-neutral application layer. SSH/SLURM credentials stay
+in their native runtime. Do not execute workflow nodes with non-local `on`: version 0.5 exposes the
+placement in plans but refuses execution until durable DAG recovery and artifact transfer exist.
 
 ## Safe experiment workflow
 
@@ -344,7 +408,9 @@ conditional `when`. `OptunaSearch` lazily requires Optuna and wraps seeded TPE p
 `asha`/`hyperband`. Existing grids/ablations do not change.
 
 CPU experiment parallelism omits GPUs and sets `cpu_jobs`; affinity oversubscription is rejected.
-`ResourceRequest` plus `ResourcePlanner` create declared capacity-safe waves/estimates.
+`ResourceRequest.from_mapping()` normalizes `cpus`, `memory`, `gpus`, `gpu_memory`, `storage`,
+`time` and `processes`; byte and duration units remain explicit. `ResourcePlanner` compares workload
+requests with separately declared capacity and creates capacity-safe waves/estimates.
 `LocalExecutionBackend` runs argv. `SlurmExecutionBackend` writes quoted `submit.sbatch` and submits
 only with `dry_run=False`; it supports nodes/array/dependency/resources/environment/container/requeue
 and never `shell=True`. `FailureClassifier`, `RetryPolicy` and `AttemptMode` keep failure and
@@ -662,17 +728,20 @@ Use these only for depth required by the current task:
 - `src/lambdaforge/data/README.md`: datasets, serialization, fingerprints and caching.
 - `src/lambdaforge/tasks/README.md`: generic task Schema, contract, planning, results and artifacts.
 - `src/lambdaforge/preprocessing/README.md`: built-ins, custom contracts, resume, shards and dataset identity.
+- `src/lambdaforge/controlplane/README.md`: clusters, bundles, providers, jobs and remote limits.
 - `src/lambdaforge/metrics/README.md`: metric semantics, streaming error and DDP state.
 - `src/lambdaforge/plugins/README.md`: entry-point publication, contracts and provenance.
 - `src/lambdaforge/tracking/README.md`: provider setup, privacy and lifecycle.
 - `docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.md`: adaptive identity, controller/backend ownership,
   recovery and failure semantics.
 
-Known intentional boundaries: each task attempt and workflow runner are local; the SLURM backend
-submits explicit plans but does not discover cluster topology or translate a whole DAG automatically.
+Known intentional boundaries: each task attempt and workflow runner are local; the control plane
+submits one complete document but does not auto-place or execute a mixed-cluster DAG. Cluster
+capacity discovery/queue-cost placement is not inferred. Remote environments are verified but not
+created or mutated. Large datasets move only through an explicit transfer provider/apply action.
 Distributed cache leases require a coherent shared filesystem; remote destructive lifecycle remains
 provider-owned. The dashboard is static/read-only. Adaptive HPO schedules local independent trials,
 not DDP actions or direct SLURM jobs; finite adapters do not silently schedule science. No pretrained
 weights, native optimized S4/Mamba kernels, native `l>=2` irreps, adaptive
 stiff ODE solver, graph sampling or compiled sparse kernels. The integrated README roadmap records
-the closed 1–30 implementation status and the owner licence decision still required for release.
+the implementation status through 0.5 and the owner licence decision still required for release.

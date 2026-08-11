@@ -13,15 +13,29 @@ from lambdaforge.tasks.TaskContext import TaskContext
 class FileTreeSource(PreprocessingSource):
     """Yield regular files below a YAML-relative root using a glob pattern."""
 
-    def __init__(self, root: str | Path, pattern: str = "**/*") -> None:
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        pattern: str = "**/*",
+        input_name: str | None = None,
+    ) -> None:
+        if root is None and input_name is None:
+            raise ValueError("FileTreeSource requires root or input_name.")
+        if root is not None and input_name is not None:
+            raise ValueError("FileTreeSource root and input_name are mutually exclusive.")
         if not str(pattern).strip():
             raise ValueError("FileTreeSource.pattern cannot be empty.")
-        self.root = Path(root)
+        self.root = Path(root) if root is not None else None
+        self.input_name = input_name
         self.pattern = str(pattern)
 
     def records(self, context: TaskContext) -> Iterable[PreprocessingRecord]:
         """Yield sorted non-symlink files with paths relative to the source root."""
-        root = context.declared_input_path(self.root)
+        root = (
+            context.input(self.input_name)
+            if self.input_name is not None
+            else context.declared_input_path(self.root or "")
+        )
         if not root.is_dir():
             raise NotADirectoryError(f"FileTreeSource root is not a directory: {root}")
         for path in sorted(root.glob(self.pattern)):

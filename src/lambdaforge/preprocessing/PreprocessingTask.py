@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import traceback
 from collections.abc import Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
 from lambdaforge.preprocessing.PreprocessingErrorPolicy import PreprocessingErrorPolicy
 from lambdaforge.preprocessing.PreprocessingManifest import PreprocessingManifest
 from lambdaforge.preprocessing.PreprocessingRecord import PreprocessingRecord
+from lambdaforge.preprocessing.PreprocessingWorkload import PreprocessingWorkload
 from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
 from lambdaforge.tasks.ArtifactType import ArtifactType
 from lambdaforge.tasks.Task import Task
@@ -39,6 +41,8 @@ class PreprocessingTask(Task):
         shard_index: int = 0,
         on_error: PreprocessingErrorPolicy | str = PreprocessingErrorPolicy.FAIL,
         checkpoint_interval: int = 1,
+        workers: int = 1,
+        workload: PreprocessingWorkload | str = PreprocessingWorkload.AUTO,
         dataset_name: str | None = None,
         dataset_version: str = "1",
         dataset_splits: Mapping[str, int] | None = None,
@@ -51,6 +55,8 @@ class PreprocessingTask(Task):
             raise ValueError("Preprocessing shard_index must be within [0, shard_count).")
         if isinstance(checkpoint_interval, bool) or int(checkpoint_interval) < 1:
             raise ValueError("Preprocessing checkpoint_interval must be at least 1.")
+        if isinstance(workers, bool) or int(workers) < 1:
+            raise ValueError("Preprocessing workers must be at least 1.")
         if not callable(getattr(source, "records", None)):
             raise TypeError("Preprocessing source must expose records(context).")
         if not callable(getattr(sink, "write", None)):
@@ -67,6 +73,8 @@ class PreprocessingTask(Task):
         self.shard_index = int(shard_index)
         self.on_error = PreprocessingErrorPolicy(on_error)
         self.checkpoint_interval = int(checkpoint_interval)
+        self.workers = int(workers)
+        self.workload = PreprocessingWorkload(workload)
         self.dataset_name = dataset_name
         self.dataset_version = str(dataset_version)
         self.dataset_splits = dict(dataset_splits or {})
@@ -94,59 +102,89 @@ class PreprocessingTask(Task):
         failures = 0
         selected = 0
         since_checkpoint = 0
-        for record in self.source.records(context):
-            if not isinstance(record, PreprocessingRecord):
-                raise TypeError("Preprocessing sources must yield PreprocessingRecord objects.")
-            if record.key in seen:
-                raise ValueError(f"Duplicate preprocessing record key: {record.key!r}.")
-            seen.add(record.key)
-            if not self._belongs_to_shard(record.key):
-                continue
-            selected += 1
-            if context.stop_requested:
-                self._checkpoint(manifest_path, context, started, records, complete=False)
-                raise KeyboardInterrupt("Preprocessing was cancelled.")
-            prior = records.get(record.key, {})
-            complete = prior.get("status") == "ok" and self._sink_is_complete(record.key, context)
-            if complete:
-                resumed += 1
-                continue
-            try:
-                transformed = record
-                for transform in self.transforms:
-                    transformed = transform.transform(transformed, context)
-                    if not isinstance(transformed, PreprocessingRecord):
-                        raise TypeError(
-                            "Preprocessing transforms must return PreprocessingRecord objects."
-                        )
-                    if transformed.key != record.key:
-                        raise ValueError(
-                            "Preprocessing transforms cannot change stable record keys."
-                        )
-                self.sink.write(transformed, context)
-                records[record.key] = {
-                    "status": "ok",
-                    "updated_at_utc": datetime.now(timezone.utc).isoformat(),
-                }
-                processed += 1
-            except Exception as error:
-                failures += 1
-                records[record.key] = {
-                    "status": "failed",
-                    "updated_at_utc": datetime.now(timezone.utc).isoformat(),
-                    "error": {
-                        "type": error.__class__.__name__,
-                        "message": str(error),
-                        "traceback": traceback.format_exc(),
-                    },
-                }
-                self._checkpoint(manifest_path, context, started, records, complete=False)
-                if self.on_error is PreprocessingErrorPolicy.FAIL:
-                    raise
-            since_checkpoint += 1
-            if since_checkpoint >= self.checkpoint_interval:
-                self._checkpoint(manifest_path, context, started, records, complete=False)
-                since_checkpoint = 0
+        pending: dict[Future[None], PreprocessingRecord] = {}
+        executor = ThreadPoolExecutor(max_workers=self.workers) if self.workers > 1 else None
+        try:
+            for record in self.source.records(context):
+                if not isinstance(record, PreprocessingRecord):
+                    raise TypeError("Preprocessing sources must yield PreprocessingRecord objects.")
+                if record.key in seen:
+                    raise ValueError(f"Duplicate preprocessing record key: {record.key!r}.")
+                seen.add(record.key)
+                if not self._belongs_to_shard(record.key):
+                    continue
+                selected += 1
+                if context.stop_requested:
+                    self._checkpoint(manifest_path, context, started, records, complete=False)
+                    raise KeyboardInterrupt("Preprocessing was cancelled.")
+                prior = records.get(record.key, {})
+                complete = prior.get("status") == "ok" and self._sink_is_complete(
+                    record.key, context
+                )
+                if complete:
+                    resumed += 1
+                    continue
+                if executor is None:
+                    try:
+                        self._transform_and_write(record, context)
+                        records[record.key] = self._success_record()
+                        processed += 1
+                    except Exception as error:
+                        failures += 1
+                        records[record.key] = self._failed_record(error)
+                        self._checkpoint(manifest_path, context, started, records, complete=False)
+                        if self.on_error is PreprocessingErrorPolicy.FAIL:
+                            raise
+                    since_checkpoint += 1
+                else:
+                    pending[executor.submit(self._transform_and_write, record, context)] = record
+                    if len(pending) >= self.workers * 2:
+                        done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+                        for future in done:
+                            current = pending.pop(future)
+                            try:
+                                future.result()
+                                records[current.key] = self._success_record()
+                                processed += 1
+                            except Exception as error:
+                                failures += 1
+                                records[current.key] = self._failed_record(error)
+                                if self.on_error is PreprocessingErrorPolicy.FAIL:
+                                    for waiting in pending:
+                                        waiting.cancel()
+                                    self._checkpoint(
+                                        manifest_path, context, started, records, complete=False
+                                    )
+                                    raise
+                            since_checkpoint += 1
+                if since_checkpoint >= self.checkpoint_interval:
+                    self._checkpoint(manifest_path, context, started, records, complete=False)
+                    since_checkpoint = 0
+            while pending:
+                done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+                for future in done:
+                    current = pending.pop(future)
+                    try:
+                        future.result()
+                        records[current.key] = self._success_record()
+                        processed += 1
+                    except Exception as error:
+                        failures += 1
+                        records[current.key] = self._failed_record(error)
+                        if self.on_error is PreprocessingErrorPolicy.FAIL:
+                            for waiting in pending:
+                                waiting.cancel()
+                            self._checkpoint(
+                                manifest_path, context, started, records, complete=False
+                            )
+                            raise
+                    since_checkpoint += 1
+                    if since_checkpoint >= self.checkpoint_interval:
+                        self._checkpoint(manifest_path, context, started, records, complete=False)
+                        since_checkpoint = 0
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
 
         final_declarations = self._finalize_sink(context)
         self._checkpoint(manifest_path, context, started, records, complete=True)
@@ -215,8 +253,36 @@ class PreprocessingTask(Task):
                 "shard_count": self.shard_count,
                 "shard_index": self.shard_index,
                 "on_error": self.on_error.value,
+                "workers": self.workers,
+                "workload": self.workload.value,
             },
         )
+
+    def _transform_and_write(self, record: PreprocessingRecord, context: TaskContext) -> None:
+        transformed = record
+        for transform in self.transforms:
+            transformed = transform.transform(transformed, context)
+            if not isinstance(transformed, PreprocessingRecord):
+                raise TypeError("Preprocessing transforms must return PreprocessingRecord objects.")
+            if transformed.key != record.key:
+                raise ValueError("Preprocessing transforms cannot change stable record keys.")
+        self.sink.write(transformed, context)
+
+    @staticmethod
+    def _success_record() -> Mapping[str, Any]:
+        return {"status": "ok", "updated_at_utc": datetime.now(timezone.utc).isoformat()}
+
+    @staticmethod
+    def _failed_record(error: Exception) -> Mapping[str, Any]:
+        return {
+            "status": "failed",
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "error": {
+                "type": error.__class__.__name__,
+                "message": str(error),
+                "traceback": "".join(traceback.format_exception(error)),
+            },
+        }
 
     def _checkpoint(
         self,

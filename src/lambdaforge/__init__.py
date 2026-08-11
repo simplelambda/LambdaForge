@@ -6,6 +6,8 @@ from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 from lambdaforge.LazyExports import LazyExports
 
 if TYPE_CHECKING:
+    from lambdaforge.configuration.MaterializedConfig import MaterializedConfig
+    from lambdaforge.controlplane.JobHandle import JobHandle
     from lambdaforge.experiments.AggregateResult import AggregateResult
     from lambdaforge.experiments.Experiment import Experiment
     from lambdaforge.experiments.results.ResultCatalog import ResultCatalog
@@ -49,6 +51,11 @@ LazyExports.install(
         ),
         "Experiment": ("lambdaforge.experiments.Experiment", "Experiment"),
         "LambdaForge": ("lambdaforge.LambdaForge", "LambdaForge"),
+        "JobHandle": ("lambdaforge.controlplane.JobHandle", "JobHandle"),
+        "MaterializedConfig": (
+            "lambdaforge.configuration.MaterializedConfig",
+            "MaterializedConfig",
+        ),
         "RunResult": ("lambdaforge.experiments.RunResult", "RunResult"),
         "ResultCatalog": (
             "lambdaforge.experiments.results.ResultCatalog",
@@ -83,6 +90,8 @@ __all__ = [
     "ArtifactRetentionResult",
     "Experiment",
     "LambdaForge",
+    "JobHandle",
+    "MaterializedConfig",
     "RunResult",
     "ResultCatalog",
     "ResultRecord",

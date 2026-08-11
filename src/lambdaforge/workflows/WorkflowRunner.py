@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from lambdaforge.configuration.AuthoringConfigNormalizer import AuthoringConfigNormalizer
+from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
 from lambdaforge.configuration.ResolvedConfiguration import ResolvedConfiguration
 from lambdaforge.experiments.Experiment import Experiment
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
@@ -40,7 +42,13 @@ class WorkflowRunner:
             completed.update(ready)
             for name in ready:
                 del remaining[name]
-        return WorkflowPlan(config.name, config.run_dir, tuple(levels), config.max_parallel)
+        return WorkflowPlan(
+            config.name,
+            config.run_dir,
+            tuple(levels),
+            config.max_parallel,
+            {node.name: node.cluster for node in config.nodes},
+        )
 
     def run(
         self, config: WorkflowConfig, *, dry_run: bool = False
@@ -49,6 +57,13 @@ class WorkflowRunner:
         plan = self.plan(config)
         if dry_run:
             return plan
+        remote = [node.name for node in config.nodes if node.cluster != "local"]
+        if remote:
+            raise ValueError(
+                "Remote workflow coordination is not enabled in the in-process DAG runner. "
+                f"Remote nodes: {remote}. Submit their configs with 'lambdaforge run --on' "
+                "and keep data transfer explicit."
+            )
         node_by_name = {node.name: node for node in config.nodes}
         outcomes: dict[str, dict[str, Any]] = {}
         for level in plan.levels:
@@ -93,7 +108,7 @@ class WorkflowRunner:
         data, source, resolution = node.materialize()
         for path, value in node.bindings.items():
             ExperimentConfig.set_value(data, str(path), self._resolve(value, outcomes))
-        if data.get("kind") == "task":
+        if AuthoringConfigNormalizer().detect(data) is ConfigurationKind.TASK:
             if resolution is not None:
                 resolution = ResolvedConfiguration(
                     data,

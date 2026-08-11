@@ -1,0 +1,20 @@
+# Copy this file to the consumer project and replace the illustrative values.
+clusters:
+  atlas:
+    transport: ssh
+    host: atlas-login
+    scheduler: slurm
+    workspace: /scratch/USER/lambdaforge
+    python: /shared/envs/research/bin/python
+    data_environment: atlas
+    scheduler_options:
+      partition: gpu
+profiles:
+  one-gpu:
+    cluster: atlas
+    resources:
+      cpus: 8
+      memory: 32GiB
+      gpus: 1
+      gpu_memory: 20GiB
+      time: 4h

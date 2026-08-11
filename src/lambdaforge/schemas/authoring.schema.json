@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.dev/lambdaforge/schemas/authoring-1.0.json",
+  "title": "LambdaForge concise authoring configuration",
+  "description": "User-facing configuration compiled to strict task, experiment or workflow IR.",
+  "type": "object",
+  "properties": {
+    "authoring_version": {"const": "1.0"},
+    "schema_version": {"type": "string"},
+    "kind": {"enum": ["task", "workflow", "experiment"]},
+    "name": {"type": "string", "minLength": 1},
+    "inputs": {
+      "oneOf": [
+        {"type": "array", "items": {"type": "object"}},
+        {"type": "object"}
+      ]
+    },
+    "outputs": {"type": "object", "additionalProperties": {"type": "string"}},
+    "preprocess": {
+      "oneOf": [
+        {"type": "string", "minLength": 3},
+        {
+          "type": "object",
+          "required": ["function"],
+          "properties": {"function": {"type": "string", "minLength": 3}},
+          "additionalProperties": true
+        }
+      ]
+    },
+    "resources": {"type": "object"},
+    "data_catalog": {"type": "string", "minLength": 1},
+    "code_version": {"type": "string", "minLength": 1},
+    "task": {"oneOf": [{"type": "string", "minLength": 3}, {"type": "object"}]},
+    "model": {"oneOf": [{"type": "string", "minLength": 3}, {"type": "object"}]},
+    "nodes": {"type": "object"}
+  },
+  "additionalProperties": true
+}
