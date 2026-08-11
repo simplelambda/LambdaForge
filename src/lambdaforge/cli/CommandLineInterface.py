@@ -7,18 +7,24 @@ import importlib
 import inspect as python_inspect
 import json
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.artifacts.ArtifactPluginRegistry import ArtifactPluginRegistry
+from lambdaforge.artifacts.ArtifactService import ArtifactService
+from lambdaforge.artifacts.NumpyArtifactValidator import NumpyArtifactValidator
+from lambdaforge.artifacts.RemoteArtifactService import RemoteArtifactService
 from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
 from lambdaforge.configuration.AuthoringSchemaCatalog import AuthoringSchemaCatalog
 from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
 from lambdaforge.configuration.ConfigurationDiff import ConfigurationDiff
 from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
+from lambdaforge.controlplane.ClusterProfile import ClusterProfile
+from lambdaforge.controlplane.ClusterService import ClusterService
 from lambdaforge.controlplane.ControlPlane import ControlPlane
-from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.Doctor import Doctor
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.JobState import JobState
@@ -39,15 +45,19 @@ from lambdaforge.experiments.results.ResultCatalog import ResultCatalog
 from lambdaforge.experiments.results.RunFingerprint import RunFingerprint
 from lambdaforge.plugins.PluginKind import PluginKind
 from lambdaforge.plugins.PluginRegistry import PluginRegistry
+from lambdaforge.preprocessing.PreprocessingDebugService import PreprocessingDebugService
 from lambdaforge.registry.ExperimentRegistry import ExperimentRegistry
 from lambdaforge.registry.LocalDashboard import LocalDashboard
 from lambdaforge.reproducibility.IdentityExplainer import IdentityExplainer
+from lambdaforge.results.RemoteResultService import RemoteResultService
+from lambdaforge.results.ResultService import ResultService
 from lambdaforge.tasks.TaskConfig import TaskConfig
 from lambdaforge.tasks.TaskExecutionPlan import TaskExecutionPlan
 from lambdaforge.tasks.TaskRun import TaskRun
 from lambdaforge.tasks.TaskSchemaCatalog import TaskSchemaCatalog
 from lambdaforge.tasks.TaskStatus import TaskStatus
 from lambdaforge.tasks.TaskValidator import TaskValidator
+from lambdaforge.visualization.VisualizationService import VisualizationService
 from lambdaforge.workflows.Workflow import Workflow
 from lambdaforge.workflows.WorkflowPlan import WorkflowPlan
 from lambdaforge.workflows.WorkflowSchemaCatalog import WorkflowSchemaCatalog
@@ -61,7 +71,14 @@ class CommandLineInterface:
     def main(cls, argv: Sequence[str] | None = None) -> int:
         """Run the CLI and return a process exit code."""
         parser = cls._parser()
-        arguments = parser.parse_args(argv)
+        raw_arguments = list(argv) if argv is not None else sys.argv[1:]
+        if (
+            len(raw_arguments) >= 2
+            and raw_arguments[0] == "results"
+            and raw_arguments[1] not in {"audit", "list", "show", "compare", "export", "sync"}
+        ):
+            raw_arguments.insert(1, "audit")
+        arguments = parser.parse_args(raw_arguments)
         if arguments.command == "init":
             return cls._initialize(
                 arguments.directory, force=arguments.force, template=arguments.template
@@ -108,7 +125,9 @@ class CommandLineInterface:
                 return 1
         if arguments.command == "doctor":
             try:
-                doctor_report = Doctor(ClusterCatalog.load(arguments.clusters)).check(arguments.on)
+                doctor_report = Doctor(ClusterCatalog.load(arguments.clusters)).check(
+                    arguments.on, config_path=arguments.config
+                )
                 print(
                     json.dumps(doctor_report.to_dict(), indent=2)
                     if arguments.json
@@ -121,6 +140,22 @@ class CommandLineInterface:
         if arguments.command == "clusters":
             try:
                 cluster_catalog = ClusterCatalog.load(arguments.catalog)
+                if arguments.cluster_command == "add":
+                    destination = arguments.catalog or Path("lambdaforge.clusters.yaml")
+                    cluster_profile = ClusterProfile(
+                        arguments.name,
+                        transport="ssh" if arguments.host else "local",
+                        scheduler=arguments.scheduler,
+                        host=arguments.host,
+                        workspace=arguments.workspace,
+                        python=arguments.python,
+                        environment=arguments.environment,
+                        wheelhouse=(str(arguments.wheelhouse) if arguments.wheelhouse else None),
+                        project_module=arguments.project_module,
+                        data_environment=arguments.data_environment,
+                    )
+                    print(ClusterCatalog.add(destination, cluster_profile))
+                    return 0
                 if arguments.cluster_command == "list":
                     cluster_payload = [
                         cluster_catalog.get(name).to_dict() for name in cluster_catalog.names()
@@ -148,26 +183,17 @@ class CommandLineInterface:
                         else cluster_report.summary()
                     )
                     return 0 if cluster_report.ok else 1
-                transport = ControlPlaneFactory().transport(cluster_profile)
-                created = transport.run(("mkdir", "-p", cluster_profile.workspace))
-                if created.returncode:
-                    raise RuntimeError(created.stderr)
-                checked = transport.run(
-                    (
-                        *cluster_profile.command_prefix,
-                        cluster_profile.python,
-                        "-c",
-                        "import lambdaforge",
-                    )
+                bootstrapped = ClusterService(cluster_catalog).bootstrap(
+                    cluster_profile.name, wheelhouse=arguments.wheelhouse
                 )
-                if checked.returncode:
-                    raise RuntimeError(
-                        "Workspace exists, but LambdaForge is unavailable in the configured "
-                        "Python. Install the pinned release in that environment."
-                    )
                 print(
-                    f"Cluster {cluster_profile.name!r} workspace and "
-                    "existing environment are ready."
+                    json.dumps(bootstrapped.to_dict(), indent=2)
+                    if arguments.json
+                    else (
+                        f"Cluster {bootstrapped.cluster!r} is ready with "
+                        f"{bootstrapped.environment_id} "
+                        f"({'reused' if bootstrapped.reused else 'created'})."
+                    )
                 )
                 return 0
             except Exception as error:
@@ -177,7 +203,11 @@ class CommandLineInterface:
             try:
                 jobs = JobService(ClusterCatalog.load(arguments.clusters))
                 if arguments.job_command == "list":
-                    job_records = jobs.list(cluster=arguments.cluster, state=arguments.state)
+                    job_records = jobs.list(
+                        cluster=arguments.cluster,
+                        state=arguments.state,
+                        name=arguments.name,
+                    )
                     if arguments.json:
                         print(json.dumps([record.to_dict() for record in job_records], indent=2))
                     else:
@@ -198,6 +228,8 @@ class CommandLineInterface:
                     )
                     return 0
                 if arguments.job_command == "logs":
+                    if arguments.follow:
+                        return cls._follow_job_logs(jobs, arguments.job_id, tail=arguments.tail)
                     print(jobs.logs(arguments.job_id, tail=arguments.tail), end="")
                     return 0
                 if arguments.job_command == "cancel":
@@ -210,6 +242,33 @@ class CommandLineInterface:
             except Exception as error:
                 print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
                 return 1
+        if arguments.command in {"status", "logs", "cancel", "retry"}:
+            forwarded = ["jobs"]
+            if arguments.clusters is not None:
+                forwarded.extend(("--clusters", str(arguments.clusters)))
+            if arguments.command == "status" and arguments.job_id is None:
+                forwarded.append("list")
+                for value, flag in (
+                    (arguments.on, "--cluster"),
+                    (arguments.state, "--state"),
+                    (arguments.name, "--name"),
+                ):
+                    if value is not None:
+                        forwarded.extend((flag, str(value)))
+                if arguments.json:
+                    forwarded.append("--json")
+            else:
+                forwarded.extend((arguments.command, arguments.job_id))
+                if arguments.command == "status" and arguments.json:
+                    forwarded.append("--json")
+                if arguments.command == "logs":
+                    if arguments.tail is not None:
+                        forwarded.extend(("--tail", str(arguments.tail)))
+                    if arguments.follow:
+                        forwarded.append("--follow")
+                if arguments.command == "retry" and arguments.dry_run:
+                    forwarded.append("--dry-run")
+            return cls.main(forwarded)
         if arguments.command == "data":
             try:
                 service = DataService(
@@ -220,6 +279,8 @@ class CommandLineInterface:
                     data_payload: object = service.list()
                 elif arguments.data_command == "locations":
                     data_payload = service.locations(arguments.dataset)
+                elif arguments.data_command == "inspect":
+                    data_payload = service.inspect(arguments.dataset)
                 else:
                     data_payload = service.replicate(
                         arguments.dataset,
@@ -384,6 +445,78 @@ class CommandLineInterface:
                 return 1
         if arguments.command == "results":
             try:
+                if arguments.results_command == "list":
+                    records = ResultService(arguments.root or ("runs",)).records(
+                        status=arguments.status
+                    )
+                    payload = [record.to_dict() for record in records]
+                    if arguments.json:
+                        print(json.dumps(payload, indent=2))
+                    else:
+                        for record in records:
+                            print(
+                                f"{record.attempt_id:<32} {record.status:<11} "
+                                f"{record.result.name} seed={record.result.seed}"
+                            )
+                    return 0
+                if arguments.results_command == "show":
+                    shown = ResultService(arguments.root or ("runs",)).show(arguments.selector)
+                    if arguments.json:
+                        print(json.dumps(shown, indent=2))
+                    else:
+                        print(f"Selector: {shown['selector']}  ambiguous={shown['ambiguous']}")
+                        for record in shown["records"]:
+                            metrics = ", ".join(
+                                f"{key}={value}" for key, value in record.get("metrics", {}).items()
+                            )
+                            print(
+                                f"{record['attempt_id']:<32} {record['status']:<11} "
+                                f"{record['name']} seed={record.get('seed')}  {metrics}"
+                            )
+                    return 0
+                if arguments.results_command == "compare":
+                    compared = ResultService(arguments.root or ("runs",)).compare(
+                        arguments.selectors,
+                        metrics=arguments.metric,
+                        confidence_level=arguments.confidence,
+                        direction=arguments.direction,
+                    )
+                    if arguments.json:
+                        print(json.dumps(compared, indent=2))
+                    else:
+                        for comparison in compared["comparisons"]:
+                            print(f"Metric: {comparison['metric']}")
+                            print("GROUP  N  MEAN  STD  CI  DELTA VS BASELINE")
+                            for label, summary in comparison["groups"].items():
+                                interval = summary["confidence_interval"]
+                                print(
+                                    f"{label}  {summary['count']}  {summary['mean']:.6g}  "
+                                    f"{summary['stdev']:.6g}  [{interval[0]:.6g}, "
+                                    f"{interval[1]:.6g}]  {summary['delta_vs_baseline']:+.6g}"
+                                )
+                            if comparison.get("direction"):
+                                print(
+                                    f"Best: {comparison['best_group']}  "
+                                    f"Worst: {comparison['worst_group']}"
+                                )
+                    return 0
+                if arguments.results_command == "export":
+                    suffix = arguments.format
+                    destination = arguments.output or Path(
+                        f"{str(arguments.selector).replace('/', '-')}-results.{suffix}"
+                    )
+                    print(
+                        ResultService(arguments.root or ("runs",)).export(
+                            arguments.selector,
+                            destination,
+                            metric_series=arguments.series,
+                        )
+                    )
+                    return 0
+                if arguments.results_command == "sync":
+                    synced = RemoteResultService(root=arguments.destination).sync(arguments.job_id)
+                    print(json.dumps(synced.to_dict(), indent=2))
+                    return 0
                 source = arguments.source
                 result_catalog = (
                     TaskRun.from_yaml(source).result_catalog()
@@ -431,6 +564,164 @@ class CommandLineInterface:
                 return (
                     2 if arguments.fail_on_ambiguous and result_catalog.ambiguous_successes() else 0
                 )
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
+        if arguments.command == "plot":
+            try:
+                visualization = VisualizationService()
+                if arguments.plot_command == "learning":
+                    selector: str | Path = arguments.selector
+                    if str(selector).startswith("job-"):
+                        selector = Path(RemoteResultService().sync(str(selector)).destination)
+                    spec = visualization.learning(
+                        selector,
+                        metrics=arguments.metric,
+                        aggregate=arguments.aggregate,
+                        uncertainty=arguments.uncertainty,
+                    )
+                elif arguments.plot_command == "sweep":
+                    spec = visualization.sweep(
+                        arguments.config,
+                        x=arguments.x,
+                        y=arguments.y,
+                        metrics=arguments.metric,
+                        uncertainty=arguments.uncertainty,
+                        interpolate=arguments.interpolate,
+                        view=arguments.kind,
+                        normalize=arguments.normalize,
+                    )
+                elif arguments.plot_command == "seeds":
+                    spec = visualization.seed_distribution(
+                        arguments.selector, metric=arguments.metric, kind=arguments.kind
+                    )
+                elif arguments.plot_command == "hpo":
+                    spec = visualization.hpo(
+                        arguments.study,
+                        parameter=arguments.parameter,
+                        direction=arguments.direction,
+                    )
+                else:
+                    spec = visualization.resources(arguments.selector)
+                if arguments.json:
+                    print(json.dumps(spec.to_dict(), indent=2))
+                    return 0
+                output = arguments.output or Path(f"{spec.plot_type}.png")
+                if getattr(arguments, "follow", False):
+                    return cls._follow_plot(arguments, visualization, output)
+                print(visualization.render(spec, output))
+                return 0
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
+        if arguments.command == "artifact":
+            try:
+                artifact_service = ArtifactService()
+                if arguments.artifact_command == "inspect":
+                    artifact_inspection = artifact_service.inspect(
+                        arguments.path,
+                        array=arguments.array,
+                        rows=arguments.rows,
+                        slice_expression=arguments.slice,
+                        inspector=arguments.inspector,
+                    )
+                    if arguments.json:
+                        print(json.dumps(artifact_inspection.to_dict(), indent=2))
+                    else:
+                        print(
+                            f"Type: {artifact_inspection.artifact_type}\n"
+                            f"Path: {artifact_inspection.path}\n"
+                            f"Size: {artifact_inspection.size_bytes} bytes"
+                        )
+                        for item in artifact_inspection.items:
+                            if "name" in item:
+                                print(
+                                    f"{item['name']:<24} shape={tuple(item['shape'])!s:<18} "
+                                    f"dtype={item['dtype']:<12} elements={item['elements']}"
+                                )
+                            else:
+                                print(json.dumps(dict(item), indent=2))
+                elif arguments.artifact_command == "export":
+                    destination = arguments.output or arguments.path.with_suffix(
+                        f".{arguments.format}"
+                    )
+                    print(
+                        artifact_service.export_array(
+                            arguments.path, array=arguments.array, destination=destination
+                        )
+                    )
+                elif arguments.artifact_command == "visualize":
+                    roles = {
+                        key: value
+                        for key, value in {
+                            "positions": arguments.positions,
+                            "nodes": arguments.nodes,
+                            "edges": arguments.edges,
+                        }.items()
+                        if value is not None
+                    }
+                    spec = artifact_service.visualization_spec(
+                        arguments.path,
+                        visualization_type=arguments.type,
+                        roles=roles,
+                        visualizer=arguments.visualizer,
+                    )
+                    if arguments.json:
+                        print(json.dumps(spec.to_dict(), indent=2))
+                    else:
+                        print(VisualizationService().render(spec, arguments.output))
+                elif arguments.artifact_command == "list":
+                    artifact_payload = (
+                        RemoteArtifactService().list(arguments.selector)
+                        if str(arguments.selector).startswith("job-")
+                        else artifact_service.list(arguments.selector)
+                    )
+                    if arguments.json:
+                        print(json.dumps(artifact_payload, indent=2))
+                    else:
+                        for artifact in artifact_payload:
+                            print(
+                                f"{str(artifact.get('logical_name')):<32} "
+                                f"{str(artifact.get('type', 'artifact')):<14} "
+                                f"{str(artifact.get('size_bytes', '?')):<12} "
+                                f"{artifact.get('location', artifact.get('path', ''))}"
+                            )
+                elif arguments.artifact_command == "fetch":
+                    print(
+                        RemoteArtifactService().fetch(
+                            arguments.job_id, arguments.logical_name, arguments.output
+                        )
+                    )
+                elif arguments.artifact_command == "plugins":
+                    print(json.dumps(ArtifactPluginRegistry().names(arguments.kind), indent=2))
+                else:
+                    shapes = cls._artifact_shapes(arguments.shape)
+                    artifact_validator = NumpyArtifactValidator(
+                        required_arrays=arguments.require_array,
+                        shapes=shapes,
+                        finite=arguments.finite,
+                    )
+                    print(
+                        json.dumps(
+                            artifact_service.validate(
+                                arguments.path, (artifact_validator,)
+                            ).to_dict(),
+                            indent=2,
+                        )
+                    )
+                return 0
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
+        if arguments.command == "debug":
+            try:
+                report = PreprocessingDebugService().debug(
+                    arguments.config,
+                    records=arguments.records,
+                    intermediates=arguments.intermediates,
+                )
+                print(json.dumps(report.to_dict(), indent=2))
+                return 0 if report.ok else 1
             except Exception as error:
                 print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
                 return 1
@@ -592,8 +883,11 @@ class CommandLineInterface:
     ) -> ResourceRequest:
         """Merge portable YAML resources with explicit CLI overrides."""
         values: dict[str, object] = base.to_dict() if base is not None else {}
-        if base is None and TaskConfig.is_task_file(arguments.config):
-            values.update(TaskConfig.from_yaml(arguments.config).resources.to_dict())
+        if base is None:
+            if TaskConfig.is_task_file(arguments.config):
+                values.update(TaskConfig.from_yaml(arguments.config).resources.to_dict())
+            elif not CommandLineInterface._is_workflow(arguments.config):
+                values.update(ExperimentConfig.from_yaml(arguments.config).resources.to_dict())
         overrides = {
             "cpus": arguments.cpus,
             "memory": arguments.memory,
@@ -627,6 +921,65 @@ class CommandLineInterface:
             if value is not None:
                 values.extend((flag, str(value)))
         return tuple(values)
+
+    @staticmethod
+    def _follow_job_logs(jobs: JobService, job_id: str, *, tail: int | None) -> int:
+        """Stream scheduler logs by reconnecting through the persistent job record."""
+        previous = ""
+        try:
+            while True:
+                current = jobs.logs(job_id, tail=tail)
+                delta = current[len(previous) :] if current.startswith(previous) else current
+                if delta:
+                    print(delta, end="" if delta.endswith("\n") else "\n", flush=True)
+                previous = current
+                if jobs.get(job_id).state.terminal:
+                    return 0
+                time.sleep(2.0)
+        except KeyboardInterrupt:
+            return 130
+
+    @staticmethod
+    def _follow_plot(
+        arguments: argparse.Namespace,
+        visualization: VisualizationService,
+        output: Path,
+    ) -> int:
+        """Synchronize small metric files and atomically refresh a job learning plot."""
+        job_id = str(arguments.selector)
+        if not job_id.startswith("job-"):
+            raise ValueError("--follow requires a persistent JOB selector.")
+        remote = RemoteResultService()
+        try:
+            while True:
+                synced = remote.sync(job_id)
+                spec = visualization.learning(
+                    synced.destination,
+                    metrics=arguments.metric,
+                    aggregate=arguments.aggregate,
+                    uncertainty=arguments.uncertainty,
+                )
+                visualization.render(spec, output)
+                record = remote.jobs.get(job_id)
+                if record.state.terminal:
+                    print(output)
+                    return 0
+                time.sleep(arguments.interval)
+        except KeyboardInterrupt:
+            return 130
+
+    @staticmethod
+    def _artifact_shapes(values: Sequence[str]) -> dict[str, tuple[int | None, ...]]:
+        """Parse repeated ARRAY=DIM,DIM validation constraints without expressions."""
+        output: dict[str, tuple[int | None, ...]] = {}
+        for value in values:
+            if "=" not in value:
+                raise ValueError("--shape must use ARRAY=DIM,DIM with * for any dimension.")
+            name, raw = value.split("=", 1)
+            output[name] = tuple(
+                None if part.strip() == "*" else int(part) for part in raw.split(",")
+            )
+        return output
 
     @staticmethod
     def _initialize(directory: Path, *, force: bool, template: str = "minimal") -> int:
@@ -899,10 +1252,23 @@ lambdaforge run {entry}
         )
         doctor.add_argument("--on", default="local", help="Cluster profile name.")
         doctor.add_argument("--clusters", type=Path, help="Cluster catalogue YAML.")
+        doctor.add_argument("--config", type=Path, help="Also check required logical datasets.")
         doctor.add_argument("--json", action="store_true")
         clusters = subparsers.add_parser("clusters", help="Inspect and test cluster profiles.")
         clusters.add_argument("--catalog", type=Path, help="Cluster catalogue YAML.")
         cluster_commands = clusters.add_subparsers(dest="cluster_command", required=True)
+        cluster_add = cluster_commands.add_parser("add")
+        cluster_add.add_argument("name")
+        cluster_add.add_argument("--host")
+        cluster_add.add_argument("--scheduler", choices=("local", "slurm"), default="slurm")
+        cluster_add.add_argument("--workspace", required=True)
+        cluster_add.add_argument("--python", default="python3")
+        cluster_add.add_argument(
+            "--environment", choices=("existing", "managed"), default="managed"
+        )
+        cluster_add.add_argument("--wheelhouse", type=Path)
+        cluster_add.add_argument("--project-module")
+        cluster_add.add_argument("--data-environment")
         cluster_list = cluster_commands.add_parser("list")
         cluster_list.add_argument("--json", action="store_true")
         cluster_show = cluster_commands.add_parser("show")
@@ -913,13 +1279,15 @@ lambdaforge run {entry}
         cluster_test.add_argument("--json", action="store_true")
         cluster_bootstrap = cluster_commands.add_parser("bootstrap")
         cluster_bootstrap.add_argument("name")
+        cluster_bootstrap.add_argument("--wheelhouse", type=Path)
         cluster_bootstrap.add_argument("--json", action="store_true")
         jobs = subparsers.add_parser("jobs", help="List and control persistent jobs.")
         jobs.add_argument("--clusters", type=Path, help="Cluster catalogue YAML.")
         job_commands = jobs.add_subparsers(dest="job_command", required=True)
         jobs_list = job_commands.add_parser("list")
-        jobs_list.add_argument("--cluster")
+        jobs_list.add_argument("--cluster", "--on", dest="cluster")
         jobs_list.add_argument("--state", choices=tuple(state.value for state in JobState))
+        jobs_list.add_argument("--name")
         jobs_list.add_argument("--json", action="store_true")
         jobs_status = job_commands.add_parser("status")
         jobs_status.add_argument("job_id")
@@ -927,11 +1295,31 @@ lambdaforge run {entry}
         jobs_logs = job_commands.add_parser("logs")
         jobs_logs.add_argument("job_id")
         jobs_logs.add_argument("--tail", type=int)
+        jobs_logs.add_argument("--follow", action="store_true")
         jobs_cancel = job_commands.add_parser("cancel")
         jobs_cancel.add_argument("job_id")
         jobs_retry = job_commands.add_parser("retry")
         jobs_retry.add_argument("job_id")
         jobs_retry.add_argument("--dry-run", action="store_true")
+        status = subparsers.add_parser("status", help="List jobs or show one persistent job.")
+        status.add_argument("job_id", nargs="?")
+        status.add_argument("--on")
+        status.add_argument("--state", choices=tuple(state.value for state in JobState))
+        status.add_argument("--name")
+        status.add_argument("--clusters", type=Path)
+        status.add_argument("--json", action="store_true")
+        logs = subparsers.add_parser("logs", help="Read or follow one persistent job log.")
+        logs.add_argument("job_id")
+        logs.add_argument("--tail", type=int)
+        logs.add_argument("--follow", action="store_true")
+        logs.add_argument("--clusters", type=Path)
+        cancel = subparsers.add_parser("cancel", help="Cancel one persistent job.")
+        cancel.add_argument("job_id")
+        cancel.add_argument("--clusters", type=Path)
+        retry = subparsers.add_parser("retry", help="Retry one terminal persistent job.")
+        retry.add_argument("job_id")
+        retry.add_argument("--dry-run", action="store_true")
+        retry.add_argument("--clusters", type=Path)
         data = subparsers.add_parser("data", help="Inspect or explicitly replicate datasets.")
         data.add_argument("--catalog", type=Path, required=True, help="Data catalogue YAML.")
         data.add_argument("--clusters", type=Path, help="Cluster catalogue YAML.")
@@ -939,6 +1327,8 @@ lambdaforge run {entry}
         data_commands.add_parser("list")
         data_locations = data_commands.add_parser("locations")
         data_locations.add_argument("dataset")
+        data_inspect = data_commands.add_parser("inspect")
+        data_inspect.add_argument("dataset")
         data_replicate = data_commands.add_parser("replicate")
         data_replicate.add_argument("dataset")
         data_replicate.add_argument("--from", dest="source", default="local")
@@ -1065,31 +1455,153 @@ lambdaforge run {entry}
             help="Apply the transaction; omission is always read-only.",
         )
         retain.add_argument("--json", action="store_true", help="Print a machine-readable result.")
-        results = subparsers.add_parser(
-            "results",
-            help="Audit current and archived attempts by scientific configuration identity.",
+        results = subparsers.add_parser("results", help="Query, compare, export or sync results.")
+        result_commands = results.add_subparsers(dest="results_command", required=True)
+        result_audit = result_commands.add_parser(
+            "audit", help="Audit attempts by scientific configuration identity."
         )
-        results.add_argument("source", type=Path, help="Experiment YAML or result-tree root.")
-        results.add_argument("--status", choices=("ok", "failed", "interrupted", "dry_run"))
-        results.add_argument(
+        result_audit.add_argument("source", type=Path, help="Experiment YAML or result-tree root.")
+        result_audit.add_argument("--status", choices=("ok", "failed", "interrupted", "dry_run"))
+        result_audit.add_argument(
             "--no-archived",
             action="store_true",
             help="Only show the canonical result.json for each run directory.",
         )
-        results.add_argument(
+        result_audit.add_argument(
             "--duplicates",
             action="store_true",
             help="Only show identities with more than one attempt.",
         )
-        results.add_argument(
+        result_audit.add_argument(
             "--write-index",
             action="store_true",
             help="Atomically write .lambdaforge/result-index.json under the suite root.",
         )
-        results.add_argument(
+        result_audit.add_argument(
             "--fail-on-ambiguous",
             action="store_true",
             help="Return exit code 2 when one identity has multiple successful attempts.",
         )
-        results.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        result_audit.add_argument(
+            "--json", action="store_true", help="Print machine-readable JSON."
+        )
+        result_list = result_commands.add_parser("list")
+        result_list.add_argument("--root", action="append", type=Path)
+        result_list.add_argument("--status", choices=("ok", "failed", "interrupted", "dry_run"))
+        result_list.add_argument("--json", action="store_true")
+        result_show = result_commands.add_parser("show")
+        result_show.add_argument("selector")
+        result_show.add_argument("--root", action="append", type=Path)
+        result_show.add_argument("--json", action="store_true")
+        result_compare = result_commands.add_parser("compare")
+        result_compare.add_argument("selectors", nargs="+")
+        result_compare.add_argument("--metric", action="append", default=[])
+        result_compare.add_argument("--confidence", type=float, default=0.95)
+        result_compare.add_argument("--direction", choices=("minimize", "maximize"))
+        result_compare.add_argument("--root", action="append", type=Path)
+        result_compare.add_argument("--json", action="store_true")
+        result_export = result_commands.add_parser("export")
+        result_export.add_argument("selector")
+        result_export.add_argument("--format", choices=("csv", "json", "parquet"), default="csv")
+        result_export.add_argument("--output", type=Path)
+        result_export.add_argument("--series", action="store_true")
+        result_export.add_argument("--root", action="append", type=Path)
+        result_sync = result_commands.add_parser("sync")
+        result_sync.add_argument("job_id")
+        result_sync.add_argument("--destination", type=Path)
+        result_sync.add_argument("--json", action="store_true")
+        plot = subparsers.add_parser("plot", help="Build reproducible scientific plots.")
+        plot_commands = plot.add_subparsers(dest="plot_command", required=True)
+        plot_learning = plot_commands.add_parser("learning")
+        plot_learning.add_argument("selector")
+        plot_learning.add_argument("--metric", action="append", default=[])
+        plot_learning.add_argument("--aggregate", choices=("individual", "mean"), default="mean")
+        plot_learning.add_argument("--uncertainty", choices=("none", "std", "ci"), default="std")
+        plot_learning.add_argument("--output", type=Path)
+        plot_learning.add_argument("--follow", action="store_true")
+        plot_learning.add_argument("--interval", type=float, default=5.0)
+        plot_learning.add_argument("--json", action="store_true")
+        plot_sweep = plot_commands.add_parser("sweep")
+        plot_sweep.add_argument("config", type=Path)
+        plot_sweep.add_argument("--x", required=True)
+        plot_sweep.add_argument("--y")
+        plot_sweep.add_argument("--metric", action="append", required=True)
+        plot_sweep.add_argument("--uncertainty", choices=("none", "std", "ci"), default="std")
+        plot_sweep.add_argument("--interpolate", action="store_true")
+        plot_sweep.add_argument(
+            "--normalize",
+            action="store_true",
+            help=(
+                "Min-max normalize each metric over observed cells; raw values remain in PlotSpec."
+            ),
+        )
+        plot_sweep.add_argument(
+            "--kind",
+            choices=("auto", "line", "scatter", "heatmap", "contour", "surface"),
+            default="auto",
+        )
+        plot_sweep.add_argument("--output", type=Path)
+        plot_sweep.add_argument("--json", action="store_true")
+        plot_seeds = plot_commands.add_parser("seeds")
+        plot_seeds.add_argument("selector")
+        plot_seeds.add_argument("--metric", required=True)
+        plot_seeds.add_argument("--kind", choices=("box", "violin", "strip"), default="box")
+        plot_seeds.add_argument("--output", type=Path)
+        plot_seeds.add_argument("--json", action="store_true")
+        plot_hpo = plot_commands.add_parser("hpo")
+        plot_hpo.add_argument("study", type=Path)
+        plot_hpo.add_argument("--parameter")
+        plot_hpo.add_argument("--direction", choices=("minimize", "maximize"), default="minimize")
+        plot_hpo.add_argument("--output", type=Path)
+        plot_hpo.add_argument("--json", action="store_true")
+        plot_resources = plot_commands.add_parser("resources")
+        plot_resources.add_argument("selector")
+        plot_resources.add_argument("--output", type=Path)
+        plot_resources.add_argument("--json", action="store_true")
+        artifact = subparsers.add_parser("artifact", help="Inspect and retrieve artifacts safely.")
+        artifact_commands = artifact.add_subparsers(dest="artifact_command", required=True)
+        artifact_inspect = artifact_commands.add_parser("inspect")
+        artifact_inspect.add_argument("path", type=Path)
+        artifact_inspect.add_argument("--array")
+        artifact_inspect.add_argument("--rows", type=int, default=20)
+        artifact_inspect.add_argument("--slice")
+        artifact_inspect.add_argument("--inspector")
+        artifact_inspect.add_argument("--json", action="store_true")
+        artifact_export = artifact_commands.add_parser("export")
+        artifact_export.add_argument("path", type=Path)
+        artifact_export.add_argument("--array", required=True)
+        artifact_export.add_argument("--format", choices=("csv", "json", "npy"), default="csv")
+        artifact_export.add_argument("--output", type=Path)
+        artifact_visualize = artifact_commands.add_parser("visualize")
+        artifact_visualize.add_argument("path", type=Path)
+        artifact_visualize.add_argument(
+            "--type", choices=("graph", "point-cloud", "mesh"), required=True
+        )
+        artifact_visualize.add_argument("--positions")
+        artifact_visualize.add_argument("--nodes")
+        artifact_visualize.add_argument("--edges")
+        artifact_visualize.add_argument("--visualizer")
+        artifact_visualize.add_argument("--output", type=Path, default=Path("artifact.png"))
+        artifact_visualize.add_argument("--json", action="store_true")
+        artifact_list = artifact_commands.add_parser("list")
+        artifact_list.add_argument("selector")
+        artifact_list.add_argument("--json", action="store_true")
+        artifact_fetch = artifact_commands.add_parser("fetch")
+        artifact_fetch.add_argument("job_id")
+        artifact_fetch.add_argument("logical_name")
+        artifact_fetch.add_argument("--output", type=Path, default=Path.cwd())
+        artifact_plugins = artifact_commands.add_parser("plugins")
+        artifact_plugins.add_argument("--kind", choices=tuple(ArtifactPluginRegistry.GROUPS))
+        artifact_plugins.add_argument("--json", action="store_true")
+        artifact_validate = artifact_commands.add_parser("validate")
+        artifact_validate.add_argument("path", type=Path)
+        artifact_validate.add_argument("--require-array", action="append", default=[])
+        artifact_validate.add_argument("--shape", action="append", default=[])
+        artifact_validate.add_argument("--finite", action="store_true")
+        artifact_validate.add_argument("--json", action="store_true")
+        debug = subparsers.add_parser("debug", help="Sample a preprocessing pipeline safely.")
+        debug.add_argument("config", type=Path)
+        debug.add_argument("--records", type=int, default=1)
+        debug.add_argument("--intermediates", type=Path)
+        debug.add_argument("--json", action="store_true")
         return parser

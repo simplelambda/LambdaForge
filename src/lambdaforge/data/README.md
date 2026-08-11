@@ -65,6 +65,10 @@ A `DataCatalog` maps a portable `dataset:NAME` reference to environment-specific
 datasets:
   corpus:
     identity: {strategy: version, namespace: lab/corpus, version: "2026-08-11"}
+    loader:
+      target: my_project.data.CorpusDataset
+      path_parameter: root
+      params: {}
     locations:
       local: /data/corpus
       atlas: /datasets/project/corpus
@@ -74,6 +78,11 @@ datasets:
 `DataTransferProvider`; the built-in provider uses `rsync`. A run never guesses or performs a large
 transfer. `lambdaforge data --catalog CATALOG replicate ...` previews, and `--apply` performs the
 reviewed transfer. The catalog is not rewritten automatically.
+
+Experiments can use `data.train: dataset:corpus/train`; the loader receives the selected path in
+`root`. Nested params use `{dataset: corpus, subpath: train}`. Only these markers resolve; ordinary
+strings are not guessed. `lambdaforge data --catalog CATALOG inspect dataset:corpus` reports
+identity, locations/size and a reachable `DatasetArtifact`.
 
 ## Object map
 
@@ -95,6 +104,8 @@ reviewed transfer. The catalog is not rewritten automatically.
 | <code>CacheRecord</code> | Own a backend payload and its idempotent close callback. |
 | <code>FileDataset</code> | Lazily load an explicit ordered list of files with a project callable. |
 | <code>NumpyMemmapDataset</code> | Read aligned <code>.npy</code> arrays without loading the complete arrays into RAM. |
+| <code>DatasetReferenceResolver</code> | Resolve direct/nested typed experiment references while recording logical bindings. |
+| <code>DataService</code> | List, inspect and explicitly replicate catalogued datasets. |
 
 All of these names are public from <code>lambdaforge.data</code>. The
 <code>lambdaforge.training.data</code> package has a different responsibility:

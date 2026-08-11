@@ -87,15 +87,29 @@ class JobService:
         return record
 
     def list(
-        self, *, cluster: str | None = None, state: JobState | str | None = None
+        self,
+        *,
+        cluster: str | None = None,
+        state: JobState | str | None = None,
+        name: str | None = None,
+        refresh: bool = True,
     ) -> tuple[JobRecord, ...]:
-        """Return locally known jobs with optional portable filters."""
+        """Return persistent jobs, reconnecting non-terminal scheduler records by default."""
         selected_state = JobState(state) if state is not None else None
+        records = tuple(
+            self.get(record.job_id) if refresh and not record.state.terminal else record
+            for record in self.store.records()
+        )
         return tuple(
             record
-            for record in self.store.records()
+            for record in records
             if (cluster is None or record.cluster == cluster)
             and (selected_state is None or record.state is selected_state)
+            and (
+                name is None
+                or name.lower()
+                in str(record.metadata.get("name", record.config_path or "")).lower()
+            )
         )
 
     def logs(self, job_id: str, *, tail: int | None = None) -> str:

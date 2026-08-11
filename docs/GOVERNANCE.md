@@ -1,3 +1,5 @@
+[English](GOVERNANCE.md) | [Español](GOVERNANCE.es.md)
+
 # Versioning, deprecation and releases
 
 LambdaForge follows Semantic Versioning. Before 1.0, a minor release may contain a documented
@@ -24,6 +26,21 @@ A release candidate is ready only when version declarations agree, changelog and
 current, lint/type checks and selected/full tests pass as appropriate, wheel and sdist build, wheel
 contents are audited, and the repository contains no caches, environments, credentials or generated
 run data. CUDA claims additionally require successful execution on a CUDA-enabled Python build.
+
+After committing 0.5.1, the owner should push the commit, wait for the complete GitHub Actions
+matrix, and only then create/push the annotated tag and GitHub Release:
+
+```bash
+git push origin main
+# Wait for the CI run on this exact commit to be green.
+git tag -a v0.5.1 -m "LambdaForge 0.5.1"
+git push origin v0.5.1
+gh release create v0.5.1 --verify-tag --generate-notes \
+  --title "LambdaForge 0.5.1"
+```
+
+Do not run these publication commands before CI is green; this repository preparation does not
+claim that a remote tag or release has already been created.
 
 The owner must select and approve the repository licence before public redistribution. Adding an
 OSI or proprietary licence grants or withholds legal rights and is deliberately not inferred by a

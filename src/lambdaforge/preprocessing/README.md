@@ -44,12 +44,12 @@ preprocess:
   workload: io
 ```
 
-`workers: 1` is deterministic sequential processing. Larger values use a bounded thread pool;
-`workload` records `auto`, `io`, `cpu` or `gpu` intent but does not silently choose processes,
-devices or batch sizes. Threads suit waiting-heavy transforms. For CPU isolation, true parallel
-Python compute or GPU batching, use explicit workflow shards or a project task with domain-specific
-batching. Record manifests, atomic sink verification and error policy remain identical.
-Custom transforms and sinks used with multiple workers must therefore be thread-safe.
+`workers: 1` is sequential. `io` uses bounded threads. `cpu` uses spawn-safe processes for
+importable/picklable transforms while the parent writes sink/manifest. `auto` conservatively uses
+threads. `gpu` requires one worker; use explicit shards/jobs for multiple GPUs. Record manifests,
+atomic verification and error policy are identical on Linux/Windows. Debug N records without the
+production sink with `lambdaforge debug CONFIG --records N [--intermediates DIR]`. See the
+[execution/debug guide](../../../docs/PREPROCESSING.md).
 
 The checked-in example is directly runnable with its bundled input and an empty transform list; it
 needs no consumer package. The configuration shown below then demonstrates where an optional

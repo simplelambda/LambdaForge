@@ -31,6 +31,8 @@ clusters:
     scheduler: slurm
     workspace: /scratch/user/lambdaforge
     python: /shared/env/bin/python
+    environment: managed
+    project_module: mi_proyecto
     data_environment: atlas
     command_prefix: [apptainer, exec, /images/project.sif]
     scheduler_options: {partition: gpu}
@@ -49,15 +51,17 @@ lambdaforge run config.yaml --on atlas --dry-run
 lambdaforge run config.yaml --profile una-gpu
 ```
 
-El bundle cachea YAML estricto, manifiesto y rutas pequeñas (máximo 10 MiB por defecto). Una ruta
-grande se rechaza y debe usar `DataCatalog`. El entorno remoto debe contener las versiones fijadas
-del framework y proyecto. Bootstrap sólo crea workspace y verifica imports.
+El bundle cachea YAML, manifiesto, wheels exactas de framework/proyecto y rutas pequeñas. Una grande
+usa `DataCatalog`. `managed` crea venv de usuario idempotente por identidad; `existing` sólo
+verifica. Offline exige wheelhouse compatible. No clona branches ni instala drivers/CUDA. Véase la
+[guía completa](../../../docs/CLUSTERS.es.md).
 
 ## 4. Jobs
 
 `JobStore` escribe JSON atómico bajo `$XDG_STATE_HOME/lambdaforge/jobs` o
 `~/.local/state/lambdaforge/jobs`. `JobService` ofrece list/get/logs/cancel/retry. Un retry crea otro
-ID con `retry_of`; nunca pisa el job ni el intento científico anterior.
+ID con `retry_of`; nunca pisa el anterior. Usa `status`, `logs JOB --follow`, `cancel` y `retry`;
+`results sync JOB` trae evidencia pequeña y `artifact fetch JOB NAME` un artifact pesado explícito.
 
 ## 5. Proveedores
 
@@ -77,4 +81,4 @@ conocer el proveedor.
 - La ubicación multiclúster aparece en planes, pero el runner rehúsa un DAG mixto hasta garantizar
   recuperación durable y transferencia de artefactos.
 - La elección de clúster es explícita; no se afirma descubrir capacidad/cola/coste ni placement
-  automático. `DataCatalog` resuelve inputs de tareas, no rutas ocultas en objetos de experimento.
+  automático. `DataCatalog` resuelve inputs y referencias de experimento tipadas, no strings.

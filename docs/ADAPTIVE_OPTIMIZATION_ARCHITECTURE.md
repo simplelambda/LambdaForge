@@ -1,3 +1,5 @@
+[English](ADAPTIVE_OPTIMIZATION_ARCHITECTURE.md) | [Español](ADAPTIVE_OPTIMIZATION_ARCHITECTURE.es.md)
+
 # Adaptive Experiment Optimizer: architecture and migration note
 
 This note records the design review performed before implementing adaptive optimization. It is an

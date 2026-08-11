@@ -5,6 +5,12 @@ datasets:
       strategy: version
       namespace: example/raw-corpus
       version: "1"
+    # A direct experiment split such as dataset:raw-corpus/train uses this loader.
+    # Replace it with an import from the installed consumer project.
+    loader:
+      target: my_project.data.CorpusDataset
+      path_parameter: root
+      params: {}
     locations:
       local: /data/raw-corpus
       atlas: /datasets/project/raw-corpus

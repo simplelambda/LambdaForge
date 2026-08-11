@@ -44,11 +44,11 @@ preprocess:
   workload: io
 ```
 
-`workers: 1` procesa secuencialmente. Un valor mayor usa un pool de hilos acotado; `workload`
-registra intención `auto`, `io`, `cpu` o `gpu`, pero no elige procesos, dispositivos ni batch size
-en secreto. Para cómputo Python CPU aislado o batching GPU usa shards explícitos de workflow o una
-tarea de proyecto. Manifiesto, verificación atómica y política de error no cambian.
-Las transformaciones y sinks propios usados con varios workers deben ser thread-safe.
+Un worker es secuencial. `io` usa threads; `cpu` procesos `spawn` para transforms
+importables/picklables mientras el padre escribe sink/manifest; `auto` threads conservadores; `gpu`
+exige uno y varias GPU usan shards/jobs explícitos. Manifest, verificación y errores son iguales en
+Linux/Windows. Depura N registros sin sink con `lambdaforge debug CONFIG --records N
+[--intermediates DIR]`. Véase la [guía](../../../docs/PREPROCESSING.es.md).
 
 El ejemplo del repositorio se ejecuta directamente con su input incluido y una lista de
 transformaciones vacía; no necesita un paquete consumidor. La configuración inferior muestra

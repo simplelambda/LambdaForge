@@ -175,7 +175,9 @@ class ArchitectureConformanceCase:
                 },
                 temporary,
             )
-            with temporary.open("rb") as handle:
+            # Windows does not permit ``fsync`` on a read-only CRT descriptor.
+            # Reopen read/write while preserving the already serialized bytes.
+            with temporary.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)
         finally:

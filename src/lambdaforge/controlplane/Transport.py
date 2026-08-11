@@ -19,3 +19,7 @@ class Transport(ABC):
     @abstractmethod
     def put(self, source: str | Path, destination: str | Path) -> None:
         """Copy one small file or directory to an explicit destination."""
+
+    def get(self, source: str | Path, destination: str | Path) -> None:
+        """Retrieve one explicit small file/directory when the provider supports it."""
+        raise NotImplementedError(f"{type(self).__name__} does not support retrieval.")

@@ -18,46 +18,46 @@ paquete estable, para que un proyecto de investigación se concentre en sus dato
 de volver a crear pipelines, bucles de entrenamiento, procedencia, gestión de resultados y
 planificación de procesos.
 
-> **Estado:** `0.5.0`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
+> **Estado:** `0.5.1`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
 > aquí forman la API prevista; todavía no se garantiza compatibilidad entre versiones menores. El
 > repositorio aún no contiene una licencia, por lo que SimpleLambda debe decidir sus condiciones de
 > redistribución.
 
 ## 0. Contenidos
 
-- [1. Qué proporciona LambdaForge](#1-qué-proporciona-lambdaforge)
-- [2. Instalación](#2-instalación)
-- [3. Integración en otro proyecto](#3-integración-en-otro-proyecto)
-- [4. Inicio rápido](#4-inicio-rápido)
-- [5. Glosario](#5-glosario-en-lenguaje-directo)
-- [6. Autoría sencilla e IR estricto](#6-autoría-sencilla-y-modelo-interno-estricto)
-- [7. Tareas y preprocesado](#7-tareas-genéricas-y-preprocesado)
-- [8. Identidad y reutilización](#8-identidad-científica-reutilización-y-repeticiones-explícitas)
-- [9. Workflows y composición](#9-workflows-y-composición-de-configuración)
-- [10. Plano de control multiclúster](#10-plano-de-control-local-y-multiclúster)
-- [11. Jobs y ubicación de datos](#11-jobs-persistentes-y-ubicación-de-datos)
-- [12. Inferencia, evaluación, exportación y HPO](#12-inferencia-evaluación-exportación-y-hpo)
-- [13. Recursos, backends y fiabilidad](#13-recursos-backends-y-fiabilidad)
-- [14. Almacenes, registro e informes](#14-almacenes-registro-e-informes)
-- [15. Observabilidad y reproducibilidad](#15-observabilidad-y-reproducibilidad)
-- [16. Referencia de CLI](#16-referencia-de-cli)
-- [17. API pública](#17-api-pública)
-- [18. Modelo conceptual](#18-modelo-conceptual-de-ejecución)
-- [19. Arquitectura](#19-arquitectura)
-- [20. Referencia YAML](#20-referencia-de-experimentos-yaml)
-- [21. Migraciones](#21-migraciones-de-configuración)
-- [22. Ejecución y procesos](#22-ejecución-y-seguridad-de-procesos)
-- [23. Salidas, reanudación y carga](#23-salidas-reanudación-y-carga)
-- [24. Retención](#24-retención-de-artefactos)
-- [25. Componentes](#25-componentes-incluidos)
-- [26. Contratos de extensión](#26-contratos-de-extensión)
-- [27. Hallazgos](#27-hallazgos-de-la-revisión)
-- [28. Desarrollo y verificación](#28-desarrollo-y-verificación)
-- [29. Limitaciones](#29-limitaciones-actuales)
-- [30. Por qué existe AGENTS.md](#30-por-qué-existe-agentsmd)
-- [31. Mapa de documentación](#31-mapa-de-documentación)
-- [32. Hoja de ruta](#32-hoja-de-ruta)
-- [33. Historial 0.2](#33-historial-de-la-hoja-de-ruta-02)
+- Primeros pasos
+  - [1. Qué proporciona](#1-qué-proporciona-lambdaforge)
+  - [2. Instalación](#2-instalación)
+  - [3. Integración](#3-integración-en-otro-proyecto)
+  - [4. Inicio rápido](#4-inicio-rápido)
+  - [5. Glosario](#5-glosario-en-lenguaje-directo)
+  - [6. Autoría sencilla e IR](#6-autoría-sencilla-y-modelo-interno-estricto)
+- Conceptos principales
+  - [7. Tareas y preprocesado](#7-tareas-genéricas-y-preprocesado)
+  - [8. Identidad y reutilización](#8-identidad-científica-reutilización-y-repeticiones-explícitas)
+  - [9. Workflows y composición](#9-workflows-y-composición-de-configuración)
+- Ejecución y datos
+  - [10. Plano de control multiclúster](#10-plano-de-control-local-y-multiclúster)
+  - [11. Jobs y ubicación de datos](#11-jobs-persistentes-y-ubicación-de-datos)
+  - [12. Operaciones y HPO](#12-inferencia-evaluación-exportación-y-hpo)
+  - [13. Recursos y fiabilidad](#13-recursos-backends-y-fiabilidad)
+- Resultados e inspección
+  - [14. Resultados, plots y artifacts](#14-almacenes-registro-e-informes)
+  - [15. Observabilidad](#15-observabilidad-y-reproducibilidad)
+- Referencia y extensión
+  - [16. CLI](#16-referencia-de-cli)
+  - [17. API pública](#17-api-pública)
+  - [18. Modelo conceptual](#18-modelo-conceptual-de-ejecución)
+  - [19. Arquitectura](#19-arquitectura)
+  - [20–26. YAML, ejecución, outputs, componentes y extensión](#20-referencia-de-experimentos-yaml)
+- Información del proyecto
+  - [27. Hallazgos](#27-hallazgos-de-la-revisión)
+  - [28. Desarrollo](#28-desarrollo-y-verificación)
+  - [29. Limitaciones](#29-limitaciones-actuales)
+  - [30. AGENTS.md](#30-por-qué-existe-agentsmd)
+  - [31. Mapa documental](#31-mapa-de-documentación)
+  - [32. Hoja de ruta](#32-hoja-de-ruta)
+  - [33. Historial 0.2](#33-historial-de-la-hoja-de-ruta-02)
 
 ## 1. Qué proporciona LambdaForge
 
@@ -182,7 +182,7 @@ ese artefacto inmutable en lugar de una ruta editable:
 
 ```bash
 python -m pip wheel /ruta/absoluta/a/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.5.1-py3-none-any.whl
 ```
 
 Deja que el lock o constraints del proyecto consumidor seleccione primero una compilación PyTorch
@@ -400,9 +400,14 @@ resources: {cpus: 4, memory: 8GiB, time: 30m}
 
 `raw` y `processed` son nombres lógicos. La fuente usa `context.input("raw")` y el sink,
 `context.output("processed")`; las rutas físicas quedan como procedencia. Las APIs antiguas de
-rutas siguen siendo compatibles, pero el código nuevo debe preferir nombres. `workers > 1` usa un
-pool acotado dentro del proceso para mantener juntos transforms y sinks con estado. Para aislar
-procesos se usan shards explícitos de workflow o una tarea de proyecto.
+rutas siguen siendo compatibles, pero el código nuevo debe preferir nombres. Un worker es
+secuencial; `io` usa threads; `cpu` usa procesos `spawn` sólo para transforms y el padre posee
+sink/manifest; `auto` usa threads conservadores; `gpu` exige uno. Transforms CPU deben ser
+importables/picklables en Linux y Windows y varias GPUs usan shards/jobs explícitos. `workers`,
+`workload` y la cadencia de checkpoint son operacionales: no cambian la identidad científica del
+preprocesado/dataset y los modos equivalentes deben producir el mismo contenido. Para probar N
+registros sin publicar dataset usa `lambdaforge debug CONFIG --records N`; `--intermediates` guarda
+sólo artifacts de debug.
 
 Sólo los campos de objeto inequívocos admiten cadenas; por ejemplo
 `model: my_project.models.ProjectModel` se materializa como un `target`. Cuando haya parámetros o
@@ -607,12 +612,12 @@ lambdaforge run experiment.yaml --profile una-gpu
 traduce a `ntasks`, `cpus-per-task`, `mem`, `gpus` y `time`. Se aceptan unidades decimales y binarias
 como `32GB`/`32GiB` y duraciones `30m`/`4h`.
 
-Un `ExecutionBundle` contiene YAML materializado, manifiesto y sólo entradas pequeñas acotadas; se
-cachea por contenido en `.lambdaforge/control/bundles`. El remoto ejecuta el mismo
-`python -m lambdaforge run`, por lo que no existe un runner alternativo. El Python remoto debe tener
-la misma versión de LambdaForge y el paquete consumidor. `clusters bootstrap` prepara el workspace
-y comprueba ese entorno existente; no modifica automáticamente entornos gestionados, módulos o
-contenedores del centro.
+Un `ExecutionBundle` contiene YAML, manifiesto, wheels exactas de LambdaForge/proyecto y sólo inputs
+pequeños; se cachea por contenido. El source dirty se construye tal cual, nunca se sustituye por
+`git clone main`. `managed` crea/reutiliza un venv de usuario identificado por bytes bajo
+`WORKSPACE/.lambdaforge/environments`; `existing` no instala y exige el Python exacto. Sin Internet
+se aporta wheelhouse compatible y se usa `--no-index`. LambdaForge verifica PyTorch/CUDA pero no
+instala drivers, CUDA de sistema ni cuDNN. El remoto ejecuta el mismo `python -m lambdaforge run`.
 
 `LocalTransport`/`SshTransport` y `LocalScheduler`/`SlurmScheduler` son proveedores independientes e
 inyectables. SLURM genera `submit.sbatch`, usa `sbatch --parsable`, reconecta con `squeue`/`sacct` y
@@ -626,15 +631,21 @@ recursos, bundle, tiempos y linaje de retry. El job describe cómo se programó 
 `result.json` sigue siendo la evidencia científica.
 
 ```bash
-lambdaforge jobs list
-lambdaforge jobs status JOB_ID
-lambdaforge jobs logs JOB_ID --tail 200
-lambdaforge jobs cancel JOB_ID
-lambdaforge jobs retry JOB_ID --dry-run
+lambdaforge status --on atlas --state running --name experimento
+lambdaforge status JOB_ID
+lambdaforge logs JOB_ID --follow
+lambdaforge cancel JOB_ID
+lambdaforge retry JOB_ID --dry-run
 ```
 
 `JobService`, `DataService` y `Doctor` ofrecen las mismas operaciones y `to_dict()` para notebooks,
 automatización o una GUI futura; no hay lógica privada sólo para CLI.
+
+El registro incluye identidades científica/ejecución, entorno exacto y paths remotos. Otro proceso
+refresca el scheduler, por lo que SLURM sobrevive al cierre de la CLI. `lambdaforge results sync JOB` trae sólo
+metadata/métricas/manifests/resúmenes/plots pequeños; `plot learning JOB --follow` los consume.
+`artifact list JOB` y `artifact fetch JOB best-checkpoint` enumeran y descargan un artifact lógico
+explícito. Nunca se copian checkpoints/datasets grandes de forma implícita.
 
 Los datos grandes nunca se copian por usar `--on`. Un catálogo separa identidad y ubicación:
 
@@ -663,6 +674,11 @@ el catálogo. Un workflow puede anotar `on: atlas` y su dry-run muestra ubicacio
 rechaza ejecutar un DAG mixto: transferencia de artefactos descendentes y recuperación durable
 necesitan semántica más fuerte que sondear logs. Cada nodo remoto se envía explícitamente con
 `run --on`; los workflows locales siguen completos.
+
+Los experimentos usan el mismo catálogo. `data.train: dataset:raw-corpus/train` necesita un
+`loader` con `path_parameter`; dentro de params se usa `{dataset: raw-corpus, subpath: train}`.
+Sólo se resuelven esos marcadores tipados, nunca strings ordinarios. El mount puede variar, pero el
+fingerprint conserva referencia e identidad lógica.
 
 ## 12. Inferencia, evaluación, exportación y HPO
 
@@ -844,6 +860,49 @@ Errores de usuario/desconocidos no se reintentan por defecto.
 
 ## 14. Almacenes, registro e informes
 
+Empieza por servicios estables, no por directorios hash:
+
+```bash
+lambdaforge results list --root runs
+lambdaforge results show baseline --root runs
+lambdaforge results compare baseline ablation --metric val_loss --direction minimize
+lambdaforge results export baseline --series --format csv --output analysis/curves.csv
+```
+
+Los selectores aceptan config/path, attempt ID, fingerprint, nombre de run/experimento o variante.
+`show` devuelve candidatos y ambigüedad, sin elegir por fecha. La sintaxis anterior `results SOURCE
+--write-index` sigue compatible como `results audit`. `MetricSeries` normaliza el `metrics.csv`
+existente a run/seed/variant/split/metric/step/value/timestamp. JSON/CSV son core y Parquet opcional.
+
+Los plots consumen resultados fuera del training:
+
+```bash
+lambdaforge plot learning baseline --metric val_loss --aggregate mean --uncertainty std
+lambdaforge plot seeds baseline --metric val_accuracy --kind violin
+lambdaforge plot sweep sweep.yaml --x optimizer.params.lr --metric val_loss
+lambdaforge plot sweep sweep.yaml --x model.params.width --y optimizer.params.lr \
+  --metric val_accuracy --output plots/sweep.html
+lambdaforge plot sweep sweep.yaml --x model.params.width \
+  --metric val_loss --metric val_accuracy --normalize
+lambdaforge plot hpo runs/STUDY/.lambdaforge/adaptive/ID --parameter optimizer.params.lr
+```
+
+Curvas/celdas muestran `n`; con una seed no inventan std/CI. Celdas 2-D ausentes siguen ausentes
+salvo interpolación explícita. `--normalize` aplica min-max por métrica sólo sobre celdas observadas
+y conserva los valores originales en `PlotSpec`. Las comparaciones calculan delta contra el primer
+selector y sólo llaman best/worst con `--direction` explícito. HPO/recursos sólo leen evidencia
+existente. `VisualizationService`
+crea `PlotSpec` (`--json`), renderiza atómicamente y guarda `FIGURE.plot.json` con timestamp para
+caché. Dentro de `run/plots/`, figura y spec aparecen en `artifact list`.
+
+NPY/NPZ se inspecciona con `lambdaforge artifact inspect`, siempre `allow_pickle=False`, preview acotado y
+muestra estadística determinista en arrays grandes; también CSV/TSV/JSON/JSONL. `artifact export`
+y `artifact validate` permiten depurar/validar. Graph/point-cloud/mesh exige roles/tipo explícitos;
+`artifact visualize graph.npz --type graph --nodes positions --edges edge_index` nunca adivina por
+shape. Inspector, visualizer, schema, exporter y validator son extensiones separadas. Véanse
+[resultados](docs/RESULTS.es.md), [artifacts](docs/ARTIFACTS.es.md),
+[clusters](docs/CLUSTERS.es.md) y [preprocesado](docs/PREPROCESSING.es.md).
+
 `ArtifactReference` contiene store, key, SHA-256, tamaño y media type. `ArtifactStore` publica
 contenido inmutable y stagea una copia verificada. `LocalArtifactStore` cubre filesystem
 local/compartido; `S3ArtifactStore` acepta cliente compatible inyectado o `boto3` opcional. Se
@@ -899,9 +958,9 @@ modificar el entorno.
 | `run CONFIG` | Ejecuta experimento, tarea o workflow. | sí |
 | `run CONFIG --force|--restart|--no-resume` | Controla reutilización y continuación parcial. | sí |
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Cachea un bundle y envía al plano de control. | metadata; remoto sin dry-run |
-| `clusters list|show|test|bootstrap` | Perfiles, conectividad y entorno existente. | bootstrap crea workspace |
-| `jobs list|status|logs|cancel|retry` | Reconecta con jobs y schedulers. | cancel/retry |
-| `data --catalog FILE list|locations|replicate` | Ubicaciones y réplica explícita. | sólo `--apply` |
+| `clusters add|list|show|test|bootstrap` | Registra, diagnostica y prepara entorno existing/managed exacto. | add/bootstrap |
+| `status|logs|cancel|retry` (`jobs ...`) | Filtra, reconecta, sigue y controla jobs. | cancel/retry |
+| `data --catalog FILE list|locations|inspect|replicate` | Ubicaciones/manifest y réplica explícita. | sólo `--apply` |
 | `compose CONFIG` | Materialización oculta + procedencia. | no |
 | `diff LEFT RIGHT` | Diferencias semánticas. | no |
 | `explain authoring|experiment|task|workflow RUTA` | Fragmento de JSON Schema. | no |
@@ -909,7 +968,11 @@ modificar el entorno.
 | `target IMPORT.PATH` | Firma y docstring. | no |
 | `migrate CONFIG` | Preview; `--output` es explícito. | no |
 | `plugins` | Metadata sin importar proveedor. | no |
-| `results SOURCE` | Intentos/duplicados; índice sólo con flag. | no |
+| `results SOURCE` / `results audit SOURCE` | Auditoría compatible; índice sólo con flag. | no |
+| `results list|show|compare|export|sync` | Selectores, estadística, tablas y evidencia remota ligera. | export/sync |
+| `plot learning|sweep|seeds|hpo|resources` | `PlotSpec` JSON o figuras atómicas. | salvo `--json` |
+| `artifact inspect|export|validate|visualize|list|fetch|plugins` | Inspección acotada y retrieval/geometría explícitos. | según acción |
+| `debug CONFIG --records N` | Muestra preprocesado sin sink/finalización de producción. | sólo intermediates |
 | `aggregate CONFIG` | Regenera agregados. | sí |
 | `retain CONFIG` | Preview; sólo `--apply` muta. | no |
 | `registry ROOT [--output FILE]` | Consulta/exporta registro. | sólo con output |
@@ -932,12 +995,16 @@ Los puntos de entrada admitidos son deliberadamente reducidos:
 | `from lambdaforge import Workflow, WorkflowPlan, WorkflowResult, WorkflowValidationReport` | Validar, planificar y ejecutar un DAG task/experiment. |
 | `from lambdaforge import RunResult, AggregateResult` | Resultados tipados e inmutables compatibles con dict/JSON legado. |
 | `from lambdaforge import ResultCatalog, ResultRecord` | Discovery por identidad y selección explícita del historial de intentos. |
+| `from lambdaforge import ResultService, VisualizationService, PlotSpec, ArtifactService` | Servicios estables de consulta, plots e inspección. |
 | `from lambdaforge import ArtifactRetentionPlan, ArtifactRetentionResult` | Previsualizaciones y resultados tipados e inmutables de retención. |
 | `lambdaforge.data` | Identidad/catálogo/ubicación, transferencias, adaptadores y cachés. |
 | `lambdaforge.tasks` | Contratos genéricos de tarea, contexto, plan, resultado y artefacto. |
 | `lambdaforge.preprocessing` | Preprocesado componible de registros y manifiestos de dataset. |
 | `lambdaforge.configuration` | Autoría a IR, includes, interpolación, secretos, procedencia y diff. |
 | `lambdaforge.controlplane` | Clústeres, transportes, schedulers, bundles, doctor y jobs. |
+| `lambdaforge.results` | Selectores humanos, MetricSeries, comparación/export y sync remoto. |
+| `lambdaforge.visualization` | PlotSpec independiente de renderer y escritura atómica. |
+| `lambdaforge.artifacts` | Contratos inspector/visualizer/schema/validator y servicios. |
 | `lambdaforge.workflows` | Configuración, nodos, planes y resultados de DAG. |
 | `lambdaforge.operations` | Tareas de inferencia, evaluación, ensemble y exportación. |
 | `lambdaforge.hpo` | Random/Optuna finito y optimización adaptativa multi-fidelidad persistente. |
@@ -1947,13 +2014,12 @@ implementaciones.
 - Los workflows siguen siendo locales y acotados. Los planes registran `on` y el plano de control
   envía configs individuales por local/SSH y local/SLURM, pero 0.5 no finge coordinar transferencia
   de artefactos ni recuperación durable de un DAG mixto.
-- Bootstrap comprueba un Python existente y crea el workspace; no instala paquetes ni modifica
-  módulos o contenedores gestionados. La réplica incluida usa rsync local→local/SSH y exige dos
-  ubicaciones ya declaradas.
-- La selección de clúster es explícita en 0.5. Los perfiles no descubren automáticamente capacidad,
-  espera de cola o coste ni prometen placement óptimo. `DataCatalog` resuelve inputs con nombre de
-  tareas genéricas; rutas ocultas en parámetros de datasets de experimento siguen perteneciendo al
-  proyecto y deben ser válidas remotamente o resolverse mediante código del consumidor.
+- Bootstrap managed instala wheels exactas en un venv de usuario, pero no sintetiza wheels de otra
+  plataforma/CUDA, drivers, módulos del centro ni contenedores. Offline requiere wheelhouse
+  compatible; existing sigue en manos del usuario. Réplica usa rsync sobre ubicaciones declaradas.
+- La selección es explícita en 0.5.1: no descubre capacidad/colas/coste ni promete placement.
+  `DataCatalog` resuelve splits y marcadores anidados tipados; strings arbitrarios siguen siendo del
+  proyecto. Sync remoto es allowlisted/acotado y artifacts pesados requieren fetch lógico.
 - Random/Optuna finito permanece. HPO adaptativo agenda trials locales independientes; integrar
   recursos del DAG, acciones DDP y callbacks remotos de pruning no es implícito.
 - BoTorch mixto modela fidelidad y geometría Hamming. El KG gaussiano de acciones y las bases de
@@ -1981,7 +2047,8 @@ especializados antes de poder configurar un modelo o añadir una loss. Ese enfoq
 y dinero, aumenta la probabilidad de olvidar restricciones leídas al principio y lleva al agente a
 deducir APIs desde ficheros internos que no forman una interfaz estable.
 
-[AGENTS.md](AGENTS.md) es por ello el manual operativo único y eficiente en tokens del framework.
+[AGENTS.es.md](AGENTS.es.md) y su edición [inglesa](AGENTS.md) son el manual operativo único y
+eficiente en tokens del framework.
 Reúne el mapa completo de capacidades, las fronteras públicas soportadas, instalación y flujo YAML,
 recetas de extensión, reglas de publicación de resultados, comandos de verificación y una pequeña
 tabla de rutas para los pocos casos que requieren más detalle. El flujo previsto para un agente es:
@@ -1995,8 +2062,8 @@ No sustituye los README bilingües destinados a personas ni los docstrings preci
 Es un índice comprimido y un contrato de seguridad que evita cargar todo el repositorio en
 contexto. Los agentes que trabajan en este checkout lo descubren automáticamente; si LambdaForge
 se consume desde otro workspace, proporciona el fichero explícitamente o referencia su ruta desde
-el `AGENTS.md` del proyecto consumidor. Los wheels también instalan ese mismo fichero fuente bajo
-`share/lambdaforge/AGENTS.md`; obtén su ruta exacta dentro del entorno sin importar el framework:
+el `AGENTS.md` del proyecto consumidor. Las wheels instalan ambas ediciones bajo
+`share/lambdaforge`; obtén su ruta exacta sin importar el framework:
 
 ```bash
 python -c "from importlib.metadata import distribution; print(distribution('lambdaforge').locate_file('share/lambdaforge/AGENTS.md'))"
@@ -2004,12 +2071,16 @@ python -c "from importlib.metadata import distribution; print(distribution('lamb
 
 ## 31. Mapa de documentación
 
-- [Manual de agentes en un único fichero](AGENTS.md)
-- [Arquitectura técnica y colaboración de clases](docs/ARCHITECTURE.md)
+- [Manual de agentes](AGENTS.es.md) · [English](AGENTS.md)
+- [Arquitectura técnica](docs/ARCHITECTURE.es.md) · [English](docs/ARCHITECTURE.md)
+- [Clusters y jobs](docs/CLUSTERS.es.md) · [English](docs/CLUSTERS.md)
+- [Resultados y plots](docs/RESULTS.es.md) · [English](docs/RESULTS.md)
+- [Inspección de artifacts](docs/ARTIFACTS.es.md) · [English](docs/ARTIFACTS.md)
+- [Ejecución/debug de preprocesado](docs/PREPROCESSING.es.md) · [English](docs/PREPROCESSING.md)
 - [Autoría y configuración](src/lambdaforge/configuration/README.es.md) · [English](src/lambdaforge/configuration/README.md)
 - [Plano de control](src/lambdaforge/controlplane/README.es.md) · [English](src/lambdaforge/controlplane/README.md)
-- [Internos del optimizador adaptativo](docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.md)
-- [Changelog](CHANGELOG.md) · [Versionado/deprecación](docs/GOVERNANCE.md) · [Seguridad](SECURITY.md)
+- [Internos del optimizador](docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.es.md) · [English](docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.md)
+- [Changelog](CHANGELOG.md) · [Versionado](docs/GOVERNANCE.es.md) · [English](docs/GOVERNANCE.md) · [Seguridad](SECURITY.md)
 - [Sistema de experimentos](src/lambdaforge/experiments/README.es.md) · [English](src/lambdaforge/experiments/README.md)
 - [Migraciones de configuración](src/lambdaforge/experiments/migrations/README.es.md) · [English](src/lambdaforge/experiments/migrations/README.md)
 - [Retención de artefactos](src/lambdaforge/experiments/retention/README.es.md) · [English](src/lambdaforge/experiments/retention/README.md)
@@ -2077,6 +2148,16 @@ pública, documentación y pruebas focalizadas; no significa incluir cada provee
 | 36 | Servicio de jobs persistente | Completado con list/status/logs/cancel/retry y JSON |
 | 37 | Ubicación/réplica explícita de datos | Completado con catálogos, rechazo preventivo y rsync |
 | 38 | Coordinador de workflow multiclúster | Diferido: planifica ubicación pero rehúsa ejecutar hasta garantizar transferencias y recuperación durable |
+| 39 | Estabilización CI/wheel instalada | Completado: Windows fsync, refill dinámico, CSV atómico y smoke aislado |
+| 40 | Workloads reales de preprocesado | Completado: secuencial, I/O threads, CPU spawn y GPU segura |
+| 41 | Training sencillo y datasets de experimento | Completado: aliases, recursos, refs directas/anidadas e identidad portable |
+| 42 | Entorno cluster managed/offline | Completado: wheels exactas, identidad, venv, bootstrap/doctor/wheelhouse |
+| 43 | Jobs/resultados remotos | Completado: filtros/follow, sync ligero y fetch explícito |
+| 44 | ResultService/MetricSeries | Completado: selectores, ambigüedad, compare y export |
+| 45 | Plots reproducibles | Completado: learning/seeds/sweep/HPO/resources, PlotSpec y sidecar |
+| 46 | Toolkit seguro de artifacts | Completado: NumPy/tablas, validación, geometría explícita y plugins |
+| 47 | Debug/dataset inspection | Completado: N records aislados e informe DatasetArtifact |
+| 48 | Workflow distribuido/placement automático | Diferido explícitamente después de 0.5.1 |
 
 Las ampliaciones futuras deben responder a necesidades de investigación demostradas y conservar las
 fronteras de la [arquitectura técnica](docs/ARCHITECTURE.md), no reabrir lo ya cerrado.

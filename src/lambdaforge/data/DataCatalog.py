@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -48,13 +48,25 @@ class DataCatalog:
         self, reference: DatasetReference | str, *, environment: str = "local"
     ) -> DatasetLocation:
         """Resolve one physical location without changing logical identity."""
-        descriptor = self.descriptor(reference)
+        parsed = DatasetReference.parse(reference) if isinstance(reference, str) else reference
+        descriptor = self.descriptor(parsed)
         locations = descriptor.get("locations", {})
         if not isinstance(locations, Mapping) or environment not in locations:
             raise KeyError(f"Dataset {reference!s} has no location for {environment!r}.")
         value = locations[environment]
         if isinstance(value, str):
-            return DatasetLocation(environment, value)
+            return self._with_subpath(DatasetLocation(environment, value), parsed.subpath)
         if not isinstance(value, Mapping) or "uri" not in value:
             raise TypeError("Dataset locations must be a URI string or mapping with uri.")
-        return DatasetLocation(environment, str(value["uri"]), bool(value.get("shared", False)))
+        location = DatasetLocation(environment, str(value["uri"]), bool(value.get("shared", False)))
+        return self._with_subpath(location, parsed.subpath)
+
+    @staticmethod
+    def _with_subpath(location: DatasetLocation, subpath: str | None) -> DatasetLocation:
+        if subpath is None:
+            return location
+        if "://" in location.uri:
+            uri = f"{location.uri.rstrip('/')}/{PurePosixPath(subpath).as_posix()}"
+        else:
+            uri = str(Path(location.uri) / Path(*PurePosixPath(subpath).parts))
+        return DatasetLocation(location.environment, uri, location.shared)

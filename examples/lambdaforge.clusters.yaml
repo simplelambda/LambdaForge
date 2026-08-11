@@ -5,7 +5,9 @@ clusters:
     host: atlas-login
     scheduler: slurm
     workspace: /scratch/USER/lambdaforge
-    python: /shared/envs/research/bin/python
+    python: python3
+    environment: managed
+    project_module: my_project
     data_environment: atlas
     scheduler_options:
       partition: gpu

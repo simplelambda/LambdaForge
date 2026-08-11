@@ -41,11 +41,7 @@ class AuthoringConfigNormalizer:
             if data.get("kind") == "experiment":
                 data.pop("kind")
             data.setdefault("schema_version", "1.1")
-            code_version = data.pop("code_version", None)
-            if code_version is not None:
-                extensions = dict(data.get("extensions", {}))
-                extensions["code_version"] = str(code_version)
-                data["extensions"] = extensions
+            data = self._experiment(data)
             data = self._object_shorthand(data)
         return MaterializedConfig(
             kind=kind,
@@ -115,6 +111,51 @@ class AuthoringConfigNormalizer:
         if extensions:
             values["extensions"] = extensions
         return self._object_shorthand(values)
+
+    def _experiment(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Expand beginner training aliases without changing the strict runner."""
+        name = values.pop("name", None)
+        if name is not None:
+            experiment = dict(values.get("experiment", {}))
+            experiment.setdefault("name", str(name))
+            values["experiment"] = experiment
+        values.setdefault("data", {})
+        singular_loss = values.pop("loss", None)
+        if singular_loss is not None:
+            if "losses" in values:
+                raise ValueError("Use either loss or losses, not both.")
+            aliases = {
+                "torch.nn.CrossEntropyLoss": "lambdaforge.nn.losses.CrossEntropyLoss",
+                "torch.nn.BCEWithLogitsLoss": (
+                    "lambdaforge.nn.losses.BinaryCrossEntropyWithLogitsLoss"
+                ),
+                "torch.nn.MSELoss": "lambdaforge.nn.losses.MeanSquaredErrorLoss",
+                "torch.nn.L1Loss": "lambdaforge.nn.losses.MeanAbsoluteErrorLoss",
+                "torch.nn.HuberLoss": "lambdaforge.nn.losses.HuberLoss",
+                "torch.nn.SmoothL1Loss": "lambdaforge.nn.losses.SmoothL1Loss",
+            }
+            values["losses"] = [aliases.get(singular_loss, singular_loss)]
+        trainer = values.get("trainer")
+        if isinstance(trainer, Mapping) and "epochs" in trainer:
+            trainer = copy.deepcopy(dict(trainer))
+            if "max_epochs" in trainer:
+                raise ValueError("Use either trainer.epochs or trainer.max_epochs, not both.")
+            trainer["max_epochs"] = trainer.pop("epochs")
+            values["trainer"] = trainer
+        extensions = dict(values.get("extensions", {}))
+        authoring = dict(self._authoring_extensions(values))
+        for key in ("resources", "data_catalog", "environment"):
+            item = values.pop(key, None)
+            if item is not None:
+                authoring[key] = copy.deepcopy(item)
+        code_version = values.pop("code_version", None)
+        if code_version is not None:
+            extensions["code_version"] = str(code_version)
+        if authoring:
+            extensions["authoring"] = authoring
+        if extensions:
+            values["extensions"] = extensions
+        return values
 
     @staticmethod
     def _inputs(value: Any) -> list[dict[str, Any]]:
@@ -210,6 +251,12 @@ class AuthoringConfigNormalizer:
         return authoring if isinstance(authoring, Mapping) else {}
 
     def _object_shorthand(self, value: Any, *, key: str | None = None) -> Any:
+        if (
+            isinstance(value, str)
+            and key in {"train", "val", "test"}
+            and value.startswith("dataset:")
+        ):
+            return value
         if isinstance(value, str) and key in self._TARGET_KEYS:
             return {"target": value}
         if isinstance(value, Mapping):

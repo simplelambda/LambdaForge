@@ -51,6 +51,19 @@ class TaskFingerprint:
         }
         if "_resolved_inputs" in selected:
             selected.pop("inputs", None)
+        task = selected.get("task")
+        if (
+            isinstance(task, Mapping)
+            and task.get("target") == "lambdaforge.preprocessing.PreprocessingTask"
+            and isinstance(task.get("params"), Mapping)
+        ):
+            cleaned_task = dict(task)
+            cleaned_task["params"] = {
+                str(key): item
+                for key, item in task["params"].items()
+                if str(key) not in {"workers", "workload", "checkpoint_interval"}
+            }
+            selected["task"] = cleaned_task
         extensions = selected.get("extensions")
         if isinstance(extensions, Mapping):
             cleaned_extensions = dict(extensions)

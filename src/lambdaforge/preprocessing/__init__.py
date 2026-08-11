@@ -10,6 +10,8 @@ if TYPE_CHECKING:
     from lambdaforge.preprocessing.FileTreeSource import FileTreeSource
     from lambdaforge.preprocessing.JsonDirectorySink import JsonDirectorySink
     from lambdaforge.preprocessing.JsonLinesSource import JsonLinesSource
+    from lambdaforge.preprocessing.PreprocessingDebugResult import PreprocessingDebugResult
+    from lambdaforge.preprocessing.PreprocessingDebugService import PreprocessingDebugService
     from lambdaforge.preprocessing.PreprocessingErrorPolicy import PreprocessingErrorPolicy
     from lambdaforge.preprocessing.PreprocessingManifest import PreprocessingManifest
     from lambdaforge.preprocessing.PreprocessingRecord import PreprocessingRecord
@@ -17,6 +19,7 @@ if TYPE_CHECKING:
     from lambdaforge.preprocessing.PreprocessingSource import PreprocessingSource
     from lambdaforge.preprocessing.PreprocessingTask import PreprocessingTask
     from lambdaforge.preprocessing.PreprocessingTransform import PreprocessingTransform
+    from lambdaforge.preprocessing.PreprocessingWorker import PreprocessingWorker
     from lambdaforge.preprocessing.PreprocessingWorkload import PreprocessingWorkload
 
 LazyExports.install(
@@ -46,6 +49,14 @@ LazyExports.install(
             "lambdaforge.preprocessing.PreprocessingErrorPolicy",
             "PreprocessingErrorPolicy",
         ),
+        "PreprocessingDebugResult": (
+            "lambdaforge.preprocessing.PreprocessingDebugResult",
+            "PreprocessingDebugResult",
+        ),
+        "PreprocessingDebugService": (
+            "lambdaforge.preprocessing.PreprocessingDebugService",
+            "PreprocessingDebugService",
+        ),
         "PreprocessingManifest": (
             "lambdaforge.preprocessing.PreprocessingManifest",
             "PreprocessingManifest",
@@ -70,6 +81,10 @@ LazyExports.install(
             "lambdaforge.preprocessing.PreprocessingTransform",
             "PreprocessingTransform",
         ),
+        "PreprocessingWorker": (
+            "lambdaforge.preprocessing.PreprocessingWorker",
+            "PreprocessingWorker",
+        ),
         "PreprocessingWorkload": (
             "lambdaforge.preprocessing.PreprocessingWorkload",
             "PreprocessingWorkload",
@@ -84,6 +99,8 @@ __all__ = [
     "JsonDirectorySink",
     "JsonLinesSource",
     "PreprocessingErrorPolicy",
+    "PreprocessingDebugResult",
+    "PreprocessingDebugService",
     "PreprocessingManifest",
     "PreprocessingRecord",
     "PreprocessingSink",
@@ -91,4 +108,5 @@ __all__ = [
     "PreprocessingTask",
     "PreprocessingTransform",
     "PreprocessingWorkload",
+    "PreprocessingWorker",
 ]

@@ -1,8 +1,11 @@
 """Construct control-plane providers from one cluster profile."""
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
+from lambdaforge.controlplane.EnvironmentProvider import EnvironmentProvider
+from lambdaforge.controlplane.ExistingEnvironmentProvider import ExistingEnvironmentProvider
 from lambdaforge.controlplane.LocalScheduler import LocalScheduler
 from lambdaforge.controlplane.LocalTransport import LocalTransport
+from lambdaforge.controlplane.ManagedEnvironmentProvider import ManagedEnvironmentProvider
 from lambdaforge.controlplane.Scheduler import Scheduler
 from lambdaforge.controlplane.SlurmScheduler import SlurmScheduler
 from lambdaforge.controlplane.SshTransport import SshTransport
@@ -23,3 +26,9 @@ class ControlPlaneFactory:
         if profile.scheduler == "local":
             return LocalScheduler(transport)
         return SlurmScheduler(transport, options=profile.scheduler_options)
+
+    def environment_provider(self, profile: ClusterProfile) -> EnvironmentProvider:
+        """Build the explicit existing/managed environment policy."""
+        if profile.environment == "managed":
+            return ManagedEnvironmentProvider()
+        return ExistingEnvironmentProvider()

@@ -54,6 +54,10 @@ contenido. `DataIdentityProviderRegistry` permite integrar identidades instituci
 datasets:
   corpus:
     identity: {strategy: version, namespace: lab/corpus, version: "2026-08-11"}
+    loader:
+      target: mi_proyecto.data.CorpusDataset
+      path_parameter: root
+      params: {}
     locations:
       local: /data/corpus
       atlas: /datasets/project/corpus
@@ -63,6 +67,11 @@ datasets:
 explícita a `DataTransferProvider`. El proveedor incluido usa `rsync`. Un run nunca adivina ni copia
 datos grandes: `lambdaforge data ... replicate` previsualiza y `--apply` ejecuta lo revisado sin
 reescribir automáticamente el catálogo.
+
+Un experimento puede usar `data.train: dataset:corpus/train`; el loader recibe el path en `root`.
+En params se usa `{dataset: corpus, subpath: train}`. Sólo esos marcadores se resuelven, nunca
+strings ordinarios. `lambdaforge data --catalog CATALOG inspect dataset:corpus` muestra identidad,
+ubicaciones/tamaño y el `DatasetArtifact` alcanzable.
 
 ## Mapa de objetos
 
@@ -84,6 +93,8 @@ reescribir automáticamente el catálogo.
 | <code>CacheRecord</code> | Posee un payload del backend y su callback de cierre idempotente. |
 | <code>FileDataset</code> | Carga de forma lazy una lista ordenada y explícita de archivos con un callable del proyecto. |
 | <code>NumpyMemmapDataset</code> | Lee arrays <code>.npy</code> alineados sin cargar los arrays completos en RAM. |
+| <code>DatasetReferenceResolver</code> | Resuelve refs tipadas de experimento y registra bindings lógicos. |
+| <code>DataService</code> | Lista, inspecciona y replica explícitamente datasets catalogados. |
 
 Todos estos nombres son públicos desde <code>lambdaforge.data</code>. El
 paquete <code>lambdaforge.training.data</code> tiene otra responsabilidad:

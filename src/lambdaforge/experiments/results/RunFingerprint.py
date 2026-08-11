@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -62,6 +63,41 @@ class RunFingerprint:
             for key, value in config.items()
             if str(key) not in cls._OPERATIONAL_SECTIONS and str(key) != "sweep"
         }
+        bindings = None
+        extensions = selected.get("extensions")
+        if isinstance(extensions, Mapping):
+            cleaned_extensions = dict(extensions)
+            bindings = cleaned_extensions.pop("_lambdaforge_dataset_bindings", None)
+            authoring = cleaned_extensions.get("authoring")
+            if isinstance(authoring, Mapping):
+                scientific_authoring = {
+                    str(key): value
+                    for key, value in authoring.items()
+                    if str(key) not in {"data_catalog", "environment", "resources"}
+                }
+                if scientific_authoring:
+                    cleaned_extensions["authoring"] = scientific_authoring
+                else:
+                    cleaned_extensions.pop("authoring", None)
+            selected["extensions"] = cleaned_extensions
+        if isinstance(bindings, Sequence):
+            selected = copy.deepcopy(selected)
+            identities: list[dict[str, Any]] = []
+            for binding in bindings:
+                if not isinstance(binding, Mapping):
+                    continue
+                path = binding.get("path")
+                reference = binding.get("reference")
+                if isinstance(path, str) and isinstance(reference, str):
+                    cls._set_path(selected, path, {"dataset_reference": reference})
+                    identities.append(
+                        {
+                            "path": path,
+                            "reference": reference,
+                            "identity": binding.get("identity", {}),
+                        }
+                    )
+            selected["dataset_identities"] = identities
         experiment = selected.get("experiment")
         if isinstance(experiment, Mapping):
             selected["experiment"] = {
@@ -77,6 +113,18 @@ class RunFingerprint:
         if not isinstance(normalized, dict):
             raise TypeError("A run fingerprint requires a top-level mapping.")
         return {"fingerprint_version": cls.VERSION, "config": normalized}
+
+    @staticmethod
+    def _set_path(config: dict[str, Any], path: str, value: Any) -> None:
+        node = config
+        parts = path.split(".")
+        for part in parts[:-1]:
+            current = node.get(part)
+            if not isinstance(current, dict):
+                return
+            node = current
+        if parts[-1] in node:
+            node[parts[-1]] = value
 
     @classmethod
     def _normalize(cls, value: Any) -> Any:

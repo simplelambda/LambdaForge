@@ -11,6 +11,9 @@ from typing import Any
 
 from lambdaforge.configuration.AuthoringConfigNormalizer import AuthoringConfigNormalizer
 from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
+from lambdaforge.data.DataCatalog import DataCatalog
+from lambdaforge.data.DatasetReferenceResolver import DatasetReferenceResolver
+from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.experiments.migrations.ExperimentConfigMigrationResult import (
     ExperimentConfigMigrationResult,
 )
@@ -60,6 +63,7 @@ class ExperimentConfig(Mapping[str, Any]):
         self.migration_result = _migration_result
         materialized = normalizer.normalize(_migration_result.config, source=self.source)
         self._data = copy.deepcopy(dict(materialized.values))
+        self._resolve_dataset_references()
         self._validate_identity(self._data)
 
     @classmethod
@@ -110,6 +114,58 @@ class ExperimentConfig(Mapping[str, Any]):
     def as_dict(self) -> dict[str, Any]:
         """Return a defensive deep copy suitable for serialization."""
         return copy.deepcopy(self._data)
+
+    @property
+    def source_dir(self) -> Path:
+        """Return the YAML directory or current directory for mapping configs."""
+        return self.source.resolve().parent if self.source is not None else Path.cwd().resolve()
+
+    @property
+    def resources(self) -> ResourceRequest:
+        """Return the portable friendly resource request, if declared."""
+        value = self._authoring.get("resources", {})
+        if not isinstance(value, Mapping):
+            raise TypeError("Experiment resources must be a mapping.")
+        return ResourceRequest.from_mapping(value)
+
+    @property
+    def _authoring(self) -> Mapping[str, Any]:
+        extensions = self._data.get("extensions", {})
+        if not isinstance(extensions, Mapping):
+            return {}
+        value = extensions.get("authoring", {})
+        return value if isinstance(value, Mapping) else {}
+
+    def _resolve_dataset_references(self) -> None:
+        authoring = self._authoring
+        configured = authoring.get("data_catalog")
+        data = self._data.get("data")
+        if configured is None or not isinstance(data, Mapping):
+            return
+        catalog_path = Path(str(configured))
+        catalog_path = (
+            catalog_path
+            if catalog_path.is_absolute()
+            else (self.source_dir / catalog_path).resolve()
+        )
+        resolver = DatasetReferenceResolver(
+            DataCatalog.from_yaml(catalog_path),
+            environment=str(authoring.get("environment", "local")),
+            source_dir=self.source_dir,
+        )
+        resolved = dict(data)
+        for split in ("train", "val", "test"):
+            if split in resolved:
+                resolved[split] = resolver.resolve_split(resolved[split], path=f"data.{split}")
+        if "datamodule" in resolved:
+            resolved["datamodule"] = resolver.resolve(
+                resolved["datamodule"], path="data.datamodule"
+            )
+        self._data["data"] = resolved
+        if resolver.bindings:
+            extensions = dict(self._data.get("extensions", {}))
+            extensions["_lambdaforge_dataset_bindings"] = resolver.bindings
+            self._data["extensions"] = extensions
 
     def value(self, path: str, default: Any = None) -> Any:
         """Read a dot-separated path from this configuration."""

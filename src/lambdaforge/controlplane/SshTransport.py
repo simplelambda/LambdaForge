@@ -48,3 +48,15 @@ class SshTransport(Transport):
         completed = subprocess.run(tuple(arguments), check=False, shell=False)
         if completed.returncode:
             raise RuntimeError(f"scp failed with exit code {completed.returncode}.")
+
+    def get(self, source: str | Path, destination: str | Path) -> None:
+        """Retrieve one explicit remote path through OpenSSH scp."""
+        destination_path = Path(destination).resolve()
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        completed = subprocess.run(
+            ("scp", *self.options, f"{self.host}:{source}", str(destination_path)),
+            check=False,
+            shell=False,
+        )
+        if completed.returncode:
+            raise RuntimeError(f"scp retrieval failed with exit code {completed.returncode}.")

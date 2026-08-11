@@ -37,3 +37,7 @@ class LocalTransport(Transport):
             shutil.copytree(source_path, destination_path, dirs_exist_ok=True)
         else:
             shutil.copy2(source_path, destination_path)
+
+    def get(self, source: str | Path, destination: str | Path) -> None:
+        """Retrieve locally using the same exact-path copy contract."""
+        self.put(source, destination)

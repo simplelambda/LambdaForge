@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -107,3 +108,34 @@ class ClusterCatalog:
                 f"{tuple(profile.name for profile in matches)}."
             )
         raise KeyError(f"No cluster profile owns data environment {environment!r}.")
+
+    @staticmethod
+    def add(path: str | Path, profile: ClusterProfile) -> Path:
+        """Atomically add/update one profile in an explicit project/user catalogue."""
+        destination = Path(path).expanduser().resolve()
+        value: dict[str, object] = {}
+        if destination.is_file():
+            loaded = yaml.safe_load(destination.read_text(encoding="utf-8")) or {}
+            if not isinstance(loaded, Mapping):
+                raise TypeError("Cluster catalogue must contain a mapping.")
+            value = dict(loaded)
+        clusters = value.setdefault("clusters", {})
+        if not isinstance(clusters, dict):
+            raise TypeError("Cluster catalogue clusters must be a mapping.")
+        descriptor = profile.to_dict()
+        descriptor.pop("name", None)
+        clusters[profile.name] = descriptor
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor_handle, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+        )
+        os.close(descriptor_handle)
+        temporary = Path(temporary_name)
+        try:
+            temporary.write_text(
+                yaml.safe_dump(value, sort_keys=False, allow_unicode=True), encoding="utf-8"
+            )
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return destination

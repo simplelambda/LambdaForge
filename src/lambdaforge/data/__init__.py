@@ -27,6 +27,7 @@ from lambdaforge.data.DatasetIdentity import DatasetIdentity
 from lambdaforge.data.DatasetIdIdentityProvider import DatasetIdIdentityProvider
 from lambdaforge.data.DatasetLocation import DatasetLocation
 from lambdaforge.data.DatasetReference import DatasetReference
+from lambdaforge.data.DatasetReferenceResolver import DatasetReferenceResolver
 from lambdaforge.data.DataTransferProvider import DataTransferProvider
 from lambdaforge.data.ExplicitVersionIdentityProvider import ExplicitVersionIdentityProvider
 from lambdaforge.data.FileDataset import FileDataset
@@ -57,6 +58,7 @@ __all__ = [
     "DatasetIdentity",
     "DatasetLocation",
     "DatasetReference",
+    "DatasetReferenceResolver",
     "DatasetSerializer",
     "DiskCacheBackend",
     "ExplicitVersionIdentityProvider",

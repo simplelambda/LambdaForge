@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import csv
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import torch
 
@@ -89,11 +91,18 @@ class EpochMetricsCSV(CallbackBase):
                 if key not in fields:
                     fields.append(key)
 
-        with open(path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fields)
-            writer.writeheader()
-            for row in self._rows:
-                writer.writerow(row)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for row in self._rows:
+                    writer.writerow(row)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _path(self, trainer: TrainerType) -> Path:
         return Path(str(trainer.default_root_dir)) / self.filename

@@ -1,5 +1,7 @@
 # LambdaForge agent manual
 
+[English](AGENTS.md) | [Español](AGENTS.es.md)
+
 This is the single operational entry point for an agent using or modifying LambdaForge. Read this
 file first. Do not crawl the repository or all READMEs. Use the routing table near the end only when
 a requested detail is not available here, then inspect the public symbol's signature/docstring or
@@ -21,7 +23,8 @@ Supported Python starts at 3.10. The documented public namespaces are `lambdafor
 `lambdaforge.configuration`, `lambdaforge.workflows`, `lambdaforge.operations`, `lambdaforge.hpo`,
 `lambdaforge.execution`, `lambdaforge.storage`, `lambdaforge.registry`,
 `lambdaforge.observability`, `lambdaforge.reproducibility`, `lambdaforge.plugins`,
-`lambdaforge.tracking`, `lambdaforge.controlplane` and `lambdaforge.integrations`. Do not import
+`lambdaforge.tracking`, `lambdaforge.controlplane`, `lambdaforge.results`,
+`lambdaforge.visualization`, `lambdaforge.artifacts` and `lambdaforge.integrations`. Do not import
 from private file locations.
 
 ## Fast decision path
@@ -60,6 +63,16 @@ from private file locations.
 | Preview/submit remote work | `lambdaforge run CONFIG --on CLUSTER --dry-run`; remove dry-run to submit |
 | Reconnect to scheduled work | `lambdaforge jobs list/status/logs/cancel/retry` |
 | Declare large-data locations | `DataCatalog`; inspect/replicate with `lambdaforge data` |
+| Use concise training YAML | `name`, `model`, one `loss`, `trainer.epochs`, `resources` compile to strict IR |
+| Use logical experiment data | `data_catalog`, then `dataset:NAME/subpath` or `{dataset, subpath}` |
+| Register/bootstrap cluster | `clusters add`; `doctor --on`; `clusters bootstrap` |
+| Reconnect to jobs | `status`; `logs JOB --follow`; `cancel JOB`; `retry JOB` |
+| Sync small remote evidence | `results sync JOB`; heavy files require `artifact fetch` |
+| Query/compare/export results | `results list/show/compare/export` |
+| Plot curves/sweeps/HPO | `plot learning/sweep/seeds/hpo/resources`; `--json` returns `PlotSpec` |
+| Inspect a scientific artifact | `artifact inspect/export/validate/visualize/list/plugins` |
+| Debug N preprocessing records | `debug preprocessing.yaml --records N` |
+| Inspect a DatasetArtifact | `data --catalog CATALOG inspect dataset:NAME` |
 
 ## Install into a consumer project
 
@@ -82,7 +95,7 @@ reproducible release, build/install a versioned LambdaForge wheel instead of the
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.5.1-py3-none-any.whl
 ```
 
 Let the consumer lock the correct PyTorch wheel. `nvidia-smi` only proves the driver is visible;
@@ -93,9 +106,9 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 ```
 
 Optional extras are `hpo` (Optuna), `adaptive-hpo` (BoTorch), `s3` (boto3), `parquet`
-(Pandas/PyArrow), `onnx`, individual/all `mlflow`/`tensorboard`/`wandb` tracking providers and
-`dev`. Install only used providers, for example `lambdaforge[adaptive-hpo,s3]`; Sobol/random HPO,
-local stores and base training do not need those extras.
+(Pandas/PyArrow), `onnx`, `viz` (Plotly), `graph` (NetworkX), `viz3d` (Plotly/trimesh), individual
+or all tracking providers and `dev`. Install only used providers; Sobol/random HPO, local stores,
+Matplotlib plots and base training do not need those extras.
 
 ## Version 0.5 authoring, identity and placement
 
@@ -152,6 +165,71 @@ already have a catalog location or be replicated explicitly with preview then `-
 `ControlPlane`/`JobService` are the provider-neutral application layer. SSH/SLURM credentials stay
 in their native runtime. Do not execute workflow nodes with non-local `on`: version 0.5 exposes the
 placement in plans but refuses execution until durable DAG recovery and artifact transfer exist.
+
+## Version 0.5.1 runtime, results and inspection
+
+Friendly training accepts top-level `name`, singular `loss`, `trainer.epochs` and `resources`, but
+agents should inspect the strict materialization before editing advanced fields. An experiment can
+resolve direct or nested typed dataset markers without making physical paths scientific:
+
+```yaml
+name: baseline
+data_catalog: data-catalog.yaml
+environment: local
+data:
+  train: dataset:corpus-v3/train
+  val:
+    target: my_project.data.Dataset
+    params:
+      root: {dataset: corpus-v3, subpath: validation}
+model: my_project.models.Model
+loss: torch.nn.BCEWithLogitsLoss
+trainer: {epochs: 20}
+resources: {cpus: 8, memory: 32GiB, gpus: 1, time: 4h}
+```
+
+A direct reference requires its catalog descriptor to contain a `loader` ObjectSpec and explicit
+`path_parameter`. Only `{dataset, subpath}` is a nested marker; never reinterpret arbitrary strings.
+The bundle picks the destination `data_environment`, while `RunFingerprint` keeps the logical
+reference and catalog identity.
+
+For remote work, use `clusters add`, `doctor --on`, `clusters bootstrap`, then `run --on`. Managed
+environments are user-space venvs under `WORKSPACE/.lambdaforge/environments`, keyed by exact
+LambdaForge/consumer/dependency wheel bytes and Python/offline policy. They never clone a branch or
+install CUDA/drivers. Existing environments are verified but owned by the user. Offline mode needs
+a target-compatible explicit wheelhouse. Jobs persist scheduler/scientific/execution/bundle IDs and
+remote paths; top-level `status/logs/cancel/retry` are aliases for the `jobs` service.
+
+Use the service layer, not filesystem globs:
+
+```bash
+lambdaforge results list --root runs
+lambdaforge results show baseline --root runs
+lambdaforge results compare baseline ablation --metric val_loss --json
+lambdaforge results export baseline --series --format csv --output curves.csv
+lambdaforge plot learning baseline --metric val_loss --aggregate mean --uncertainty std
+lambdaforge plot sweep sweep.yaml --x optimizer.params.lr --metric val_loss
+lambdaforge artifact inspect predictions.npz --array logits --rows 20
+lambdaforge artifact visualize graph.npz --type graph --nodes positions --edges edge_index
+lambdaforge debug preprocessing.yaml --records 3 --intermediates debug/stages
+```
+
+`MetricSeries` is the normalized view over existing `metrics.csv`; exact names only. A `PlotSpec`
+is renderer-neutral and every rendered plot gets an atomic `.plot.json` sidecar/cache key. With one
+seed, do not invent std/CI. NPZ/NPY inspection always disables pickle, caps previews and samples
+statistics deterministically above the bound. Geometry requires explicit roles. Artifact plugin
+groups cover inspector/visualizer/schema/exporter/validator.
+
+`results sync JOB` retrieves only allowlisted small evidence. `artifact fetch JOB LOGICAL_NAME`
+downloads one explicit heavy artifact. `plot learning JOB --follow` periodically syncs metrics and
+atomically refreshes until the scheduler is terminal. 0.5.1 intentionally has no automatic
+placement, distributed workflow coordinator, GUI/server, implicit dataset/checkpoint download,
+platform wheel synthesis or new HPO algorithm.
+
+For preprocessing concurrency: `workers=1` is sequential; `io` uses threads; `cpu` uses a spawn
+pool for importable/picklable transforms while the parent owns sink/manifest; `auto` uses conservative
+threads; `gpu` requires one worker. Use explicit sharded jobs for multiple GPUs. Sample debug never
+calls/finalizes the production sink and has a separate `debug:` identity.
 
 ## Safe experiment workflow
 
@@ -409,7 +487,8 @@ conditional `when`. `OptunaSearch` lazily requires Optuna and wraps seeded TPE p
 
 CPU experiment parallelism omits GPUs and sets `cpu_jobs`; affinity oversubscription is rejected.
 `ResourceRequest.from_mapping()` normalizes `cpus`, `memory`, `gpus`, `gpu_memory`, `storage`,
-`time` and `processes`; byte and duration units remain explicit. `ResourcePlanner` compares workload
+`time` and `processes`; singular `cpu`/`ram`/`gpu` are friendly aliases. Byte and duration units
+remain explicit. `ResourcePlanner` compares workload
 requests with separately declared capacity and creates capacity-safe waves/estimates.
 `LocalExecutionBackend` runs argv. `SlurmExecutionBackend` writes quoted `submit.sbatch` and submits
 only with `dry_run=False`; it supports nodes/array/dependency/resources/environment/container/requeue

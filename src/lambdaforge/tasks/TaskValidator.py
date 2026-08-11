@@ -136,12 +136,22 @@ class TaskValidator:
         if (
             target.__module__ == "lambdaforge.preprocessing.PreprocessingTask"
             and target.__name__ == "PreprocessingTask"
-            and not has_inputs
         ):
-            errors.append(
-                "Built-in PreprocessingTask requires at least one top-level 'inputs' entry so "
-                "mutable source content participates in task identity."
-            )
+            if not has_inputs:
+                errors.append(
+                    "Built-in PreprocessingTask requires at least one top-level 'inputs' entry so "
+                    "mutable source content participates in task identity."
+                )
+            params = spec.get("params", {})
+            if (
+                isinstance(params, Mapping)
+                and params.get("workload", "auto") == "gpu"
+                and int(params.get("workers", 1)) != 1
+            ):
+                errors.append(
+                    "GPU preprocessing requires workers=1; use explicit task shards for "
+                    "multi-GPU execution."
+                )
         params = spec.get("params", {})
         try:
             inspect.signature(target).bind(**dict(params))

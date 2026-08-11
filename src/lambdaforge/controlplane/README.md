@@ -40,6 +40,8 @@ clusters:
     scheduler: slurm
     workspace: /scratch/user/lambdaforge
     python: /shared/env/bin/python
+    environment: managed
+    project_module: my_project
     data_environment: atlas
     command_prefix: [apptainer, exec, /images/project.sif]
     scheduler_options: {partition: gpu}
@@ -59,10 +61,11 @@ lambdaforge run config.yaml --on atlas --dry-run
 lambdaforge run config.yaml --profile one-gpu
 ```
 
-`ExecutionBundleBuilder` caches strict YAML, a manifest and small path inputs (10 MiB maximum by
-default). Large path inputs are rejected; use `DataCatalog`. Remote environments must already
-contain the pinned framework and consumer project. `clusters bootstrap` only creates the workspace
-and verifies imports.
+`ExecutionBundleBuilder` caches strict YAML, manifest, exact local framework/consumer wheels and
+small path inputs (10 MiB maximum). Large inputs use `DataCatalog`. `managed` creates an idempotent
+user venv keyed by wheel/Python/wheelhouse identity; `existing` only verifies. Offline mode needs a
+target-compatible wheelhouse. No branch clone, driver or system CUDA installation occurs. See the
+[complete cluster guide](../../../docs/CLUSTERS.md).
 
 Python:
 
@@ -84,15 +87,16 @@ handle, bundle = ControlPlane().submit(
 `~/.local/state/lambdaforge/jobs`. `JobService` is restart-safe for scheduler-backed jobs:
 
 ```bash
-lambdaforge jobs list
-lambdaforge jobs status JOB_ID
-lambdaforge jobs logs JOB_ID --tail 100
-lambdaforge jobs cancel JOB_ID
-lambdaforge jobs retry JOB_ID --dry-run
+lambdaforge status --on atlas --state running --name study
+lambdaforge status JOB_ID
+lambdaforge logs JOB_ID --follow
+lambdaforge cancel JOB_ID
+lambdaforge retry JOB_ID --dry-run
 ```
 
 Retry creates a new job ID and `retry_of` link. It never overwrites the prior job or scientific
-attempt.
+attempt. `results sync JOB` retrieves small evidence; `artifact fetch JOB NAME` explicitly retrieves
+one heavy artifact.
 
 ## 5. Providers
 
@@ -113,6 +117,6 @@ Implement `Transport` and `Scheduler` for another platform. Return `CommandResul
 - Mixed-cluster workflow placement is visible in dry-run but execution is refused until durable DAG
   recovery and artifact transfer are implemented soundly.
 - Cluster choice is explicit; capacity/queue/cost discovery and automatic placement are not claimed.
-- `DataCatalog` resolves named task inputs. Dataset paths embedded in experiment objects remain a
-  consumer concern and must resolve in the configured remote environment.
+- `DataCatalog` resolves named task inputs plus direct/nested typed experiment references; ordinary
+  strings remain a consumer concern.
 - Local scheduler execution is synchronous. SLURM jobs reconnect across CLI processes.

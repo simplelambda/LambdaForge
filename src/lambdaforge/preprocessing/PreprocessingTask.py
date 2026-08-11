@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import traceback
 from collections.abc import Mapping, Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Executor,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +23,7 @@ from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
 from lambdaforge.preprocessing.PreprocessingErrorPolicy import PreprocessingErrorPolicy
 from lambdaforge.preprocessing.PreprocessingManifest import PreprocessingManifest
 from lambdaforge.preprocessing.PreprocessingRecord import PreprocessingRecord
+from lambdaforge.preprocessing.PreprocessingWorker import PreprocessingWorker
 from lambdaforge.preprocessing.PreprocessingWorkload import PreprocessingWorkload
 from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
 from lambdaforge.tasks.ArtifactType import ArtifactType
@@ -75,6 +85,11 @@ class PreprocessingTask(Task):
         self.checkpoint_interval = int(checkpoint_interval)
         self.workers = int(workers)
         self.workload = PreprocessingWorkload(workload)
+        if self.workload is PreprocessingWorkload.GPU and self.workers != 1:
+            raise ValueError(
+                "GPU preprocessing requires workers=1. Use explicit task sharding and "
+                "resource planning instead of creating uncoordinated GPU workers."
+            )
         self.dataset_name = dataset_name
         self.dataset_version = str(dataset_version)
         self.dataset_splits = dict(dataset_splits or {})
@@ -102,8 +117,8 @@ class PreprocessingTask(Task):
         failures = 0
         selected = 0
         since_checkpoint = 0
-        pending: dict[Future[None], PreprocessingRecord] = {}
-        executor = ThreadPoolExecutor(max_workers=self.workers) if self.workers > 1 else None
+        pending: dict[Future[Any], PreprocessingRecord] = {}
+        executor = self._executor()
         try:
             for record in self.source.records(context):
                 if not isinstance(record, PreprocessingRecord):
@@ -137,13 +152,13 @@ class PreprocessingTask(Task):
                             raise
                     since_checkpoint += 1
                 else:
-                    pending[executor.submit(self._transform_and_write, record, context)] = record
+                    pending[self._submit(executor, record, context)] = record
                     if len(pending) >= self.workers * 2:
                         done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
                         for future in done:
                             current = pending.pop(future)
                             try:
-                                future.result()
+                                self._complete_future(future, context)
                                 records[current.key] = self._success_record()
                                 processed += 1
                             except Exception as error:
@@ -165,7 +180,7 @@ class PreprocessingTask(Task):
                 for future in done:
                     current = pending.pop(future)
                     try:
-                        future.result()
+                        self._complete_future(future, context)
                         records[current.key] = self._success_record()
                         processed += 1
                     except Exception as error:
@@ -259,14 +274,42 @@ class PreprocessingTask(Task):
         )
 
     def _transform_and_write(self, record: PreprocessingRecord, context: TaskContext) -> None:
-        transformed = record
-        for transform in self.transforms:
-            transformed = transform.transform(transformed, context)
-            if not isinstance(transformed, PreprocessingRecord):
-                raise TypeError("Preprocessing transforms must return PreprocessingRecord objects.")
-            if transformed.key != record.key:
-                raise ValueError("Preprocessing transforms cannot change stable record keys.")
+        transformed = PreprocessingWorker.transform(self.transforms, record, context)
         self.sink.write(transformed, context)
+
+    def _executor(self) -> Executor | None:
+        if self.workers == 1:
+            return None
+        if self.workload is PreprocessingWorkload.CPU:
+            return ProcessPoolExecutor(
+                max_workers=self.workers,
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+        # AUTO deliberately prefers the safer thread protocol. Consumers opt in
+        # to process serialization costs and restrictions with workload=cpu.
+        return ThreadPoolExecutor(max_workers=self.workers)
+
+    def _submit(
+        self,
+        executor: Executor,
+        record: PreprocessingRecord,
+        context: TaskContext,
+    ) -> Future[Any]:
+        if self.workload is PreprocessingWorkload.CPU:
+            return executor.submit(
+                PreprocessingWorker.transform,
+                self.transforms,
+                record,
+                replace(context, stop_event=None),
+            )
+        return executor.submit(self._transform_and_write, record, context)
+
+    def _complete_future(self, future: Future[Any], context: TaskContext) -> None:
+        result = future.result()
+        if self.workload is PreprocessingWorkload.CPU:
+            if not isinstance(result, PreprocessingRecord):
+                raise TypeError("A preprocessing process returned an invalid record.")
+            self.sink.write(result, context)
 
     @staticmethod
     def _success_record() -> Mapping[str, Any]:

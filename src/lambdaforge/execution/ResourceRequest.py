@@ -43,8 +43,11 @@ class ResourceRequest:
         """Parse the user-facing portable ``resources`` mapping."""
         data = dict(value or {})
         aliases = {
+            "cpu": "cpu_cores",
             "cpus": "cpu_cores",
+            "ram": "ram_bytes",
             "memory": "ram_bytes",
+            "gpu": "gpu_count",
             "gpus": "gpu_count",
             "gpu_memory": "gpu_memory_bytes",
             "time": "runtime_seconds",

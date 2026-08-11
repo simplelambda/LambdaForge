@@ -14,6 +14,7 @@ from lambdaforge.controlplane import (
     CommandResult,
     ControlPlane,
     ExecutionBundleBuilder,
+    ExistingEnvironmentProvider,
     JobService,
     JobState,
     JobStore,
@@ -91,6 +92,10 @@ class FakeFactory:
     def scheduler(self, profile: ClusterProfile, transport: Transport) -> Scheduler:
         del profile, transport
         return self.scheduler_instance
+
+    def environment_provider(self, profile: ClusterProfile) -> ExistingEnvironmentProvider:
+        del profile
+        return ExistingEnvironmentProvider()
 
 
 class TestControlPlane:

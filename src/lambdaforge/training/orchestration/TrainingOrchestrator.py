@@ -298,12 +298,33 @@ class TrainingOrchestrator:
                     for slot_index, (_, process) in running.items()
                     if not process.is_alive()
                 ]
+                launched = False
                 for slot_index in finished:
                     name, process = running.pop(slot_index)
                     process.join()
                     exit_codes[name] = process.exitcode
                     if on_job_finished is not None:
                         on_job_finished(name, process.exitcode, slot_index)
+
+                    # A dynamic controller must observe one completed action and
+                    # be allowed to react before an unrelated completion is
+                    # incorporated.  This also avoids leaving a released GPU idle
+                    # for an entire polling pass.
+                    if not self.stop_event.is_set():
+                        job = next_job(slot_index, normalized_slots[slot_index])
+                        if job is not None:
+                            if job.name in names:
+                                raise ValueError(
+                                    f"Dynamic training job name is not unique: {job.name!r}."
+                                )
+                            names.add(job.name)
+                            replacement = self._launch(
+                                job,
+                                normalized_slots[slot_index],
+                                slot_index=slot_index,
+                            )
+                            running[slot_index] = (job.name, replacement)
+                            launched = True
 
                 if self.stop_event.is_set():
                     self._join_processes(list(running.values()))
@@ -312,7 +333,6 @@ class TrainingOrchestrator:
                     self._raise_if_processes_alive(list(running.values()))
                     return exit_codes
 
-                launched = False
                 for slot_index, slot in enumerate(normalized_slots):
                     if slot_index in running:
                         continue

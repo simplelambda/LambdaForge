@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,6 +21,9 @@ class ClusterProfile:
     host: str | None = None
     workspace: str = ".lambdaforge/remote"
     python: str = "python"
+    environment: str = "existing"
+    wheelhouse: str | None = None
+    project_module: str | None = None
     data_environment: str | None = None
     ssh_options: tuple[str, ...] = ()
     command_prefix: tuple[str, ...] = ()
@@ -32,10 +36,17 @@ class ClusterProfile:
             raise ValueError("Cluster transport must be 'local' or 'ssh'.")
         if self.scheduler not in {"local", "slurm"}:
             raise ValueError("Cluster scheduler must be 'local' or 'slurm'.")
+        if self.environment not in {"existing", "managed"}:
+            raise ValueError("Cluster environment must be 'existing' or 'managed'.")
         if self.transport == "ssh" and not self.host:
             raise ValueError("SSH cluster profiles require host.")
         if self.transport == "ssh" and not self.workspace.startswith("/"):
             raise ValueError("SSH cluster workspaces must be absolute paths.")
+        if (
+            self.project_module is not None
+            and re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", self.project_module) is None
+        ):
+            raise ValueError("project_module must be a fully qualified Python module name.")
         object.__setattr__(self, "scheduler_options", FrozenJsonMapping(self.scheduler_options))
 
     @classmethod
@@ -54,6 +65,9 @@ class ClusterProfile:
             host=str(value["host"]) if value.get("host") is not None else None,
             workspace=str(value.get("workspace", ".lambdaforge/remote")),
             python=str(value.get("python", "python")),
+            environment=str(value.get("environment", "existing")),
+            wheelhouse=(str(value["wheelhouse"]) if value.get("wheelhouse") else None),
+            project_module=(str(value["project_module"]) if value.get("project_module") else None),
             data_environment=(
                 str(value["data_environment"])
                 if value.get("data_environment") is not None
@@ -73,6 +87,9 @@ class ClusterProfile:
             "host": self.host,
             "workspace": self.workspace,
             "python": self.python,
+            "environment": self.environment,
+            "wheelhouse": self.wheelhouse,
+            "project_module": self.project_module,
             "data_environment": self.data_environment or self.name,
             "ssh_options": list(self.ssh_options),
             "command_prefix": list(self.command_prefix),

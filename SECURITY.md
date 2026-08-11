@@ -1,5 +1,7 @@
 # Security policy
 
+[English](SECURITY.md) | [Español](SECURITY.es.md)
+
 ## Supported versions
 
 LambdaForge is pre-1.0. Security fixes are applied to the current development branch and the most

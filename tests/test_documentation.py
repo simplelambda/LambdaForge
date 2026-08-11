@@ -12,7 +12,7 @@ class TestDocumentation:
     def test_every_local_markdown_link_resolves(self) -> None:
         missing: list[str] = []
         for document in sorted(self.ROOT.rglob("*.md")):
-            if ".git" in document.parts:
+            if {".git", ".venv", "build", "dist"}.intersection(document.parts):
                 continue
             text = document.read_text(encoding="utf-8")
             for match in re.finditer(r"\[[^\]]*\]\(([^)]+)\)", text):
@@ -30,14 +30,19 @@ class TestDocumentation:
             (self.ROOT / "README.md").read_text(encoding="utf-8"),
             (self.ROOT / "README.es.md").read_text(encoding="utf-8"),
             (self.ROOT / "AGENTS.md").read_text(encoding="utf-8"),
+            (self.ROOT / "AGENTS.es.md").read_text(encoding="utf-8"),
         ]
         namespaces = {
             "lambdaforge.configuration",
+            "lambdaforge.controlplane",
             "lambdaforge.data",
             "lambdaforge.execution",
             "lambdaforge.experiments",
             "lambdaforge.hpo",
             "lambdaforge.integrations",
+            "lambdaforge.results",
+            "lambdaforge.visualization",
+            "lambdaforge.artifacts",
             "lambdaforge.metrics",
             "lambdaforge.nn",
             "lambdaforge.observability",
@@ -102,3 +107,46 @@ class TestDocumentation:
             "examples/adaptive-hpo.yaml",
         }
         assert not sorted(value for value in required if value not in manual)
+
+    def test_every_maintained_human_guide_has_a_visible_translation(self) -> None:
+        """Keep technical, package, security and agent documentation paired."""
+        documents = [
+            self.ROOT / "README.md",
+            self.ROOT / "AGENTS.md",
+            self.ROOT / "CHANGELOG.md",
+            self.ROOT / "SECURITY.md",
+            *sorted((self.ROOT / "docs").glob("*.md")),
+            *sorted((self.ROOT / "src/lambdaforge").glob("*/README*.md")),
+            *sorted((self.ROOT / "src/lambdaforge").glob("*/*/README*.md")),
+        ]
+        for document in documents:
+            if document.name.endswith(".es.md"):
+                counterpart = document.with_name(document.name.removesuffix(".es.md") + ".md")
+                expected = counterpart.name
+            else:
+                counterpart = document.with_name(document.stem + ".es.md")
+                expected = counterpart.name
+            assert counterpart.is_file(), f"Missing translation for {document}"
+            assert expected in document.read_text(encoding="utf-8"), document
+
+    def test_release_051_commands_and_limits_are_documented_in_both_languages(self) -> None:
+        required = {
+            "lambdaforge results sync JOB",
+            "lambdaforge plot learning",
+            "lambdaforge artifact inspect",
+            "lambdaforge debug",
+            "allow_pickle=False",
+            "automatic placement",
+        }
+        english = (self.ROOT / "README.md").read_text(encoding="utf-8")
+        spanish = (self.ROOT / "README.es.md").read_text(encoding="utf-8")
+        assert not sorted(value for value in required if value not in english)
+        spanish_required = {
+            "lambdaforge results sync JOB",
+            "lambdaforge plot learning",
+            "lambdaforge artifact inspect",
+            "lambdaforge debug",
+            "allow_pickle=False",
+            "placement automático",
+        }
+        assert not sorted(value for value in spanish_required if value not in spanish)

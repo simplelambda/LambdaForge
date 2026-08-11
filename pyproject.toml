@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lambdaforge"
-version = "0.5.0"
+version = "0.5.1"
 description = "Reproducible AI workflows from local authoring to multi-cluster execution."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -63,7 +63,18 @@ onnx = [
     "onnx>=1.16",
     "onnxscript>=0.1",
 ]
+viz = [
+    "plotly>=5.20",
+]
+graph = [
+    "networkx>=3.2",
+]
+viz3d = [
+    "plotly>=5.20",
+    "trimesh>=4.0",
+]
 dev = [
+    "build>=1.2",
     "mypy>=1.10",
     "pytest>=8",
     "pytest-cov>=5",
@@ -72,6 +83,7 @@ dev = [
     "types-pywin32>=308",
     "types-jsonschema>=4.23",
     "types-PyYAML>=6",
+    "twine>=6",
 ]
 
 [project.scripts]
@@ -90,7 +102,14 @@ lambdaforge = [
 ]
 
 [tool.setuptools.data-files]
-"share/lambdaforge" = ["AGENTS.md", "CHANGELOG.md", "SECURITY.md"]
+"share/lambdaforge" = [
+    "AGENTS.md",
+    "AGENTS.es.md",
+    "CHANGELOG.md",
+    "CHANGELOG.es.md",
+    "SECURITY.md",
+    "SECURITY.es.md",
+]
 "share/lambdaforge/examples" = [
     "examples/adaptive-hpo.yaml",
     "examples/experiment.yaml",
@@ -103,8 +122,19 @@ lambdaforge = [
 ]
 "share/lambdaforge/docs" = [
     "docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.md",
+    "docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.es.md",
     "docs/ARCHITECTURE.md",
+    "docs/ARCHITECTURE.es.md",
+    "docs/ARTIFACTS.md",
+    "docs/ARTIFACTS.es.md",
+    "docs/CLUSTERS.md",
+    "docs/CLUSTERS.es.md",
     "docs/GOVERNANCE.md",
+    "docs/GOVERNANCE.es.md",
+    "docs/PREPROCESSING.md",
+    "docs/PREPROCESSING.es.md",
+    "docs/RESULTS.md",
+    "docs/RESULTS.es.md",
 ]
 
 [tool.pytest.ini_options]

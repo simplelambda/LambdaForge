@@ -6,6 +6,7 @@ from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 from lambdaforge.LazyExports import LazyExports
 
 if TYPE_CHECKING:
+    from lambdaforge.artifacts.ArtifactService import ArtifactService
     from lambdaforge.configuration.MaterializedConfig import MaterializedConfig
     from lambdaforge.controlplane.JobHandle import JobHandle
     from lambdaforge.experiments.AggregateResult import AggregateResult
@@ -18,9 +19,12 @@ if TYPE_CHECKING:
     from lambdaforge.hpo.AdaptiveExperimentPlan import AdaptiveExperimentPlan
     from lambdaforge.hpo.AdaptiveExperimentResult import AdaptiveExperimentResult
     from lambdaforge.LambdaForge import LambdaForge
+    from lambdaforge.results.ResultService import ResultService
     from lambdaforge.tasks.TaskExecutionPlan import TaskExecutionPlan
     from lambdaforge.tasks.TaskResult import TaskResult
     from lambdaforge.tasks.TaskRun import TaskRun
+    from lambdaforge.visualization.PlotSpec import PlotSpec
+    from lambdaforge.visualization.VisualizationService import VisualizationService
     from lambdaforge.workflows.Workflow import Workflow
     from lambdaforge.workflows.WorkflowPlan import WorkflowPlan
     from lambdaforge.workflows.WorkflowResult import WorkflowResult
@@ -41,6 +45,7 @@ LazyExports.install(
             "lambdaforge.experiments.AggregateResult",
             "AggregateResult",
         ),
+        "ArtifactService": ("lambdaforge.artifacts.ArtifactService", "ArtifactService"),
         "ArtifactRetentionPlan": (
             "lambdaforge.experiments.retention.ArtifactRetentionPlan",
             "ArtifactRetentionPlan",
@@ -65,6 +70,8 @@ LazyExports.install(
             "lambdaforge.experiments.results.ResultRecord",
             "ResultRecord",
         ),
+        "ResultService": ("lambdaforge.results.ResultService", "ResultService"),
+        "PlotSpec": ("lambdaforge.visualization.PlotSpec", "PlotSpec"),
         "TaskExecutionPlan": (
             "lambdaforge.tasks.TaskExecutionPlan",
             "TaskExecutionPlan",
@@ -78,6 +85,10 @@ LazyExports.install(
             "lambdaforge.workflows.WorkflowValidationReport",
             "WorkflowValidationReport",
         ),
+        "VisualizationService": (
+            "lambdaforge.visualization.VisualizationService",
+            "VisualizationService",
+        ),
     },
 )
 
@@ -86,6 +97,7 @@ __all__ = [
     "AdaptiveExperimentPlan",
     "AdaptiveExperimentResult",
     "AggregateResult",
+    "ArtifactService",
     "ArtifactRetentionPlan",
     "ArtifactRetentionResult",
     "Experiment",
@@ -95,6 +107,8 @@ __all__ = [
     "RunResult",
     "ResultCatalog",
     "ResultRecord",
+    "ResultService",
+    "PlotSpec",
     "TaskExecutionPlan",
     "TaskResult",
     "TaskRun",
@@ -102,5 +116,6 @@ __all__ = [
     "WorkflowPlan",
     "WorkflowResult",
     "WorkflowValidationReport",
+    "VisualizationService",
     "__version__",
 ]

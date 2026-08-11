@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,7 +15,9 @@ import yaml
 from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
 from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
+from lambdaforge.controlplane.EnvironmentIdentity import EnvironmentIdentity
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
+from lambdaforge.controlplane.ProjectWheelBuilder import ProjectWheelBuilder
 from lambdaforge.data.DataCatalog import DataCatalog
 from lambdaforge.data.DatasetReference import DatasetReference
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
@@ -40,13 +43,18 @@ class ExecutionBundleBuilder:
         materialized = AuthoringConfig.from_yaml(source).materialize()
         values = materialized.to_dict()
         staged: list[tuple[Path, str]] = []
-        if materialized.kind is ConfigurationKind.TASK and profile.name != "local":
-            self._prepare_task_inputs(values, source.parent, profile, staged)
+        if profile.name != "local":
+            if materialized.kind is ConfigurationKind.TASK:
+                self._prepare_task_inputs(values, source.parent, profile, staged)
+            elif materialized.kind is ConfigurationKind.EXPERIMENT:
+                self._prepare_experiment_data(values, source.parent, profile, staged)
+        environment = self._prepare_environment(source, profile, staged)
         identity_payload = {
-            "bundle_version": 1,
+            "bundle_version": 2,
             "lambdaforge_version": LambdaForgeVersion.CURRENT,
             "cluster": profile.name,
             "config": values,
+            "environment": environment.to_dict() if environment is not None else None,
             "staged": [(relative, self._fingerprint(path)) for path, relative in staged],
         }
         digest = hashlib.sha256(
@@ -87,7 +95,75 @@ class ExecutionBundleBuilder:
         for path, _ in staged:
             if path.parent == self.root and path.name.startswith(".catalog-"):
                 path.unlink(missing_ok=True)
-        return ExecutionBundle(bundle_id, directory, config_output, manifest_output, size)
+        packages = tuple(sorted(path.name for path in (directory / "packages").glob("*.whl")))
+        return ExecutionBundle(
+            bundle_id,
+            directory,
+            config_output,
+            manifest_output,
+            size,
+            environment_id=environment.environment_id if environment is not None else None,
+            package_names=packages,
+            offline=environment.offline if environment is not None else False,
+        )
+
+    def _prepare_environment(
+        self,
+        source: Path,
+        profile: ClusterProfile,
+        staged: list[tuple[Path, str]],
+    ) -> EnvironmentIdentity | None:
+        if profile.environment == "existing":
+            return None
+        builder = ProjectWheelBuilder(self.root.parent / "wheels")
+        framework_root = Path(__file__).resolve().parents[3]
+        if not (framework_root / "pyproject.toml").is_file():
+            raise RuntimeError(
+                "Managed source deployment requires an installed release wheel or a LambdaForge "
+                "source checkout containing pyproject.toml."
+            )
+        roots = [framework_root]
+        consumer = self._project_root(source.parent)
+        if consumer is not None and consumer != framework_root:
+            roots.append(consumer)
+        wheels = [builder.build(root) for root in roots]
+        descriptors = []
+        for wheel in wheels:
+            relative = f"packages/{wheel.name}"
+            staged.append((wheel, relative))
+            descriptors.append(
+                {
+                    "name": wheel.name,
+                    "sha256": self._fingerprint(wheel),
+                    "size_bytes": wheel.stat().st_size,
+                }
+            )
+        offline = profile.wheelhouse is not None
+        if profile.wheelhouse is not None:
+            wheelhouse = Path(profile.wheelhouse).expanduser().resolve()
+            if not wheelhouse.is_dir():
+                raise FileNotFoundError(f"Configured wheelhouse does not exist: {wheelhouse}")
+            for wheel in sorted(wheelhouse.glob("*.whl")):
+                staged.append((wheel, f"wheelhouse/{wheel.name}"))
+                descriptors.append(
+                    {
+                        "name": f"wheelhouse/{wheel.name}",
+                        "sha256": self._fingerprint(wheel),
+                        "size_bytes": wheel.stat().st_size,
+                    }
+                )
+        return EnvironmentIdentity.create(
+            descriptors,
+            python_requirement=f">={sys.version_info.major}.{sys.version_info.minor}",
+            offline=offline,
+        )
+
+    @staticmethod
+    def _project_root(start: Path) -> Path | None:
+        for candidate in (start, *start.parents):
+            if (candidate / "pyproject.toml").is_file():
+                return candidate
+        return None
 
     def _prepare_task_inputs(
         self,
@@ -143,6 +219,62 @@ class ExecutionBundleBuilder:
             )
             staged.append((catalog_file, relative))
             authoring["data_catalog"] = relative
+
+    def _prepare_experiment_data(
+        self,
+        values: dict[str, object],
+        source_dir: Path,
+        profile: ClusterProfile,
+        staged: list[tuple[Path, str]],
+    ) -> None:
+        extensions = values.setdefault("extensions", {})
+        if not isinstance(extensions, dict):
+            raise TypeError("Experiment extensions must be a mapping.")
+        authoring = extensions.setdefault("authoring", {})
+        if not isinstance(authoring, dict):
+            raise TypeError("Experiment authoring extensions must be a mapping.")
+        catalog_value = authoring.get("data_catalog")
+        if catalog_value is None:
+            return
+        catalog_path = Path(str(catalog_value))
+        catalog_path = (
+            catalog_path if catalog_path.is_absolute() else (source_dir / catalog_path).resolve()
+        )
+        catalog = DataCatalog.from_yaml(catalog_path)
+        environment = profile.data_environment or profile.name
+        referenced = self._experiment_dataset_names(values.get("data", {}))
+        remote_catalog: dict[str, object] = {"datasets": {}}
+        for name in referenced:
+            reference = DatasetReference(name)
+            descriptor = catalog.descriptor(reference)
+            location = catalog.resolve(reference, environment=environment)
+            descriptor["locations"] = {environment: location.to_dict()}
+            remote_catalog["datasets"][name] = descriptor  # type: ignore[index]
+        if referenced:
+            catalog_file = self.root / f".catalog-{uuid4().hex}.yaml"
+            catalog_file.parent.mkdir(parents=True, exist_ok=True)
+            catalog_file.write_text(
+                yaml.safe_dump(remote_catalog, sort_keys=False), encoding="utf-8"
+            )
+            staged.append((catalog_file, "data-catalog.yaml"))
+            authoring["data_catalog"] = "data-catalog.yaml"
+            authoring["environment"] = environment
+
+    @classmethod
+    def _experiment_dataset_names(cls, value: object) -> tuple[str, ...]:
+        names: set[str] = set()
+        if isinstance(value, str) and value.startswith("dataset:"):
+            names.add(DatasetReference.parse(value).name)
+        elif isinstance(value, dict):
+            if "dataset" in value:
+                raw = str(value["dataset"])
+                names.add(DatasetReference.parse(raw).name if raw.startswith("dataset:") else raw)
+            for item in value.values():
+                names.update(cls._experiment_dataset_names(item))
+        elif isinstance(value, list):
+            for item in value:
+                names.update(cls._experiment_dataset_names(item))
+        return tuple(sorted(names))
 
     @staticmethod
     def _authoring(values: dict[str, object]) -> dict[str, object]:

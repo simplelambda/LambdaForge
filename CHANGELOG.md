@@ -1,5 +1,7 @@
 # Changelog
 
+[English](CHANGELOG.md) | [Español](CHANGELOG.es.md)
+
 All notable LambdaForge changes are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The repository currently has no Git
@@ -7,6 +9,62 @@ tags; the 0.1.0 and 0.2.0 entries below were reconstructed from their version co
 metadata rather than invented release numbers.
 
 ## [Unreleased]
+
+## [0.5.1] - 2026-08-11
+
+### Added
+
+- Real preprocessing workload semantics: deterministic sequential mode, bounded threads for I/O,
+  spawn-safe processes for CPU transforms with parent-owned sinks/manifests, conservative auto mode,
+  single-worker GPU safety and isolated N-record stage debugging.
+- Friendly training aliases for top-level name, singular loss, trainer epochs and portable resources;
+  experiment `DataCatalog` support for direct and nested typed dataset references, subpaths and
+  physical-path-independent scientific fingerprints.
+- Exact managed cluster environments from local LambdaForge/consumer wheels, content identities,
+  user-space idempotent venvs, offline wheelhouses, cluster registration/bootstrap and expanded
+  Python/project/PyTorch/CUDA diagnostics without driver installation.
+- Persistent job filters and log following, allowlisted lightweight remote result synchronization,
+  explicit logical artifact listing/fetch and stored scientific/execution/environment identities.
+- Public `ResultService`, normalized `MetricSeries`, human selectors, ambiguity reporting,
+  comparison and JSON/CSV/optional Parquet export.
+- Public renderer-neutral `PlotSpec` and `VisualizationService` for learning/seed/sweep/HPO/resource
+  views, seed-aware uncertainty, atomic Matplotlib/optional Plotly output and reproducible sidecars.
+- Separate artifact inspector/visualizer/schema/validator contracts; safe bounded NPY/NPZ and
+  tabular inspection/export, explicit graph/point-cloud/mesh semantics and entry-point registry.
+- Dataset manifest inspection, complete bilingual cluster/result/artifact/preprocessing/architecture
+  guides and a synchronized Spanish agent manual.
+
+### Changed
+
+- Remote bundles now carry exact locally built project/framework wheels instead of relying on a
+  remotely different checkout; managed environments live below the user workspace and reuse by
+  complete wheel/Python/offline identity.
+- Result, plot, artifact, data and job commands delegate to reusable application services. Legacy
+  `lambdaforge results SOURCE` remains compatible through the `results audit` path.
+- The root documentation now uses a hierarchical index, documents simple paths before provider
+  details and records the 0.5.1 roadmap as complete while explicitly deferring automatic placement
+  and distributed workflow execution.
+- Packaging gained `viz`, `graph` and `viz3d` optional extras, ships all paired technical/agent
+  guides and includes release build/check tools in `dev`.
+- Preprocessing execution controls no longer change scientific/dataset identity; sweep metric
+  normalization is explicit and comparisons require metric direction before naming best/worst.
+
+### Fixed
+
+- Windows architecture-reference persistence no longer calls `fsync` on a read-only descriptor.
+- Dynamic scheduling observes and refills a completed slot before processing unrelated simultaneous
+  completions, preventing slower queued work from being delayed by completion ordering.
+- Dense epoch metrics CSV rewrites now use flush/fsync plus atomic replacement, so concurrent/live
+  readers never observe a partially rewritten file.
+- The package CI smoke now installs the wheel with dependencies in an isolated environment and runs
+  from outside the source tree; the prior `--no-deps` smoke could fail on a correct distribution.
+
+### Security
+
+- NumPy artifact loading disables pickle, previews/statistics are bounded, geometry roles are
+  explicit, remote sync is file/size allowlisted and artifact fetch rejects paths outside the job.
+- SSH retains standard host-key/agent configuration; offline bootstrap fails closed on incomplete
+  wheels and no cluster operation installs NVIDIA drivers or system CUDA.
 
 ## [0.5.0] - 2026-08-11
 
@@ -165,7 +223,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/simplelambda/LambdaForge/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/simplelambda/LambdaForge/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/simplelambda/LambdaForge/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/simplelambda/LambdaForge/compare/v0.3.0...v0.4.0

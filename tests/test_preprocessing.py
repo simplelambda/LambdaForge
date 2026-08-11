@@ -176,3 +176,78 @@ class TestPreprocessing:
         path = Path("examples/preprocessing.yaml")
         report = TaskValidator().validate_file(path)
         assert report.is_valid, report.summary()
+
+    def test_cpu_workload_uses_spawn_safe_workers_and_parent_owned_sink(
+        self, tmp_path: Path
+    ) -> None:
+        """CPU concurrency must preserve values and safely publish through the parent."""
+        self.write_jsonl(
+            tmp_path / "records.jsonl",
+            [{"id": str(index), "text": f"value-{index}"} for index in range(8)],
+        )
+        value = self.config(tmp_path)
+        value["task"]["params"].update({"workers": 2, "workload": "cpu"})
+        path = self.write_config(tmp_path / "cpu.yaml", value)
+
+        result = TaskRun.from_yaml(path).run()
+
+        assert isinstance(result, TaskResult)
+        assert result.status is TaskStatus.OK
+        assert result.metadata["workload"] == "cpu"
+        written = [
+            json.loads(item.read_text(encoding="utf-8"))["value"]["text"]
+            for item in Path(result.run_dir).glob("processed/*.json")
+        ]
+        assert sorted(written) == [f"VALUE-{index}" for index in range(8)]
+        resumed = TaskRun.from_yaml(path).run()
+        assert isinstance(resumed, TaskResult)
+        assert resumed.skipped_existing
+
+    def test_gpu_workload_rejects_blind_process_parallelism(self, tmp_path: Path) -> None:
+        """One task must not create multiple competing CUDA processes implicitly."""
+        self.write_jsonl(tmp_path / "records.jsonl", [{"id": "a", "text": "a"}])
+        value = self.config(tmp_path)
+        value["task"]["params"].update({"workers": 2, "workload": "gpu"})
+        path = self.write_config(tmp_path / "gpu.yaml", value)
+
+        report = TaskValidator().validate_file(path)
+
+        assert not report.is_valid
+        assert any("GPU preprocessing requires workers=1" in error for error in report.errors)
+
+    def test_execution_workload_does_not_change_dataset_identity(self, tmp_path: Path) -> None:
+        """Sequential, thread and spawn policies must preserve scientific content identity."""
+        self.write_jsonl(
+            tmp_path / "records.jsonl",
+            [{"id": str(index), "text": f"value-{index}"} for index in range(6)],
+        )
+        identities: set[str] = set()
+        fingerprints: set[str] = set()
+        contents: list[list[dict[str, Any]]] = []
+        for label, workers, workload in (
+            ("sequential", 1, "auto"),
+            ("threads", 2, "io"),
+            ("processes", 2, "cpu"),
+        ):
+            value = self.config(tmp_path)
+            value["output_root"] = str(tmp_path / f"runs-{label}")
+            value["task"]["params"].update(
+                {"workers": workers, "workload": workload, "checkpoint_interval": workers}
+            )
+            path = self.write_config(tmp_path / f"{label}.yaml", value)
+            config = TaskConfig.from_yaml(path)
+            result = TaskRun(config).run()
+            assert isinstance(result, TaskResult)
+            fingerprints.add(config.fingerprint)
+            artifact = DatasetArtifact.read_json(Path(result.run_dir) / "dataset-artifact.json")
+            identities.add(artifact.dataset_id)
+            contents.append(
+                [
+                    json.loads(item.read_text(encoding="utf-8"))["value"]
+                    for item in sorted(Path(result.run_dir).glob("processed/*.json"))
+                ]
+            )
+
+        assert len(fingerprints) == 1
+        assert len(identities) == 1
+        assert contents[0] == contents[1] == contents[2]
