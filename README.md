@@ -17,7 +17,7 @@ generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine be
 Python package, so a research project can focus on its data and science instead of rebuilding
 pipelines, training loops, provenance, result management and process scheduling.
 
-> **Status:** `0.5.1`, usable but pre-1.0. The public namespaces documented below are the intended
+> **Status:** `0.5.2`, usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
 > contain a licence file, so redistribution terms still need to be chosen by SimpleLambda.
 
@@ -134,6 +134,7 @@ Optional integrations never enter the base dependency set:
 | `s3` | Default boto3 client for `S3ArtifactStore`; an injected compatible client needs no extra. |
 | `parquet` | Pandas/PyArrow registry export. |
 | `onnx` | ONNX/ONNX Script model export. |
+| `cluster-password` | Paramiko password SSH/SFTP plus OS keyring; default OpenSSH needs no extra. |
 | `mlflow`, `tensorboard`, `wandb`, `tracking` | One tracking provider or all three. |
 | `dev` | Tests, type checking and formatting tools for LambdaForge contributors. |
 
@@ -177,7 +178,7 @@ immutable artifact instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.1-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.5.2-py3-none-any.whl
 ```
 
 Let the consumer project's lock file or constraints select a PyTorch build compatible with its
@@ -618,21 +619,29 @@ configuration materialization, bundle identity and persistent job metadata. A cl
 four operational decisions: how to reach the machine, which scheduler accepts work, where small
 execution bundles are cached, and which Python/environment command runs LambdaForge.
 
-Create `lambdaforge.clusters.yaml` in the project or point `LAMBDAFORGE_CLUSTERS`/`--clusters` to an
-explicit file:
+Catalogs merge by profile name with explicit precedence: user
+`~/.config/lambdaforge/clusters.yaml`, project `lambdaforge.clusters.yaml`, then
+`--clusters-file`/`--clusters` (or `LAMBDAFORGE_CLUSTERS`). `clusters add` writes the user scope by
+default; use `--scope project` deliberately. `clusters inspect NAME` reports the winning and
+overridden sources.
 
 ```yaml
 clusters:
   atlas:
     transport: ssh
     host: atlas-login                 # an OpenSSH config host; host keys are never disabled
+    user: my-user                     # optional; the alias may already specify it
+    auth: {mode: openssh}             # recommended: keys/agent/ProxyJump remain native
     scheduler: slurm
     workspace: /scratch/my-user/lambdaforge
     python: /shared/envs/research/bin/python
     environment: managed             # or existing for a user/admin-owned environment
     project_module: my_project       # doctor verifies this consumer import
     data_environment: atlas
-    scheduler_options: {partition: gpu, account: project123}
+    resource_mapping:
+      gpu: {option: gres, value: "gpu:a100:{gpus}"}
+      memory: {option: mem, value: "{memory_gib}G"}
+    scheduler_directives: {partition: gpu, account: project123, exclusive: true}
   atlas-container:
     transport: ssh
     host: atlas-login
@@ -646,9 +655,12 @@ profiles:
     resources: {cpus: 8, memory: 32GiB, gpus: 1, gpu_memory: 20GiB, time: 4h}
 ```
 
-`command_prefix` is an argument vector, so modules, containers or site wrappers can be selected
-without shell fragments or environment variables. Credentials remain in OpenSSH, the scheduler or
-the remote runtime; they are not copied into job records or YAML snapshots.
+`command_prefix` is an argument vector, so containers/site wrappers can be selected without local
+shell interpolation. OpenSSH is the default and preserves aliases, keys, agent, `known_hosts` and
+ProxyJump. Optional password mode uses Paramiko with rejected unknown hosts and obtains its secret
+interactively, from a `keyring:` reference in the OS keyring, or from an explicit `env:NAME`
+reference. The value is never accepted through `--password`, persisted, logged, bundled or
+fingerprinted. Install `lambdaforge[cluster-password]` only for that legacy mode.
 
 Use the same configuration locally and remotely:
 
@@ -657,6 +669,7 @@ lambdaforge doctor
 lambdaforge clusters add atlas --host atlas-login --workspace /scratch/my-user/lambdaforge \
   --scheduler slurm --environment managed
 lambdaforge clusters list
+lambdaforge clusters inspect atlas
 lambdaforge clusters test atlas
 lambdaforge clusters bootstrap atlas
 lambdaforge run experiment.yaml --on atlas --dry-run
@@ -665,9 +678,14 @@ lambdaforge run experiment.yaml --profile one-gpu
 ```
 
 The portable `ResourceRequest` normalizes CPU cores, RAM, GPUs, GPU memory, duration, storage and
-process count. It is translated by the provider: SLURM receives `ntasks`, `cpus-per-task`, `mem`,
-`gpus` and `time`; local execution uses the same request for audit/planning. Units accept decimal
-`KB/MB/GB/TB`, binary `KiB/MiB/GiB/TiB`, and durations such as `30m` or `4h`.
+process count. One validated per-cluster translation layer emits standard `gpus`, generic/typed
+`gres`, CPU, memory and time directives. Static directives support flags and repeated values;
+submit/queue/accounting/cancel commands, job-ID regex, shell and trusted prologue/epilogue are also
+configurable as safe argv/templates. Legacy `scheduler_options` remains compatible. Dry-run exposes
+the exact script, resources, directives, warnings and submit argv; explicitly omitted resources
+produce a warning. Units accept decimal `KB/MB/GB/TB`, binary `KiB/MiB/GiB/TiB`, and durations such
+as `30m` or `4h`. The full schemas and security trade-offs are in the
+[cluster guide](docs/CLUSTERS.md).
 
 An `ExecutionBundle` contains materialized YAML, a manifest, exact wheels for LambdaForge and the
 nearest consumer project, and only explicitly bounded small inputs. It is content-addressed under
@@ -679,11 +697,11 @@ Offline clusters use a target-compatible `wheelhouse`/`--wheelhouse` and `--no-i
 verifies PyTorch/CUDA but never installs drivers, system CUDA or cuDNN. The remote command remains
 `python -m lambdaforge run config.yaml`, so there is no second runner.
 
-`LocalTransport` and `SshTransport`, plus `LocalScheduler` and `SlurmScheduler`, are independent
-public providers. The SSH adapter uses argument quoting and the user's normal host-key policy. The
-SLURM adapter generates an inspectable `submit.sbatch`, uses `sbatch --parsable`, reconnects through
-`squeue`/`sacct`, and cancels with `scancel`. Provider boundaries are injectable, which lets tests
-exercise submission, failures and reconnection without a real cluster.
+`LocalTransport`, OpenSSH `SshTransport` and optional `PasswordSshTransport`, plus
+`LocalScheduler`/`SlurmScheduler`, are independent public providers. `doctor` checks connection and
+auth, workspace, Python/project/framework/PyTorch/CUDA, every configured scheduler executable,
+resource mapping and partition without submitting a job. Provider boundaries are injectable, so
+tests exercise credentials, transfers, submission, failures and reconnection without a real cluster.
 
 ## 11. Persistent jobs and data placement
 
@@ -1131,7 +1149,7 @@ snapshot without changing the environment.
 | `run CONFIG` | Execute experiment, task or workflow. | yes |
 | `run CONFIG --force|--restart|--no-resume` | Explicitly control success reuse and partial continuation. | yes |
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Cache a small bundle and submit through the control plane. | job metadata; remote only without dry-run |
-| `clusters add|list|show|test|bootstrap` | Register profiles; diagnose/bootstrap exact existing or managed environments. | add/bootstrap |
+| `clusters add|list|show|inspect|export|credentials|test|bootstrap` | Manage layered profiles, external credentials, diagnostics and exact environments. | add/credentials/bootstrap |
 | `status|logs|cancel|retry` (`jobs ...` also valid) | Filter/reconnect/follow/control persistent jobs. | cancel/retry only |
 | `data --catalog FILE list|locations|inspect|replicate` | Inspect logical datasets/manifests; replication needs `--apply`. | only replicate `--apply` |
 | `compose CONFIG` | Redacted materialization plus provenance. | no |
@@ -2198,7 +2216,7 @@ modules.
   synthesize platform/CUDA dependency wheels, install drivers, load site modules or build a
   container. Offline sites need a compatible wheelhouse. Existing environments remain user-owned.
   Built-in replication is local/SSH rsync over predeclared locations.
-- Cluster selection is explicit in 0.5.1. Profiles do not auto-discover total capacity, queue delay or
+- Cluster selection is explicit in 0.5.2. Profiles do not auto-discover total capacity, queue delay or
   monetary cost and the control plane does not claim optimal placement. `DataCatalog` resolves
   direct experiment splits and nested typed markers; arbitrary untyped strings stay project-owned.
 - Remote result sync is allowlisted and per-file bounded, not a remote filesystem mirror. Heavy
@@ -2260,6 +2278,7 @@ python -c "from importlib.metadata import distribution; print(distribution('lamb
 - [Single-file agent manual](AGENTS.md) · [Español](AGENTS.es.md)
 - [Technical architecture and class collaboration](docs/ARCHITECTURE.md) · [Español](docs/ARCHITECTURE.es.md)
 - [Clusters and persistent jobs](docs/CLUSTERS.md) · [Español](docs/CLUSTERS.es.md)
+- [Cluster credential/scheduler security](docs/SECURITY.md) · [Español](docs/SECURITY.es.md)
 - [Results and plots](docs/RESULTS.md) · [Español](docs/RESULTS.es.md)
 - [Artifact inspection](docs/ARTIFACTS.md) · [Español](docs/ARTIFACTS.es.md)
 - [Preprocessing execution/debug](docs/PREPROCESSING.md) · [Español](docs/PREPROCESSING.es.md)
@@ -2343,7 +2362,7 @@ provider or research method is built in.
 | 45 | Reproducible scientific plotting | Completed: learning/seeds/sweep/HPO/resources, PlotSpec, atomic render and sidecar cache |
 | 46 | Safe artifact toolkit | Completed: bounded NumPy/tabular inspection, export, validators, explicit geometry and plugins |
 | 47 | Preprocessing and dataset inspection | Completed: isolated N-record stage debug and DatasetArtifact report |
-| 48 | Distributed workflow runtime and automatic placement | Deferred explicitly beyond 0.5.1 |
+| 48 | Distributed workflow runtime and automatic placement | Deferred explicitly beyond 0.5.2 |
 
 Future additions should be driven by demonstrated research needs and preserve the boundaries in the
 [technical architecture](docs/ARCHITECTURE.md), rather than reopening this closed 1–30 checklist.

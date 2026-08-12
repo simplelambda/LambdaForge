@@ -10,6 +10,30 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-12
+
+### Added
+
+- Layered user/project/explicit cluster catalogs with source/conflict inspection, portable export
+  and user scope as the safe default for new remote profiles.
+- Optional password SSH through hidden interactive, OS-keyring or environment-reference credential
+  providers and Paramiko SSH/SFTP with strict host-key verification and bounded timeouts.
+- Per-cluster `SlurmProfile` customization for validated CPU/memory/GPU/time mappings, static flags/
+  repeated directives, scheduler command argv/job-ID parsing and trusted job-script hooks.
+- Credential set/delete CLI, detailed scheduler dry-run previews and expanded read-only doctor checks.
+
+### Changed
+
+- OpenSSH remains the recommended/default transport and now also accepts explicit user/port while
+  preserving aliases, keys, agent, known_hosts and ProxyJump. Legacy cluster catalogs and
+  `scheduler_options` remain compatible.
+
+### Security
+
+- Password values cannot enter cluster serialization, command-line flags, bundles, job records,
+  fingerprints or logs; known transport errors are redacted. Scheduler templates use allowlisted
+  placeholders and argv, while trusted prologue/epilogue never interpolate credentials.
+
 ## [0.5.1] - 2026-08-11
 
 ### Added
@@ -223,7 +247,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/simplelambda/LambdaForge/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/simplelambda/LambdaForge/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/simplelambda/LambdaForge/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/simplelambda/LambdaForge/compare/v0.4.0...v0.4.1

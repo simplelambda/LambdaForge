@@ -8,7 +8,7 @@ después inspecciona la firma/docstring del símbolo público concreto.
 
 ## Qué es y cómo instalarlo
 
-LambdaForge 0.5.1 es una biblioteca instalable PyTorch/Lightning para tasks genéricas,
+LambdaForge 0.5.2 es una biblioteca instalable PyTorch/Lightning para tasks genéricas,
 preprocesado, training, workflows, sweeps/HPO, ejecución CPU/GPU/SLURM, resultados, plots,
 artifacts, reproducibilidad y control explícito de clusters. El proyecto consumidor posee modelos,
 datasets y código de dominio. Python >=3.10. Importa sólo desde estos namespaces públicos:
@@ -32,7 +32,7 @@ python -m pip check
 python -c "import lambdaforge; print(lambdaforge.__version__)"
 ```
 
-Para release reproducible construye/instala `lambdaforge-0.5.1-py3-none-any.whl`. El proyecto
+Para release reproducible construye/instala `lambdaforge-0.5.2-py3-none-any.whl`. El proyecto
 consumidor fija la wheel correcta de PyTorch. `nvidia-smi` sólo prueba driver; comprueba
 `torch.cuda.is_available()` y `torch.version.cuda`. Extras: `hpo`, `adaptive-hpo`, `s3`, `parquet`,
 `onnx`, `viz`, `graph`, `viz3d`, tracking y `dev`.
@@ -153,9 +153,15 @@ drivers/CUDA. `existing` sólo verifica el intérprete. Offline usa wheelhouse c
 `--no-index`; no sintetices wheels de otra plataforma.
 
 `JobRecord` persiste scheduler/scientific/execution/bundle IDs, paths y tiempos; `status` refresca al
-reiniciar el PC. OpenSSH conserva política estándar. `results sync` sólo trae pequeños metadata,
-métricas, curves, manifests, summaries y plots. No hay placement automático, workflow entre
-clusters, daemon, servidor o GUI en 0.5.1.
+reiniciar el PC. `ClusterCatalog` fusiona usuario < proyecto < explícito y `clusters inspect` muestra
+la fuente. OpenSSH es el default recomendado: conserva aliases/claves/agente/known_hosts/ProxyJump.
+Contraseña opcional sólo puede venir de prompt oculto, referencia `keyring:` o `env:` mediante
+`CredentialProvider`; nunca pongas el valor en argv/YAML/job/bundle/fingerprint/log.
+`PasswordSshTransport` usa RejectPolicy/SFTP/timeouts. `SlurmProfile` centraliza mapping de recursos,
+directivas, comandos argv/placeholders/regex y líneas de script confiables sin secrets; dry-run debe
+mostrar directivas, avisos y comando. Lee `docs/CLUSTERS.es.md` y `docs/SECURITY.es.md` si modificas
+esta frontera. `results sync` sólo trae evidencia pequeña. No hay placement automático, workflow
+entre clusters, daemon, servidor o GUI en 0.5.2.
 
 ## HPO adaptativo
 
@@ -211,6 +217,7 @@ Prueba además la wheel instalada desde fuera del source. Revisa `git status --s
 
 - arquitectura global: `docs/ARCHITECTURE.es.md`;
 - clusters: `docs/CLUSTERS.es.md`;
+- seguridad de credenciales/scheduler: `docs/SECURITY.es.md`;
 - resultados/plots: `docs/RESULTS.es.md`;
 - artifacts: `docs/ARTIFACTS.es.md`;
 - preprocesado: `docs/PREPROCESSING.es.md`;

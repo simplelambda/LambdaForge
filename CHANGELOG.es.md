@@ -7,6 +7,21 @@ detalle para releases anteriores; esta edición mantiene el resumen operativo en
 
 ## [Sin publicar]
 
+## [0.5.2] - 2026-08-12
+
+### Añadido
+
+- Catálogos fusionados usuario/proyecto/explícito con inspección de fuente/conflictos y export seguro.
+- Contraseña SSH opcional por prompt oculto, keyring o referencia de entorno, con Paramiko,
+  verificación estricta de host, SFTP y timeouts.
+- `SlurmProfile` por clúster para mapping CPU/memoria/GPU/tiempo, flags/repeticiones, comandos argv,
+  parseo de ID, hooks confiables, preview detallado y doctor ampliado.
+
+### Seguridad
+
+- El valor secreto no entra en flags, YAML, jobs, bundles, fingerprints ni logs; errores conocidos se
+  redactan. OpenSSH sigue recomendado y `scheduler_options`/catálogos antiguos siguen compatibles.
+
 ## [0.5.1] - 2026-08-11
 
 ### Añadido

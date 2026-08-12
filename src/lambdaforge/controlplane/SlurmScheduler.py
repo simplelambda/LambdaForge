@@ -1,4 +1,4 @@
-"""Transport-aware SLURM scheduler provider."""
+"""Transport-aware configurable SLURM scheduler provider."""
 
 from __future__ import annotations
 
@@ -10,20 +10,23 @@ from pathlib import Path, PurePosixPath
 from lambdaforge.controlplane.JobState import JobState
 from lambdaforge.controlplane.Scheduler import Scheduler
 from lambdaforge.controlplane.SchedulerSubmission import SchedulerSubmission
+from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.controlplane.Transport import Transport
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
 
 class SlurmScheduler(Scheduler):
-    """Generate, submit and reconnect to SLURM jobs through any transport."""
-
-    _ID = re.compile(r"^(\d+)(?:;.*)?$")
+    """Translate portable resources through one per-cluster SLURM dialect."""
 
     def __init__(
-        self, transport: Transport, *, options: Mapping[str, object] | None = None
+        self,
+        transport: Transport,
+        *,
+        profile: SlurmProfile | None = None,
+        options: Mapping[str, object] | None = None,
     ) -> None:
         self.transport = transport
-        self.options = dict(options or {})
+        self.profile = profile or SlurmProfile.from_mapping(None, legacy_options=options)
 
     def submit(
         self,
@@ -33,7 +36,9 @@ class SlurmScheduler(Scheduler):
         work_dir: str | Path,
         dry_run: bool = False,
     ) -> SchedulerSubmission:
-        """Write a local preview script, stage it and optionally call sbatch."""
+        """Create an auditable script and optionally stage/submit it."""
+        if not command:
+            raise ValueError("Scheduled commands cannot be empty.")
         directory = str(work_dir)
         script = (
             Path.cwd()
@@ -43,56 +48,87 @@ class SlurmScheduler(Scheduler):
             / (re.sub(r"[^A-Za-z0-9_.-]", "-", directory) + ".sbatch")
         )
         script.parent.mkdir(parents=True, exist_ok=True)
+        resource_directives, warnings = self.profile.resource_mapping.render(resources)
+        directives = (*resource_directives, *self.profile.render_directives())
         lines = [
-            "#!/bin/bash",
+            f"#!{self.profile.shell}",
             "set -euo pipefail",
-            f"#SBATCH --ntasks={resources.processes}",
-            f"#SBATCH --cpus-per-task={max(1, resources.cpu_cores // resources.processes)}",
-            "#SBATCH --output=lambdaforge-%j.out",
-            "#SBATCH --error=lambdaforge-%j.out",
+            *(f"#SBATCH {directive}" for directive in directives),
+            *self.profile.prologue,
         ]
-        if resources.ram_bytes:
-            lines.append(f"#SBATCH --mem={max(1, (resources.ram_bytes + 1048575) // 1048576)}M")
-        if resources.gpu_count:
-            lines.append(f"#SBATCH --gpus={resources.gpu_count}")
-        if resources.runtime_seconds:
-            lines.append(f"#SBATCH --time={max(1, int((resources.runtime_seconds + 59) // 60))}")
-        for key, value in sorted(self.options.items()):
-            if not re.fullmatch(r"[a-z][a-z0-9-]*", str(key)) or "\n" in str(value):
-                raise ValueError(f"Unsafe SLURM option: {key!r}.")
-            lines.append(f"#SBATCH --{key}={value}")
-        lines.append("exec " + shlex.join(tuple(command)))
+        rendered_command = shlex.join(tuple(str(item) for item in command))
+        if self.profile.epilogue:
+            lines.extend(
+                (
+                    "set +e",
+                    rendered_command,
+                    "_lambdaforge_status=$?",
+                    "set -e",
+                    *self.profile.epilogue,
+                    'exit "$_lambdaforge_status"',
+                )
+            )
+        else:
+            lines.append(f"exec {rendered_command}")
         script.write_text("\n".join(lines) + "\n", encoding="utf-8")
         remote_script = str(PurePosixPath(directory) / "submit.sbatch")
+        values = {"script": remote_script, "work_dir": directory}
+        submit_command = self.profile.submit.render(values, allowed={"script", "work_dir"})
+        if not any("{script}" in item for item in self.profile.submit.arguments):
+            submit_command = (*submit_command, remote_script)
+        preview = SchedulerSubmission(
+            None,
+            JobState.CREATED,
+            script=script,
+            command=submit_command,
+            directives=directives,
+            warnings=warnings,
+        )
         if dry_run:
-            return SchedulerSubmission(None, JobState.CREATED, script=script)
+            return preview
         mkdir = self.transport.run(("mkdir", "-p", directory))
         if mkdir.returncode:
             raise RuntimeError(f"Could not create remote workspace: {mkdir.stderr}")
         self.transport.put(script, remote_script)
-        submitted = self.transport.run(("sbatch", "--parsable", remote_script), cwd=directory)
+        submitted = self.transport.run(submit_command, cwd=directory)
         if submitted.returncode:
             raise RuntimeError(f"SLURM submission failed: {submitted.stderr}")
-        match = self._ID.fullmatch(submitted.stdout.strip())
+        pattern = self.profile.submit.job_id_pattern
+        if pattern is None:
+            raise RuntimeError("SLURM submit command requires job_id_pattern.")
+        match = re.fullmatch(pattern, submitted.stdout.strip())
         if match is None:
-            raise RuntimeError(f"Could not parse SLURM job id: {submitted.stdout!r}")
-        return SchedulerSubmission(match.group(1), JobState.QUEUED, script=script)
+            raise RuntimeError(
+                "Could not parse SLURM job id with the configured job_id_pattern: "
+                f"{submitted.stdout!r}"
+            )
+        scheduler_id = match.group(1)
+        self._validate_id(scheduler_id)
+        return SchedulerSubmission(
+            scheduler_id,
+            JobState.QUEUED,
+            script=script,
+            command=submit_command,
+            directives=directives,
+            warnings=warnings,
+        )
 
     def state(self, scheduler_id: str) -> JobState:
-        """Map squeue/sacct state to the portable lifecycle."""
+        """Query configured queue then accounting commands."""
         self._validate_id(scheduler_id)
-        queued = self.transport.run(("squeue", "-h", "-j", scheduler_id, "-o", "%T"))
+        values = {"job_id": scheduler_id}
+        queued_command = self.profile.queue.render(values, allowed={"job_id"})
+        queued = self.transport.run(queued_command)
         raw = queued.stdout.strip().splitlines()
         if queued.returncode == 0 and raw:
             return self._state(raw[0])
-        accounting = self.transport.run(
-            ("sacct", "-n", "-X", "-j", scheduler_id, "-o", "State", "--parsable2")
-        )
-        values = accounting.stdout.strip().splitlines()
-        return self._state(values[0]) if accounting.returncode == 0 and values else JobState.UNKNOWN
+        accounting_command = self.profile.accounting.render(values, allowed={"job_id"})
+        accounting = self.transport.run(accounting_command)
+        rows = accounting.stdout.strip().splitlines()
+        return self._state(rows[0]) if accounting.returncode == 0 and rows else JobState.UNKNOWN
 
     def logs(self, scheduler_id: str, *, tail: int | None = None) -> str:
-        """Read the standard SLURM stdout file through the transport."""
+        """Read the conventional output file through the transport."""
         self._validate_id(scheduler_id)
         command = (
             ("tail", "-n", str(tail), f"lambdaforge-{scheduler_id}.out")
@@ -103,25 +139,26 @@ class SlurmScheduler(Scheduler):
         return result.stdout if result.returncode == 0 else result.stderr
 
     def cancel(self, scheduler_id: str) -> None:
-        """Cancel one validated numeric SLURM job."""
+        """Cancel one validated job with the configured command."""
         self._validate_id(scheduler_id)
-        result = self.transport.run(("scancel", scheduler_id))
+        command = self.profile.cancel.render({"job_id": scheduler_id}, allowed={"job_id"})
+        result = self.transport.run(command)
         if result.returncode:
             raise RuntimeError(f"SLURM cancellation failed: {result.stderr}")
 
     @staticmethod
     def _validate_id(value: str) -> None:
-        if not value.isdigit():
-            raise ValueError("SLURM job ids must be numeric.")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", value) is None:
+            raise ValueError("Scheduler job id contains unsafe characters.")
 
     @staticmethod
     def _state(value: str) -> JobState:
-        state = value.strip().upper().split("+")[0]
+        state = value.strip().upper().split("+")[0].split("|")[0].strip()
         if state in {"PENDING", "CONFIGURING", "REQUEUED"}:
             return JobState.QUEUED
         if state in {"RUNNING", "COMPLETING", "SUSPENDED"}:
             return JobState.RUNNING
-        if state in {"COMPLETED"}:
+        if state == "COMPLETED":
             return JobState.SUCCEEDED
         if state in {"CANCELLED", "PREEMPTED"}:
             return JobState.CANCELLED

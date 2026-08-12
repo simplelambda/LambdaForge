@@ -28,15 +28,15 @@ store. `ExecutionIdentity` records placement/resources without changing `Scienti
 
 ## 2. Cluster catalogue
 
-`ClusterCatalog.load()` searches an explicit path, `LAMBDAFORGE_CLUSTERS`, the project
-`lambdaforge.clusters.yaml`, then the user config path. `local` always exists. An SSH profile must
-declare an absolute workspace.
+`ClusterCatalog.load()` merges user, project and explicit paths in that precedence order; local
+always exists. `clusters inspect` reports source/conflicts. Adds default to user scope.
 
 ```yaml
 clusters:
   atlas:
     transport: ssh
     host: atlas-login
+    auth: {mode: openssh}
     scheduler: slurm
     workspace: /scratch/user/lambdaforge
     python: /shared/env/bin/python
@@ -44,15 +44,18 @@ clusters:
     project_module: my_project
     data_environment: atlas
     command_prefix: [apptainer, exec, /images/project.sif]
-    scheduler_options: {partition: gpu}
+    resource_mapping: {gpu: {option: gres, value: "gpu:{gpus}"}}
+    scheduler_directives: {partition: gpu}
 profiles:
   one-gpu:
     cluster: atlas
     resources: {cpus: 8, memory: 32GiB, gpus: 1, time: 4h}
 ```
 
-`command_prefix` is an argv prefix for containers/site wrappers. Do not place credentials in this
-file. Verify with `lambdaforge doctor --on atlas` or `clusters test atlas`.
+`command_prefix` is argv. OpenSSH remains preferred. Optional password mode persists only an
+interactive/`keyring:`/`env:` descriptor and uses a host-key-verifying Paramiko transport; never put
+a password value in this file. See the complete guide for credentials and scheduler command/script
+configuration. Verify with `doctor --on atlas` or `clusters test atlas`.
 
 ## 3. Submission and bundles
 
@@ -102,8 +105,10 @@ one heavy artifact.
 
 - `LocalTransport`: local subprocess and filesystem staging.
 - `SshTransport`: OpenSSH/scp with normal host-key policy and quoted remote argv.
+- `PasswordSshTransport`: optional Paramiko password SSH/SFTP with rejected unknown hosts.
 - `LocalScheduler`: synchronous execution through a transport.
-- `SlurmScheduler`: script generation, `sbatch`, `squeue`/`sacct`, logs and `scancel`.
+- `SlurmScheduler`: one `SlurmProfile` resource/directive/command/script dialect per cluster.
+- `CredentialProvider`: hidden interactive, OS-keyring and environment reference providers.
 - `ControlPlaneFactory`: default provider selection; inject another factory/provider in services.
 
 Implement `Transport` and `Scheduler` for another platform. Return `CommandResult`,
@@ -112,8 +117,10 @@ Implement `Transport` and `Scheduler` for another platform. Return `CommandResul
 ## 6. Safety and limits
 
 - Remote actions occur only with `run --on` and no `--dry-run`; data replication needs `--apply`.
-- SSH host verification and credentials belong to OpenSSH; LambdaForge never disables them.
-- Scheduler options reject unsafe names/newlines; commands remain argument vectors.
+- OpenSSH never weakens native host verification. Password mode uses RejectPolicy/timeouts and no
+  CLI/YAML/record/bundle/fingerprint secret value.
+- Resource/command placeholders are allowlisted; command profiles remain argv. Trusted
+  prologue/epilogue lines receive no secret interpolation.
 - Mixed-cluster workflow placement is visible in dry-run but execution is refused until durable DAG
   recovery and artifact transfer are implemented soundly.
 - Cluster choice is explicit; capacity/queue/cost discovery and automatic placement are not claimed.

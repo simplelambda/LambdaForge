@@ -54,4 +54,4 @@ slot. Acciones, asignaciones y límites de acciones/epochs/GPU-seconds quedan pe
 - estado se reemplaza atómicamente y eventos usan lock+fsync;
 - summary informa seeds, curvas, memoria y confirmación sin seleccionar por mtime.
 
-0.5.1 no cambia esta matemática; añade inspección y plots sobre el estado existente.
+0.5.2 no cambia esta matemática; añade infraestructura de clúster sin alterar el HPO existente.

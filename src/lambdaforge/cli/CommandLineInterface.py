@@ -9,8 +9,11 @@ import json
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from lambdaforge.artifacts.ArtifactPluginRegistry import ArtifactPluginRegistry
 from lambdaforge.artifacts.ArtifactService import ArtifactService
@@ -21,10 +24,12 @@ from lambdaforge.configuration.AuthoringSchemaCatalog import AuthoringSchemaCata
 from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
 from lambdaforge.configuration.ConfigurationDiff import ConfigurationDiff
 from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
+from lambdaforge.controlplane.ClusterAuthentication import ClusterAuthentication
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.ClusterService import ClusterService
 from lambdaforge.controlplane.ControlPlane import ControlPlane
+from lambdaforge.controlplane.CredentialService import CredentialService
 from lambdaforge.controlplane.Doctor import Doctor
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.JobState import JobState
@@ -141,12 +146,31 @@ class CommandLineInterface:
             try:
                 cluster_catalog = ClusterCatalog.load(arguments.catalog)
                 if arguments.cluster_command == "add":
-                    destination = arguments.catalog or Path("lambdaforge.clusters.yaml")
+                    destination = arguments.catalog or (
+                        ClusterCatalog.user_path()
+                        if arguments.scope == "user"
+                        else ClusterCatalog.project_path()
+                    )
+                    credential = arguments.credential
+                    credentials = CredentialService()
+                    if arguments.store_password:
+                        if arguments.auth != "password":
+                            raise ValueError("--store-password requires --auth password.")
+                        credential = credential or cls._keyring_reference(
+                            arguments.name, arguments.user, arguments.host
+                        )
+                        if not credential.startswith("keyring:"):
+                            raise ValueError("--store-password requires a keyring: reference.")
                     cluster_profile = ClusterProfile(
                         arguments.name,
                         transport="ssh" if arguments.host else "local",
                         scheduler=arguments.scheduler,
                         host=arguments.host,
+                        user=arguments.user,
+                        port=arguments.port,
+                        auth=ClusterAuthentication(arguments.auth, credential),
+                        known_hosts=(str(arguments.known_hosts) if arguments.known_hosts else None),
+                        ssh_timeout=arguments.ssh_timeout,
                         workspace=arguments.workspace,
                         python=arguments.python,
                         environment=arguments.environment,
@@ -154,26 +178,92 @@ class CommandLineInterface:
                         project_module=arguments.project_module,
                         data_environment=arguments.data_environment,
                     )
+                    if arguments.store_password:
+                        secret = credentials.interactive.get(
+                            "interactive",
+                            prompt=f"Password for {arguments.user or ''}@{arguments.host}: ",
+                        )
+                        credentials.store(credential or "", secret)
+                        del secret
                     print(ClusterCatalog.add(destination, cluster_profile))
                     return 0
                 if arguments.cluster_command == "list":
                     cluster_payload = [
-                        cluster_catalog.get(name).to_dict() for name in cluster_catalog.names()
+                        cluster_catalog.inspect(name) for name in cluster_catalog.names()
                     ]
                     if arguments.json:
                         print(json.dumps(cluster_payload, indent=2))
                     else:
-                        for profile_payload in cluster_payload:
+                        for inspected in cluster_payload:
+                            profile_payload = inspected["profile"]
                             print(
                                 f"{profile_payload['name']:<16} "
                                 f"{profile_payload['transport']:<6} "
                                 f"{profile_payload['scheduler']:<6} "
-                                f"{profile_payload['host'] or '-'}"
+                                f"{profile_payload['host'] or '-'} "
+                                f"[{inspected['source']}]"
                             )
                     return 0
                 cluster_profile = cluster_catalog.get(arguments.name)
                 if arguments.cluster_command == "show":
                     print(json.dumps(cluster_profile.to_dict(), indent=2))
+                    return 0
+                if arguments.cluster_command == "inspect":
+                    print(json.dumps(cluster_catalog.inspect(arguments.name), indent=2))
+                    return 0
+                if arguments.cluster_command == "export":
+                    cluster_export_payload = cluster_profile.to_dict()
+                    cluster_export_payload.pop("name", None)
+                    exported = {"clusters": {cluster_profile.name: cluster_export_payload}}
+                    if arguments.output is None:
+                        print(yaml.safe_dump(exported, sort_keys=False, allow_unicode=True), end="")
+                    else:
+                        ClusterCatalog.export(arguments.output, cluster_profile)
+                        print(arguments.output.expanduser().resolve())
+                    return 0
+                if arguments.cluster_command == "credentials":
+                    if cluster_profile.name == "local":
+                        raise ValueError("The built-in local profile has no SSH credentials.")
+                    source = cluster_catalog.source(cluster_profile.name)
+                    if source is None:
+                        raise ValueError("The selected profile has no writable catalog source.")
+                    credentials = CredentialService()
+                    reference = cluster_profile.auth.credential or cls._keyring_reference(
+                        cluster_profile.name, cluster_profile.user, cluster_profile.host
+                    )
+                    if arguments.credential_command == "set":
+                        if not reference.startswith("keyring:"):
+                            reference = cls._keyring_reference(
+                                cluster_profile.name, cluster_profile.user, cluster_profile.host
+                            )
+                        secret = credentials.interactive.get(
+                            "interactive",
+                            prompt=(
+                                f"Password for {cluster_profile.user or ''}@"
+                                f"{cluster_profile.host}: "
+                            ),
+                        )
+                        credentials.store(reference, secret)
+                        del secret
+                        updated = replace(
+                            cluster_profile,
+                            auth=ClusterAuthentication("password", reference),
+                        )
+                        ClusterCatalog.add(source, updated)
+                        print(
+                            f"Stored credential reference {reference!r} for "
+                            f"{cluster_profile.name!r}."
+                        )
+                        return 0
+                    if not reference.startswith("keyring:"):
+                        raise ValueError("Only keyring: credentials can be deleted from storage.")
+                    credentials.delete(reference)
+                    updated = replace(cluster_profile, auth=ClusterAuthentication("password", None))
+                    ClusterCatalog.add(source, updated)
+                    print(
+                        f"Deleted credential for {cluster_profile.name!r}; password mode "
+                        "is now interactive."
+                    )
                     return 0
                 if arguments.cluster_command == "test":
                     cluster_report = Doctor(cluster_catalog).check(cluster_profile.name)
@@ -862,6 +952,12 @@ class CommandLineInterface:
             return False
 
     @staticmethod
+    def _keyring_reference(name: str, user: str | None, host: str | None) -> str:
+        """Create a stable non-secret keyring identifier for one endpoint."""
+        endpoint = f"{user or 'default'}@{host or 'local'}"
+        return f"keyring:cluster/{name}/{endpoint}"
+
+    @staticmethod
     def _scientific_payload(path: str | Path) -> dict[str, object]:
         """Return the normalized scientific payload for explain-changes."""
         materialized = AuthoringConfig.from_yaml(path).materialize()
@@ -1251,15 +1347,39 @@ lambdaforge run {entry}
             "doctor", help="Check local or remote Python, LambdaForge, scheduler and CUDA."
         )
         doctor.add_argument("--on", default="local", help="Cluster profile name.")
-        doctor.add_argument("--clusters", type=Path, help="Cluster catalogue YAML.")
+        doctor.add_argument(
+            "--clusters",
+            "--clusters-file",
+            dest="clusters",
+            type=Path,
+            help="Highest-precedence cluster catalogue YAML.",
+        )
         doctor.add_argument("--config", type=Path, help="Also check required logical datasets.")
         doctor.add_argument("--json", action="store_true")
         clusters = subparsers.add_parser("clusters", help="Inspect and test cluster profiles.")
-        clusters.add_argument("--catalog", type=Path, help="Cluster catalogue YAML.")
+        clusters.add_argument(
+            "--catalog",
+            "--clusters-file",
+            dest="catalog",
+            type=Path,
+            help="Highest-precedence cluster catalogue YAML.",
+        )
         cluster_commands = clusters.add_subparsers(dest="cluster_command", required=True)
         cluster_add = cluster_commands.add_parser("add")
         cluster_add.add_argument("name")
         cluster_add.add_argument("--host")
+        cluster_add.add_argument("--user")
+        cluster_add.add_argument("--port", type=int, default=22)
+        cluster_add.add_argument("--known-hosts", type=Path)
+        cluster_add.add_argument("--ssh-timeout", type=float, default=15.0)
+        cluster_add.add_argument("--auth", choices=("openssh", "password"), default="openssh")
+        cluster_add.add_argument(
+            "--credential", help="Credential reference (keyring:... or env:...); never the value."
+        )
+        cluster_add.add_argument(
+            "--store-password", action="store_true", help="Prompt and store in the system keyring."
+        )
+        cluster_add.add_argument("--scope", choices=("user", "project"), default="user")
         cluster_add.add_argument("--scheduler", choices=("local", "slurm"), default="slurm")
         cluster_add.add_argument("--workspace", required=True)
         cluster_add.add_argument("--python", default="python3")
@@ -1274,6 +1394,20 @@ lambdaforge run {entry}
         cluster_show = cluster_commands.add_parser("show")
         cluster_show.add_argument("name")
         cluster_show.add_argument("--json", action="store_true")
+        cluster_inspect = cluster_commands.add_parser("inspect")
+        cluster_inspect.add_argument("name")
+        cluster_inspect.add_argument("--json", action="store_true")
+        cluster_export = cluster_commands.add_parser("export")
+        cluster_export.add_argument("name")
+        cluster_export.add_argument("--output", type=Path)
+        cluster_credentials = cluster_commands.add_parser("credentials")
+        credential_commands = cluster_credentials.add_subparsers(
+            dest="credential_command", required=True
+        )
+        credential_set = credential_commands.add_parser("set")
+        credential_set.add_argument("name")
+        credential_delete = credential_commands.add_parser("delete")
+        credential_delete.add_argument("name")
         cluster_test = cluster_commands.add_parser("test")
         cluster_test.add_argument("name")
         cluster_test.add_argument("--json", action="store_true")

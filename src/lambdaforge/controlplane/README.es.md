@@ -20,14 +20,15 @@ siguen en `result.json`; el ciclo del scheduler queda en el almacén de jobs.
 
 ## 2. Catálogo de clústeres
 
-`ClusterCatalog.load()` busca ruta explícita, `LAMBDAFORGE_CLUSTERS`, fichero del proyecto y
-configuración del usuario. `local` siempre existe. Un perfil SSH exige workspace absoluto.
+`ClusterCatalog.load()` fusiona usuario, proyecto y explícito en ese orden; `local` siempre existe.
+`clusters inspect` muestra fuente/conflictos y los nuevos perfiles van a usuario por defecto.
 
 ```yaml
 clusters:
   atlas:
     transport: ssh
     host: atlas-login
+    auth: {mode: openssh}
     scheduler: slurm
     workspace: /scratch/user/lambdaforge
     python: /shared/env/bin/python
@@ -35,14 +36,17 @@ clusters:
     project_module: mi_proyecto
     data_environment: atlas
     command_prefix: [apptainer, exec, /images/project.sif]
-    scheduler_options: {partition: gpu}
+    resource_mapping: {gpu: {option: gres, value: "gpu:{gpus}"}}
+    scheduler_directives: {partition: gpu}
 profiles:
   una-gpu:
     cluster: atlas
     resources: {cpus: 8, memory: 32GiB, gpus: 1, time: 4h}
 ```
 
-No guardes credenciales aquí. Comprueba con `doctor --on atlas` o `clusters test atlas`.
+OpenSSH es preferido. Contraseña opcional conserva solo descriptor interactivo/`keyring:`/`env:` y
+usa Paramiko con host verificado; nunca guardes el valor. La guía completa explica credenciales y
+configuración de recursos/comandos/scripts. Comprueba con `doctor --on` o `clusters test`.
 
 ## 3. Envío y bundles
 
@@ -65,9 +69,10 @@ ID con `retry_of`; nunca pisa el anterior. Usa `status`, `logs JOB --follow`, `c
 
 ## 5. Proveedores
 
-- `LocalTransport` y `SshTransport` ejecutan y stagean.
+- `LocalTransport`, `SshTransport` OpenSSH y `PasswordSshTransport` Paramiko ejecutan/stagean.
 - `LocalScheduler` ejecuta síncronamente.
-- `SlurmScheduler` genera script, envía, reconecta, lee logs y cancela.
+- `SlurmScheduler` aplica un `SlurmProfile` de mapping/directivas/comandos/script por clúster.
+- `CredentialProvider` cubre prompt oculto, keyring del SO y referencia de entorno.
 - `ControlPlaneFactory` selecciona defaults y permite inyección para otros centros/tests.
 
 Otro proveedor implementa `Transport`/`Scheduler` y devuelve valores portables; el runner no debe
@@ -76,8 +81,10 @@ conocer el proveedor.
 ## 6. Seguridad y límites
 
 - Remoto requiere `run --on` sin dry-run; replicar datos exige `--apply`.
-- OpenSSH conserva verificación y credenciales; LambdaForge no las desactiva.
-- Opciones/argv se validan y no se usa shell local.
+- OpenSSH no debilita verificación. Contraseña usa RejectPolicy/timeouts y el valor no entra en
+  CLI/YAML/registro/bundle/fingerprint.
+- Placeholders están allowlisted y comandos son argv; prologue/epilogue son perfil confiable sin
+  interpolación de secretos.
 - La ubicación multiclúster aparece en planes, pero el runner rehúsa un DAG mixto hasta garantizar
   recuperación durable y transferencia de artefactos.
 - La elección de clúster es explícita; no se afirma descubrir capacidad/cola/coste ni placement

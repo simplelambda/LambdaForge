@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lambdaforge"
-version = "0.5.1"
+version = "0.5.2"
 description = "Reproducible AI workflows from local authoring to multi-cluster execution."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -72,6 +72,10 @@ graph = [
 viz3d = [
     "plotly>=5.20",
     "trimesh>=4.0",
+]
+cluster-password = [
+    "keyring>=25",
+    "paramiko>=3.4",
 ]
 dev = [
     "build>=1.2",

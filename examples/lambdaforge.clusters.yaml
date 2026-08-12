@@ -3,14 +3,33 @@ clusters:
   atlas:
     transport: ssh
     host: atlas-login
+    user: USER
+    port: 22
+    auth: {mode: openssh}
     scheduler: slurm
     workspace: /scratch/USER/lambdaforge
     python: python3
     environment: managed
     project_module: my_project
     data_environment: atlas
-    scheduler_options:
+    resource_mapping:
+      gpu: {option: gres, value: "gpu:{gpus}"}
+      memory: {option: mem, value: "{memory_gib}G"}
+    scheduler_directives:
       partition: gpu
+      account: PROJECT
+    scheduler_commands:
+      submit:
+        command: sbatch
+        args: [--parsable, "{script}"]
+        job_id_pattern: "^(\\d+)(?:;.*)?$"
+      queue: {command: squeue, args: [-h, -j, "{job_id}", -o, "%T"]}
+      accounting: {command: sacct, args: [-n, -X, -j, "{job_id}", -o, State]}
+      cancel: {command: scancel, args: ["{job_id}"]}
+    job_script:
+      shell: /bin/bash
+      prologue: [module load cuda]
+      epilogue: []
 profiles:
   one-gpu:
     cluster: atlas

@@ -50,6 +50,9 @@ class JobService:
         now = datetime.now(timezone.utc).isoformat()
         job_id = f"job-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
         submission = scheduler.submit(command, resources, work_dir=work_dir, dry_run=dry_run)
+        record_metadata = dict(metadata or {})
+        if dry_run:
+            record_metadata["scheduler_preview"] = submission.to_dict()
         record = JobRecord(
             job_id=job_id,
             cluster=cluster,
@@ -66,10 +69,16 @@ class JobService:
             retry_of=retry_of,
             stdout=submission.stdout,
             stderr=submission.stderr,
-            metadata=metadata or {},
+            metadata=record_metadata,
         )
         self.store.write(record)
-        return JobHandle(record.job_id, cluster, record.state, record.scheduler_id)
+        return JobHandle(
+            record.job_id,
+            cluster,
+            record.state,
+            record.scheduler_id,
+            submission.to_dict() if dry_run else None,
+        )
 
     def get(self, job_id: str, *, refresh: bool = True) -> JobRecord:
         """Load and optionally refresh a non-terminal scheduler state."""

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+from typing import cast
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.DoctorCheck import DoctorCheck
 from lambdaforge.controlplane.DoctorReport import DoctorReport
+from lambdaforge.controlplane.SlurmProfile import SlurmProfile
+from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 
 
@@ -29,13 +32,45 @@ class Doctor:
         profile = self.catalog.get(cluster)
         transport = self.factory.transport(profile)
         checks: list[DoctorCheck] = []
-        connection = transport.run(("true",))
+        try:
+            connection = transport.run(("true",))
+        except Exception as error:
+            return DoctorReport(
+                cluster,
+                (
+                    DoctorCheck(
+                        "connection",
+                        False,
+                        str(error),
+                        (
+                            "Verify the credential reference, SSH host key, network and timeout; "
+                            "OpenSSH profiles should verify ssh config/agent/ProxyJump."
+                        ),
+                    ),
+                ),
+            )
         checks.append(
             DoctorCheck(
                 "connection",
                 connection.returncode == 0,
                 connection.stderr.strip() or "Transport connection is available.",
                 "Verify SSH config, agent, host key and network connectivity.",
+            )
+        )
+        checks.append(
+            DoctorCheck(
+                "authentication",
+                True,
+                (
+                    "Authentication is delegated to OpenSSH configuration/agent."
+                    if profile.auth.mode == "openssh"
+                    else (
+                        f"Password authentication succeeded using {profile.auth.credential!r}."
+                        if profile.auth.credential is not None
+                        else "Interactive password authentication succeeded."
+                    )
+                ),
+                None,
             )
         )
         selected_python = profile.python
@@ -108,15 +143,64 @@ class Doctor:
             )
         )
         if profile.scheduler == "slurm":
-            scheduler = transport.run(("sinfo", "--version"))
-            checks.append(
-                DoctorCheck(
-                    "slurm",
-                    scheduler.returncode == 0,
-                    scheduler.stdout.strip() or scheduler.stderr.strip(),
-                    "Load the cluster's SLURM client environment or correct the profile.",
+            slurm_profile = cast(SlurmProfile, profile.slurm_profile)
+            for executable in slurm_profile.executables():
+                scheduler = transport.run(("which", executable))
+                checks.append(
+                    DoctorCheck(
+                        f"scheduler-command:{executable}",
+                        scheduler.returncode == 0,
+                        scheduler.stdout.strip() or scheduler.stderr.strip() or "Not found.",
+                        "Load the cluster's scheduler client environment or correct "
+                        "scheduler_commands in the profile.",
+                    )
                 )
-            )
+            try:
+                _, warnings = slurm_profile.resource_mapping.render(
+                    ResourceRequest(
+                        cpu_cores=2,
+                        ram_bytes=1024**3,
+                        gpu_count=1,
+                        runtime_seconds=60,
+                    )
+                )
+                checks.append(
+                    DoctorCheck(
+                        "scheduler-resource-mapping",
+                        True,
+                        (
+                            "Resource templates are valid. WARNING: " + " ".join(warnings)
+                            if warnings
+                            else "Resource templates are valid and emit CPU/memory/GPU/time."
+                        ),
+                        None,
+                    )
+                )
+            except (TypeError, ValueError) as error:
+                checks.append(
+                    DoctorCheck(
+                        "scheduler-resource-mapping",
+                        False,
+                        str(error),
+                        "Correct resource_mapping placeholders and options in the cluster profile.",
+                    )
+                )
+            partitions = slurm_profile.directives.get("partition", ())
+            for partition in partitions:
+                partition_command = slurm_profile.info.render(
+                    {"partition": str(partition)}, allowed={"partition"}
+                )
+                partition_check = transport.run(partition_command)
+                checks.append(
+                    DoctorCheck(
+                        f"scheduler-partition:{partition}",
+                        partition_check.returncode == 0 and bool(partition_check.stdout.strip()),
+                        partition_check.stdout.strip()
+                        or partition_check.stderr.strip()
+                        or "Partition not visible.",
+                        "Correct scheduler_directives.partition or request cluster access.",
+                    )
+                )
         pytorch = transport.run(
             (
                 *profile.command_prefix,

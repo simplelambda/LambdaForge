@@ -29,8 +29,16 @@ required. Do not include real credentials or private datasets.
   HMAC where supported, restrict store permissions and obtain artifacts over authenticated channels.
 - Local and SLURM backends never interpolate a command through a local shell. Generated batch
   scripts quote arguments and submission/cancellation remains explicit.
+- Cluster YAML stores only authentication mode and optional `keyring:`/`env:` reference. Password
+  values are never CLI arguments, serialized state, bundles, fingerprints or logs. OpenSSH remains
+  preferred; optional Paramiko password transport rejects unknown host keys and uses bounded
+  timeouts. Environment-backed secrets inherit the exposure risks of the calling process/CI.
+- Scheduler command/resource placeholders are allowlisted and rendered to argv. Profile
+  prologue/epilogue lines are trusted shell code and must not interpolate secrets or accept
+  unreviewed experiment values.
 - Tracking and S3-compatible providers expand the trust boundary to their SDK, credentials, network
   and service. They are optional and loaded only when configured.
 
 The detailed trust boundaries and data flow are documented in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the cluster-specific threat model in
+[docs/SECURITY.md](docs/SECURITY.md).

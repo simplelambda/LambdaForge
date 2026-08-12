@@ -18,7 +18,7 @@ paquete estable, para que un proyecto de investigación se concentre en sus dato
 de volver a crear pipelines, bucles de entrenamiento, procedencia, gestión de resultados y
 planificación de procesos.
 
-> **Estado:** `0.5.1`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
+> **Estado:** `0.5.2`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
 > aquí forman la API prevista; todavía no se garantiza compatibilidad entre versiones menores. El
 > repositorio aún no contiene una licencia, por lo que SimpleLambda debe decidir sus condiciones de
 > redistribución.
@@ -139,6 +139,7 @@ Las integraciones opcionales nunca amplían las dependencias base:
 | `s3` | Cliente boto3 por defecto para `S3ArtifactStore`; un cliente compatible inyectado no requiere el extra. |
 | `parquet` | Export del registro mediante Pandas/PyArrow. |
 | `onnx` | Export de modelos ONNX/ONNX Script. |
+| `cluster-password` | SSH/SFTP por contraseña con Paramiko y keyring del SO; OpenSSH no lo necesita. |
 | `mlflow`, `tensorboard`, `wandb`, `tracking` | Un proveedor de tracking o los tres. |
 | `dev` | Tests, tipado y formato para contribuir a LambdaForge. |
 
@@ -182,7 +183,7 @@ ese artefacto inmutable en lugar de una ruta editable:
 
 ```bash
 python -m pip wheel /ruta/absoluta/a/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.1-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.5.2-py3-none-any.whl
 ```
 
 Deja que el lock o constraints del proyecto consumidor seleccione primero una compilación PyTorch
@@ -568,9 +569,10 @@ del proveedor debe leer credenciales del entorno en ejecución. Las APIs son
 
 ## 10. Plano de control local y multiclúster
 
-El plano de control 0.5 es un coordinador local, no un servicio web obligatorio. El equipo del
-usuario materializa configuración, crea bundles y conserva jobs; cada perfil decide transporte,
-scheduler, workspace y entorno de Python:
+El plano de control 0.5 es un coordinador local. Los catálogos se fusionan por nombre con precedencia
+usuario (`~/.config/lambdaforge/clusters.yaml`), proyecto (`lambdaforge.clusters.yaml`) y archivo
+explícito (`--clusters-file`/`--clusters`). `clusters add` usa usuario por defecto; `--scope project`
+es explícito y `clusters inspect` muestra fuente ganadora y tapadas.
 
 ```yaml
 # lambdaforge.clusters.yaml
@@ -578,11 +580,16 @@ clusters:
   atlas:
     transport: ssh
     host: atlas-login
+    user: mi-usuario
+    auth: {mode: openssh}
     scheduler: slurm
     workspace: /scratch/mi-usuario/lambdaforge
     python: /shared/envs/research/bin/python
     data_environment: atlas
-    scheduler_options: {partition: gpu, account: project123}
+    resource_mapping:
+      gpu: {option: gres, value: "gpu:a100:{gpus}"}
+      memory: {option: mem, value: "{memory_gib}G"}
+    scheduler_directives: {partition: gpu, account: project123, exclusive: true}
   atlas-container:
     transport: ssh
     host: atlas-login
@@ -596,21 +603,27 @@ profiles:
     resources: {cpus: 8, memory: 32GiB, gpus: 1, gpu_memory: 20GiB, time: 4h}
 ```
 
-`command_prefix` es una lista de argumentos, no shell. OpenSSH conserva su política normal de host
-keys y las credenciales nunca se copian al YAML ni al job. Flujo básico:
+`command_prefix` es argv. OpenSSH sigue recomendado y conserva aliases, claves, agente,
+`known_hosts` y ProxyJump. El modo opcional de contraseña instala
+`lambdaforge[cluster-password]`, verifica host con Paramiko y obtiene el secreto por prompt oculto,
+referencia `keyring:` o `env:NAME`. No existe `--password`: el valor nunca se serializa, registra,
+empaqueta ni fingerprinta.
 
 ```bash
 lambdaforge doctor
 lambdaforge clusters list
+lambdaforge clusters inspect atlas
 lambdaforge clusters test atlas
 lambdaforge run experiment.yaml --on atlas --dry-run
 lambdaforge run experiment.yaml --on atlas --cpus 8 --memory 32GiB --resource-gpus 1 --time 4h
 lambdaforge run experiment.yaml --profile una-gpu
 ```
 
-`ResourceRequest` normaliza CPU, RAM, GPU, VRAM, duración, almacenamiento y procesos. SLURM los
-traduce a `ntasks`, `cpus-per-task`, `mem`, `gpus` y `time`. Se aceptan unidades decimales y binarias
-como `32GB`/`32GiB` y duraciones `30m`/`4h`.
+`ResourceRequest` normaliza CPU, RAM, GPU, VRAM, duración, almacenamiento y procesos. Una sola capa
+por clúster traduce a `gpus`, GRES genérico/tipado, CPU, memoria y tiempo; admite flags/repeticiones,
+comandos submit/queue/accounting/cancel, regex de ID y script confiable. `scheduler_options` antiguo
+sigue compatible. Dry-run muestra script, recursos, directivas, avisos y argv exacto. La
+[guía de clústeres](docs/CLUSTERS.es.md) contiene esquemas, credenciales y trade-offs completos.
 
 Un `ExecutionBundle` contiene YAML, manifiesto, wheels exactas de LambdaForge/proyecto y sólo inputs
 pequeños; se cachea por contenido. El source dirty se construye tal cual, nunca se sustituye por
@@ -619,9 +632,9 @@ pequeños; se cachea por contenido. El source dirty se construye tal cual, nunca
 se aporta wheelhouse compatible y se usa `--no-index`. LambdaForge verifica PyTorch/CUDA pero no
 instala drivers, CUDA de sistema ni cuDNN. El remoto ejecuta el mismo `python -m lambdaforge run`.
 
-`LocalTransport`/`SshTransport` y `LocalScheduler`/`SlurmScheduler` son proveedores independientes e
-inyectables. SLURM genera `submit.sbatch`, usa `sbatch --parsable`, reconecta con `squeue`/`sacct` y
-cancela con `scancel`. Los tests usan proveedores falsos y no necesitan un clúster real.
+`LocalTransport`, `SshTransport` OpenSSH y `PasswordSshTransport` opcional, junto con los schedulers,
+son proveedores independientes. `doctor` comprueba auth, workspace, Python/proyecto/framework,
+PyTorch/CUDA, todos los ejecutables, mapping y partición sin enviar job. Los tests usan fakes.
 
 ## 11. Jobs persistentes y ubicación de datos
 
@@ -958,7 +971,7 @@ modificar el entorno.
 | `run CONFIG` | Ejecuta experimento, tarea o workflow. | sí |
 | `run CONFIG --force|--restart|--no-resume` | Controla reutilización y continuación parcial. | sí |
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Cachea un bundle y envía al plano de control. | metadata; remoto sin dry-run |
-| `clusters add|list|show|test|bootstrap` | Registra, diagnostica y prepara entorno existing/managed exacto. | add/bootstrap |
+| `clusters add|list|show|inspect|export|credentials|test|bootstrap` | Gestiona perfiles por ámbito, credenciales externas, diagnóstico y entorno exacto. | add/credentials/bootstrap |
 | `status|logs|cancel|retry` (`jobs ...`) | Filtra, reconecta, sigue y controla jobs. | cancel/retry |
 | `data --catalog FILE list|locations|inspect|replicate` | Ubicaciones/manifest y réplica explícita. | sólo `--apply` |
 | `compose CONFIG` | Materialización oculta + procedencia. | no |
@@ -2017,7 +2030,7 @@ implementaciones.
 - Bootstrap managed instala wheels exactas en un venv de usuario, pero no sintetiza wheels de otra
   plataforma/CUDA, drivers, módulos del centro ni contenedores. Offline requiere wheelhouse
   compatible; existing sigue en manos del usuario. Réplica usa rsync sobre ubicaciones declaradas.
-- La selección es explícita en 0.5.1: no descubre capacidad/colas/coste ni promete placement.
+- La selección es explícita en 0.5.2: no descubre capacidad/colas/coste ni promete placement.
   `DataCatalog` resuelve splits y marcadores anidados tipados; strings arbitrarios siguen siendo del
   proyecto. Sync remoto es allowlisted/acotado y artifacts pesados requieren fetch lógico.
 - Random/Optuna finito permanece. HPO adaptativo agenda trials locales independientes; integrar
@@ -2074,6 +2087,7 @@ python -c "from importlib.metadata import distribution; print(distribution('lamb
 - [Manual de agentes](AGENTS.es.md) · [English](AGENTS.md)
 - [Arquitectura técnica](docs/ARCHITECTURE.es.md) · [English](docs/ARCHITECTURE.md)
 - [Clusters y jobs](docs/CLUSTERS.es.md) · [English](docs/CLUSTERS.md)
+- [Seguridad de credenciales/scheduler](docs/SECURITY.es.md) · [English](docs/SECURITY.md)
 - [Resultados y plots](docs/RESULTS.es.md) · [English](docs/RESULTS.md)
 - [Inspección de artifacts](docs/ARTIFACTS.es.md) · [English](docs/ARTIFACTS.md)
 - [Ejecución/debug de preprocesado](docs/PREPROCESSING.es.md) · [English](docs/PREPROCESSING.md)
@@ -2157,7 +2171,7 @@ pública, documentación y pruebas focalizadas; no significa incluir cada provee
 | 45 | Plots reproducibles | Completado: learning/seeds/sweep/HPO/resources, PlotSpec y sidecar |
 | 46 | Toolkit seguro de artifacts | Completado: NumPy/tablas, validación, geometría explícita y plugins |
 | 47 | Debug/dataset inspection | Completado: N records aislados e informe DatasetArtifact |
-| 48 | Workflow distribuido/placement automático | Diferido explícitamente después de 0.5.1 |
+| 48 | Workflow distribuido/placement automático | Diferido explícitamente después de 0.5.2 |
 
 Las ampliaciones futuras deben responder a necesidades de investigación demostradas y conservar las
 fronteras de la [arquitectura técnica](docs/ARCHITECTURE.md), no reabrir lo ya cerrado.

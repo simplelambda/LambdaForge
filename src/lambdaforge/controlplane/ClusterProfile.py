@@ -6,8 +6,10 @@ import copy
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
+from lambdaforge.controlplane.ClusterAuthentication import ClusterAuthentication
+from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
 
 
@@ -19,6 +21,11 @@ class ClusterProfile:
     transport: str = "local"
     scheduler: str = "local"
     host: str | None = None
+    user: str | None = None
+    port: int = 22
+    auth: ClusterAuthentication = field(default_factory=ClusterAuthentication)
+    known_hosts: str | None = None
+    ssh_timeout: float = 15.0
     workspace: str = ".lambdaforge/remote"
     python: str = "python"
     environment: str = "existing"
@@ -28,6 +35,7 @@ class ClusterProfile:
     ssh_options: tuple[str, ...] = ()
     command_prefix: tuple[str, ...] = ()
     scheduler_options: Mapping[str, Any] = field(default_factory=dict)
+    slurm_profile: SlurmProfile | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -40,6 +48,18 @@ class ClusterProfile:
             raise ValueError("Cluster environment must be 'existing' or 'managed'.")
         if self.transport == "ssh" and not self.host:
             raise ValueError("SSH cluster profiles require host.")
+        if (
+            isinstance(self.port, bool)
+            or not isinstance(self.port, int)
+            or not 1 <= self.port <= 65535
+        ):
+            raise ValueError("SSH port must be an integer between 1 and 65535.")
+        if self.user is not None and (
+            not self.user.strip() or "\n" in self.user or "@" in self.user
+        ):
+            raise ValueError("SSH user must be a non-empty user name without '@' or newlines.")
+        if self.ssh_timeout <= 0:
+            raise ValueError("SSH timeout must be positive.")
         if self.transport == "ssh" and not self.workspace.startswith("/"):
             raise ValueError("SSH cluster workspaces must be absolute paths.")
         if (
@@ -48,6 +68,18 @@ class ClusterProfile:
         ):
             raise ValueError("project_module must be a fully qualified Python module name.")
         object.__setattr__(self, "scheduler_options", FrozenJsonMapping(self.scheduler_options))
+        auth = self.auth
+        if not isinstance(auth, ClusterAuthentication):
+            auth = ClusterAuthentication.from_mapping(auth)
+            object.__setattr__(self, "auth", auth)
+        if auth.mode == "password" and self.transport != "ssh":
+            raise ValueError("Password authentication is available only for SSH profiles.")
+        slurm_profile = self.slurm_profile
+        if not isinstance(slurm_profile, SlurmProfile):
+            slurm_profile = SlurmProfile.from_mapping(
+                slurm_profile, legacy_options=self.scheduler_options
+            )
+            object.__setattr__(self, "slurm_profile", slurm_profile)
 
     @classmethod
     def from_mapping(cls, name: str, value: Mapping[str, Any]) -> ClusterProfile:
@@ -63,6 +95,11 @@ class ClusterProfile:
             transport=str(value.get("transport", "local")),
             scheduler=str(value.get("scheduler", "local")),
             host=str(value["host"]) if value.get("host") is not None else None,
+            user=str(value["user"]) if value.get("user") is not None else None,
+            port=int(value.get("port", 22)),
+            auth=ClusterAuthentication.from_mapping(value.get("auth")),
+            known_hosts=(str(value["known_hosts"]) if value.get("known_hosts") else None),
+            ssh_timeout=float(value.get("ssh_timeout", 15.0)),
             workspace=str(value.get("workspace", ".lambdaforge/remote")),
             python=str(value.get("python", "python")),
             environment=str(value.get("environment", "existing")),
@@ -76,15 +113,44 @@ class ClusterProfile:
             ssh_options=tuple(str(item) for item in options),
             command_prefix=tuple(str(item) for item in prefix),
             scheduler_options=copy.deepcopy(value.get("scheduler_options", {})),
+            slurm_profile=SlurmProfile.from_mapping(
+                {
+                    key: copy.deepcopy(value[key])
+                    for key in (
+                        "resource_mapping",
+                        "scheduler_directives",
+                        "scheduler_commands",
+                        "job_script",
+                    )
+                    if key in value
+                },
+                legacy_options=value.get("scheduler_options", {}),
+            ),
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return a redaction-safe profile descriptor."""
+    def to_dict(self, *, include_defaults: bool = True) -> dict[str, Any]:
+        """Return a redaction-safe effective or compact profile descriptor."""
+        slurm = cast(SlurmProfile, self.slurm_profile)
+        slurm_descriptor = slurm.to_dict(include_defaults=include_defaults)
+        if not include_defaults and "scheduler_directives" in slurm_descriptor:
+            explicit = dict(slurm_descriptor["scheduler_directives"])
+            for key, value in self.scheduler_options.items():
+                if explicit.get(key) == value:
+                    explicit.pop(key)
+            if explicit:
+                slurm_descriptor["scheduler_directives"] = explicit
+            else:
+                slurm_descriptor.pop("scheduler_directives")
         return {
             "name": self.name,
             "transport": self.transport,
             "scheduler": self.scheduler,
             "host": self.host,
+            "user": self.user,
+            "port": self.port,
+            "auth": self.auth.to_dict(),
+            "known_hosts": self.known_hosts,
+            "ssh_timeout": self.ssh_timeout,
             "workspace": self.workspace,
             "python": self.python,
             "environment": self.environment,
@@ -94,4 +160,5 @@ class ClusterProfile:
             "ssh_options": list(self.ssh_options),
             "command_prefix": list(self.command_prefix),
             "scheduler_options": copy.deepcopy(self.scheduler_options),
+            **(slurm_descriptor if self.scheduler == "slurm" else {}),
         }

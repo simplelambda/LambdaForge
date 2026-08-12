@@ -40,7 +40,7 @@ anteriores se archivan.
 `PreprocessingTask` compone source, transforms ordenados y sink. Las claves estables gobiernan
 sharding y resume. El padre escribe sink y manifest: I/O usa threads; CPU usa procesos `spawn` sólo
 para transforms; GPU permanece en un proceso. Así no se comparte estado CUDA ni se corrompen
-manifiestos. `Workflow` coordina documentos completos en un DAG, pero 0.5.1 no distribuye un mismo
+manifiestos. `Workflow` coordina documentos completos en un DAG, pero 0.5.2 no distribuye un mismo
 DAG entre clusters.
 
 ## 4. Experimentos y entrenamiento
@@ -60,13 +60,21 @@ separada. Véase [la arquitectura específica](ADAPTIVE_OPTIMIZATION_ARCHITECTUR
 
 ## 6. Runtime multiclúster explícito
 
-`ClusterCatalog` guarda `ClusterProfile`. `ExecutionBundleBuilder` materializa YAML, selecciona
+`ClusterCatalog` fusiona `ClusterProfile` de usuario/proyecto/explícito y conserva la fuente ganadora.
+`ClusterAuthentication` sólo contiene modo/referencia; `CredentialService` elige un
+`CredentialProvider` interactivo, entorno o keyring. `ControlPlaneFactory` mantiene OpenSSH por
+defecto y sólo crea `PasswordSshTransport` Paramiko en modo explícito. `SlurmProfile` compone un
+único `SlurmResourceMapping` y `SchedulerCommand` seguros antes de que `SlurmScheduler` escriba el
+script.
+
+`ExecutionBundleBuilder` materializa YAML, selecciona
 ubicaciones lógicas para el destino, construye wheels exactas de LambdaForge/proyecto y genera un
 bundle por contenido. `EnvironmentIdentity` incluye bytes instalables, Python y wheelhouse offline.
 `ControlPlane` transfiere mediante `Transport`, prepara el intérprete con `EnvironmentProvider` y
 envía por `Scheduler`. `ManagedEnvironmentProvider` crea un venv idempotente de usuario;
 `ExistingEnvironmentProvider` sólo verifica. `JobStore` permite que `JobService` reconecte después.
-No hay daemon, placement automático, passwords SSH, instalador CUDA ni workflow entre clusters.
+No hay daemon, placement automático, fichero crypto propio, instalador CUDA ni workflow entre
+clusters. Véanse [operaciones](CLUSTERS.es.md) y [seguridad](SECURITY.es.md).
 
 ## 7. Resultados, plots y artifacts
 
@@ -84,6 +92,6 @@ proveedores reutilizables. Plotly, NetworkX, trimesh, Optuna, BoTorch, stores y 
 opcionales. Una API nueva necesita validación, re-export público, tests focalizados, documentación
 EN/ES y entrada para agentes.
 
-En 0.5.1 no hay placement automático, workflows multiclúster, servidor/GUI, descargas implícitas
+En 0.5.2 no hay placement automático, workflows multiclúster, servidor/GUI, descargas implícitas
 pesadas, instalación CUDA, síntesis de wheels de otra plataforma ni interpretación mágica de
 arrays. Tampoco se amplía la matemática de HPO.

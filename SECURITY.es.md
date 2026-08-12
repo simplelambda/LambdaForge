@@ -24,5 +24,11 @@ incluyas credenciales ni datasets privados.
 - Tracking/S3 amplían confianza a SDK, credenciales, red y servicio y sólo cargan si se configuran.
 - NPZ/NPY deshabilita pickle; sync remoto está allowlisted/acotado y fetch no sale del work_dir.
 - SSH conserva `known_hosts`/agent/config; bootstrap no instala drivers ni CUDA del sistema.
+- El YAML de clúster solo guarda modo y referencia `keyring:`/`env:`; el valor de contraseña nunca
+  entra en argv, estado, bundles, fingerprints ni logs. OpenSSH es preferido; Paramiko opcional
+  rechaza hosts desconocidos y aplica timeouts. `env:` hereda el riesgo del entorno de proceso/CI.
+- Placeholders de scheduler están allowlisted y producen argv. Prologue/epilogue son shell confiable
+  del perfil y no deben interpolar secretos ni recibir valores no revisados del experimento.
 
-Los límites completos están en [arquitectura](docs/ARCHITECTURE.es.md).
+Los límites completos están en [arquitectura](docs/ARCHITECTURE.es.md) y en el
+[modelo de amenazas de clúster](docs/SECURITY.es.md).

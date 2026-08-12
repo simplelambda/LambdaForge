@@ -1,4 +1,4 @@
-"""Loader for named cluster profiles."""
+"""Layered loader for named cluster profiles."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -15,56 +16,90 @@ from lambdaforge.controlplane.ExecutionProfile import ExecutionProfile
 
 
 class ClusterCatalog:
-    """Resolve cluster names from one explicit, project or user YAML catalogue."""
+    """Merge user, project and explicit catalogs with auditable precedence."""
 
     def __init__(
         self,
         profiles: Mapping[str, ClusterProfile],
         execution_profiles: Mapping[str, ExecutionProfile] | None = None,
+        *,
+        sources: Mapping[str, Path | None] | None = None,
+        shadowed_sources: Mapping[str, tuple[Path, ...]] | None = None,
     ) -> None:
         self._profiles = dict(profiles)
         self._execution_profiles = dict(execution_profiles or {})
+        self._sources = dict(sources or {})
+        self._shadowed_sources = dict(shadowed_sources or {})
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> ClusterCatalog:
-        """Load configured clusters; always provide a safe local profile."""
-        candidates = []
-        if path is not None:
-            candidates.append(Path(path))
-        elif os.environ.get("LAMBDAFORGE_CLUSTERS"):
-            candidates.append(Path(os.environ["LAMBDAFORGE_CLUSTERS"]))
-        else:
-            candidates.extend(
-                (
-                    Path("lambdaforge.clusters.yaml"),
-                    Path.home() / ".config/lambdaforge/clusters.yaml",
-                )
-            )
-        selected = next(
-            (item.expanduser().resolve() for item in candidates if item.expanduser().is_file()),
-            None,
-        )
+        """Merge user < project < explicit catalogs and always provide local."""
+        explicit = path
+        if explicit is None and os.environ.get("LAMBDAFORGE_CLUSTERS"):
+            explicit = os.environ["LAMBDAFORGE_CLUSTERS"]
+        candidates = [cls.user_path(), cls.project_path()]
+        if explicit is not None:
+            candidates.append(Path(explicit).expanduser().resolve())
+        unique: list[Path] = []
+        for candidate in candidates:
+            resolved = candidate.expanduser().resolve()
+            if resolved not in unique:
+                unique.append(resolved)
         profiles: dict[str, ClusterProfile] = {
             "local": ClusterProfile("local", python=sys.executable)
         }
         execution_profiles: dict[str, ExecutionProfile] = {}
-        if selected is not None:
-            value = yaml.safe_load(selected.read_text(encoding="utf-8")) or {}
+        sources: dict[str, Path | None] = {"local": None}
+        shadowed: dict[str, list[Path]] = {}
+        for source in unique:
+            if not source.is_file():
+                continue
+            value = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
             raw = value.get("clusters") if isinstance(value, Mapping) else None
             if not isinstance(raw, Mapping):
-                raise ValueError("Cluster catalog requires a top-level clusters mapping.")
+                raise ValueError(f"Cluster catalog {source} requires a top-level clusters mapping.")
             for name, descriptor in raw.items():
                 if not isinstance(descriptor, Mapping):
-                    raise TypeError(f"Cluster profile {name!r} must be a mapping.")
-                profiles[str(name)] = ClusterProfile.from_mapping(str(name), descriptor)
+                    raise TypeError(f"Cluster profile {name!r} in {source} must be a mapping.")
+                key = str(name)
+                previous = sources.get(key)
+                if previous is not None:
+                    shadowed.setdefault(key, []).append(previous)
+                profiles[key] = ClusterProfile.from_mapping(key, descriptor)
+                sources[key] = source
             raw_execution = value.get("profiles", {})
             if not isinstance(raw_execution, Mapping):
-                raise TypeError("Cluster catalog profiles must be a mapping.")
+                raise TypeError(f"Cluster catalog profiles in {source} must be a mapping.")
             for name, descriptor in raw_execution.items():
                 if not isinstance(descriptor, Mapping):
-                    raise TypeError(f"Execution profile {name!r} must be a mapping.")
+                    raise TypeError(f"Execution profile {name!r} in {source} must be a mapping.")
                 execution_profiles[str(name)] = ExecutionProfile.from_mapping(str(name), descriptor)
-        return cls(profiles, execution_profiles)
+        return cls(
+            profiles,
+            execution_profiles,
+            sources=sources,
+            shadowed_sources={key: tuple(values) for key, values in shadowed.items()},
+        )
+
+    @staticmethod
+    def user_path() -> Path:
+        """Return the XDG-aware default user catalog path."""
+        root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        return (root / "lambdaforge" / "clusters.yaml").expanduser().resolve()
+
+    @staticmethod
+    def project_path() -> Path:
+        """Return the nearest project catalog/root instead of depending on one subdirectory."""
+        current = Path.cwd().resolve()
+        parents = (current, *current.parents)
+        for directory in parents:
+            candidate = directory / "lambdaforge.clusters.yaml"
+            if candidate.is_file():
+                return candidate
+        for directory in parents:
+            if (directory / "pyproject.toml").is_file():
+                return directory / "lambdaforge.clusters.yaml"
+        return current / "lambdaforge.clusters.yaml"
 
     def names(self) -> tuple[str, ...]:
         """Return configured cluster names in stable order."""
@@ -76,6 +111,31 @@ class ClusterCatalog:
             return self._profiles[name]
         except KeyError as error:
             raise KeyError(f"Unknown cluster {name!r}; configured: {self.names()}.") from error
+
+    def source(self, name: str) -> Path | None:
+        """Return the winning catalog path, or ``None`` for built-in local."""
+        self.get(name)
+        return self._sources.get(name)
+
+    def inspect(self, name: str) -> dict[str, Any]:
+        """Return a redaction-safe profile with precedence and auth status."""
+        profile = self.get(name)
+        reference = profile.auth.credential
+        auth_status = (
+            "openssh-managed"
+            if profile.auth.mode == "openssh"
+            else "interactive"
+            if reference is None
+            else "environment-reference"
+            if reference.startswith("env:")
+            else "keyring-reference"
+        )
+        return {
+            "profile": profile.to_dict(),
+            "source": str(self.source(name)) if self.source(name) is not None else "built-in",
+            "shadowed_sources": [str(item) for item in self._shadowed_sources.get(name, ())],
+            "authentication_status": auth_status,
+        }
 
     def execution_profile(self, name: str) -> ExecutionProfile:
         """Return one reusable placement/resource preset."""
@@ -92,7 +152,7 @@ class ClusterCatalog:
         return tuple(sorted(self._execution_profiles))
 
     def for_data_environment(self, environment: str) -> ClusterProfile:
-        """Resolve a transfer destination by profile name or declared data environment."""
+        """Resolve a transfer destination by profile name or data environment."""
         if environment in self._profiles:
             return self._profiles[environment]
         matches = tuple(
@@ -111,7 +171,7 @@ class ClusterCatalog:
 
     @staticmethod
     def add(path: str | Path, profile: ClusterProfile) -> Path:
-        """Atomically add/update one profile in an explicit project/user catalogue."""
+        """Atomically add/update one redaction-safe profile descriptor."""
         destination = Path(path).expanduser().resolve()
         value: dict[str, object] = {}
         if destination.is_file():
@@ -122,7 +182,7 @@ class ClusterCatalog:
         clusters = value.setdefault("clusters", {})
         if not isinstance(clusters, dict):
             raise TypeError("Cluster catalogue clusters must be a mapping.")
-        descriptor = profile.to_dict()
+        descriptor = profile.to_dict(include_defaults=False)
         descriptor.pop("name", None)
         clusters[profile.name] = descriptor
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -139,3 +199,8 @@ class ClusterCatalog:
         finally:
             temporary.unlink(missing_ok=True)
         return destination
+
+    @staticmethod
+    def export(path: str | Path, profile: ClusterProfile) -> Path:
+        """Export one portable profile, retaining only its non-secret reference."""
+        return ClusterCatalog.add(path, profile)

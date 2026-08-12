@@ -12,7 +12,7 @@ from lambdaforge.configuration import AuthoringConfig
 
 def main() -> None:
     """Verify imports, packaged resources and one minimal authoring operation."""
-    assert lambdaforge.__version__ == "0.5.1"
+    assert lambdaforge.__version__ == "0.5.2"
     assert files("lambdaforge").joinpath("schemas/experiment.schema.json").is_file()
     assert files("lambdaforge").joinpath("schemas/task.schema.json").is_file()
     assert files("lambdaforge").joinpath("schemas/authoring.schema.json").is_file()

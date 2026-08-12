@@ -66,6 +66,9 @@ from private file locations.
 | Use concise training YAML | `name`, `model`, one `loss`, `trainer.epochs`, `resources` compile to strict IR |
 | Use logical experiment data | `data_catalog`, then `dataset:NAME/subpath` or `{dataset, subpath}` |
 | Register/bootstrap cluster | `clusters add`; `doctor --on`; `clusters bootstrap` |
+| Inspect cluster source/auth | `clusters inspect NAME`; never search YAML for a password value |
+| Manage a legacy SSH password | `clusters credentials set/delete NAME`; prefer OpenSSH |
+| Customize a site scheduler | cluster `resource_mapping`, `scheduler_directives/commands`, `job_script` |
 | Reconnect to jobs | `status`; `logs JOB --follow`; `cancel JOB`; `retry JOB` |
 | Sync small remote evidence | `results sync JOB`; heavy files require `artifact fetch` |
 | Query/compare/export results | `results list/show/compare/export` |
@@ -95,7 +98,7 @@ reproducible release, build/install a versioned LambdaForge wheel instead of the
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.1-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.5.2-py3-none-any.whl
 ```
 
 Let the consumer lock the correct PyTorch wheel. `nvidia-smi` only proves the driver is visible;
@@ -107,8 +110,9 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 
 Optional extras are `hpo` (Optuna), `adaptive-hpo` (BoTorch), `s3` (boto3), `parquet`
 (Pandas/PyArrow), `onnx`, `viz` (Plotly), `graph` (NetworkX), `viz3d` (Plotly/trimesh), individual
-or all tracking providers and `dev`. Install only used providers; Sobol/random HPO, local stores,
-Matplotlib plots and base training do not need those extras.
+or all tracking providers, `cluster-password` (Paramiko/keyring) and `dev`. Install only used
+providers; OpenSSH, Sobol/random HPO, local stores, Matplotlib plots and base training do not need
+those extras.
 
 ## Version 0.5 authoring, identity and placement
 
@@ -159,14 +163,21 @@ lambdaforge run experiment.yaml --on atlas --cpus 8 --memory 32GiB --resource-gp
 lambdaforge jobs status JOB_ID
 ```
 
-`ClusterCatalog` selects a transport, scheduler, absolute workspace, Python command and data
-environment. `ExecutionBundleBuilder` stages strict YAML and bounded small inputs; large data must
-already have a catalog location or be replicated explicitly with preview then `--apply`.
-`ControlPlane`/`JobService` are the provider-neutral application layer. SSH/SLURM credentials stay
-in their native runtime. Do not execute workflow nodes with non-local `on`: version 0.5 exposes the
-placement in plans but refuses execution until durable DAG recovery and artifact transfer exist.
+`ClusterCatalog` merges user < project < explicit scopes; inspect reports the winning source.
+OpenSSH is the recommended default and preserves aliases/keys/agent/known_hosts/ProxyJump. Optional
+password mode resolves only hidden interactive, `keyring:` or `env:` values through
+`CredentialProvider`; never put a value in argv/YAML/job/bundle/fingerprint/log. `PasswordSshTransport`
+uses Paramiko RejectPolicy/SFTP/timeouts. `SlurmProfile` owns one validated resource translation,
+static directives, safe command argv/placeholders/job-ID regex and trusted non-secret script lines;
+legacy `scheduler_options` remains valid. Dry-run must show directives, warnings and submit argv.
+Read `docs/CLUSTERS.md` and `docs/SECURITY.md` only when changing these boundaries.
 
-## Version 0.5.1 runtime, results and inspection
+`ExecutionBundleBuilder` stages strict YAML and bounded small inputs; large data must already have a
+catalog location or be replicated explicitly with preview then `--apply`. `ControlPlane`/`JobService`
+are the provider-neutral application layer. Do not execute workflow nodes with non-local `on`:
+version 0.5 exposes placement but refuses execution until durable DAG recovery/transfer exist.
+
+## Version 0.5.2 runtime, results and inspection
 
 Friendly training accepts top-level `name`, singular `loss`, `trainer.epochs` and `resources`, but
 agents should inspect the strict materialization before editing advanced fields. An experiment can
@@ -222,7 +233,7 @@ groups cover inspector/visualizer/schema/exporter/validator.
 
 `results sync JOB` retrieves only allowlisted small evidence. `artifact fetch JOB LOGICAL_NAME`
 downloads one explicit heavy artifact. `plot learning JOB --follow` periodically syncs metrics and
-atomically refreshes until the scheduler is terminal. 0.5.1 intentionally has no automatic
+atomically refreshes until the scheduler is terminal. 0.5.2 intentionally has no automatic
 placement, distributed workflow coordinator, GUI/server, implicit dataset/checkpoint download,
 platform wheel synthesis or new HPO algorithm.
 
@@ -808,6 +819,7 @@ Use these only for depth required by the current task:
 - `src/lambdaforge/tasks/README.md`: generic task Schema, contract, planning, results and artifacts.
 - `src/lambdaforge/preprocessing/README.md`: built-ins, custom contracts, resume, shards and dataset identity.
 - `src/lambdaforge/controlplane/README.md`: clusters, bundles, providers, jobs and remote limits.
+- `docs/CLUSTERS.md` / `docs/SECURITY.md`: credential, catalog-scope and scheduler-dialect contracts.
 - `src/lambdaforge/metrics/README.md`: metric semantics, streaming error and DDP state.
 - `src/lambdaforge/plugins/README.md`: entry-point publication, contracts and provenance.
 - `src/lambdaforge/tracking/README.md`: provider setup, privacy and lifecycle.

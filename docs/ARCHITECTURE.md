@@ -52,7 +52,7 @@ work uses threads; explicitly CPU-bound work uses spawn-safe child processes for
 work stays in one process. This avoids forked CUDA state and concurrent manifest corruption.
 
 `Workflow` schedules complete task/experiment documents in a DAG. It delegates identity and resume
-to each node runner. It does not distribute one DAG across clusters in 0.5.1; remote submission is
+to each node runner. It does not distribute one DAG across clusters in 0.5.2; remote submission is
 one explicit schedulable unit.
 
 ## 4. Experiments and training
@@ -78,7 +78,15 @@ recovery authority. See [the dedicated architecture](ADAPTIVE_OPTIMIZATION_ARCHI
 
 ## 6. Explicit multi-cluster runtime
 
-`ClusterCatalog` stores named `ClusterProfile` values. `ExecutionBundleBuilder` materializes the
+`ClusterCatalog` merges named `ClusterProfile` values across user/project/explicit scopes and keeps
+winning-source provenance. `ClusterAuthentication` contains only mode/reference;
+`CredentialService` selects hidden interactive, environment or OS-keyring `CredentialProvider`.
+`ControlPlaneFactory` keeps OpenSSH as default and constructs `PasswordSshTransport` only for the
+explicit Paramiko password mode. `SlurmProfile` composes `SlurmResourceMapping` plus safe
+`SchedulerCommand` values, so resources are translated once before `SlurmScheduler` writes a job
+script.
+
+`ExecutionBundleBuilder` materializes the
 configuration, selects target-specific logical data locations, builds exact LambdaForge/consumer
 wheels and creates a content-addressed bundle. `EnvironmentIdentity` hashes installable wheel bytes,
 Python policy and offline wheelhouse contents.
@@ -87,8 +95,8 @@ Python policy and offline wheelhouse contents.
 interpreter and submits through `Scheduler`. `ManagedEnvironmentProvider` creates an idempotent
 user-space venv; `ExistingEnvironmentProvider` only verifies a user-managed interpreter. `JobStore`
 persists reconnection data and `JobService` queries the scheduler on later processes. There is no
-daemon, automatic placement, SSH password store, driver installer or cross-cluster workflow
-coordinator. See [cluster operations](CLUSTERS.md).
+daemon, automatic placement, custom cryptographic password file, driver installer or cross-cluster
+workflow coordinator. See [cluster operations](CLUSTERS.md) and its [security model](SECURITY.md).
 
 ## 7. Results, plots and artifacts
 
@@ -117,11 +125,11 @@ Optuna, BoTorch, cloud stores and trackers stay optional. A new public contract 
 validation, stable re-export, YAML/public-import coverage, focused failure tests, English/Spanish
 documentation and an AGENTS entry.
 
-## 10. Intentional 0.5.1 limits
+## 10. Intentional 0.5.2 limits
 
 - No automatic cluster selection or mixed-cluster workflow runtime.
 - No server, GUI or resident control-plane daemon.
 - No implicit large-result, checkpoint or dataset download.
 - No automatic CUDA/driver installation or remote platform wheel synthesis.
 - No magical interpretation of arrays as graphs, point clouds or meshes.
-- No new HPO mathematics in 0.5.1; only inspection and visualization of existing state.
+- No new HPO mathematics in 0.5.2; cluster hardening does not alter existing scientific policy.
