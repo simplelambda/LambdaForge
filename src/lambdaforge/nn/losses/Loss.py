@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -61,9 +61,24 @@ class Loss(nn.Module, ABC):
     def _autocast_reduced_dtype() -> torch.dtype | None:
         """Return the reduced dtype of an active autocast context, if any."""
         for device in ("cuda", "cpu"):
-            if not torch.is_autocast_enabled(device):
+            try:
+                enabled = cast(Any, torch.is_autocast_enabled)(device)
+            except TypeError:  # Torch < 2.4 has device-specific legacy functions.
+                enabled = (
+                    torch.is_autocast_enabled()
+                    if device == "cuda"
+                    else bool(torch.is_autocast_cpu_enabled())
+                )
+            if not enabled:
                 continue
-            dtype = torch.get_autocast_dtype(device)
+            getter = getattr(torch, "get_autocast_dtype", None)
+            dtype = (
+                getter(device)
+                if getter is not None
+                else torch.get_autocast_gpu_dtype()
+                if device == "cuda"
+                else torch.get_autocast_cpu_dtype()
+            )
             if dtype in (torch.float16, torch.bfloat16):
                 return dtype
         return None

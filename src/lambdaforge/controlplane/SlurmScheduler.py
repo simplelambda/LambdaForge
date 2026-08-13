@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 
 from lambdaforge.controlplane.JobState import JobState
 from lambdaforge.controlplane.Scheduler import Scheduler
+from lambdaforge.controlplane.SchedulerCapabilities import SchedulerCapabilities
 from lambdaforge.controlplane.SchedulerSubmission import SchedulerSubmission
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.controlplane.Transport import Transport
@@ -28,6 +29,15 @@ class SlurmScheduler(Scheduler):
         self.transport = transport
         self.profile = profile or SlurmProfile.from_mapping(None, legacy_options=options)
 
+    @property
+    def capabilities(self) -> SchedulerCapabilities:
+        return SchedulerCapabilities(
+            supports_pause=self.profile.pause is not None,
+            supports_resume=self.profile.resume is not None,
+            durable=True,
+            resources_released_when_paused=False,
+        )
+
     def submit(
         self,
         command: Sequence[str],
@@ -35,8 +45,10 @@ class SlurmScheduler(Scheduler):
         *,
         work_dir: str | Path,
         dry_run: bool = False,
+        job_id: str | None = None,
     ) -> SchedulerSubmission:
         """Create an auditable script and optionally stage/submit it."""
+        del job_id
         if not command:
             raise ValueError("Scheduled commands cannot be empty.")
         directory = str(work_dir)
@@ -83,6 +95,7 @@ class SlurmScheduler(Scheduler):
             command=submit_command,
             directives=directives,
             warnings=warnings,
+            work_dir=directory,
         )
         if dry_run:
             return preview
@@ -111,6 +124,7 @@ class SlurmScheduler(Scheduler):
             command=submit_command,
             directives=directives,
             warnings=warnings,
+            work_dir=directory,
         )
 
     def state(self, scheduler_id: str) -> JobState:
@@ -146,6 +160,22 @@ class SlurmScheduler(Scheduler):
         if result.returncode:
             raise RuntimeError(f"SLURM cancellation failed: {result.stderr}")
 
+    def pause(self, scheduler_id: str) -> None:
+        self._optional_control(scheduler_id, "pause")
+
+    def resume(self, scheduler_id: str) -> None:
+        self._optional_control(scheduler_id, "resume")
+
+    def _optional_control(self, scheduler_id: str, operation: str) -> None:
+        self._validate_id(scheduler_id)
+        descriptor = getattr(self.profile, operation)
+        if descriptor is None:
+            raise NotImplementedError(f"{operation.title()} is not supported by this scheduler.")
+        command = descriptor.render({"job_id": scheduler_id}, allowed={"job_id"})
+        result = self.transport.run(command, timeout=30.0)
+        if result.returncode:
+            raise RuntimeError(f"SLURM {operation} failed: {result.stderr}")
+
     @staticmethod
     def _validate_id(value: str) -> None:
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", value) is None:
@@ -156,12 +186,16 @@ class SlurmScheduler(Scheduler):
         state = value.strip().upper().split("+")[0].split("|")[0].strip()
         if state in {"PENDING", "CONFIGURING", "REQUEUED"}:
             return JobState.QUEUED
-        if state in {"RUNNING", "COMPLETING", "SUSPENDED"}:
+        if state in {"RUNNING", "COMPLETING"}:
             return JobState.RUNNING
+        if state == "SUSPENDED":
+            return JobState.PAUSED
         if state == "COMPLETED":
             return JobState.SUCCEEDED
         if state in {"CANCELLED", "PREEMPTED"}:
             return JobState.CANCELLED
-        if state in {"FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "BOOT_FAIL"}:
+        if state == "TIMEOUT":
+            return JobState.TIMEOUT
+        if state in {"FAILED", "OUT_OF_MEMORY", "NODE_FAIL", "BOOT_FAIL"}:
             return JobState.FAILED
         return JobState.UNKNOWN

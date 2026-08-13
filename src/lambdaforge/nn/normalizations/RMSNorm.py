@@ -49,7 +49,8 @@ class RMSNorm(Normalization):
         resolved_shape = (
             normalized_shape if isinstance(normalized_shape, int) else list(normalized_shape)
         )
-        self.norm = nn.RMSNorm(
+        rms_norm = vars(nn)["RMSNorm"]
+        self.norm = rms_norm(
             normalized_shape=resolved_shape,
             eps=eps,
             elementwise_affine=elementwise_affine,

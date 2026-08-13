@@ -13,8 +13,9 @@ LambdaForge is an installable, task-agnostic PyTorch/Lightning library. It provi
 composable preprocessing, reusable neural objects and a YAML engine for validation, construction,
 seed/sweep/HPO expansion, workflow DAGs, CPU/GPU/SLURM planning, training, aggregation, statistical
 comparisons, tracking, result auditing, checkpoint/model operations, artifact stores/cache and
-retention. Version 0.5 also provides concise authoring, logical data/code identity and a local
-multi-cluster control plane with persistent jobs. A consumer project owns its datasets and domain
+retention. Version 0.6 also provides concise authoring, logical data/code identity, durable direct
+process jobs, SSH connection reuse, global resource views, first-class datasets, config discovery
+and safe internal-storage lifecycle. A consumer project owns its datasets and domain
 code.
 
 Supported Python starts at 3.10. The documented public namespaces are `lambdaforge`,
@@ -70,7 +71,13 @@ from private file locations.
 | Manage a legacy SSH password | `clusters credentials set/delete NAME`; prefer OpenSSH |
 | Customize a site scheduler | cluster `resource_mapping`, `scheduler_directives/commands`, `job_script` |
 | Fix managed Torch/CUDA compatibility | keep `pytorch.channel: auto`; inspect bootstrap plan + doctor |
-| Reconnect to jobs | `status`; `logs JOB --follow`; `cancel JOB`; `retry JOB` |
+| Reconnect to jobs | `jobs list --all`; `status`; `logs JOB --follow`; `cancel JOB`; `retry JOB` |
+| Global control-plane view | `status`; `overview --json`; `top --follow` |
+| Durable process lifecycle | `jobs show/logs/pause/resume/cancel/retry/delete/reconcile` |
+| Inspect host/scheduler resources | `resources --on CLUSTER`; use `--all` for bounded parallel queries |
+| Discover project YAML by name | `configs`, `experiments` or `tasks` `list/show/validate/plan/run` |
+| Discover/manage dataset versions | `datasets list/show/stats/verify/lineage/materialize`; delete is preview-first |
+| Inspect/collect internal cache | `storage status`; `storage gc`; apply only after preview |
 | Sync small remote evidence | `results sync JOB`; heavy files require `artifact fetch` |
 | Query/compare/export results | `results list/show/compare/export` |
 | Plot curves/sweeps/HPO | `plot learning/sweep/seeds/hpo/resources`; `--json` returns `PlotSpec` |
@@ -99,7 +106,7 @@ reproducible release, build/install a versioned LambdaForge wheel instead of the
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.3-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.6.0-py3-none-any.whl
 ```
 
 Let the consumer lock the correct PyTorch wheel. `nvidia-smi` only proves the driver is visible;
@@ -162,6 +169,7 @@ lambdaforge doctor --on atlas
 lambdaforge run experiment.yaml --on atlas --dry-run
 lambdaforge run experiment.yaml --on atlas --cpus 8 --memory 32GiB --resource-gpus 1
 lambdaforge jobs status JOB_ID
+lambdaforge jobs group show GROUP_ID
 ```
 
 `ClusterCatalog` merges user < project < explicit scopes; inspect reports the winning source.
@@ -178,7 +186,7 @@ catalog location or be replicated explicitly with preview then `--apply`. `Contr
 are the provider-neutral application layer. Do not execute workflow nodes with non-local `on`:
 version 0.5 exposes placement but refuses execution until durable DAG recovery/transfer exist.
 
-## Version 0.5.3 runtime, results and inspection
+## Version 0.5.3–0.6 runtime, results and inspection
 
 Friendly training accepts top-level `name`, singular `loss`, `trainer.epochs` and `resources`, but
 agents should inspect the strict materialization before editing advanced fields. An experiment can
@@ -245,7 +253,7 @@ groups cover inspector/visualizer/schema/exporter/validator.
 
 `results sync JOB` retrieves only allowlisted small evidence. `artifact fetch JOB LOGICAL_NAME`
 downloads one explicit heavy artifact. `plot learning JOB --follow` periodically syncs metrics and
-atomically refreshes until the scheduler is terminal. 0.5.3 intentionally has no automatic
+atomically refreshes until the scheduler is terminal. 0.6 intentionally has no automatic
 placement, distributed workflow coordinator, GUI/server, implicit dataset/checkpoint download,
 platform wheel synthesis or new HPO algorithm.
 
@@ -253,6 +261,44 @@ For preprocessing concurrency: `workers=1` is sequential; `io` uses threads; `cp
 pool for importable/picklable transforms while the parent owns sink/manifest; `auto` uses conservative
 threads; `gpu` requires one worker. Use explicit sharded jobs for multiple GPUs. Sample debug never
 calls/finalizes the production sink and has a separate `debug:` identity.
+
+## Version 0.6 terminal control plane
+
+There is no central daemon. A direct `scheduler: local` submission starts one detached
+`ProcessSupervisor` on the execution host and returns after durable acknowledgement. State, silent
+heartbeats, stdout/stderr, usage and mutable work live under `storage.run_root/JOB`; bundles and
+verified environments live under `storage.cache_root`; registries/pointers live under
+`storage.state_root`; datasets use an optional independent `storage.dataset_root`. SLURM remains
+authoritative for `scheduler: slurm`. Never treat job work/results/datasets as cache.
+
+OpenSSH starts a client process per operation but defaults to `ControlMaster=auto` and reuses its
+private authenticated socket across operations/CLI invocations until `connection.persist` idle
+seconds. Configure `connect_timeout`, Paramiko-only `auth_timeout`/`banner_timeout`, `keepalive`,
+`multiplex`, `persist` and optional `command_timeout` independently. Scientific commands have no
+transport timeout by default; probes use explicit deadlines and `resources.time` is the scientific
+runtime watchdog. Password Paramiko reuse lasts only within one CLI invocation. Never disable host
+verification or serialize a credential.
+
+Process control verifies PID, process group, creation time and command hash before signalling.
+Pause retains RAM/VRAM/CPU/GPU leases. Cooperative direct-host admission sets CPU affinity/thread
+limits and `CUDA_VISIBLE_DEVICES`; it is not cgroup isolation and avoids observable external GPU
+processes. Use `jobs reconcile --on CLUSTER` to rebuild missing local metadata from only
+LambdaForge-owned remote job directories. Offline/provider errors produce `unknown` plus
+last-known state, never a fake scientific failure.
+
+Successful preprocessing with `dataset-artifact.json` auto-registers `name@version`, immutable ID,
+producer/lineage and placement. `DatasetArtifact` remains authoritative; the atomic registry is
+reconciliable. `datasets remove` changes registration only. `datasets delete` requires an exact
+placement, valid matching manifest/hashes, no declared active consumer and `--apply`. `materialize`
+plans `NOOP`, `REPLICATE` or `BUILD`; preview never copies large bytes. Built-in relay supports a
+local source and must not be described as durable cluster-to-cluster transfer.
+
+`ProjectConfigService` discovers bounded project YAML and resolves unambiguous names; source YAML
+remains authoritative. Repeating `--on` makes independent persistent job-group replicas. HPO needs
+`--independent-hpo` because no optimizer state is shared. 0.6 still has no automatic placement,
+central server, coordinated multi-cluster HPO or durable mixed-cluster workflow DAG. Read only
+`docs/CONTROL_PLANE.md`, `docs/JOBS.md`, `docs/DATASETS.md` or `docs/STORAGE.md` when changing the
+corresponding boundary.
 
 ## Safe experiment workflow
 
@@ -831,6 +877,8 @@ Use these only for depth required by the current task:
 - `src/lambdaforge/tasks/README.md`: generic task Schema, contract, planning, results and artifacts.
 - `src/lambdaforge/preprocessing/README.md`: built-ins, custom contracts, resume, shards and dataset identity.
 - `src/lambdaforge/controlplane/README.md`: clusters, bundles, providers, jobs and remote limits.
+- `docs/CONTROL_PLANE.md`, `docs/JOBS.md`, `docs/DATASETS.md`, `docs/STORAGE.md`: 0.6 terminal
+  ownership, process recovery, dataset lifecycle and reference-aware storage GC.
 - `docs/CLUSTERS.md` / `docs/SECURITY.md`: credential, catalog-scope and scheduler-dialect contracts.
 - `src/lambdaforge/metrics/README.md`: metric semantics, streaming error and DDP state.
 - `src/lambdaforge/plugins/README.md`: entry-point publication, contracts and provenance.
@@ -847,4 +895,4 @@ provider-owned. The dashboard is static/read-only. Adaptive HPO schedules local 
 not DDP actions or direct SLURM jobs; finite adapters do not silently schedule science. No pretrained
 weights, native optimized S4/Mamba kernels, native `l>=2` irreps, adaptive
 stiff ODE solver, graph sampling or compiled sparse kernels. The integrated README roadmap records
-the implementation status through 0.5 and the owner licence decision still required for release.
+the implementation status through 0.6 and the owner licence decision still required for release.

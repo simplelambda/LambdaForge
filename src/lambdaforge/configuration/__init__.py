@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     from lambdaforge.configuration.ConfigurationDiff import ConfigurationDiff
     from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
     from lambdaforge.configuration.MaterializedConfig import MaterializedConfig
+    from lambdaforge.configuration.ProjectConfigRecord import ProjectConfigRecord
+    from lambdaforge.configuration.ProjectConfigService import ProjectConfigService
     from lambdaforge.configuration.ResolvedConfiguration import ResolvedConfiguration
     from lambdaforge.configuration.SecretValue import SecretValue
 
@@ -43,6 +45,14 @@ LazyExports.install(
             "lambdaforge.configuration.MaterializedConfig",
             "MaterializedConfig",
         ),
+        "ProjectConfigRecord": (
+            "lambdaforge.configuration.ProjectConfigRecord",
+            "ProjectConfigRecord",
+        ),
+        "ProjectConfigService": (
+            "lambdaforge.configuration.ProjectConfigService",
+            "ProjectConfigService",
+        ),
         "ResolvedConfiguration": (
             "lambdaforge.configuration.ResolvedConfiguration",
             "ResolvedConfiguration",
@@ -59,6 +69,8 @@ __all__ = [
     "ConfigurationDiff",
     "ConfigurationKind",
     "MaterializedConfig",
+    "ProjectConfigRecord",
+    "ProjectConfigService",
     "ResolvedConfiguration",
     "SecretValue",
 ]

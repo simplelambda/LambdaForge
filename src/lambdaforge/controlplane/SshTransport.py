@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 from lambdaforge.controlplane.CommandResult import CommandResult
+from lambdaforge.controlplane.RemoteCommandTimeout import RemoteCommandTimeout
+from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
 from lambdaforge.controlplane.Transport import Transport
 
 
@@ -21,6 +24,8 @@ class SshTransport(Transport):
         options: Sequence[str] = (),
         user: str | None = None,
         port: int = 22,
+        connection: SshConnectionPolicy | None = None,
+        control_root: str | Path | None = None,
     ) -> None:
         if not host.strip() or host.startswith("-") or "\n" in host:
             raise ValueError("SSH host must be a non-empty configured host name.")
@@ -29,8 +34,26 @@ class SshTransport(Transport):
         self.host = host
         self.user = user
         self.port = port
-        connection_options = tuple(options)
-        scp_options = tuple(options)
+        self.connection = connection or SshConnectionPolicy()
+        shared = list(options)
+        if not self._has_option(shared, "ConnectTimeout"):
+            shared.extend(("-o", f"ConnectTimeout={self.connection.connect_timeout:g}"))
+        if self.connection.keepalive > 0 and not self._has_option(shared, "ServerAliveInterval"):
+            shared.extend(("-o", f"ServerAliveInterval={self.connection.keepalive:g}"))
+        if self.connection.multiplex and not self._has_option(shared, "ControlMaster"):
+            root = self._control_root(control_root)
+            shared.extend(
+                (
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    f"ControlPersist={self.connection.persist:g}s",
+                    "-o",
+                    f"ControlPath={root}/%C",
+                )
+            )
+        connection_options = tuple(shared)
+        scp_options = tuple(shared)
         if port != 22:
             connection_options = ("-p", str(port), *connection_options)
             scp_options = ("-P", str(port), *scp_options)
@@ -42,21 +65,51 @@ class SshTransport(Transport):
         """Return the OpenSSH target while preserving configured host aliases."""
         return f"{self.user}@{self.host}" if self.user else self.host
 
-    def run(self, command: Sequence[str], *, cwd: str | Path | None = None) -> CommandResult:
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: str | Path | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
         """Execute an argument vector remotely through one quoted command string."""
         if not command:
             raise ValueError("SSH commands cannot be empty.")
         remote = shlex.join(tuple(command))
         if cwd is not None:
             remote = f"cd {shlex.quote(str(cwd))} && exec {remote}"
-        completed = subprocess.run(
-            ("ssh", *self.options, self.destination, "--", remote),
-            check=False,
-            capture_output=True,
-            text=True,
-            shell=False,
-        )
+        deadline = self.connection.command_timeout if timeout is None else timeout
+        try:
+            completed = subprocess.run(
+                ("ssh", *self.options, self.destination, "--", remote),
+                check=False,
+                capture_output=True,
+                text=True,
+                shell=False,
+                timeout=deadline,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RemoteCommandTimeout(remote, float(deadline or 0)) from error
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+    @staticmethod
+    def _has_option(arguments: Sequence[str], name: str) -> bool:
+        lowered = name.lower()
+        return any(lowered in item.lower() for item in arguments)
+
+    @staticmethod
+    def _control_root(value: str | Path | None) -> str:
+        if value is None:
+            base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+            value = base / "lambdaforge" / "ssh"
+        root = Path(value).expanduser().resolve()
+        # Unix-domain socket paths are short on several OpenSSH platforms. Keep a
+        # private, deterministic fallback rather than silently disabling reuse.
+        if len(str(root / ("f" * 40))) >= 96:
+            root = Path("/tmp") / f"lambdaforge-{os.getuid()}" / "ssh"
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.chmod(0o700)
+        return str(root)
 
     def put(self, source: str | Path, destination: str | Path) -> None:
         """Stage one explicit small bundle with OpenSSH scp."""

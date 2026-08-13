@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lambdaforge"
-version = "0.5.3"
+version = "0.6.0"
 description = "Reproducible AI workflows from local authoring to multi-cluster execution."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -133,12 +133,20 @@ lambdaforge = [
     "docs/ARTIFACTS.es.md",
     "docs/CLUSTERS.md",
     "docs/CLUSTERS.es.md",
+    "docs/CONTROL_PLANE.md",
+    "docs/CONTROL_PLANE.es.md",
+    "docs/DATASETS.md",
+    "docs/DATASETS.es.md",
     "docs/GOVERNANCE.md",
     "docs/GOVERNANCE.es.md",
+    "docs/JOBS.md",
+    "docs/JOBS.es.md",
     "docs/PREPROCESSING.md",
     "docs/PREPROCESSING.es.md",
     "docs/RESULTS.md",
     "docs/RESULTS.es.md",
+    "docs/STORAGE.md",
+    "docs/STORAGE.es.md",
 ]
 
 [tool.pytest.ini_options]
@@ -170,9 +178,11 @@ warn_redundant_casts = true
 module = [
     "botorch.*",
     "gpytorch.*",
+    "keyring",
     "psutil",
     "sklearn.*",
     "threadpoolctl",
+    "jsonschema",
     "win32api",
     "win32con",
     "win32job",

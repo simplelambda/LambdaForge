@@ -24,18 +24,26 @@ from lambdaforge.configuration.AuthoringSchemaCatalog import AuthoringSchemaCata
 from lambdaforge.configuration.ConfigurationComposer import ConfigurationComposer
 from lambdaforge.configuration.ConfigurationDiff import ConfigurationDiff
 from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
+from lambdaforge.configuration.ProjectConfigService import ProjectConfigService
 from lambdaforge.controlplane.ClusterAuthentication import ClusterAuthentication
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.ClusterService import ClusterService
+from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
 from lambdaforge.controlplane.ControlPlane import ControlPlane
 from lambdaforge.controlplane.CredentialService import CredentialService
 from lambdaforge.controlplane.Doctor import Doctor
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.JobState import JobState
+from lambdaforge.controlplane.MultiClusterSubmissionService import MultiClusterSubmissionService
+from lambdaforge.controlplane.OverviewService import OverviewService
+from lambdaforge.controlplane.ResourceService import ResourceService
+from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
+from lambdaforge.controlplane.StorageService import StorageService
 from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
 from lambdaforge.data.DataCatalog import DataCatalog
 from lambdaforge.data.DataService import DataService
+from lambdaforge.data.DatasetService import DatasetService
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.experiments.Experiment import Experiment
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
@@ -85,6 +93,12 @@ class CommandLineInterface:
         ):
             raw_arguments.insert(1, "audit")
         arguments = parser.parse_args(raw_arguments)
+        if arguments.command in {"run", "validate", "inspect"} and not arguments.config.exists():
+            try:
+                arguments.config = ProjectConfigService().resolve(arguments.config)
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
         if arguments.command == "init":
             return cls._initialize(
                 arguments.directory, force=arguments.force, template=arguments.template
@@ -143,6 +157,193 @@ class CommandLineInterface:
             except Exception as error:
                 print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
                 return 1
+        if arguments.command in {"overview", "top"}:
+            try:
+                while True:
+                    overview_payload = OverviewService(
+                        ClusterCatalog.load(arguments.clusters)
+                    ).snapshot()
+                    if arguments.json:
+                        print(json.dumps(overview_payload, indent=2))
+                    else:
+                        cls._print_overview(overview_payload)
+                    if arguments.command != "top" or not arguments.follow:
+                        return 0
+                    time.sleep(arguments.interval)
+            except KeyboardInterrupt:
+                return 0
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
+        if arguments.command == "resources":
+            try:
+                resource_service = ResourceService(ClusterCatalog.load(arguments.clusters))
+                if arguments.processes:
+                    resource_payload: object = resource_service.processes(arguments.on or "local")
+                elif arguments.all:
+                    resource_payload = [value.to_dict() for value in resource_service.all()]
+                else:
+                    resource_payload = resource_service.get(arguments.on or "local").to_dict()
+                if arguments.json:
+                    print(json.dumps(resource_payload, indent=2))
+                else:
+                    cls._print_resources(resource_payload)
+                return 0
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
+        if arguments.command == "storage":
+            try:
+                storage_service = StorageService(ClusterCatalog.load(arguments.clusters))
+                if arguments.storage_command == "status":
+                    reports = (
+                        storage_service.all()
+                        if arguments.all
+                        else (storage_service.status(arguments.on),)
+                    )
+                    storage_payload = [value.to_dict() for value in reports]
+                    if arguments.json:
+                        print(json.dumps(storage_payload, indent=2))
+                    else:
+                        cls._print_storage(storage_payload)
+                    return 0 if all(value.online for value in reports) else 1
+                plan = storage_service.gc(arguments.on, apply=arguments.apply)
+                print(json.dumps(plan.to_dict(), indent=2))
+                return 0
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
+        if arguments.command == "environments":
+            try:
+                environment_service = StorageService(ClusterCatalog.load(arguments.clusters))
+                if arguments.environment_command == "gc":
+                    print(
+                        json.dumps(
+                            environment_service.gc(arguments.on, apply=arguments.apply).to_dict(),
+                            indent=2,
+                        )
+                    )
+                    return 0
+                values = environment_service.environments(arguments.on)
+                if arguments.environment_command == "show":
+                    values = tuple(
+                        value
+                        for value in values
+                        if value.get("environment_id") == arguments.environment_id
+                    )
+                    if not values:
+                        raise KeyError(f"Unknown environment {arguments.environment_id!r}.")
+                print(json.dumps(values, indent=2))
+                return 0
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
+        if arguments.command == "datasets":
+            try:
+                dataset_service = DatasetService(clusters=ClusterCatalog.load(arguments.clusters))
+                operation = arguments.dataset_command
+                if operation == "list":
+                    dataset_payload: object = [
+                        value.to_dict()
+                        for value in dataset_service.list(
+                            cluster=arguments.on, all_clusters=arguments.all
+                        )
+                    ]
+                elif operation == "show":
+                    dataset_payload = dataset_service.show(arguments.dataset).to_dict()
+                elif operation == "add":
+                    dataset_payload = dataset_service.add(
+                        arguments.manifest, cluster=arguments.on, root=arguments.root
+                    ).to_dict()
+                elif operation == "locations":
+                    dataset_payload = [
+                        value.to_dict() for value in dataset_service.locations(arguments.dataset)
+                    ]
+                elif operation == "stats":
+                    schema = (
+                        yaml.safe_load(arguments.schema.read_text(encoding="utf-8"))
+                        if arguments.schema
+                        else None
+                    )
+                    dataset_payload = dataset_service.stats(
+                        arguments.dataset, cluster=arguments.on, schema=schema
+                    )
+                elif operation == "verify":
+                    dataset_payload = dataset_service.verify(
+                        arguments.dataset, cluster=arguments.on
+                    )
+                elif operation == "lineage":
+                    dataset_payload = dataset_service.lineage(arguments.dataset)
+                elif operation == "remove":
+                    removed = dataset_service.remove(arguments.dataset, cluster=arguments.on)
+                    dataset_payload = {
+                        "removed": True,
+                        "remaining": removed.to_dict() if removed else None,
+                    }
+                elif operation == "delete":
+                    dataset_payload = dataset_service.delete(
+                        arguments.dataset, cluster=arguments.on, apply=arguments.apply
+                    ).to_dict()
+                elif operation == "materialize":
+                    dataset_payload = dataset_service.materialize(
+                        arguments.dataset,
+                        cluster=arguments.on,
+                        strategy=arguments.strategy,
+                        apply=arguments.apply,
+                    ).to_dict()
+                else:
+                    dataset_payload = dataset_service.replicate(
+                        arguments.dataset,
+                        source=arguments.source,
+                        destination=arguments.destination,
+                        apply=arguments.apply,
+                    ).to_dict()
+                print(json.dumps(dataset_payload, indent=2))
+                return 0
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
+        if arguments.command in {"configs", "experiments", "tasks"}:
+            try:
+                kind = (
+                    None if arguments.command == "configs" else arguments.command.removesuffix("s")
+                )
+                config_service = ProjectConfigService(arguments.root)
+                if arguments.entity_command == "list":
+                    print(
+                        json.dumps(
+                            [value.to_dict() for value in config_service.list(kind=kind)], indent=2
+                        )
+                    )
+                    return 0
+                config_record = config_service.show(arguments.selector)
+                if kind is not None and config_record.kind != kind:
+                    raise ValueError(f"{config_record.name!r} is {config_record.kind}, not {kind}.")
+                if arguments.entity_command == "show":
+                    print(json.dumps(config_record.to_dict(), indent=2))
+                    return 0
+                if arguments.entity_command == "status":
+                    entity_jobs = JobService().list(name=config_record.name)
+                    print(json.dumps([value.to_dict() for value in entity_jobs], indent=2))
+                    return 0
+                if arguments.entity_command in {"history", "results"}:
+                    print(json.dumps(ResultService().show(config_record.path), indent=2))
+                    return 0
+                forwarded = (
+                    "inspect" if arguments.entity_command == "plan" else arguments.entity_command
+                )
+                command = [forwarded, str(config_record.path)]
+                if forwarded == "run" and arguments.on:
+                    for cluster in arguments.on:
+                        command.extend(("--on", cluster))
+                if getattr(arguments, "dry_run", False):
+                    command.append("--dry-run")
+                if getattr(arguments, "independent_hpo", False):
+                    command.append("--independent-hpo")
+                return cls.main(command)
+            except Exception as error:
+                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
+                return 1
         if arguments.command == "clusters":
             try:
                 cluster_catalog = ClusterCatalog.load(arguments.catalog)
@@ -172,7 +373,31 @@ class CommandLineInterface:
                         auth=ClusterAuthentication(arguments.auth, credential),
                         known_hosts=(str(arguments.known_hosts) if arguments.known_hosts else None),
                         ssh_timeout=arguments.ssh_timeout,
+                        connection=SshConnectionPolicy(
+                            connect_timeout=arguments.connect_timeout,
+                            auth_timeout=arguments.auth_timeout,
+                            banner_timeout=arguments.banner_timeout,
+                            keepalive=arguments.keepalive_interval,
+                            multiplex=not arguments.no_multiplex,
+                            persist=arguments.control_persist,
+                            command_timeout=arguments.command_timeout,
+                        ),
                         workspace=arguments.workspace,
+                        storage=ClusterStoragePolicy.from_mapping(
+                            {
+                                key: value
+                                for key, value in {
+                                    "state_root": arguments.state_root,
+                                    "cache_root": arguments.cache_root,
+                                    "run_root": arguments.run_root,
+                                    "dataset_root": arguments.dataset_root,
+                                    "cache_max_size": arguments.cache_max_size,
+                                    "cache_max_age": arguments.cache_max_age,
+                                }.items()
+                                if value is not None
+                            },
+                            workspace=arguments.workspace,
+                        ),
                         python=arguments.python,
                         environment=arguments.environment,
                         wheelhouse=(str(arguments.wheelhouse) if arguments.wheelhouse else None),
@@ -215,7 +440,47 @@ class CommandLineInterface:
                                 f"[{inspected['source']}]"
                             )
                     return 0
+                if arguments.cluster_command == "resources":
+                    cluster_resource = ResourceService(cluster_catalog).get(arguments.name)
+                    value = cluster_resource.to_dict()
+                    if arguments.json:
+                        print(json.dumps(value, indent=2))
+                    else:
+                        cls._print_resources(value)
+                    return 0 if cluster_resource.online else 1
+                if arguments.cluster_command == "storage":
+                    cluster_storage = StorageService(cluster_catalog).status(arguments.name)
+                    value = cluster_storage.to_dict()
+                    if arguments.json:
+                        print(json.dumps(value, indent=2))
+                    else:
+                        cls._print_storage([value])
+                    return 0 if cluster_storage.online else 1
                 cluster_profile = cluster_catalog.get(arguments.name)
+                if arguments.cluster_command in {"set", "unset", "remove"}:
+                    source = cluster_catalog.source(cluster_profile.name)
+                    if source is None:
+                        raise ValueError("The built-in local profile cannot be modified.")
+                    if arguments.cluster_command == "remove":
+                        ClusterCatalog.remove(source, cluster_profile.name)
+                        print(source)
+                        return 0
+                    descriptor = cluster_profile.to_dict(include_defaults=False)
+                    descriptor.pop("name", None)
+                    if arguments.cluster_command == "set":
+                        cls._set_dotted(
+                            descriptor,
+                            arguments.key,
+                            yaml.safe_load(arguments.value),
+                        )
+                    else:
+                        cls._delete_dotted(descriptor, arguments.key)
+                    ClusterCatalog.add(
+                        source,
+                        ClusterProfile.from_mapping(cluster_profile.name, descriptor),
+                    )
+                    print(source)
+                    return 0
                 if arguments.cluster_command == "show":
                     print(json.dumps(cluster_profile.to_dict(), indent=2))
                     return 0
@@ -304,6 +569,8 @@ class CommandLineInterface:
             try:
                 jobs = JobService(ClusterCatalog.load(arguments.clusters))
                 if arguments.job_command == "list":
+                    if arguments.all:
+                        jobs.reconcile(all_clusters=True)
                     job_records = jobs.list(
                         cluster=arguments.cluster,
                         state=arguments.state,
@@ -318,7 +585,7 @@ class CommandLineInterface:
                                 f"{job_record.cluster:<12} {job_record.scheduler_id or '-'}"
                             )
                     return 0
-                if arguments.job_command == "status":
+                if arguments.job_command in {"status", "show"}:
                     job_record = jobs.get(arguments.job_id)
                     print(
                         json.dumps(job_record.to_dict(), indent=2)
@@ -337,6 +604,36 @@ class CommandLineInterface:
                     cancelled_job = jobs.cancel(arguments.job_id)
                     print(f"{cancelled_job.job_id}: {cancelled_job.state.value}")
                     return 0
+                if arguments.job_command == "pause":
+                    paused = jobs.pause(arguments.job_id)
+                    print(json.dumps(paused.to_dict(), indent=2))
+                    return 0
+                if arguments.job_command == "resume":
+                    resumed = jobs.resume(arguments.job_id)
+                    print(json.dumps(resumed.to_dict(), indent=2))
+                    return 0
+                if arguments.job_command == "delete":
+                    jobs.delete(arguments.job_id)
+                    print(json.dumps({"deleted": arguments.job_id}, indent=2))
+                    return 0
+                if arguments.job_command == "reconcile":
+                    reconciled = jobs.reconcile(
+                        cluster=arguments.cluster, all_clusters=arguments.all
+                    )
+                    print(json.dumps([value.to_dict() for value in reconciled], indent=2))
+                    return 0
+                if arguments.job_command in {"group", "groups"}:
+                    from lambdaforge.controlplane.JobGroupStore import JobGroupStore
+
+                    groups = JobGroupStore()
+                    group_id = getattr(arguments, "group_id", None)
+                    group_payload: object = (
+                        groups.get(group_id).to_dict()
+                        if group_id
+                        else [value.to_dict() for value in groups.list()]
+                    )
+                    print(json.dumps(group_payload, indent=2))
+                    return 0
                 handle = jobs.retry(arguments.job_id, dry_run=arguments.dry_run)
                 print(json.dumps(handle.to_dict(), indent=2))
                 return 0
@@ -344,6 +641,19 @@ class CommandLineInterface:
                 print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
                 return 1
         if arguments.command in {"status", "logs", "cancel", "retry"}:
+            if (
+                arguments.command == "status"
+                and arguments.job_id is None
+                and arguments.on is None
+                and arguments.state is None
+                and arguments.name is None
+            ):
+                forwarded = ["overview"]
+                if arguments.clusters is not None:
+                    forwarded.extend(("--clusters", str(arguments.clusters)))
+                if arguments.json:
+                    forwarded.append("--json")
+                return cls.main(forwarded)
             forwarded = ["jobs"]
             if arguments.clusters is not None:
                 forwarded.extend(("--clusters", str(arguments.clusters)))
@@ -372,18 +682,18 @@ class CommandLineInterface:
             return cls.main(forwarded)
         if arguments.command == "data":
             try:
-                service = DataService(
+                data_service = DataService(
                     DataCatalog.from_yaml(arguments.catalog),
                     ClusterCatalog.load(arguments.clusters),
                 )
                 if arguments.data_command == "list":
-                    data_payload: object = service.list()
+                    data_payload: object = data_service.list()
                 elif arguments.data_command == "locations":
-                    data_payload = service.locations(arguments.dataset)
+                    data_payload = data_service.locations(arguments.dataset)
                 elif arguments.data_command == "inspect":
-                    data_payload = service.inspect(arguments.dataset)
+                    data_payload = data_service.inspect(arguments.dataset)
                 else:
-                    data_payload = service.replicate(
+                    data_payload = data_service.replicate(
                         arguments.dataset,
                         source_environment=arguments.source,
                         destination_environment=arguments.destination,
@@ -443,13 +753,13 @@ class CommandLineInterface:
                 return 1
         if arguments.command == "plugins":
             descriptors = PluginRegistry.default().discover(arguments.kind)
-            payload = [descriptor.to_dict() for descriptor in descriptors]
+            plugin_payload = [descriptor.to_dict() for descriptor in descriptors]
             if arguments.json:
-                print(json.dumps(payload, indent=2))
-            elif not payload:
+                print(json.dumps(plugin_payload, indent=2))
+            elif not plugin_payload:
                 print("No LambdaForge plugins found.")
             else:
-                for plugin in payload:
+                for plugin in plugin_payload:
                     provider = plugin["distribution"] or "unknown distribution"
                     version = f" {plugin['version']}" if plugin["version"] else ""
                     print(
@@ -550,14 +860,14 @@ class CommandLineInterface:
                     records = ResultService(arguments.root or ("runs",)).records(
                         status=arguments.status
                     )
-                    payload = [record.to_dict() for record in records]
+                    result_payload = [record.to_dict() for record in records]
                     if arguments.json:
-                        print(json.dumps(payload, indent=2))
+                        print(json.dumps(result_payload, indent=2))
                     else:
-                        for record in records:
+                        for result_record in records:
                             print(
-                                f"{record.attempt_id:<32} {record.status:<11} "
-                                f"{record.result.name} seed={record.result.seed}"
+                                f"{result_record.attempt_id:<32} {result_record.status:<11} "
+                                f"{result_record.result.name} seed={result_record.result.seed}"
                             )
                     return 0
                 if arguments.results_command == "show":
@@ -831,7 +1141,18 @@ class CommandLineInterface:
         ):
             try:
                 run_catalog = ClusterCatalog.load(arguments.clusters)
-                cluster = arguments.on
+                selected_clusters = tuple(arguments.on or ())
+                if len(selected_clusters) > 1:
+                    group = MultiClusterSubmissionService(run_catalog).submit(
+                        arguments.config,
+                        selected_clusters,
+                        resources=cls._resource_request(arguments),
+                        dry_run=arguments.dry_run,
+                        independent_hpo=arguments.independent_hpo,
+                    )
+                    print(json.dumps(group.to_dict(), indent=2))
+                    return 0
+                cluster = selected_clusters[0] if selected_clusters else None
                 base_resources = None
                 if arguments.profile is not None:
                     execution_profile = run_catalog.execution_profile(arguments.profile)
@@ -1028,6 +1349,79 @@ class CommandLineInterface:
             if value is not None:
                 values.extend((flag, str(value)))
         return tuple(values)
+
+    @staticmethod
+    def _print_overview(payload: dict[str, Any]) -> None:
+        jobs = payload["jobs"]
+        datasets = payload["datasets"]
+        print(
+            f"LambdaForge: {jobs['active']} active / {jobs['total']} jobs; "
+            f"{datasets['versions']} dataset versions; "
+            f"offline={len(payload['offline_clusters'])}"
+        )
+        for cluster in payload["clusters"]:
+            observed = cluster.get("observed", {})
+            print(
+                f"{cluster['cluster']:<16} "
+                f"{'online' if cluster['online'] else 'offline':<8} "
+                f"cpu={observed.get('cpu_total', '?')} "
+                f"ram={observed.get('ram_available_bytes', '?')} "
+                f"gpus={len(observed.get('gpus', []))}"
+            )
+
+    @staticmethod
+    def _print_resources(payload: object) -> None:
+        values = payload if isinstance(payload, list) else [payload]
+        for value in values:
+            if not isinstance(value, dict):
+                print(value)
+                continue
+            observed = value.get("observed", {})
+            print(
+                f"{value.get('cluster', '-')}: "
+                f"{'online' if value.get('online') else 'offline'}; "
+                f"CPU={observed.get('cpu_total', '?')} "
+                f"(load={observed.get('cpu_load', '?')}); "
+                f"RAM={observed.get('ram_available_bytes', '?')}/"
+                f"{observed.get('ram_total_bytes', '?')}; "
+                f"GPUs={observed.get('gpus', [])}"
+            )
+
+    @staticmethod
+    def _print_storage(payload: list[dict[str, Any]]) -> None:
+        for report in payload:
+            print(f"{report['cluster']} LambdaForge storage")
+            if not report["online"]:
+                print(f"  offline: {report.get('error')}")
+                continue
+            for name, usage in report["categories"].items():
+                print(f"  {name:<18} {usage['bytes']:>12} bytes {usage['files']:>8} files")
+
+    @staticmethod
+    def _set_dotted(value: dict[str, Any], path: str, replacement: Any) -> None:
+        parts = path.split(".")
+        if not all(parts):
+            raise ValueError("Cluster setting path cannot be empty.")
+        current = value
+        for part in parts[:-1]:
+            child = current.setdefault(part, {})
+            if not isinstance(child, dict):
+                raise ValueError(f"Cluster setting {part!r} is not a mapping.")
+            current = child
+        current[parts[-1]] = replacement
+
+    @staticmethod
+    def _delete_dotted(value: dict[str, Any], path: str) -> None:
+        parts = path.split(".")
+        current = value
+        for part in parts[:-1]:
+            child = current.get(part)
+            if not isinstance(child, dict):
+                raise KeyError(f"Unknown cluster setting {path!r}.")
+            current = child
+        if parts[-1] not in current:
+            raise KeyError(f"Unknown cluster setting {path!r}.")
+        del current[parts[-1]]
 
     @staticmethod
     def _follow_job_logs(jobs: JobService, job_id: str, *, tail: int | None) -> int:
@@ -1367,6 +1761,48 @@ lambdaforge run {entry}
         )
         doctor.add_argument("--config", type=Path, help="Also check required logical datasets.")
         doctor.add_argument("--json", action="store_true")
+        overview = subparsers.add_parser("overview", help="Summarize clusters, jobs and datasets.")
+        overview.add_argument("--clusters", type=Path)
+        overview.add_argument("--json", action="store_true")
+        top = subparsers.add_parser("top", help="Show a refreshable global control-plane view.")
+        top.add_argument("--clusters", type=Path)
+        top.add_argument("--follow", action="store_true")
+        top.add_argument("--interval", type=float, default=5.0)
+        top.add_argument("--json", action="store_true")
+        resources = subparsers.add_parser(
+            "resources", help="Observe cluster CPU, RAM, GPU and jobs."
+        )
+        resources.add_argument("--on")
+        resources.add_argument("--all", action="store_true")
+        resources.add_argument("--processes", action="store_true")
+        resources.add_argument("--clusters", type=Path)
+        resources.add_argument("--json", action="store_true")
+        storage = subparsers.add_parser(
+            "storage", help="Inspect and conservatively collect internal storage."
+        )
+        storage.add_argument("--clusters", type=Path)
+        storage_commands = storage.add_subparsers(dest="storage_command", required=True)
+        storage_status = storage_commands.add_parser("status")
+        storage_status.add_argument("--on", default="local")
+        storage_status.add_argument("--all", action="store_true")
+        storage_status.add_argument("--json", action="store_true")
+        storage_gc = storage_commands.add_parser("gc")
+        storage_gc.add_argument("--on", default="local")
+        storage_gc.add_argument("--apply", action="store_true")
+        storage_gc.add_argument("--json", action="store_true")
+        environments = subparsers.add_parser("environments", help="Inspect managed environments.")
+        environments.add_argument("--clusters", type=Path)
+        environment_commands = environments.add_subparsers(
+            dest="environment_command", required=True
+        )
+        environment_list = environment_commands.add_parser("list")
+        environment_list.add_argument("--on", default="local")
+        environment_show = environment_commands.add_parser("show")
+        environment_show.add_argument("environment_id")
+        environment_show.add_argument("--on", default="local")
+        environment_gc = environment_commands.add_parser("gc")
+        environment_gc.add_argument("--on", default="local")
+        environment_gc.add_argument("--apply", action="store_true")
         clusters = subparsers.add_parser("clusters", help="Inspect and test cluster profiles.")
         clusters.add_argument(
             "--catalog",
@@ -1383,6 +1819,13 @@ lambdaforge run {entry}
         cluster_add.add_argument("--port", type=int, default=22)
         cluster_add.add_argument("--known-hosts", type=Path)
         cluster_add.add_argument("--ssh-timeout", type=float, default=15.0)
+        cluster_add.add_argument("--connect-timeout", type=float, default=15.0)
+        cluster_add.add_argument("--auth-timeout", type=float, default=30.0)
+        cluster_add.add_argument("--banner-timeout", type=float, default=30.0)
+        cluster_add.add_argument("--keepalive-interval", type=float, default=30.0)
+        cluster_add.add_argument("--control-persist", type=float, default=60.0)
+        cluster_add.add_argument("--command-timeout", type=float)
+        cluster_add.add_argument("--no-multiplex", action="store_true")
         cluster_add.add_argument("--auth", choices=("openssh", "password"), default="openssh")
         cluster_add.add_argument(
             "--credential", help="Credential reference (keyring:... or env:...); never the value."
@@ -1393,6 +1836,12 @@ lambdaforge run {entry}
         cluster_add.add_argument("--scope", choices=("user", "project"), default="user")
         cluster_add.add_argument("--scheduler", choices=("local", "slurm"), default="slurm")
         cluster_add.add_argument("--workspace", required=True)
+        cluster_add.add_argument("--state-root")
+        cluster_add.add_argument("--cache-root")
+        cluster_add.add_argument("--run-root")
+        cluster_add.add_argument("--dataset-root")
+        cluster_add.add_argument("--cache-max-size")
+        cluster_add.add_argument("--cache-max-age")
         cluster_add.add_argument("--python", default="python3")
         cluster_add.add_argument(
             "--environment", choices=("existing", "managed"), default="managed"
@@ -1417,6 +1866,15 @@ lambdaforge run {entry}
         cluster_inspect = cluster_commands.add_parser("inspect")
         cluster_inspect.add_argument("name")
         cluster_inspect.add_argument("--json", action="store_true")
+        cluster_set = cluster_commands.add_parser("set")
+        cluster_set.add_argument("name")
+        cluster_set.add_argument("key")
+        cluster_set.add_argument("value")
+        cluster_unset = cluster_commands.add_parser("unset")
+        cluster_unset.add_argument("name")
+        cluster_unset.add_argument("key")
+        cluster_remove = cluster_commands.add_parser("remove")
+        cluster_remove.add_argument("name")
         cluster_export = cluster_commands.add_parser("export")
         cluster_export.add_argument("name")
         cluster_export.add_argument("--output", type=Path)
@@ -1435,6 +1893,12 @@ lambdaforge run {entry}
         cluster_bootstrap.add_argument("name")
         cluster_bootstrap.add_argument("--wheelhouse", type=Path)
         cluster_bootstrap.add_argument("--json", action="store_true")
+        cluster_resources = cluster_commands.add_parser("resources")
+        cluster_resources.add_argument("name")
+        cluster_resources.add_argument("--json", action="store_true")
+        cluster_storage = cluster_commands.add_parser("storage")
+        cluster_storage.add_argument("name")
+        cluster_storage.add_argument("--json", action="store_true")
         jobs = subparsers.add_parser("jobs", help="List and control persistent jobs.")
         jobs.add_argument("--clusters", type=Path, help="Cluster catalogue YAML.")
         job_commands = jobs.add_subparsers(dest="job_command", required=True)
@@ -1442,16 +1906,36 @@ lambdaforge run {entry}
         jobs_list.add_argument("--cluster", "--on", dest="cluster")
         jobs_list.add_argument("--state", choices=tuple(state.value for state in JobState))
         jobs_list.add_argument("--name")
+        jobs_list.add_argument("--all", action="store_true")
         jobs_list.add_argument("--json", action="store_true")
         jobs_status = job_commands.add_parser("status")
         jobs_status.add_argument("job_id")
         jobs_status.add_argument("--json", action="store_true")
+        jobs_show = job_commands.add_parser("show")
+        jobs_show.add_argument("job_id")
+        jobs_show.add_argument("--json", action="store_true")
         jobs_logs = job_commands.add_parser("logs")
         jobs_logs.add_argument("job_id")
         jobs_logs.add_argument("--tail", type=int)
         jobs_logs.add_argument("--follow", action="store_true")
         jobs_cancel = job_commands.add_parser("cancel")
         jobs_cancel.add_argument("job_id")
+        jobs_pause = job_commands.add_parser("pause")
+        jobs_pause.add_argument("job_id")
+        jobs_resume = job_commands.add_parser("resume")
+        jobs_resume.add_argument("job_id")
+        jobs_delete = job_commands.add_parser("delete")
+        jobs_delete.add_argument("job_id")
+        jobs_reconcile = job_commands.add_parser("reconcile")
+        jobs_reconcile.add_argument("--cluster", "--on", dest="cluster")
+        jobs_reconcile.add_argument("--all", action="store_true")
+        jobs_groups = job_commands.add_parser("groups")
+        jobs_groups.add_argument("group_id", nargs="?")
+        jobs_group = job_commands.add_parser("group")
+        jobs_group_commands = jobs_group.add_subparsers(dest="group_command", required=True)
+        jobs_group_show = jobs_group_commands.add_parser("show")
+        jobs_group_show.add_argument("group_id")
+        jobs_group_commands.add_parser("list")
         jobs_retry = job_commands.add_parser("retry")
         jobs_retry.add_argument("job_id")
         jobs_retry.add_argument("--dry-run", action="store_true")
@@ -1490,6 +1974,76 @@ lambdaforge run {entry}
         data_replicate.add_argument(
             "--apply", action="store_true", help="Transfer bytes; omission is preview-only."
         )
+        datasets = subparsers.add_parser(
+            "datasets", help="Discover and safely manage registered dataset versions."
+        )
+        datasets.add_argument("--clusters", type=Path)
+        dataset_commands = datasets.add_subparsers(dest="dataset_command", required=True)
+        dataset_list = dataset_commands.add_parser("list")
+        dataset_list.add_argument("--on")
+        dataset_list.add_argument("--all", action="store_true")
+        dataset_list.add_argument("--json", action="store_true")
+        dataset_show = dataset_commands.add_parser("show")
+        dataset_show.add_argument("dataset")
+        dataset_show.add_argument("--json", action="store_true")
+        dataset_add = dataset_commands.add_parser("add")
+        dataset_add.add_argument("manifest", type=Path)
+        dataset_add.add_argument("--on", default="local")
+        dataset_add.add_argument("--root", type=Path)
+        dataset_locations = dataset_commands.add_parser("locations")
+        dataset_locations.add_argument("dataset")
+        dataset_stats = dataset_commands.add_parser("stats")
+        dataset_stats.add_argument("dataset")
+        dataset_stats.add_argument("--on")
+        dataset_stats.add_argument("--schema", type=Path)
+        dataset_verify = dataset_commands.add_parser("verify")
+        dataset_verify.add_argument("dataset")
+        dataset_verify.add_argument("--on")
+        dataset_lineage = dataset_commands.add_parser("lineage")
+        dataset_lineage.add_argument("dataset")
+        dataset_remove = dataset_commands.add_parser("remove")
+        dataset_remove.add_argument("dataset")
+        dataset_remove.add_argument("--on")
+        dataset_delete = dataset_commands.add_parser("delete")
+        dataset_delete.add_argument("dataset")
+        dataset_delete.add_argument("--on", required=True)
+        dataset_delete.add_argument("--apply", action="store_true")
+        dataset_materialize = dataset_commands.add_parser("materialize")
+        dataset_materialize.add_argument("dataset")
+        dataset_materialize.add_argument("--on", required=True)
+        dataset_materialize.add_argument(
+            "--strategy", choices=("auto", "replicate", "build"), default="auto"
+        )
+        dataset_materialize.add_argument("--apply", action="store_true")
+        dataset_replicate = dataset_commands.add_parser("replicate")
+        dataset_replicate.add_argument("dataset")
+        dataset_replicate.add_argument("--from", dest="source", required=True)
+        dataset_replicate.add_argument("--to", dest="destination", required=True)
+        dataset_replicate.add_argument("--apply", action="store_true")
+        for entity in ("configs", "experiments", "tasks"):
+            entity_parser = subparsers.add_parser(
+                entity, help=f"Discover and operate project {entity} by name."
+            )
+            entity_parser.add_argument("--root", type=Path)
+            entity_commands = entity_parser.add_subparsers(dest="entity_command", required=True)
+            entity_list = entity_commands.add_parser("list")
+            entity_list.add_argument("--json", action="store_true")
+            entity_show = entity_commands.add_parser("show")
+            entity_show.add_argument("selector")
+            entity_show.add_argument("--json", action="store_true")
+            for operation in ("validate", "plan"):
+                operation_parser = entity_commands.add_parser(operation)
+                operation_parser.add_argument("selector")
+            entity_run = entity_commands.add_parser("run")
+            entity_run.add_argument("selector")
+            entity_run.add_argument("--on", action="append")
+            entity_run.add_argument("--dry-run", action="store_true")
+            entity_run.add_argument("--independent-hpo", action="store_true")
+            if entity == "experiments":
+                for operation in ("status", "history", "results"):
+                    entity_query = entity_commands.add_parser(operation)
+                    entity_query.add_argument("selector")
+                    entity_query.add_argument("--json", action="store_true")
         compose = subparsers.add_parser(
             "compose", help="Resolve includes/interpolation and show redacted provenance."
         )
@@ -1519,8 +2073,17 @@ lambdaforge run {entry}
         run.add_argument("--devices-per-job", type=int)
         run.add_argument("--grace-seconds", type=float)
         placement = run.add_mutually_exclusive_group()
-        placement.add_argument("--on", help="Submit through one configured cluster profile.")
+        placement.add_argument(
+            "--on",
+            action="append",
+            help="Submit through a cluster profile; repeat for independent replicas.",
+        )
         placement.add_argument("--profile", help="Use a named cluster/resource preset.")
+        run.add_argument(
+            "--independent-hpo",
+            action="store_true",
+            help="Allow repeated --on to create separate, uncoordinated HPO studies.",
+        )
         run.add_argument("--clusters", type=Path, help="Cluster catalogue YAML.")
         lifecycle = run.add_mutually_exclusive_group()
         lifecycle.add_argument("--force", action="store_true", help="Run even after success.")

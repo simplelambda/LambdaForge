@@ -52,7 +52,7 @@ work uses threads; explicitly CPU-bound work uses spawn-safe child processes for
 work stays in one process. This avoids forked CUDA state and concurrent manifest corruption.
 
 `Workflow` schedules complete task/experiment documents in a DAG. It delegates identity and resume
-to each node runner. It does not distribute one DAG across clusters in 0.5.3; remote submission is
+to each node runner. It does not distribute one DAG across clusters in 0.6; remote submission is
 one explicit schedulable unit.
 
 ## 4. Experiments and training
@@ -110,6 +110,20 @@ and `ArtifactValidator` contracts. Built-ins inspect NumPy and tabular formats w
 pickle disabled. Geometry requires explicit semantic roles. `RemoteResultService` synchronizes only
 allowlisted small evidence; `RemoteArtifactService` fetches one explicitly named artifact.
 
+### 0.6 control-plane ownership
+
+`SshConnectionPolicy` owns reuse and independent deadlines; transports only execute/transfer.
+`ProcessScheduler` translates a request into a durable job directory; `ProcessSupervisor` owns the
+scientific child, process/resource leases, heartbeat and atomic remote state. `JobService` is the
+provider-neutral application layer and `JobStore` is only the local reconnection index.
+`ResourceService` selects the direct or SLURM probe and preserves offline last-known observations.
+
+`DatasetArtifact` remains authoritative. `DatasetRegistry` is an atomic reconciliable index;
+`DatasetService` coordinates discovery/profiling/verification/lifecycle and `DatasetOperations`
+performs bounded exact-root work where bytes live. `ProjectConfigService` indexes source YAML
+without replacing it. `StorageService` delegates exact-root status/GC, protects active references
+and never owns results or dataset deletion.
+
 ## 8. Storage, observability and reproducibility
 
 Artifact stores expose immutable references; local/S3 providers and the shared cache own transfer
@@ -130,11 +144,11 @@ verifies an exact official PyTorch wheel, and places its `TorchInstallationPlan`
 `EnvironmentIdentity`. `ManagedEnvironmentProvider` installs and constrains that wheel before other
 dependencies, then verifies required CUDA initialization. It never manages host drivers/toolkits.
 
-## 10. Intentional 0.5.3 limits
+## 10. Intentional 0.6 limits
 
 - No automatic cluster selection or mixed-cluster workflow runtime.
-- No server, GUI or resident control-plane daemon.
+- No central server or GUI. Per-job supervisors are workers, not a global daemon.
 - No implicit large-result, checkpoint or dataset download.
 - No automatic CUDA/driver installation or remote platform wheel synthesis.
 - No magical interpretation of arrays as graphs, point clouds or meshes.
-- No new HPO mathematics in 0.5.3; CUDA environment resolution does not alter scientific policy.
+- No new HPO mathematics in 0.6; control-plane work does not alter scientific policy.

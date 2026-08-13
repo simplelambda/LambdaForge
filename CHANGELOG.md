@@ -10,6 +10,47 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-13
+
+### Added
+
+- Serverless terminal control plane with a detached per-job `ProcessSupervisor`, durable remote
+  state/logs/heartbeats/usage, safe process identity/groups, runtime timeouts and recovery inventory.
+- Complete job lifecycle commands for show, pause, resume, cancel, retry, local metadata deletion,
+  reconciliation and persistent independent multi-cluster job groups.
+- Direct-host CPU/RAM admission, CPU affinity, cooperative GPU leases, external GPU-process
+  avoidance and `CUDA_VISIBLE_DEVICES`; separate direct and SLURM resource observations.
+- First-class dataset records/placements, remote discovery, automatic preprocessing registration,
+  universal and explicit classification stats, verification, lineage, remove/delete and
+  deterministic NOOP/REPLICATE/BUILD materialization plans.
+- Project YAML discovery and unambiguous config/experiment/task operations by name, global
+  overview/top, storage reports and managed-environment inspection.
+- Bilingual 0.5.3-to-0.6 audit and focused control-plane, job, dataset and storage guides.
+
+### Changed
+
+- OpenSSH now enables private idle-expiring connection multiplexing by default. Connect,
+  authentication, banner, keepalive and command timeouts are independent; scientific commands have
+  no implicit transport deadline.
+- `scheduler: local` is now asynchronous and durable. SLURM and direct jobs share `JobService`,
+  while provider errors/offline clusters remain distinct from scientific failures.
+- Cluster storage separates small state, immutable bundle/environment/package cache, mutable job
+  work and optional dataset roots. Remote jobs no longer write scientific output into bundle cache.
+- Managed environments build transactionally in a temporary directory, verify before atomic
+  publication and share a pip download cache; legacy 0.5 environments/pointers remain readable.
+
+### Security
+
+- Pause/cancel/resume refuse mismatched or reused PIDs by checking creation time, process group and
+  command hash. Inventory only accepts LambdaForge-owned matching request/state directories.
+- Dataset physical deletion and storage GC are preview-first, locked and exact-root constrained.
+  GC protects active references and can never select datasets, results or retained checkpoints.
+
+### Fixed
+
+- Restored the declared Torch 2.1+ compatibility for optional unsigned graph index dtypes and
+  legacy device-specific autocast APIs; the full type check now passes on the minimum-era API.
+
 ## [0.5.3] - 2026-08-13
 
 ### Added
@@ -277,7 +318,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/simplelambda/LambdaForge/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/simplelambda/LambdaForge/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/simplelambda/LambdaForge/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/simplelambda/LambdaForge/compare/v0.5.0...v0.5.1

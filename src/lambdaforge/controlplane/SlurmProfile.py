@@ -34,6 +34,8 @@ class SlurmProfile:
     cancel: SchedulerCommand = field(
         default_factory=lambda: SchedulerCommand("scancel", ("{job_id}",))
     )
+    pause: SchedulerCommand | None = None
+    resume: SchedulerCommand | None = None
     info: SchedulerCommand = field(
         default_factory=lambda: SchedulerCommand("sinfo", ("-h", "-p", "{partition}", "-o", "%P"))
     )
@@ -122,6 +124,22 @@ class SlurmProfile:
                 commands.get("accounting"), default=accounting_default
             ),
             cancel=SchedulerCommand.from_value(commands.get("cancel"), default=cancel_default),
+            pause=(
+                SchedulerCommand.from_value(
+                    commands.get("pause"),
+                    default=SchedulerCommand("scontrol", ("suspend", "{job_id}")),
+                )
+                if commands.get("pause") is not None
+                else None
+            ),
+            resume=(
+                SchedulerCommand.from_value(
+                    commands.get("resume"),
+                    default=SchedulerCommand("scontrol", ("resume", "{job_id}")),
+                )
+                if commands.get("resume") is not None
+                else None
+            ),
             info=SchedulerCommand.from_value(commands.get("info"), default=info_default),
             shell=str(job_script.get("shell", "/bin/bash")),
             prologue=prologue,
@@ -149,6 +167,7 @@ class SlurmProfile:
                     self.queue.executable,
                     self.accounting.executable,
                     self.cancel.executable,
+                    *(command.executable for command in (self.pause, self.resume) if command),
                     self.info.executable,
                 )
             )
@@ -167,6 +186,8 @@ class SlurmProfile:
                 "queue": self.queue.to_dict(),
                 "accounting": self.accounting.to_dict(),
                 "cancel": self.cancel.to_dict(),
+                "pause": self.pause.to_dict() if self.pause else None,
+                "resume": self.resume.to_dict() if self.resume else None,
                 "info": self.info.to_dict(),
             },
             "job_script": {

@@ -74,10 +74,12 @@ lambdaforge clusters credentials set legacy
 lambdaforge clusters credentials delete legacy
 ```
 
-Paramiko usa SFTP/SSH con `RejectPolicy`, `known_hosts` del sistema, timeouts acotados y sin fallback
-a claves/agente. Se pueden fijar `known_hosts: /fichero/revisado` y `ssh_timeout: 20`. Paramiko se
-conecta a un host concreto; los aliases/ProxyJump pertenecen a OpenSSH, así que usa el default en
-esos casos.
+Paramiko usa SFTP/SSH con `RejectPolicy`, `known_hosts` del sistema, límites independientes de
+conexión/auth/banner y sin fallback a claves/agente. `ssh_timeout` queda como alias compatible sólo
+para conexión. Un comando científico no tiene timeout de transporte salvo
+`connection.command_timeout` o un límite explícito de la operación. OpenSSH multiplexa sesiones
+autenticadas por defecto; consulta la [guía del plano 0.6](CONTROL_PLANE.es.md#3-reutilización-ssh-y-timeouts).
+Paramiko se conecta a un host concreto; aliases/ProxyJump pertenecen a OpenSSH.
 
 Solo se persisten estas referencias, nunca su valor:
 
@@ -193,7 +195,7 @@ La detección describe el host alcanzado por el transporte. Si un login de SLURM
 LambdaForge no puede inferir con seguridad la imagen de los nodos de cómputo: usa un canal o
 wheelhouse revisado por el administrador (el canal explícito requiere `require_cuda: false`), o un
 entorno existente, y valídalo dentro de una reserva GPU. Ese `false` aplaza explícitamente la
-validación, no demuestra compatibilidad. La versión 0.5.3 no solicita implícitamente un job de prueba.
+validación, no demuestra compatibilidad. La versión 0.6 no solicita implícitamente un job de prueba.
 
 ## 7. Enviar y reconectar
 

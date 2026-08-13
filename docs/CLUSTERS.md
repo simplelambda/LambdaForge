@@ -91,10 +91,12 @@ lambdaforge clusters credentials set legacy
 lambdaforge clusters credentials delete legacy
 ```
 
-Password profiles use Paramiko SFTP/SSH with `RejectPolicy`, system `known_hosts`, bounded connect/
-auth/command timeouts, and no key or agent fallback. Set `known_hosts: /reviewed/file` and
-`ssh_timeout: 20` when required. Paramiko connects to a concrete host; OpenSSH aliases/ProxyJump are
-an OpenSSH feature, so keep the default transport for those cases.
+Password profiles use Paramiko SFTP/SSH with `RejectPolicy`, system `known_hosts`, independent
+connect/auth/banner deadlines, and no key or agent fallback. `ssh_timeout` remains a compatible
+connection-only alias. Scientific commands have no transport deadline unless
+`connection.command_timeout` or an operation-specific deadline is explicit. OpenSSH multiplexes
+authenticated sessions by default; see the [0.6 control-plane guide](CONTROL_PLANE.md#3-ssh-connection-reuse-and-timeouts).
+Paramiko connects to a concrete host; OpenSSH aliases/ProxyJump are an OpenSSH feature.
 
 The only persisted authentication forms are:
 
@@ -233,7 +235,7 @@ Detection describes the host reached by the configured transport. If a SLURM log
 GPU/driver, LambdaForge cannot safely infer the compute-node image: use an administrator-reviewed
 explicit channel with `require_cuda: false`, a reviewed wheelhouse, or an existing site environment,
 and validate it on an allocated GPU node. Setting false here explicitly defers CUDA validation; it
-does not claim compatibility. Version 0.5.3 does not allocate a probe job implicitly.
+does not claim compatibility. Version 0.6 does not allocate a probe job implicitly.
 
 ## 7. Submit and reconnect
 

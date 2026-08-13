@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from lambdaforge.data import DatasetRegistry
 from lambdaforge.preprocessing import DatasetArtifact, PreprocessingManifest
 from lambdaforge.tasks import TaskConfig, TaskResult, TaskRun, TaskStatus, TaskValidator
 
@@ -93,6 +94,10 @@ class TestPreprocessing:
         assert dataset.preprocessing_fingerprint == result.config_fingerprint
         assert dataset.dataset_id == result.outputs["dataset_id"]
         assert "resolved_path" not in dataset.source["inputs"][0]
+        registered = DatasetRegistry(tmp_path / ".lambdaforge" / "datasets.json").get(
+            f"{dataset.name}@{dataset.version}"
+        )
+        assert registered.dataset_id == dataset.dataset_id
 
     def test_failed_attempt_resumes_only_verified_record_outputs(self, tmp_path: Path) -> None:
         """A new attempt should skip successful records and retry the failed key."""

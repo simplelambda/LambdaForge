@@ -1,42 +1,8 @@
 """Task-agnostic dataset wrappers and bounded cache backends."""
 
-from lambdaforge.data.cache import (
-    CacheBackend,
-    CacheIntegrityError,
-    CacheIntegrityMode,
-    CacheNamespaceManifest,
-    CacheRecord,
-    CacheRecordCodec,
-    CacheStats,
-    CacheUsage,
-    DatasetCache,
-    DatasetFingerprint,
-    DatasetSerializer,
-    DiskCacheBackend,
-    MemoryMappedCacheBackend,
-    NumpyDatasetSerializer,
-    PickleDatasetSerializer,
-)
-from lambdaforge.data.CategoricalFeatureEncoder import CategoricalFeatureEncoder
-from lambdaforge.data.DataCatalog import DataCatalog
-from lambdaforge.data.DataIdentityProvider import DataIdentityProvider
-from lambdaforge.data.DataIdentityProviderRegistry import DataIdentityProviderRegistry
-from lambdaforge.data.DataReplicationResult import DataReplicationResult
-from lambdaforge.data.DataService import DataService
-from lambdaforge.data.DatasetIdentity import DatasetIdentity
-from lambdaforge.data.DatasetIdIdentityProvider import DatasetIdIdentityProvider
-from lambdaforge.data.DatasetLocation import DatasetLocation
-from lambdaforge.data.DatasetReference import DatasetReference
-from lambdaforge.data.DatasetReferenceResolver import DatasetReferenceResolver
-from lambdaforge.data.DataTransferProvider import DataTransferProvider
-from lambdaforge.data.ExplicitVersionIdentityProvider import ExplicitVersionIdentityProvider
-from lambdaforge.data.FileDataset import FileDataset
-from lambdaforge.data.ManifestIdentityProvider import ManifestIdentityProvider
-from lambdaforge.data.NumpyMemmapDataset import NumpyMemmapDataset
-from lambdaforge.data.RsyncDataTransferProvider import RsyncDataTransferProvider
-from lambdaforge.data.StrictContentHashIdentityProvider import StrictContentHashIdentityProvider
+from lambdaforge.LazyExports import LazyExports
 
-__all__ = [
+_CACHE_NAMES = (
     "CacheBackend",
     "CacheIntegrityError",
     "CacheIntegrityMode",
@@ -45,29 +11,49 @@ __all__ = [
     "CacheRecordCodec",
     "CacheStats",
     "CacheUsage",
+    "DatasetCache",
+    "DatasetFingerprint",
+    "DatasetSerializer",
+    "DiskCacheBackend",
+    "MemoryMappedCacheBackend",
+    "NumpyDatasetSerializer",
+    "PickleDatasetSerializer",
+)
+_DATA_NAMES = (
     "CategoricalFeatureEncoder",
+    "ClassificationDatasetProfiler",
     "DataCatalog",
     "DataIdentityProvider",
     "DataIdentityProviderRegistry",
     "DataReplicationResult",
     "DataService",
     "DataTransferProvider",
-    "DatasetCache",
-    "DatasetFingerprint",
+    "DatasetDeletionPlan",
     "DatasetIdIdentityProvider",
     "DatasetIdentity",
     "DatasetLocation",
+    "DatasetMaterializationPlan",
+    "DatasetPlacement",
+    "DatasetProfiler",
+    "DatasetRecord",
     "DatasetReference",
     "DatasetReferenceResolver",
-    "DatasetSerializer",
-    "DiskCacheBackend",
+    "DatasetRegistry",
+    "DatasetService",
     "ExplicitVersionIdentityProvider",
     "FileDataset",
-    "MemoryMappedCacheBackend",
     "ManifestIdentityProvider",
-    "NumpyDatasetSerializer",
     "NumpyMemmapDataset",
-    "PickleDatasetSerializer",
     "RsyncDataTransferProvider",
     "StrictContentHashIdentityProvider",
-]
+)
+
+LazyExports.install(
+    __name__,
+    {
+        **{name: (f"lambdaforge.data.cache.{name}", name) for name in _CACHE_NAMES},
+        **{name: (f"lambdaforge.data.{name}", name) for name in _DATA_NAMES},
+    },
+)
+
+__all__ = [*_CACHE_NAMES, *_DATA_NAMES]

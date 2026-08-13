@@ -37,6 +37,7 @@ class ClusterService:
     ) -> ClusterBootstrapResult:
         """Create workspace and idempotently verify/install the configured environment."""
         profile = self.catalog.get(cluster)
+        assert profile.storage is not None
         if wheelhouse is not None:
             profile = replace(profile, wheelhouse=str(Path(wheelhouse).expanduser().resolve()))
         if profile.wheelhouse is not None:
@@ -44,6 +45,8 @@ class ClusterService:
             if not wheelhouse_path.is_dir():
                 raise FileNotFoundError(f"Configured wheelhouse does not exist: {wheelhouse_path}")
             profile = replace(profile, wheelhouse=str(wheelhouse_path))
+        assert profile.storage is not None
+        storage = profile.storage
         transport = self.factory.transport(profile)
         torch_plan = (
             self.cuda_resolver.resolve(profile, transport)
@@ -54,8 +57,11 @@ class ClusterService:
             (
                 "mkdir",
                 "-p",
-                str(PurePosixPath(profile.workspace) / ".lambdaforge" / "bundles"),
-                str(PurePosixPath(profile.workspace) / ".lambdaforge" / "environments"),
+                storage.state_root,
+                storage.bundle_root,
+                storage.environment_root,
+                storage.job_root,
+                str(PurePosixPath(storage.cache_root) / "pip"),
             )
         )
         if created.returncode:
@@ -101,11 +107,11 @@ class ClusterService:
         packages = directory / "packages"
         packages.mkdir(parents=True, exist_ok=True)
         shutil.copy2(wheel, packages / wheel.name)
-        wheelhouse = directory / "wheelhouse"
-        wheelhouse.mkdir(parents=True, exist_ok=True)
+        wheelhouse_directory = directory / "wheelhouse"
+        wheelhouse_directory.mkdir(parents=True, exist_ok=True)
         if profile.wheelhouse is not None:
             for dependency in sorted(Path(profile.wheelhouse).expanduser().glob("*.whl")):
-                shutil.copy2(dependency, wheelhouse / dependency.name)
+                shutil.copy2(dependency, wheelhouse_directory / dependency.name)
         manifest = directory / "manifest.json"
         identity_payload = identity.to_dict()
         manifest.write_text(
@@ -122,12 +128,7 @@ class ClusterService:
             offline=identity.offline,
             environment_policy=identity.dependency_policy,
         )
-        remote = (
-            PurePosixPath(profile.workspace)
-            / ".lambdaforge"
-            / "bootstrap"
-            / identity.environment_id
-        )
+        remote = PurePosixPath(storage.cache_root) / "bootstrap" / identity.environment_id
         cached = transport.run(("test", "-f", str(remote / "manifest.json")))
         if cached.returncode != 0:
             parent = transport.run(("mkdir", "-p", str(remote.parent)))

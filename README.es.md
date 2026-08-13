@@ -18,7 +18,7 @@ paquete estable, para que un proyecto de investigación se concentre en sus dato
 de volver a crear pipelines, bucles de entrenamiento, procedencia, gestión de resultados y
 planificación de procesos.
 
-> **Estado:** `0.5.3`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
+> **Estado:** `0.6.0`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
 > aquí forman la API prevista; todavía no se garantiza compatibilidad entre versiones menores. El
 > repositorio aún no contiene una licencia, por lo que SimpleLambda debe decidir sus condiciones de
 > redistribución.
@@ -183,7 +183,7 @@ ese artefacto inmutable en lugar de una ruta editable:
 
 ```bash
 python -m pip wheel /ruta/absoluta/a/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.3-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.6.0-py3-none-any.whl
 ```
 
 Deja que el lock o constraints del proyecto consumidor seleccione primero una compilación PyTorch
@@ -569,7 +569,12 @@ del proveedor debe leer credenciales del entorno en ejecución. Las APIs son
 
 ## 10. Plano de control local y multiclúster
 
-El plano de control 0.5 es un coordinador local. Los catálogos se fusionan por nombre con precedencia
+La versión 0.6 convierte el terminal en un plano de control unificado sin servidor obligatorio. El
+comando vuelve tras la confirmación durable del scheduler; en hosts directos manda un supervisor
+separado por job y en SLURM manda SLURM. `status`, `resources --all`, `top`, `configs`, `datasets` y
+`storage` usan los mismos servicios. Consulta la [guía del plano 0.6](docs/CONTROL_PLANE.es.md).
+
+El plano de control es un coordinador local. Los catálogos se fusionan por nombre con precedencia
 usuario (`~/.config/lambdaforge/clusters.yaml`), proyecto (`lambdaforge.clusters.yaml`) y archivo
 explícito (`--clusters-file`/`--clusters`). `clusters add` usa usuario por defecto; `--scope project`
 es explícito y `clusters inspect` muestra fuente ganadora y tapadas.
@@ -587,6 +592,12 @@ clusters:
     python: /shared/envs/research/bin/python
     pytorch: {channel: auto, require_cuda: auto}
     data_environment: atlas
+    connection: {connect_timeout: 15s, keepalive: 30s, multiplex: true, persist: 2m}
+    storage:
+      state_root: /home/mi-usuario/.lambdaforge/state
+      cache_root: /scratch/mi-usuario/lambdaforge/cache
+      run_root: /scratch/mi-usuario/lambdaforge/jobs
+      dataset_root: /project/datasets
     resource_mapping:
       gpu: {option: gres, value: "gpu:a100:{gpus}"}
       memory: {option: mem, value: "{memory_gib}G"}
@@ -605,16 +616,22 @@ profiles:
 ```
 
 `command_prefix` es argv. OpenSSH sigue recomendado y conserva aliases, claves, agente,
-`known_hosts` y ProxyJump. El modo opcional de contraseña instala
+`known_hosts` y ProxyJump. Un socket privado `ControlMaster=auto` reutiliza la conexión autenticada
+hasta `connection.persist` segundos sin actividad. Conexión/auth/banner, keepalive y timeout de
+comando son independientes; el trabajo científico no tiene timeout de transporte implícito. El modo opcional de contraseña instala
 `lambdaforge[cluster-password]`, verifica host con Paramiko y obtiene el secreto por prompt oculto,
 referencia `keyring:` o `env:NAME`. No existe `--password`: el valor nunca se serializa, registra,
 empaqueta ni fingerprinta.
+Paramiko reutiliza un cliente verificado dentro de una operación CLI; la reutilización entre
+invocaciones distintas es propia de la multiplexación OpenSSH, por lo que el modo contraseña abre
+una sesión autenticada nueva en cada invocación.
 
 ```bash
 lambdaforge doctor
 lambdaforge clusters list
 lambdaforge clusters inspect atlas
 lambdaforge clusters test atlas
+lambdaforge clusters bootstrap atlas
 lambdaforge run experiment.yaml --on atlas --dry-run
 lambdaforge run experiment.yaml --on atlas --cpus 8 --memory 32GiB --resource-gpus 1 --time 4h
 lambdaforge run experiment.yaml --profile una-gpu
@@ -650,6 +667,10 @@ PyTorch/CUDA, todos los ejecutables, mapping y partición sin enviar job. Los te
 
 ## 11. Jobs persistentes y ubicación de datos
 
+La máquina de estados, layout durable, identidad segura, leases CPU/RAM/GPU, pausa y recuperación
+se explican en [Jobs durables](docs/JOBS.es.md). Registro, profiling y ciclo de vida están en
+[Datasets de primera clase](docs/DATASETS.es.md).
+
 Cada envío devuelve un `job_id` corto y escribe JSON atómico en el directorio XDG de estado
 (`~/.local/state/lambdaforge/jobs` por defecto). Registra clúster, ID del scheduler, comando exacto,
 recursos, bundle, tiempos y linaje de retry. El job describe cómo se programó la ejecución;
@@ -661,9 +682,13 @@ lambdaforge status JOB_ID
 lambdaforge logs JOB_ID --follow
 lambdaforge cancel JOB_ID
 lambdaforge retry JOB_ID --dry-run
+lambdaforge jobs pause JOB_ID
+lambdaforge jobs resume JOB_ID
+lambdaforge jobs reconcile --all
 ```
 
-`JobService`, `DataService` y `Doctor` ofrecen las mismas operaciones y `to_dict()` para notebooks,
+`JobService`, `DatasetService`, `ResourceService`, `StorageService`, `DataService` y `Doctor`
+ofrecen las mismas operaciones y `to_dict()` para notebooks,
 automatización o una GUI futura; no hay lógica privada sólo para CLI.
 
 El registro incluye identidades científica/ejecución, entorno exacto y paths remotos. Otro proceso
@@ -695,7 +720,7 @@ lambdaforge data --catalog data-catalog.yaml replicate raw-corpus --from local -
 ```
 
 El proveedor incluido usa rsync entre ubicaciones ya declaradas; no adivina destinos ni reescribe
-el catálogo. Un workflow puede anotar `on: atlas` y su dry-run muestra ubicaciones. La versión 0.5
+el catálogo. Un workflow puede anotar `on: atlas` y su dry-run muestra ubicaciones. La versión 0.6
 rechaza ejecutar un DAG mixto: transferencia de artefactos descendentes y recuperación durable
 necesitan semántica más fuerte que sondear logs. Cada nodo remoto se envía explícitamente con
 `run --on`; los workflows locales siguen completos.
@@ -704,6 +729,19 @@ Los experimentos usan el mismo catálogo. `data.train: dataset:raw-corpus/train`
 `loader` con `path_parameter`; dentro de params se usa `{dataset: raw-corpus, subpath: train}`.
 Sólo se resuelven esos marcadores tipados, nunca strings ordinarios. El mount puede variar, pero el
 fingerprint conserva referencia e identidad lógica.
+
+0.6 registra automáticamente los `DatasetArtifact` correctos y permite operar sin catálogo:
+
+```bash
+lambdaforge datasets list --all
+lambdaforge datasets show raw-corpus@v3
+lambdaforge datasets stats raw-corpus@v3 --on atlas
+lambdaforge datasets verify raw-corpus@v3 --on atlas
+lambdaforge datasets materialize raw-corpus@v3 --on gpu-lab
+```
+
+`remove` sólo cambia el registro. `delete` físico verifica manifiesto, hashes y consumidores, es
+preview y exige `--apply`. GC nunca elimina placements de datasets.
 
 ## 12. Inferencia, evaluación, exportación y HPO
 
@@ -983,8 +1021,13 @@ modificar el entorno.
 | `run CONFIG` | Ejecuta experimento, tarea o workflow. | sí |
 | `run CONFIG --force|--restart|--no-resume` | Controla reutilización y continuación parcial. | sí |
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Cachea un bundle y envía al plano de control. | metadata; remoto sin dry-run |
-| `clusters add|list|show|inspect|export|credentials|test|bootstrap` | Gestiona perfiles por ámbito, credenciales externas, diagnóstico y entorno exacto. | add/credentials/bootstrap |
-| `status|logs|cancel|retry` (`jobs ...`) | Filtra, reconecta, sigue y controla jobs. | cancel/retry |
+| `clusters add|list|show|inspect|set|unset|remove|export|credentials|test|bootstrap|resources|storage` | Gestiona perfiles e inspecciona entorno, recursos y almacenamiento. | mutaciones explícitas |
+| `status`, `overview`, `top` | Vista global de clústeres/jobs/datasets; `top --follow` refresca. | no |
+| `jobs list [--all]|show|logs|pause|resume|cancel|retry|delete|reconcile`, `jobs group list|show` | Reconecta y controla trabajos/grupos persistentes. | sólo lifecycle |
+| `resources [--on C|--all] [--processes]` | Hechos observados, vista scheduler y recursos declarados. | no |
+| `configs|experiments|tasks list|show|validate|plan|run`; `experiments status|history|results` | Descubre YAML y opera por nombre no ambiguo. | sólo run |
+| `datasets list|show|locations|stats|verify|lineage|add|remove|delete|materialize|replicate` | Descubrimiento y ciclo de vida preview-first. | mutaciones explícitas/`--apply` |
+| `storage status|gc`, `environments list|show|gc` | Bytes/ficheros y GC de caché reconstruible sin referencias. | sólo GC `--apply` |
 | `data --catalog FILE list|locations|inspect|replicate` | Ubicaciones/manifest y réplica explícita. | sólo `--apply` |
 | `compose CONFIG` | Materialización oculta + procedencia. | no |
 | `diff LEFT RIGHT` | Diferencias semánticas. | no |
@@ -2037,12 +2080,13 @@ implementaciones.
   siguen siendo externas; un fallo del tracker hace fallar su run y la retención de LambdaForge no
   puede eliminar artefactos ya subidos. Tracking no es la fuente de verdad de resultados.
 - Los workflows siguen siendo locales y acotados. Los planes registran `on` y el plano de control
-  envía configs individuales por local/SSH y local/SLURM, pero 0.5 no finge coordinar transferencia
+  envía configs individuales por local/SSH y process/SLURM, pero 0.6 no finge coordinar transferencia
   de artefactos ni recuperación durable de un DAG mixto.
 - Bootstrap managed instala wheels exactas en un venv de usuario, pero no sintetiza wheels de otra
   plataforma/CUDA, drivers, módulos del centro ni contenedores. Offline requiere wheelhouse
   compatible; existing sigue en manos del usuario. Réplica usa rsync sobre ubicaciones declaradas.
-- La selección es explícita en 0.5.3: no descubre capacidad/colas/coste ni promete placement.
+- La selección es explícita en 0.6: observa recursos, pero no promete placement óptimo sin datos
+  completos de capacidad, cola y coste.
   `DataCatalog` resuelve splits y marcadores anidados tipados; strings arbitrarios siguen siendo del
   proyecto. Sync remoto es allowlisted/acotado y artifacts pesados requieren fetch lógico.
 - Random/Optuna finito permanece. HPO adaptativo agenda trials locales independientes; integrar
@@ -2099,6 +2143,10 @@ python -c "from importlib.metadata import distribution; print(distribution('lamb
 - [Manual de agentes](AGENTS.es.md) · [English](AGENTS.md)
 - [Arquitectura técnica](docs/ARCHITECTURE.es.md) · [English](docs/ARCHITECTURE.md)
 - [Clusters y jobs](docs/CLUSTERS.es.md) · [English](docs/CLUSTERS.md)
+- [Plano de control terminal 0.6](docs/CONTROL_PLANE.es.md) · [English](docs/CONTROL_PLANE.md)
+- [Jobs durables/ProcessScheduler](docs/JOBS.es.md) · [English](docs/JOBS.md)
+- [Datasets de primera clase](docs/DATASETS.es.md) · [English](docs/DATASETS.md)
+- [Almacenamiento interno y GC](docs/STORAGE.es.md) · [English](docs/STORAGE.md)
 - [Seguridad de credenciales/scheduler](docs/SECURITY.es.md) · [English](docs/SECURITY.md)
 - [Resultados y plots](docs/RESULTS.es.md) · [English](docs/RESULTS.md)
 - [Inspección de artifacts](docs/ARTIFACTS.es.md) · [English](docs/ARTIFACTS.md)
@@ -2134,7 +2182,20 @@ precisa para los argumentos de cada constructor.
 La hoja de ruta vive aquí para que su estado no diverja en otro fichero. “Completado” significa API
 pública, documentación y pruebas focalizadas; no significa incluir cada proveedor o método externo.
 
-| Prioridad | Capacidad | Estado 0.5 |
+| Prioridad 0.6 | Capacidad del plano terminal | Estado |
+|---:|---|---|
+| 1 | Límites SSH independientes y reutilización autenticada por inactividad | Completado |
+| 2 | ProcessScheduler asíncrono durable con identidad/grupos/heartbeat/timeout | Completado |
+| 3 | Lifecycle global, pausa/reanudación, reconciliación y grupos | Completado |
+| 4 | Observación directa/SLURM y admisión cooperativa CPU/RAM/GPU | Completado |
+| 5 | Registro/descubrimiento/stats/verificación/linaje/CRUD de datasets | Completado |
+| 6 | Materialización explícita y réplica preview-first | Completado; transfer durable es extensión |
+| 7 | Descubrimiento de config/experimento/task y ejecución por nombre | Completado |
+| 8 | Raíces separadas, entornos transaccionales, caché pip y GC seguro | Completado |
+| 9 | Overview/top global y DTO JSON de servicios | Completado |
+| 10 | Servidor, placement, HPO/workflow multiclúster coordinado | Diferido explícitamente |
+
+| Prioridad histórica | Capacidad | Estado 0.5 |
 |---:|---|---|
 | 1 | Contrato de tarea genérica | Completado |
 | 2 | Schema/configuración task independiente | Completado |
@@ -2183,7 +2244,7 @@ pública, documentación y pruebas focalizadas; no significa incluir cada provee
 | 45 | Plots reproducibles | Completado: learning/seeds/sweep/HPO/resources, PlotSpec y sidecar |
 | 46 | Toolkit seguro de artifacts | Completado: NumPy/tablas, validación, geometría explícita y plugins |
 | 47 | Debug/dataset inspection | Completado: N records aislados e informe DatasetArtifact |
-| 48 | Workflow distribuido/placement automático | Diferido explícitamente después de 0.5.3 |
+| 48 | Workflow distribuido/placement automático | Diferido explícitamente después de 0.6.0 |
 
 Las ampliaciones futuras deben responder a necesidades de investigación demostradas y conservar las
 fronteras de la [arquitectura técnica](docs/ARCHITECTURE.md), no reabrir lo ya cerrado.

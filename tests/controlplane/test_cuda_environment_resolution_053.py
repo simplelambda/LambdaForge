@@ -76,7 +76,7 @@ class InstallationTransport(Transport):
             return CommandResult(0 if values[2] in self.files else 1)
         if "Path(sys.argv[1]).write_text" in " ".join(values):
             self.files.add(values[-2])
-        return CommandResult(0, "0.5.3 2.12.1+cu126 12.6 True\n", "")
+        return CommandResult(0, "0.6.0 2.12.1+cu126 12.6 True\n", "")
 
     def put(self, source: str | Path, destination: str | Path) -> None:
         del source, destination
@@ -103,7 +103,7 @@ class DoctorTransport(Transport):
         if "import torch; print(torch.__version__)" in source:
             return CommandResult(0, "2.13.0+cu130\n")
         if "import lambdaforge" in source:
-            return CommandResult(0, "0.5.3\n")
+            return CommandResult(0, "0.6.0\n")
         return CommandResult(0, "")
 
     def put(self, source: str | Path, destination: str | Path) -> None:
@@ -239,7 +239,7 @@ def test_environment_identity_changes_with_exact_torch_plan() -> None:
 
 
 def test_managed_install_pins_resolved_torch_before_framework(tmp_path: Path) -> None:
-    package = tmp_path / "lambdaforge-0.5.3-py3-none-any.whl"
+    package = tmp_path / "lambdaforge-0.6.0-py3-none-any.whl"
     package.write_bytes(b"wheel")
     plan = TorchInstallationPlan(
         "cu126",

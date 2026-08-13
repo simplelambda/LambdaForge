@@ -7,6 +7,25 @@ from typing import Any
 from lambdaforge.cli import CommandLineInterface
 
 
+def test_control_plane_reference_commands_parse() -> None:
+    parser = CommandLineInterface._parser()
+    commands = (
+        ["overview", "--json"],
+        ["resources", "--all", "--json"],
+        ["storage", "status", "--all", "--json"],
+        ["clusters", "resources", "atlas", "--json"],
+        ["clusters", "storage", "atlas", "--json"],
+        ["jobs", "list", "--all", "--json"],
+        ["jobs", "group", "show", "group-123"],
+        ["datasets", "materialize", "corpus", "--on", "atlas"],
+        ["experiments", "status", "baseline", "--json"],
+        ["experiments", "history", "baseline", "--json"],
+        ["tasks", "run", "prepare", "--on", "atlas"],
+    )
+    for command in commands:
+        assert parser.parse_args(command).command == command[0]
+
+
 def test_init_creates_complete_non_overwriting_consumer(tmp_path: Path, capsys: Any) -> None:
     project = tmp_path / "consumer"
     assert CommandLineInterface.main(["init", str(project)]) == 0

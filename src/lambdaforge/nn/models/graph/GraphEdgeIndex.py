@@ -14,16 +14,19 @@ class GraphEdgeIndex:
     """
 
     INTEGER_DTYPES = frozenset(
-        {
-            torch.uint8,
-            torch.int8,
-            torch.int16,
-            torch.int32,
-            torch.int64,
-            torch.uint16,
-            torch.uint32,
-            torch.uint64,
-        }
+        filter(
+            None,
+            (
+                getattr(torch, "uint8", None),
+                getattr(torch, "int8", None),
+                getattr(torch, "int16", None),
+                getattr(torch, "int32", None),
+                getattr(torch, "int64", None),
+                getattr(torch, "uint16", None),
+                getattr(torch, "uint32", None),
+                getattr(torch, "uint64", None),
+            ),
+        )
     )
 
     @classmethod

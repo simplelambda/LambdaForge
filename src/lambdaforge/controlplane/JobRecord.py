@@ -31,6 +31,8 @@ class JobRecord:
     stdout: str = ""
     stderr: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    job_type: str = "command"
+    group_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.job_id.strip() or not self.cluster.strip():
@@ -62,6 +64,8 @@ class JobRecord:
             stdout=str(value.get("stdout", "")),
             stderr=str(value.get("stderr", "")),
             metadata=value.get("metadata", {}),
+            job_type=str(value.get("job_type", "command")),
+            group_id=str(value["group_id"]) if value.get("group_id") else None,
         )
 
     def with_updates(self, **changes: Any) -> JobRecord:
@@ -71,7 +75,7 @@ class JobRecord:
     def to_dict(self) -> dict[str, Any]:
         """Return the durable JSON representation."""
         return {
-            "job_record_version": 1,
+            "job_record_version": 2,
             "job_id": self.job_id,
             "cluster": self.cluster,
             "scheduler": self.scheduler,
@@ -88,4 +92,6 @@ class JobRecord:
             "stdout": self.stdout,
             "stderr": self.stderr,
             "metadata": copy.deepcopy(self.metadata),
+            "job_type": self.job_type,
+            "group_id": self.group_id,
         }

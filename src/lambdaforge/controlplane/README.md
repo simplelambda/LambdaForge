@@ -90,8 +90,8 @@ handle, bundle = ControlPlane().submit(
 
 ## 4. Jobs
 
-`JobStore` writes atomic JSON below `$XDG_STATE_HOME/lambdaforge/jobs` or
-`~/.local/state/lambdaforge/jobs`. `JobService` is restart-safe for scheduler-backed jobs:
+`JobStore` writes locked atomic JSON below `$XDG_STATE_HOME/lambdaforge/jobs` or
+`~/.local/state/lambdaforge/jobs`. `JobService` is restart-safe for SLURM and direct process jobs:
 
 ```bash
 lambdaforge status --on atlas --state running --name study
@@ -99,6 +99,8 @@ lambdaforge status JOB_ID
 lambdaforge logs JOB_ID --follow
 lambdaforge cancel JOB_ID
 lambdaforge retry JOB_ID --dry-run
+lambdaforge jobs pause JOB_ID
+lambdaforge jobs reconcile --all
 ```
 
 Retry creates a new job ID and `retry_of` link. It never overwrites the prior job or scientific
@@ -110,7 +112,8 @@ one heavy artifact.
 - `LocalTransport`: local subprocess and filesystem staging.
 - `SshTransport`: OpenSSH/scp with normal host-key policy and quoted remote argv.
 - `PasswordSshTransport`: optional Paramiko password SSH/SFTP with rejected unknown hosts.
-- `LocalScheduler`: synchronous execution through a transport.
+- `ProcessScheduler`/compatible `LocalScheduler`: detached per-job supervisor with durable state,
+  safe process identity, resource leases and reconnectable lifecycle.
 - `SlurmScheduler`: one `SlurmProfile` resource/directive/command/script dialect per cluster.
 - `CredentialProvider`: hidden interactive, OS-keyring and environment reference providers.
 - `CudaCompatibilityResolver`: remote facts to exact official `TorchInstallationPlan`.
@@ -128,7 +131,10 @@ Implement `Transport` and `Scheduler` for another platform. Return `CommandResul
   prologue/epilogue lines receive no secret interpolation.
 - Mixed-cluster workflow placement is visible in dry-run but execution is refused until durable DAG
   recovery and artifact transfer are implemented soundly.
-- Cluster choice is explicit; capacity/queue/cost discovery and automatic placement are not claimed.
+- Resource observation is explicit and honest about host/scheduler/declared views; automatic
+  capacity/queue/cost placement is not claimed.
 - `DataCatalog` resolves named task inputs plus direct/nested typed experiment references; ordinary
   strings remain a consumer concern.
-- Local scheduler execution is synchronous. SLURM jobs reconnect across CLI processes.
+- Direct and SLURM jobs reconnect across CLI processes. See the focused
+  [control-plane](../../../docs/CONTROL_PLANE.md), [job](../../../docs/JOBS.md),
+  [dataset](../../../docs/DATASETS.md) and [storage](../../../docs/STORAGE.md) guides.

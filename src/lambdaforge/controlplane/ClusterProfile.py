@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from lambdaforge.controlplane.ClusterAuthentication import ClusterAuthentication
+from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
+from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
 from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
 from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
 
@@ -27,7 +29,9 @@ class ClusterProfile:
     auth: ClusterAuthentication = field(default_factory=ClusterAuthentication)
     known_hosts: str | None = None
     ssh_timeout: float = 15.0
+    connection: SshConnectionPolicy = field(default_factory=SshConnectionPolicy)
     workspace: str = ".lambdaforge/remote"
+    storage: ClusterStoragePolicy | None = None
     python: str = "python"
     environment: str = "existing"
     wheelhouse: str | None = None
@@ -66,8 +70,18 @@ class ClusterProfile:
             raise ValueError("SSH user must be a non-empty user name without '@' or newlines.")
         if self.ssh_timeout <= 0:
             raise ValueError("SSH timeout must be positive.")
+        connection = self.connection
+        if not isinstance(connection, SshConnectionPolicy):
+            connection = SshConnectionPolicy.from_mapping(
+                connection, legacy_timeout=self.ssh_timeout
+            )
+            object.__setattr__(self, "connection", connection)
         if self.transport == "ssh" and not self.workspace.startswith("/"):
             raise ValueError("SSH cluster workspaces must be absolute paths.")
+        storage = self.storage
+        if not isinstance(storage, ClusterStoragePolicy):
+            storage = ClusterStoragePolicy.from_mapping(storage, workspace=self.workspace)
+            object.__setattr__(self, "storage", storage)
         if (
             self.project_module is not None
             and re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", self.project_module) is None
@@ -106,7 +120,15 @@ class ClusterProfile:
             auth=ClusterAuthentication.from_mapping(value.get("auth")),
             known_hosts=(str(value["known_hosts"]) if value.get("known_hosts") else None),
             ssh_timeout=float(value.get("ssh_timeout", 15.0)),
+            connection=SshConnectionPolicy.from_mapping(
+                value.get("connection"),
+                legacy_timeout=float(value.get("ssh_timeout", 15.0)),
+            ),
             workspace=str(value.get("workspace", ".lambdaforge/remote")),
+            storage=ClusterStoragePolicy.from_mapping(
+                value.get("storage"),
+                workspace=str(value.get("workspace", ".lambdaforge/remote")),
+            ),
             python=str(value.get("python", "python")),
             environment=str(value.get("environment", "existing")),
             wheelhouse=(str(value["wheelhouse"]) if value.get("wheelhouse") else None),
@@ -158,7 +180,9 @@ class ClusterProfile:
             "auth": self.auth.to_dict(),
             "known_hosts": self.known_hosts,
             "ssh_timeout": self.ssh_timeout,
+            "connection": self.connection.to_dict(),
             "workspace": self.workspace,
+            "storage": cast(ClusterStoragePolicy, self.storage).to_dict(),
             "python": self.python,
             "environment": self.environment,
             "wheelhouse": self.wheelhouse,

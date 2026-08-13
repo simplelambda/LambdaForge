@@ -180,6 +180,8 @@ class TaskRunner:
                         run_dir / "environment.json"
                     )
         result.write_json(run_dir / "result.json")
+        if result.status is TaskStatus.OK:
+            self._register_dataset(config, run_dir, events)
         event_fields: dict[str, Any] = {
             "name": config.name,
             "attempt_id": attempt_id,
@@ -192,6 +194,35 @@ class TaskRunner:
             )
         events.write("task_finished", event_fields)
         return result
+
+    @staticmethod
+    def _register_dataset(config: TaskConfig, run_dir: Path, events: EventLogger) -> None:
+        """Publish preprocessing manifests to the reconciliable dataset registry."""
+        manifest = run_dir / "dataset-artifact.json"
+        if not manifest.is_file() or manifest.is_symlink():
+            return
+        try:
+            from lambdaforge.data.DatasetRegistry import DatasetRegistry
+
+            registry_path = os.environ.get("LAMBDAFORGE_DATASET_REGISTRY") or (
+                DatasetRegistry.project_path(config.source_dir)
+            )
+            record = DatasetRegistry(registry_path).register_artifact(
+                manifest,
+                cluster=os.environ.get("LAMBDAFORGE_CLUSTER", "local"),
+                root=run_dir,
+                producer={
+                    "config": str(config.source) if config.source is not None else None,
+                    "task_fingerprint": config.fingerprint,
+                },
+            )
+            events.write("dataset_registered", {"dataset": record.key})
+        except Exception as error:
+            # The manifest/result remain authoritative; an auxiliary index can be reconciled.
+            events.write(
+                "dataset_registration_failed",
+                {"error_type": error.__class__.__name__, "message": str(error)},
+            )
 
     @staticmethod
     def _invoke(method: Any, context: TaskContext) -> Any:

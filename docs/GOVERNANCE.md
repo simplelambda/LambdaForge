@@ -27,16 +27,16 @@ current, lint/type checks and selected/full tests pass as appropriate, wheel and
 contents are audited, and the repository contains no caches, environments, credentials or generated
 run data. CUDA claims additionally require successful execution on a CUDA-enabled Python build.
 
-After committing 0.5.3, the owner should push the commit, wait for the complete GitHub Actions
+After committing 0.6.0, the owner should push the commit, wait for the complete GitHub Actions
 matrix, and only then create/push the annotated tag and GitHub Release:
 
 ```bash
 git push origin main
 # Wait for the CI run on this exact commit to be green.
-git tag -a v0.5.3 -m "LambdaForge 0.5.3"
-git push origin v0.5.3
-gh release create v0.5.3 --verify-tag --generate-notes \
-  --title "LambdaForge 0.5.3"
+git tag -a v0.6.0 -m "LambdaForge 0.6.0"
+git push origin v0.6.0
+gh release create v0.6.0 --verify-tag --generate-notes \
+  --title "LambdaForge 0.6.0"
 ```
 
 Do not run these publication commands before CI is green; this repository preparation does not

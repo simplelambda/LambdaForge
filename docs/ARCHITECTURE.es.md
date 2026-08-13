@@ -40,7 +40,7 @@ anteriores se archivan.
 `PreprocessingTask` compone source, transforms ordenados y sink. Las claves estables gobiernan
 sharding y resume. El padre escribe sink y manifest: I/O usa threads; CPU usa procesos `spawn` sólo
 para transforms; GPU permanece en un proceso. Así no se comparte estado CUDA ni se corrompen
-manifiestos. `Workflow` coordina documentos completos en un DAG, pero 0.5.3 no distribuye un mismo
+manifiestos. `Workflow` coordina documentos completos en un DAG, pero 0.6 no distribuye un mismo
 DAG entre clusters.
 
 ## 4. Experimentos y entrenamiento
@@ -89,6 +89,18 @@ visualizer, schema y validator. NumPy/tablas tienen límites y pickle deshabilit
 requiere roles explícitos. Los servicios remotos sincronizan evidencia pequeña y sólo descargan el
 artifact que se pide.
 
+### Responsabilidades del plano 0.6
+
+`SshConnectionPolicy` posee reutilización/deadlines; los transports sólo ejecutan/transfieren.
+`ProcessScheduler` crea el directorio durable y `ProcessSupervisor` posee hijo, leases, heartbeat y
+estado remoto atómico. `JobService` es la capa neutral y `JobStore` sólo el índice local.
+`ResourceService` elige probe directo/SLURM y conserva la última observación si queda offline.
+
+`DatasetArtifact` es autoritativo. `DatasetRegistry` es índice atómico reconstruible;
+`DatasetService` coordina discovery/profiling/verificación/lifecycle y `DatasetOperations` opera de
+forma acotada donde viven los bytes. `ProjectConfigService` indexa YAML sin sustituirlo.
+`StorageService` protege referencias y nunca posee resultados o delete de datasets.
+
 ## 8. Extensión y límites
 
 Se prefiere una clase del proyecto consumidor mediante `target`; los entry points son para
@@ -96,6 +108,6 @@ proveedores reutilizables. Plotly, NetworkX, trimesh, Optuna, BoTorch, stores y 
 opcionales. Una API nueva necesita validación, re-export público, tests focalizados, documentación
 EN/ES y entrada para agentes.
 
-En 0.5.3 no hay placement automático, workflows multiclúster, servidor/GUI, descargas implícitas
+En 0.6 no hay placement automático, workflows multiclúster durables, servidor central/GUI, descargas implícitas
 pesadas, instalación CUDA, síntesis de wheels de otra plataforma ni interpretación mágica de
 arrays. Tampoco se amplía la matemática de HPO.

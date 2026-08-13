@@ -65,15 +65,16 @@ Offline exige wheelhouse compatible. No clona branches ni instala drivers/CUDA. 
 
 ## 4. Jobs
 
-`JobStore` escribe JSON atómico bajo `$XDG_STATE_HOME/lambdaforge/jobs` o
-`~/.local/state/lambdaforge/jobs`. `JobService` ofrece list/get/logs/cancel/retry. Un retry crea otro
+`JobStore` escribe JSON atómico con lock bajo `$XDG_STATE_HOME/lambdaforge/jobs` o
+`~/.local/state/lambdaforge/jobs`. `JobService` ofrece lifecycle completo y reconexión. Un retry crea otro
 ID con `retry_of`; nunca pisa el anterior. Usa `status`, `logs JOB --follow`, `cancel` y `retry`;
 `results sync JOB` trae evidencia pequeña y `artifact fetch JOB NAME` un artifact pesado explícito.
 
 ## 5. Proveedores
 
 - `LocalTransport`, `SshTransport` OpenSSH y `PasswordSshTransport` Paramiko ejecutan/stagean.
-- `LocalScheduler` ejecuta síncronamente.
+- `ProcessScheduler`/`LocalScheduler` compatible usa supervisor separado por job, estado durable,
+  identidad segura y leases.
 - `SlurmScheduler` aplica un `SlurmProfile` de mapping/directivas/comandos/script por clúster.
 - `CredentialProvider` cubre prompt oculto, keyring del SO y referencia de entorno.
 - `CudaCompatibilityResolver` convierte hechos remotos en `TorchInstallationPlan` exacto.
@@ -93,3 +94,6 @@ conocer el proveedor.
   recuperación durable y transferencia de artefactos.
 - La elección de clúster es explícita; no se afirma descubrir capacidad/cola/coste ni placement
   automático. `DataCatalog` resuelve inputs y referencias de experimento tipadas, no strings.
+- Jobs directos y SLURM reconectan entre procesos CLI. Consulta las guías de
+  [plano](../../../docs/CONTROL_PLANE.es.md), [jobs](../../../docs/JOBS.es.md),
+  [datasets](../../../docs/DATASETS.es.md) y [storage](../../../docs/STORAGE.es.md).

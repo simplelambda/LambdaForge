@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from lambdaforge.controlplane.CommandResult import CommandResult
+from lambdaforge.controlplane.RemoteCommandTimeout import RemoteCommandTimeout
 from lambdaforge.controlplane.SecretRedactor import SecretRedactor
 from lambdaforge.controlplane.Transport import Transport
 
@@ -24,6 +25,10 @@ class PasswordSshTransport(Transport):
         user: str | None = None,
         port: int = 22,
         timeout: float = 15.0,
+        auth_timeout: float | None = None,
+        banner_timeout: float | None = None,
+        keepalive: float = 30.0,
+        command_timeout: float | None = None,
         known_hosts: str | Path | None = None,
         paramiko_module: Any | None = None,
     ) -> None:
@@ -35,6 +40,10 @@ class PasswordSshTransport(Transport):
         self.user = user
         self.port = port
         self.timeout = timeout
+        self.auth_timeout = auth_timeout if auth_timeout is not None else timeout
+        self.banner_timeout = banner_timeout if banner_timeout is not None else timeout
+        self.keepalive = keepalive
+        self.command_timeout = command_timeout
         self.known_hosts = Path(known_hosts).expanduser() if known_hosts is not None else None
         self._password_provider = password_provider
         self._paramiko_module = paramiko_module
@@ -46,7 +55,13 @@ class PasswordSshTransport(Transport):
             f"port={self.port!r}, password={SecretRedactor.MARKER!r})"
         )
 
-    def run(self, command: Sequence[str], *, cwd: str | Path | None = None) -> CommandResult:
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: str | Path | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
         """Execute one safely quoted argv through the established SSH channel."""
         if not command:
             raise ValueError("SSH commands cannot be empty.")
@@ -54,10 +69,13 @@ class PasswordSshTransport(Transport):
         if cwd is not None:
             remote = f"cd {shlex.quote(str(cwd))} && exec {remote}"
         try:
-            _, stdout, stderr = self._connection().exec_command(remote, timeout=self.timeout)
+            deadline = self.command_timeout if timeout is None else timeout
+            _, stdout, stderr = self._connection().exec_command(remote, timeout=deadline)
             output = stdout.read().decode("utf-8", errors="replace")
             errors = stderr.read().decode("utf-8", errors="replace")
             return CommandResult(stdout.channel.recv_exit_status(), output, errors)
+        except TimeoutError as error:
+            raise RemoteCommandTimeout(remote, float(deadline or 0)) from error
         except Exception as error:
             raise RuntimeError(
                 f"Password SSH command failed for {self.host!r}: {SecretRedactor.redact(error)}"
@@ -130,8 +148,8 @@ class PasswordSshTransport(Transport):
                 username=self.user,
                 password=password,
                 timeout=self.timeout,
-                banner_timeout=self.timeout,
-                auth_timeout=self.timeout,
+                banner_timeout=self.banner_timeout,
+                auth_timeout=self.auth_timeout,
                 look_for_keys=False,
                 allow_agent=False,
             )
@@ -144,6 +162,9 @@ class PasswordSshTransport(Transport):
             ) from None
         finally:
             del password
+        transport = client.get_transport() if hasattr(client, "get_transport") else None
+        if transport is not None and self.keepalive > 0:
+            transport.set_keepalive(int(self.keepalive))
         self._client = client
         return client
 

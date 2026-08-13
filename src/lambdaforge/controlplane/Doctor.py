@@ -30,6 +30,7 @@ class Doctor:
     ) -> DoctorReport:
         """Run read-only diagnostics through the selected transport."""
         profile = self.catalog.get(cluster)
+        assert profile.storage is not None
         transport = self.factory.transport(profile)
         checks: list[DoctorCheck] = []
         try:
@@ -75,8 +76,11 @@ class Doctor:
         )
         selected_python = profile.python
         if profile.environment == "managed":
-            pointer = PurePosixPath(profile.workspace) / ".lambdaforge" / "active-environment"
+            pointer = PurePosixPath(profile.storage.state_root) / "active-environment"
             active = transport.run(("cat", str(pointer)))
+            if active.returncode or not active.stdout.strip():
+                legacy = PurePosixPath(profile.workspace) / ".lambdaforge" / "active-environment"
+                active = transport.run(("cat", str(legacy)))
             if active.returncode == 0 and active.stdout.strip():
                 selected_python = active.stdout.strip()
             checks.append(
@@ -267,9 +271,7 @@ class Doctor:
                 "with pytorch.channel=auto or an explicit compatible channel.",
             )
         )
-        bundle_cache = transport.run(
-            ("test", "-d", f"{profile.workspace.rstrip('/')}/.lambdaforge/bundles")
-        )
+        bundle_cache = transport.run(("test", "-d", profile.storage.bundle_root))
         checks.append(
             DoctorCheck(
                 "bundle-cache",

@@ -204,3 +204,35 @@ class ClusterCatalog:
     def export(path: str | Path, profile: ClusterProfile) -> Path:
         """Export one portable profile, retaining only its non-secret reference."""
         return ClusterCatalog.add(path, profile)
+
+    @staticmethod
+    def remove(path: str | Path, name: str) -> Path:
+        """Atomically remove one profile from one explicit writable catalogue."""
+        destination = Path(path).expanduser().resolve()
+        loaded = yaml.safe_load(destination.read_text(encoding="utf-8")) or {}
+        if not isinstance(loaded, Mapping):
+            raise TypeError("Cluster catalogue must contain a mapping.")
+        value = dict(loaded)
+        clusters = value.get("clusters", {})
+        if not isinstance(clusters, dict) or name not in clusters:
+            raise KeyError(f"Cluster {name!r} is not defined in {destination}.")
+        del clusters[name]
+        return ClusterCatalog._write(destination, value)
+
+    @staticmethod
+    def _write(destination: Path, value: Mapping[str, object]) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor_handle, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+        )
+        os.close(descriptor_handle)
+        temporary = Path(temporary_name)
+        try:
+            temporary.write_text(
+                yaml.safe_dump(dict(value), sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return destination

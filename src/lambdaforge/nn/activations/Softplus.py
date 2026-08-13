@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -43,7 +44,8 @@ class Softplus(Activation):
         self.threshold = float(threshold)
 
     def forward(self, x: Tensor) -> Tensor:
-        return torch.nn.functional.softplus(x, beta=self.beta, threshold=self.threshold)
+        parameters: dict[str, Any] = {"beta": self.beta, "threshold": self.threshold}
+        return torch.nn.functional.softplus(x, **parameters)
 
     def extra_repr(self) -> str:
         return f"beta={self.beta}, threshold={self.threshold}, name={self.name!r}"

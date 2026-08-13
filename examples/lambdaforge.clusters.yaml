@@ -6,8 +6,21 @@ clusters:
     user: USER
     port: 22
     auth: {mode: openssh}
+    connection:
+      connect_timeout: 15s
+      keepalive: 30s
+      multiplex: true
+      persist: 2m
+      command_timeout: null
     scheduler: slurm
     workspace: /scratch/USER/lambdaforge
+    storage:
+      state_root: /home/USER/.lambdaforge/state
+      cache_root: /scratch/USER/lambdaforge/cache
+      run_root: /scratch/USER/lambdaforge/jobs
+      dataset_root: /project/PROJECT/datasets
+      cache_max_size: 50GiB
+      cache_max_age: 30d
     python: python3
     environment: managed
     pytorch: {channel: auto, require_cuda: auto}

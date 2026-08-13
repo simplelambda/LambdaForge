@@ -8,7 +8,7 @@ después inspecciona la firma/docstring del símbolo público concreto.
 
 ## Qué es y cómo instalarlo
 
-LambdaForge 0.5.3 es una biblioteca instalable PyTorch/Lightning para tasks genéricas,
+LambdaForge 0.6.0 es una biblioteca instalable PyTorch/Lightning para tasks genéricas,
 preprocesado, training, workflows, sweeps/HPO, ejecución CPU/GPU/SLURM, resultados, plots,
 artifacts, reproducibilidad y control explícito de clusters. El proyecto consumidor posee modelos,
 datasets y código de dominio. Python >=3.10. Importa sólo desde estos namespaces públicos:
@@ -32,7 +32,7 @@ python -m pip check
 python -c "import lambdaforge; print(lambdaforge.__version__)"
 ```
 
-Para release reproducible construye/instala `lambdaforge-0.5.3-py3-none-any.whl`. El proyecto
+Para release reproducible construye/instala `lambdaforge-0.6.0-py3-none-any.whl`. El proyecto
 consumidor fija la wheel correcta de PyTorch. `nvidia-smi` sólo prueba driver; comprueba
 `torch.cuda.is_available()` y `torch.version.cuda`. Extras: `hpo`, `adaptive-hpo`, `s3`, `parquet`,
 `onnx`, `viz`, `graph`, `viz3d`, tracking y `dev`.
@@ -48,7 +48,13 @@ consumidor fija la wheel correcta de PyTorch. `nvidia-smi` sólo prueba driver; 
 | Workflow local | `kind: workflow`; validate/inspect/run |
 | Dataset lógico | `data_catalog` + `dataset:NAME/subpath` |
 | Cluster | `clusters add`; `doctor --on`; `clusters bootstrap`; `run --on` |
-| Reconectar job | `status`; `logs JOB --follow`; `cancel`; `retry` |
+| Reconectar job | `jobs list --all`; `status`; `logs JOB --follow`; `cancel`; `retry` |
+| Vista global | `status`; `overview --json`; `top --follow` |
+| Lifecycle durable | `jobs show/logs/pause/resume/cancel/retry/delete/reconcile` |
+| Recursos | `resources --on CLUSTER`; `--all` consulta en paralelo acotado |
+| Configs por nombre | `configs`, `experiments` o `tasks` `list/show/validate/plan/run` |
+| Datasets | `datasets list/show/stats/verify/lineage/materialize`; delete es preview-first |
+| Almacenamiento | `storage status`; revisa `storage gc` antes de `--apply` |
 | Resultados | `results list/show/compare/export`; auditoría legacy sigue válida |
 | Curvas/sweeps | `plot learning/sweep/seeds/hpo/resources` |
 | Artifact | `artifact inspect/export/validate/visualize/list/fetch/plugins` |
@@ -148,7 +154,8 @@ core. `artifact fetch JOB NAME` debe seleccionar uno y permanecer bajo el work_d
 
 `ExecutionBundleBuilder` materializa YAML, selecciona ubicación de data del destino y construye
 wheels exactas del framework/proyecto. `EnvironmentIdentity` incluye wheels, Python y wheelhouse.
-`managed` crea venv idempotente bajo `WORKSPACE/.lambdaforge/environments`; no clona main ni instala
+`managed` crea primero un venv temporal, lo verifica y lo publica por identidad bajo
+`storage.cache_root/environments`; no clona main ni instala
 drivers/CUDA. `existing` sólo verifica el intérprete. Offline usa wheelhouse compatible y
 `--no-index`; no sintetices wheels de otra plataforma.
 
@@ -161,16 +168,31 @@ el probe tensorial CUDA instalado. Si no hay wheel falla cerrado. Canal/CPU/whee
 explícitos requieren revisión porque la compatibilidad menor tiene salvedades PTX. Nunca cambia
 driver/CUDA de sistema/forward-compat; doctor falla si CUDA visible/requerida no inicializa.
 
-`JobRecord` persiste scheduler/scientific/execution/bundle IDs, paths y tiempos; `status` refresca al
-reiniciar el PC. `ClusterCatalog` fusiona usuario < proyecto < explícito y `clusters inspect` muestra
-la fuente. OpenSSH es el default recomendado: conserva aliases/claves/agente/known_hosts/ProxyJump.
+`JobRecord` persiste scheduler/scientific/execution/bundle IDs, paths y tiempos. En
+`scheduler: local`, un `ProcessSupervisor` separado mantiene estado/logs/heartbeat/work bajo
+`storage.run_root/JOB`, por lo que la CLI vuelve y el job sobrevive al controlador. Control seguro
+verifica PID, grupo, creación y hash; pausa conserva RAM/VRAM/leases. Admisión CPU/RAM/GPU es
+cooperativa, aplica afinidad y `CUDA_VISIBLE_DEVICES`, no aislamiento físico. Usa `jobs reconcile`
+si se pierde el índice local; un cluster offline produce `unknown` con estado anterior, no fallo
+científico inventado. `ClusterCatalog` fusiona usuario < proyecto < explícito y `clusters inspect`
+muestra la fuente. OpenSSH conserva aliases/claves/agente/known_hosts/ProxyJump y usa por defecto
+`ControlMaster=auto` con `connection.persist` para reutilizar autenticación entre comandos/CLI.
+Timeouts connect/auth/banner, keepalive y command son independientes; el trabajo largo no tiene
+timeout SSH implícito y `resources.time` controla runtime.
 Contraseña opcional sólo puede venir de prompt oculto, referencia `keyring:` o `env:` mediante
 `CredentialProvider`; nunca pongas el valor en argv/YAML/job/bundle/fingerprint/log.
 `PasswordSshTransport` usa RejectPolicy/SFTP/timeouts. `SlurmProfile` centraliza mapping de recursos,
 directivas, comandos argv/placeholders/regex y líneas de script confiables sin secrets; dry-run debe
 mostrar directivas, avisos y comando. Lee `docs/CLUSTERS.es.md` y `docs/SECURITY.es.md` si modificas
-esta frontera. `results sync` sólo trae evidencia pequeña. No hay placement automático, workflow
-entre clusters, daemon, servidor o GUI en 0.5.3.
+esta frontera. `results sync` sólo trae evidencia pequeña.
+
+El preprocesado correcto auto-registra su `DatasetArtifact`. El manifiesto es autoritativo y el
+registry atómico se reconcilia. `datasets remove` no borra bytes; `delete` verifica identidad/hashes,
+consumidores y exige `--apply`. `materialize` planea `NOOP`, `REPLICATE` o `BUILD` sin copiar en
+preview. `storage gc` sólo considera caché reconstruible sin referencias; nunca datasets,
+resultados, checkpoints o work activo. Repetir `--on` crea un job group de réplicas independientes;
+HPO exige `--independent-hpo`. No hay placement automático, workflow multiclúster durable, HPO
+multiclúster coordinado, daemon, servidor o GUI en 0.6.
 
 ## HPO adaptativo
 
@@ -226,6 +248,8 @@ Prueba además la wheel instalada desde fuera del source. Revisa `git status --s
 
 - arquitectura global: `docs/ARCHITECTURE.es.md`;
 - clusters: `docs/CLUSTERS.es.md`;
+- plano terminal/jobs/datasets/storage 0.6: `docs/CONTROL_PLANE.es.md`, `docs/JOBS.es.md`,
+  `docs/DATASETS.es.md`, `docs/STORAGE.es.md`;
 - seguridad de credenciales/scheduler: `docs/SECURITY.es.md`;
 - resultados/plots: `docs/RESULTS.es.md`;
 - artifacts: `docs/ARTIFACTS.es.md`;

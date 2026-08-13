@@ -13,8 +13,14 @@ class Transport(ABC):
     """Execute argument vectors and stage small control bundles."""
 
     @abstractmethod
-    def run(self, command: Sequence[str], *, cwd: str | Path | None = None) -> CommandResult:
-        """Run a command without interpreting local shell syntax."""
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: str | Path | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
+        """Run argv with an optional command deadline independent of connection setup."""
 
     @abstractmethod
     def put(self, source: str | Path, destination: str | Path) -> None:

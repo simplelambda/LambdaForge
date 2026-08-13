@@ -21,6 +21,7 @@ class SchedulerSubmission:
     command: tuple[str, ...] = ()
     directives: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    work_dir: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a complete dry-run/audit payload without secrets."""
@@ -33,4 +34,5 @@ class SchedulerSubmission:
             "command": list(self.command),
             "directives": list(self.directives),
             "warnings": list(self.warnings),
+            "work_dir": self.work_dir,
         }

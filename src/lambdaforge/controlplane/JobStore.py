@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from lambdaforge.controlplane.JobRecord import JobRecord
+from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 
 
 class JobStore:
@@ -23,15 +24,21 @@ class JobStore:
         """Atomically create or update the exact job record."""
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / f"{record.job_id}.json"
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-        try:
-            temporary.write_text(
-                json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        with CrossProcessFileLock(
+            path.with_suffix(".lock"),
+            shared=False,
+            timeout_seconds=10.0,
+            poll_interval_seconds=0.05,
+        ):
+            temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+            try:
+                temporary.write_text(
+                    json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
         return path
 
     def get(self, job_id: str) -> JobRecord:
@@ -63,3 +70,15 @@ class JobStore:
             except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
                 continue
         return tuple(sorted(records, key=lambda item: item.created_at_utc, reverse=True))
+
+    def delete(self, job_id: str) -> None:
+        """Delete only local metadata for one validated job id."""
+        self.get(job_id)
+        path = self.root / f"{job_id}.json"
+        with CrossProcessFileLock(
+            path.with_suffix(".lock"),
+            shared=False,
+            timeout_seconds=10.0,
+            poll_interval_seconds=0.05,
+        ):
+            path.unlink()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from torch import nn
@@ -69,15 +69,16 @@ class BatchNorm(Normalization):
         else:
             raise ValueError(f"Unsupported BatchNorm dim: {dim}")
 
-        self.norm = norm_cls(
-            num_features=num_features,
-            eps=eps,
-            momentum=momentum,
-            affine=affine,
-            track_running_stats=track_running_stats,
-            device=device,
-            dtype=dtype,
-        )
+        parameters: dict[str, Any] = {
+            "num_features": num_features,
+            "eps": eps,
+            "momentum": momentum,
+            "affine": affine,
+            "track_running_stats": track_running_stats,
+            "device": device,
+            "dtype": dtype,
+        }
+        self.norm = norm_cls(**parameters)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.norm(x)

@@ -54,4 +54,4 @@ slot. Acciones, asignaciones y límites de acciones/epochs/GPU-seconds quedan pe
 - estado se reemplaza atómicamente y eventos usan lock+fsync;
 - summary informa seeds, curvas, memoria y confirmación sin seleccionar por mtime.
 
-0.5.3 no cambia esta matemática; resuelve entornos CUDA sin alterar el HPO existente.
+0.6 no cambia esta matemática; integra la ejecución con el plano de control sin alterar el HPO.

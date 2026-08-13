@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -73,7 +74,7 @@ class TemperatureScaler(nn.Module):
             loss.backward()
             return loss
 
-        optimizer.step(closure)
+        optimizer.step(cast(Any, closure))
         with torch.no_grad():
             self.log_temperature.clamp_(
                 math.log(self.minimum_temperature), math.log(self.maximum_temperature)

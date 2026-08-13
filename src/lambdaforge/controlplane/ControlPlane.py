@@ -41,9 +41,12 @@ class ControlPlane:
         resources: ResourceRequest | None = None,
         dry_run: bool = False,
         run_arguments: Sequence[str] = (),
+        group_id: str | None = None,
     ) -> tuple[JobHandle, ExecutionBundle]:
         """Build/cache a bundle, stage it and submit the normal remote run command."""
         profile = self.catalog.get(cluster)
+        assert profile.storage is not None
+        storage = profile.storage
         transport = self.factory.transport(profile) if cluster != "local" else None
         torch_plan = (
             self.cuda_resolver.resolve(profile, transport)
@@ -58,6 +61,7 @@ class ControlPlane:
             ),
         )
         request = resources or ResourceRequest()
+        reserved_job_id: str | None = None
         work_dir: str | Path
         if cluster == "local":
             work_dir = Path(config_path).resolve().parent
@@ -72,8 +76,9 @@ class ControlPlane:
             )
             config = str(Path(config_path).resolve())
         else:
-            state_root = PurePosixPath(profile.workspace) / ".lambdaforge"
-            remote_dir = str(state_root / "bundles" / bundle.bundle_id)
+            storage = profile.storage
+            assert storage is not None
+            remote_dir = str(PurePosixPath(storage.bundle_root) / bundle.bundle_id)
             assert transport is not None
             if not dry_run:
                 created = transport.run(("mkdir", "-p", str(PurePosixPath(remote_dir).parent)))
@@ -86,7 +91,12 @@ class ControlPlane:
                     transport.put(bundle.directory, remote_dir)
             if dry_run:
                 remote_python = (
-                    str(state_root / "environments" / str(bundle.environment_id) / "bin" / "python")
+                    str(
+                        PurePosixPath(storage.environment_root)
+                        / str(bundle.environment_id)
+                        / "bin"
+                        / "python"
+                    )
                     if profile.environment == "managed"
                     else profile.python
                 )
@@ -100,6 +110,16 @@ class ControlPlane:
                 remote_python = prepared.python
             work_dir = remote_dir
             config = str(PurePosixPath(remote_dir) / "config.yaml")
+            if profile.scheduler == "slurm" and not dry_run:
+                reserved_job_id = JobService.new_id()
+                work_dir = str(PurePosixPath(storage.job_root) / reserved_job_id / "work")
+                staged = transport.run(("mkdir", "-p", str(work_dir)))
+                if staged.returncode:
+                    raise RuntimeError(f"Could not create SLURM job workspace: {staged.stderr}")
+                copied = transport.run(("cp", "-a", f"{remote_dir}/.", str(work_dir)))
+                if copied.returncode:
+                    raise RuntimeError(f"Could not stage SLURM job workspace: {copied.stderr}")
+                config = str(PurePosixPath(str(work_dir)) / "config.yaml")
             command = (
                 *profile.command_prefix,
                 remote_python,
@@ -125,7 +145,11 @@ class ControlPlane:
                 "execution_identity": f"{cluster}:{bundle.bundle_id}",
                 "remote_config_path": config,
                 "pytorch": torch_plan.to_dict() if torch_plan is not None else None,
+                "datasets": list(self._configuration_datasets(config_path)),
             },
+            job_id=reserved_job_id,
+            group_id=group_id,
+            job_type=self._configuration_type(config_path),
         )
         return handle, bundle
 
@@ -154,3 +178,20 @@ class ControlPlane:
         if isinstance(experiment, dict) and experiment.get("name"):
             return str(experiment["name"])
         return str(values.get("name", Path(config_path).stem))
+
+    @staticmethod
+    def _configuration_datasets(config_path: str | Path) -> tuple[str, ...]:
+        from lambdaforge.configuration.ProjectConfigService import ProjectConfigService
+
+        materialized = AuthoringConfig.from_yaml(config_path).materialize()
+        return ProjectConfigService.datasets(materialized.to_dict())
+
+    @staticmethod
+    def _configuration_type(config_path: str | Path) -> str:
+        materialized = AuthoringConfig.from_yaml(config_path).materialize()
+        hpo = materialized.values.get("hpo", {})
+        if isinstance(hpo, dict) and hpo.get("enabled"):
+            return "hpo"
+        if materialized.kind.value == "task" and "preprocess" in materialized.values:
+            return "preprocessing"
+        return materialized.kind.value

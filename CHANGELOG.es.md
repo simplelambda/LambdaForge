@@ -7,6 +7,36 @@ detalle para releases anteriores; esta edición mantiene el resumen operativo en
 
 ## [Sin publicar]
 
+## [0.6.0] - 2026-08-13
+
+### Añadido
+
+- Plano terminal sin servidor, ProcessScheduler asíncrono con supervisor durable, identidad/grupo
+  seguros, heartbeat/uso/logs, timeout de runtime y reconciliación.
+- Lifecycle completo de jobs, grupos multiclúster independientes, vistas globales y observación de
+  recursos directa/SLURM con admisión cooperativa CPU/RAM/GPU.
+- Datasets de primera clase con auto-registro, inventario remoto, stats/profilers explícitos,
+  verificación, linaje, CRUD y planes NOOP/REPLICATE/BUILD.
+- Descubrimiento de configs/experimentos/tasks por nombre y gestión de storage/entornos con docs
+  técnicas bilingües.
+
+### Cambiado
+
+- OpenSSH reutiliza por defecto una conexión autenticada con caducidad por inactividad; conexión,
+  auth, banner, keepalive y timeout de comando son independientes.
+- Estado, caché, work y datasets usan raíces separadas. Los entornos se construyen temporalmente,
+  se verifican antes de publicar y comparten caché pip; los entornos 0.5 siguen legibles.
+
+### Seguridad
+
+- Señales a procesos verifican PID, creación, grupo y comando. Delete de datasets y GC son preview,
+  exact-root y nunca seleccionan resultados, datasets o checkpoints retenidos.
+
+### Corregido
+
+- Compatibilidad real con Torch 2.1+ para dtypes unsigned opcionales de índices y APIs autocast
+  antiguas por dispositivo; el chequeo de tipos completo vuelve a pasar.
+
 ## [0.5.3] - 2026-08-13
 
 ### Añadido

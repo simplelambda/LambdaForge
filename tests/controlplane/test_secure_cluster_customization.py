@@ -114,9 +114,11 @@ class FakeSshClient:
         if self.failure is not None:
             raise self.failure
 
-    def exec_command(self, command: str, *, timeout: float) -> tuple[None, FakeStream, FakeStream]:
+    def exec_command(
+        self, command: str, *, timeout: float | None
+    ) -> tuple[None, FakeStream, FakeStream]:
         assert command == "cd /work && exec python train.py"
-        assert timeout == 3
+        assert timeout is None
         return None, FakeStream(b"ok\n"), FakeStream(b"")
 
     def open_sftp(self) -> FakeSftp:

@@ -50,9 +50,15 @@ class RuntimeTransport(Transport):
                 )
             ]
             return CommandResult(0, json.dumps(payload))
+        if len(command) >= 2 and "os.rename" in " ".join(command):
+            source, destination = command[-2:]
+            for path, value in tuple(self.files.items()):
+                if path == source or path.startswith(f"{source}/"):
+                    self.files[f"{destination}{path[len(source) :]}"] = value
+                    del self.files[path]
         if len(command) >= 2 and "Path(sys.argv[1]).write_text" in " ".join(command):
             self.files[command[-2]] = command[-1].encode("utf-8")
-        return CommandResult(0, "0.5.3\n")
+        return CommandResult(0, "0.6.0\n")
 
     def put(self, source: str | Path, destination: str | Path) -> None:
         del source, destination
@@ -76,7 +82,7 @@ class TestManagedRuntime051:
     """Exercise idempotence, offline policy and explicit remote artifact selection."""
 
     def test_managed_environment_is_idempotent_and_offline(self, tmp_path: Path) -> None:
-        package = tmp_path / "packages" / "lambdaforge-0.5.3-py3-none-any.whl"
+        package = tmp_path / "packages" / "lambdaforge-0.6.0-py3-none-any.whl"
         package.parent.mkdir()
         package.write_bytes(b"wheel")
         manifest = tmp_path / "manifest.json"
@@ -117,9 +123,9 @@ class TestManagedRuntime051:
             for command in transport.commands
         )
         assert sum("venv" in command for command in transport.commands) == 1
-        assert transport.files["/work/user/.lambdaforge/active-environment"].decode().strip() == (
-            first.python
-        )
+        assert transport.files[
+            "/work/user/.lambdaforge/state/active-environment"
+        ].decode().strip() == (first.python)
 
     def test_project_module_rejects_command_injection(self) -> None:
         with pytest.raises(ValueError, match="fully qualified"):

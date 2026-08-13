@@ -6,7 +6,7 @@ import hashlib
 import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import torch
@@ -209,7 +209,7 @@ class ArchitectureConformanceCase:
             model_factory=model_factory,
             inputs=inputs,
             keyword_inputs=keyword_inputs,
-            expected_output=output,
+            expected_output=cast(torch.Tensor, output),
             expected_state=state,
             source=str(payload["source"]),
             expected_parameter_count=int(payload["expected_parameter_count"]),
