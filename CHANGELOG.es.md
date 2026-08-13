@@ -11,6 +11,10 @@ detalle para releases anteriores; esta edición mantiene el resumen operativo en
 
 ### Añadido
 
+- Lifecycle genérico `PostRunAction` con checkpoint explícito, política required/optional por acción,
+  artifacts compartidos verificados, fingerprint separado y recibos seguros ante interrupción.
+- Outputs de validation desacoplados para callbacks, diagnóstico sin segundo forward y métricas
+  `val_*` normales utilizables por checkpointing/HPO.
 - Plano terminal sin servidor, ProcessScheduler asíncrono con supervisor durable, identidad/grupo
   seguros, heartbeat/uso/logs, timeout de runtime y reconciliación.
 - Lifecycle completo de jobs, grupos multiclúster independientes, vistas globales y observación de
@@ -22,6 +26,9 @@ detalle para releases anteriores; esta edición mantiene el resumen operativo en
 
 ### Cambiado
 
+- Training se confirma antes de post-run; cambiar/recuperar análisis reutiliza checkpoint sin
+  repetir fit. Sólo rank cero ejecuta acciones y HPO usa confirmation por defecto, nunca pausas o
+  cancelaciones.
 - OpenSSH reutiliza por defecto una conexión autenticada con caducidad por inactividad; conexión,
   auth, banner, keepalive y timeout de comando son independientes.
 - Estado, caché, work y datasets usan raíces separadas. Los entornos se construyen temporalmente,

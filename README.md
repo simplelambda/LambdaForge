@@ -1243,6 +1243,7 @@ The supported entry points are deliberately narrow:
 | `from lambdaforge import TaskRun, TaskResult, TaskExecutionPlan` | Validate, inspect, execute and audit one generic task. |
 | `from lambdaforge import Workflow, WorkflowPlan, WorkflowResult, WorkflowValidationReport` | Validate, plan and run a task/experiment DAG. |
 | `from lambdaforge import RunResult, AggregateResult` | Typed immutable results with legacy dict/JSON compatibility. |
+| `from lambdaforge.experiments import PostRunAction, PostRunContext, PostRunResult` | Per-run final analysis contract with stable checkpoint/artifact context. |
 | `from lambdaforge import ResultCatalog, ResultRecord` | Identity-aware discovery and explicit selection of attempt history. |
 | `from lambdaforge import ResultService, VisualizationService, PlotSpec, ArtifactService` | Stable query, plotting and safe artifact application services. |
 | `from lambdaforge import ArtifactRetentionPlan, ArtifactRetentionResult` | Typed immutable retention previews and outcomes. |
@@ -1501,6 +1502,7 @@ The example file is the canonical template. Top-level blocks are:
 | `trainer` | no | `LightningTrainConfig` fields and advanced `trainer_kwargs`. |
 | `runner` | no | Custom runner target, callbacks or runner parameters. |
 | `callbacks` | no | Additional callback objects constructed from YAML. |
+| `post_run` | no | Checkpoint-aware final actions with separate identity, artifacts and failure policy. |
 | `sweep` | no | Base inclusion, Cartesian grid and named ablations. |
 | `execution` | no | Sequential/parallel/DDP resources. |
 | `aggregation` | no | Cross-seed confidence intervals, paired tests and reliability thresholds. |
@@ -1594,6 +1596,60 @@ With `resume: true`, an incomplete run may resume from its last checkpoint. With
 `rerun_completed: false`, a successful run is skipped only if `result.json`, the selected checkpoint
 and every relative `required_artifacts` path exist. Required artifacts are generic paths; the
 framework contains no domain-specific prediction-file assumption.
+
+### Validation diagnostics and post-run analysis
+
+LambdaForge deliberately has three different extension levels:
+
+| Use | When | Examples |
+|---|---|---|
+| Lightning `callbacks` | The logic belongs to a validation/train batch or epoch | streaming diagnostics, a `val_*` HPO metric |
+| `post_run` | One successful run needs bounded final analysis on the same allocation | predictions, a report, model interpretation |
+| `Task`/`Workflow` | Work needs another allocation, cluster or independently scheduled lifecycle | large inference, export pipeline, multi-stage reconstruction |
+
+A validation callback receives the ordinary detached `model_outputs` returned by
+`LightningTask.validation_step`; it can summarize them without a second model forward and log an
+exact `val_auxiliary_score`. That column enters `metrics.csv` and can be selected as the HPO
+objective. The callback owns its memory strategy and distributed reduction. Any file-writing hook
+must check `trainer.is_global_zero`.
+
+For final per-run analysis, implement `run(PostRunContext) -> PostRunResult` and configure it:
+
+```yaml
+post_run:
+  - name: predictions
+    target: my_project.analysis.GeneratePredictions
+    params: {split: test}
+    checkpoint: best       # best (default), last, current or none
+    required: true
+    artifacts:
+      - {name: predictions, path: analysis/predictions.npz, kind: predictions}
+  - name: html-report
+    target: my_project.analysis.GenerateReport
+    params: {theme: paper}
+    checkpoint: best
+    required: false
+```
+
+The context contains the run directory, immutable materialized config, seed/variant, typed training
+result, best/last/selected checkpoint, checkpoint SHA-256 and an identity-specific state directory.
+It does not retain a live model or datamodule: project code reconstructs only what it needs from the
+config and selected checkpoint. `best` is strict and never silently falls back to `last`; `current`
+means the persisted final/current (`last`) checkpoint. Long actions can poll the live
+`context.stop_requested` cooperative-cancellation state.
+
+Training success is committed before actions begin. Each action then gets its own fingerprint and
+atomic receipt. Receipts verify artifact path, logical name, type, size, SHA-256, media type,
+producer and action identity using the shared task artifact implementation. Consequently an
+interrupted action can resume or rerun without training again, and changing only a visualization
+parameter invalidates only that action. A required failure makes `result.json` failed until the
+action succeeds; an optional failure remains visible while the trained run stays usable.
+
+Actions execute sequentially on global rank zero and reuse the training allocation. Adaptive HPO
+defaults to `confirmed_runs`; the mapping form permits explicit `scope: all_runs`. Paused or
+cancelled trials never run them. Use a callback—not a post-run metric—when HPO must optimize that
+value. See the complete contracts and neutral Python example in the
+[training guide](src/lambdaforge/training/README.md).
 
 ### Cross-seed statistical comparisons
 
@@ -2338,6 +2394,7 @@ python -c "from importlib.metadata import distribution; print(distribution('lamb
 
 - [Single-file agent manual](AGENTS.md) · [Español](AGENTS.es.md)
 - [Technical architecture and class collaboration](docs/ARCHITECTURE.md) · [Español](docs/ARCHITECTURE.es.md)
+- [Training lifecycle and post-run audit](docs/TRAINING_LIFECYCLE.md) · [Español](docs/TRAINING_LIFECYCLE.es.md)
 - [Clusters and persistent jobs](docs/CLUSTERS.md) · [Español](docs/CLUSTERS.es.md)
 - [0.6 terminal control plane](docs/CONTROL_PLANE.md) · [Español](docs/CONTROL_PLANE.es.md)
 - [Durable jobs/process scheduler](docs/JOBS.md) · [Español](docs/JOBS.es.md)

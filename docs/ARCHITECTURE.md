@@ -68,6 +68,14 @@ model, losses and metrics. `TrainingOrchestrator` owns process scheduling and im
 slot after observing completion. `EpochMetricsCSV` publishes dense learning curves with atomic
 replacement so readers never consume a partial rewrite.
 
+Loop-bound extensions remain ordinary Lightning callbacks. Validation returns detached model
+outputs so callbacks can stream diagnostics without another forward. `TrainingCompletionStore`
+commits successful training before `PostRunService` executes any configured `PostRunAction` on rank
+zero. Each action receives a stable `PostRunContext`, selects a persisted checkpoint through
+`CheckpointResolver`, returns shared artifact declarations and commits a content-verified receipt.
+Training identity and action identity are separate, so action recovery/configuration changes do not
+repeat fitting. Work requiring another allocation remains a Task/Workflow responsibility.
+
 ## 5. Adaptive optimization
 
 `AdaptiveExperimentOptimizer` persists controller state and turns each decision into an ordinary

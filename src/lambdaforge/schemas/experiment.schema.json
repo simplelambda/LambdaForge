@@ -27,6 +27,7 @@
     "execution": {"$ref": "#/$defs/execution"},
     "aggregation": {"$ref": "#/$defs/aggregation"},
     "retention": {"$ref": "#/$defs/retention", "default": {}},
+    "post_run": {"$ref": "#/$defs/postRun"},
     "metadata": {"type": "object"},
     "extensions": {"type": "object"}
   },
@@ -200,6 +201,50 @@
         "target": {"type": "string", "minLength": 3, "pattern": "^[^.]+\\..+"},
         "params": {"type": "object"}
       }
+    },
+    "artifactDeclaration": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "object",
+          "required": ["path"],
+          "additionalProperties": false,
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$"},
+            "path": {"type": "string", "minLength": 1},
+            "kind": {"enum": ["file", "directory", "dataset", "predictions", "metrics", "figure", "table", "report", "checkpoint", "other"]},
+            "media_type": {"type": ["string", "null"]},
+            "metadata": {"type": "object"}
+          }
+        }
+      ]
+    },
+    "postRunAction": {
+      "type": "object",
+      "required": ["target"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+        "target": {"type": "string", "minLength": 3, "pattern": "^[^.]+\\..+"},
+        "params": {"type": "object"},
+        "checkpoint": {"enum": ["best", "last", "current", "none"], "default": "best"},
+        "required": {"type": "boolean", "default": true},
+        "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifactDeclaration"}}
+      }
+    },
+    "postRun": {
+      "oneOf": [
+        {"type": "array", "items": {"$ref": "#/$defs/postRunAction"}},
+        {
+          "type": "object",
+          "required": ["actions"],
+          "additionalProperties": false,
+          "properties": {
+            "scope": {"enum": ["confirmed_runs", "all_runs"], "default": "confirmed_runs"},
+            "actions": {"type": "array", "items": {"$ref": "#/$defs/postRunAction"}}
+          }
+        }
+      ]
     },
     "experiment": {
       "type": "object",

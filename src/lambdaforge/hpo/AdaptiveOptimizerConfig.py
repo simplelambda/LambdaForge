@@ -284,7 +284,7 @@ class AdaptiveOptimizerConfig:
         base_payload = {
             key: value
             for key, value in base.items()
-            if key not in {"execution", "aggregation", "retention", "metadata", "hpo"}
+            if key not in {"execution", "aggregation", "retention", "metadata", "hpo", "post_run"}
         }
         payload = json.dumps(
             {"base": base_payload, "hpo": scientific_hpo},

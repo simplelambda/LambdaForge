@@ -525,6 +525,17 @@ class ExperimentRunner:
                 if completed is None:
                     return None
                 result = completed
+            elif result.status is RunStatus.FAILED:
+                from lambdaforge.experiments.postrun.PostRunService import PostRunService
+                from lambdaforge.experiments.postrun.TrainingCompletionStore import (
+                    TrainingCompletionStore,
+                )
+
+                if (
+                    PostRunService().configuration_fingerprint(run_config) is not None
+                    and TrainingCompletionStore().load(run_config, run_dir) is not None
+                ):
+                    return None
             elif not result.is_terminal:
                 return None
             results.append(
@@ -589,8 +600,13 @@ class ExperimentRunner:
             artifact_path = (run_dir / str(artifact)).resolve()
             if not artifact_path.is_relative_to(resolved_run_dir):
                 raise ValueError("Required artifact paths must remain inside the run directory.")
-            if not artifact_path.exists():
+            if not artifact_path.exists() or artifact_path.is_symlink():
                 return None
+
+        from lambdaforge.experiments.postrun.PostRunService import PostRunService
+
+        if not PostRunService().is_complete(config, result):
+            return None
 
         if result.config_fingerprint is None:
             return result.with_updates(
@@ -767,6 +783,39 @@ class ExperimentRunner:
 
         self._write_hparams(config, run_dir)
 
+        from lambdaforge.experiments.postrun.PostRunService import PostRunService
+        from lambdaforge.experiments.postrun.TrainingCompletionStore import (
+            TrainingCompletionStore,
+        )
+
+        training_store = TrainingCompletionStore()
+        reusable_training = training_store.load(config, run_dir)
+        if reusable_training is not None:
+            print(
+                f"Reusing completed training; reconciling post-run actions: {run_dir}",
+                flush=True,
+            )
+            plugins = PluginRegistry.default()
+            with plugins.usage_session() as plugin_usage:
+                result = (
+                    PostRunService().run(
+                        config,
+                        reusable_training,
+                        plugins=plugins,
+                        stop_event=stop_event,
+                    )
+                    if PostRunService().should_run_for_materialized_adaptive(
+                        config, reusable_training
+                    )
+                    else reusable_training
+                )
+                self._write_environment_manifest(
+                    run_dir,
+                    environment.with_plugins(plugin_usage.descriptors()),
+                )
+            result.write_json(run_dir / "result.json")
+            return result
+
         t0 = time.perf_counter()
         started_at_utc = datetime.now(timezone.utc).isoformat()
         attempt_id = (
@@ -845,6 +894,10 @@ class ExperimentRunner:
                     config_fingerprint=config_fingerprint,
                     started_at_utc=started_at_utc,
                     finished_at_utc=datetime.now(timezone.utc).isoformat(),
+                    extra={
+                        "trainer_stopped_early": bool(getattr(trainer, "should_stop", False))
+                        and not interrupted
+                    },
                 )
             except BaseException:
                 try:
@@ -860,12 +913,25 @@ class ExperimentRunner:
                     )
                 raise
 
-            self._write_environment_manifest(
-                run_dir,
-                environment.with_plugins(plugin_usage.descriptors()),
-            )
+            is_global_zero = bool(getattr(trainer, "is_global_zero", True))
+            if is_global_zero and result.status is RunStatus.OK:
+                training_store.write(config, result)
+                if PostRunService().should_run_for_materialized_adaptive(config, result):
+                    result = PostRunService().run(
+                        config,
+                        result,
+                        plugins=plugins,
+                        stop_event=stop_event,
+                    )
 
-        result.write_json(run_dir / "result.json")
+            if is_global_zero:
+                self._write_environment_manifest(
+                    run_dir,
+                    environment.with_plugins(plugin_usage.descriptors()),
+                )
+
+        if is_global_zero:
+            result.write_json(run_dir / "result.json")
         return result
 
     def run_experiment_config(

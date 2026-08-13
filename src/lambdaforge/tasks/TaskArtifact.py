@@ -21,6 +21,7 @@ class TaskArtifact(JsonResult):
         self,
         *,
         path: str,
+        name: str | None = None,
         kind: ArtifactType | str,
         sha256: str,
         size_bytes: int,
@@ -34,6 +35,9 @@ class TaskArtifact(JsonResult):
         if isinstance(size_bytes, bool) or int(size_bytes) < 0:
             raise ValueError("Task artifact size_bytes must be non-negative.")
         self.path = Path(path).as_posix()
+        self.name = str(name).strip() if name is not None else None
+        if self.name is not None and (not self.name or "/" in self.name or "\\" in self.name):
+            raise ValueError("Task artifact logical names must be non-empty path-free strings.")
         self.kind = ArtifactType(kind)
         self.sha256 = sha256
         self.size_bytes = int(size_bytes)
@@ -65,6 +69,7 @@ class TaskArtifact(JsonResult):
         kind = inferred if declared.kind is ArtifactType.OTHER else declared.kind
         return cls(
             path=path.relative_to(root).as_posix(),
+            name=declared.name,
             kind=kind,
             sha256=digest,
             size_bytes=size,
@@ -77,6 +82,7 @@ class TaskArtifact(JsonResult):
         """Restore an artifact from its persisted JSON mapping."""
         return cls(
             path=str(value["path"]),
+            name=value.get("name"),
             kind=str(value["kind"]),
             sha256=str(value["sha256"]),
             size_bytes=int(value["size_bytes"]),
@@ -93,6 +99,8 @@ class TaskArtifact(JsonResult):
             "size_bytes": self.size_bytes,
             "metadata": copy.deepcopy(self.metadata),
         }
+        if self.name is not None:
+            payload["name"] = self.name
         if self.media_type is not None:
             payload["media_type"] = self.media_type
         return payload

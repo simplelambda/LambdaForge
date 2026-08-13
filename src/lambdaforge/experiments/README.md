@@ -42,6 +42,7 @@ class. The safe lifecycle is validate → inspect → dry-run → run → audit 
 | `Experiment` | Public handle for expand, run, aggregate, retention and load operations. |
 | `ExperimentConfig` | Own YAML loading, dotted paths, validation and suite expansion. |
 | `ExperimentValidator` | Validate Schema, expansion, resources and imports without side effects. |
+| `PostRunService` | Reconcile checkpoint-aware per-run actions and verified artifact receipts. |
 | `ValidationReport` | Immutable human/JSON-readable validation result. |
 | `ExperimentConfigMigrator` | Plan, apply and validate exact forward Schema migrations without user imports. |
 | `ExperimentConfigMigrationResult` | Immutable diff/YAML/JSON preview and explicit atomic YAML persistence. |
@@ -197,7 +198,8 @@ A run is complete only when:
 1. `result.json` has status `ok`;
 2. its stored or legacy-materialised scientific fingerprint matches the expanded config;
 3. the result's selected checkpoint exists when checkpointing is required; and
-4. every path in `experiment.required_artifacts` exists inside the run directory.
+4. every current required post-run action has a matching successful verified receipt; and
+5. every path in `experiment.required_artifacts` exists inside the run directory.
 
 With `rerun_completed: false`, complete runs are skipped. With `resume: true`, incomplete runs use a
 usable last checkpoint when one exists. Failure handling writes a terminal failure result and the
@@ -249,7 +251,9 @@ complete `summary.json` envelope.
 output paths, checkpoint/retry controls, execution scheduling, aggregation, retention and
 descriptive metadata; those change how an attempt is operated, not the scientific calculation.
 Expanded seed, data, model, losses, metrics, optimizer, scheduler, task, trainer, runner, callbacks
-and `extensions` remain identity-bearing. Changing one prevents stale completion reuse.
+and `extensions` remain identity-bearing. `post_run` is deliberately separate: each action combines
+that training identity with its own target/params/policy and selected checkpoint digest. Changing
+one action reconciles post-processing without refitting.
 
 Before a retry replaces the canonical terminal marker, LambdaForge archives it under
 `<run>/.lambdaforge/attempts/result-<attempt-id>.json`. The canonical `result.json` is the current

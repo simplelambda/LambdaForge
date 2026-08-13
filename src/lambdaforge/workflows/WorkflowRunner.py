@@ -155,11 +155,17 @@ class WorkflowRunner:
             "ok" if payloads and all(item.get("status") == "ok" for item in payloads) else "failed"
         )
         metrics = payloads[-1].get("final_metrics", {}) if payloads else {}
+        artifacts = [
+            artifact
+            for payload in payloads
+            for artifact in payload.get("artifacts", [])
+            if isinstance(artifact, dict)
+        ]
         return {
             "status": status,
             "outputs": {},
             "metrics": metrics,
-            "artifacts": [],
+            "artifacts": artifacts,
             "results": payloads,
         }
 

@@ -16,6 +16,7 @@ class ArtifactDeclaration:
     """Declare a run-relative output for safe hashing after task completion."""
 
     path: str | Path
+    name: str | None = None
     kind: ArtifactType | str = ArtifactType.OTHER
     media_type: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -25,6 +26,11 @@ class ArtifactDeclaration:
         if relative.is_absolute() or not relative.parts or ".." in relative.parts:
             raise ValueError("Artifact paths must be non-empty and relative to the task run.")
         object.__setattr__(self, "path", relative.as_posix())
+        if self.name is not None:
+            name = str(self.name).strip()
+            if not name or "/" in name or "\\" in name:
+                raise ValueError("Artifact logical names must be non-empty path-free strings.")
+            object.__setattr__(self, "name", name)
         object.__setattr__(self, "kind", ArtifactType(self.kind))
         if self.media_type is not None and not str(self.media_type).strip():
             raise ValueError("Artifact media_type cannot be empty when provided.")
@@ -44,11 +50,12 @@ class ArtifactDeclaration:
             raise TypeError("Artifacts must be paths, mappings or ArtifactDeclaration objects.")
         if "path" not in value:
             raise ValueError("Artifact mappings require a 'path'.")
-        unexpected = set(value) - {"path", "kind", "media_type", "metadata"}
+        unexpected = set(value) - {"name", "path", "kind", "media_type", "metadata"}
         if unexpected:
             raise ValueError(f"Unexpected artifact declaration keys: {sorted(unexpected)}.")
         return cls(
             path=value["path"],
+            name=value.get("name"),
             kind=value.get("kind", ArtifactType.OTHER),
             media_type=value.get("media_type"),
             metadata=value.get("metadata", {}),

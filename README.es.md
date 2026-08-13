@@ -1062,6 +1062,7 @@ Los puntos de entrada admitidos son deliberadamente reducidos:
 | `from lambdaforge import TaskRun, TaskResult, TaskExecutionPlan` | Validar, inspeccionar, ejecutar y auditar una tarea genérica. |
 | `from lambdaforge import Workflow, WorkflowPlan, WorkflowResult, WorkflowValidationReport` | Validar, planificar y ejecutar un DAG task/experiment. |
 | `from lambdaforge import RunResult, AggregateResult` | Resultados tipados e inmutables compatibles con dict/JSON legado. |
+| `from lambdaforge.experiments import PostRunAction, PostRunContext, PostRunResult` | Contrato de análisis final por run con contexto estable de checkpoint/artifacts. |
 | `from lambdaforge import ResultCatalog, ResultRecord` | Discovery por identidad y selección explícita del historial de intentos. |
 | `from lambdaforge import ResultService, VisualizationService, PlotSpec, ArtifactService` | Servicios estables de consulta, plots e inspección. |
 | `from lambdaforge import ArtifactRetentionPlan, ArtifactRetentionResult` | Previsualizaciones y resultados tipados e inmutables de retención. |
@@ -1299,6 +1300,7 @@ El archivo de ejemplo es la plantilla canónica. Sus bloques superiores son:
 | `trainer` | no | Campos de `LightningTrainConfig` y `trainer_kwargs` avanzados. |
 | `runner` | no | Runner personalizado, callbacks o parámetros. |
 | `callbacks` | no | Objetos callback adicionales construidos desde YAML. |
+| `post_run` | no | Acciones finales con checkpoint, identidad, artifacts y política de fallo propias. |
 | `sweep` | no | Inclusión de base, producto cartesiano y ablaciones. |
 | `execution` | no | Recursos secuenciales, paralelos o DDP. |
 | `aggregation` | no | Intervalos, pruebas pareadas y umbrales de fiabilidad entre semillas. |
@@ -1392,6 +1394,59 @@ Con `resume: true`, una ejecución incompleta puede continuar desde su último c
 `rerun_completed: false`, una ejecución correcta solo se omite si existen `result.json`, el
 checkpoint seleccionado y todas las rutas relativas de `required_artifacts`. Esas rutas son
 genéricas; el framework no presupone ningún archivo de predicciones propio de un dominio.
+
+### Diagnósticos de validation y análisis post-run
+
+LambdaForge separa deliberadamente tres niveles de extensión:
+
+| Usa | Cuándo | Ejemplos |
+|---|---|---|
+| `callbacks` Lightning | La lógica pertenece a un batch/época de validation o training | diagnóstico incremental, métrica `val_*` para HPO |
+| `post_run` | Un run correcto necesita análisis final acotado en el mismo allocation | predicciones, informe, interpretación |
+| `Task`/`Workflow` | El trabajo necesita otro allocation/clúster o lifecycle independiente | inferencia grande, export, reconstrucción por fases |
+
+Un callback de validation recibe los `model_outputs` desacoplados del forward normal de
+`LightningTask.validation_step`; puede resumirlos sin un segundo forward y publicar, por ejemplo,
+`val_auxiliary_score`. Esa columna entra en `metrics.csv` y puede ser objetivo HPO. El proyecto
+decide memoria y reducción distribuida; cualquier escritura debe comprobar
+`trainer.is_global_zero`.
+
+Para análisis final por run, implementa `run(PostRunContext) -> PostRunResult`:
+
+```yaml
+post_run:
+  - name: predictions
+    target: my_project.analysis.GeneratePredictions
+    params: {split: test}
+    checkpoint: best       # best (default), last, current o none
+    required: true
+    artifacts:
+      - {name: predictions, path: analysis/predictions.npz, kind: predictions}
+  - name: html-report
+    target: my_project.analysis.GenerateReport
+    params: {theme: paper}
+    checkpoint: best
+    required: false
+```
+
+El contexto contiene run, configuración materializada inmutable, seed/variant, resultado de
+training tipado, checkpoints best/last/seleccionado, SHA-256 y un directorio de estado propio de la
+identidad. No retiene modelo ni datamodule vivos: el proyecto reconstruye sólo lo necesario. `best`
+es estricto y no cae silenciosamente a `last`; `current` significa el estado final/actual persistido
+(`last`). Las acciones largas pueden consultar el estado vivo de cancelación cooperativa mediante
+`context.stop_requested`.
+
+El éxito de training se confirma antes de iniciar acciones. Cada acción posee fingerprint y recibo
+atómico propios. El recibo verifica path, nombre lógico, tipo, tamaño, SHA-256, media type, productor
+e identidad con el sistema compartido de artifacts. Una interrupción puede reanudar/repetir sólo la
+acción, y cambiar un gráfico no repite training. Un fallo required deja `result.json` fallido hasta
+resolverlo; uno optional queda visible y mantiene utilizable el modelo entrenado.
+
+Las acciones son secuenciales, sólo en rank global cero y reutilizan el allocation. HPO adaptativo
+usa `confirmed_runs` por defecto; la forma mapping permite `scope: all_runs`. Pausas y cancelaciones
+no ejecutan acciones. Si HPO debe optimizar una métrica, publícala desde un callback, no post-run.
+Consulta el contrato y ejemplo Python completos en la
+[guía de entrenamiento](src/lambdaforge/training/README.es.md).
 
 ### Comparaciones estadísticas entre semillas
 
@@ -2142,6 +2197,7 @@ python -c "from importlib.metadata import distribution; print(distribution('lamb
 
 - [Manual de agentes](AGENTS.es.md) · [English](AGENTS.md)
 - [Arquitectura técnica](docs/ARCHITECTURE.es.md) · [English](docs/ARCHITECTURE.md)
+- [Lifecycle de training y auditoría post-run](docs/TRAINING_LIFECYCLE.es.md) · [English](docs/TRAINING_LIFECYCLE.md)
 - [Clusters y jobs](docs/CLUSTERS.es.md) · [English](docs/CLUSTERS.md)
 - [Plano de control terminal 0.6](docs/CONTROL_PLANE.es.md) · [English](docs/CONTROL_PLANE.md)
 - [Jobs durables/ProcessScheduler](docs/JOBS.es.md) · [English](docs/JOBS.md)

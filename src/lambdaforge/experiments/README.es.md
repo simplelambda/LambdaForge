@@ -43,6 +43,7 @@ de forma explícita.
 | `Experiment` | Fachada pública para expandir, ejecutar, agregar, retener y cargar. |
 | `ExperimentConfig` | Carga YAML, rutas con puntos, validación y expansión. |
 | `ExperimentValidator` | Validación de Schema, expansión, recursos e imports sin efectos laterales. |
+| `PostRunService` | Reconcilia acciones por run con checkpoint y recibos de artifacts verificados. |
 | `ValidationReport` | Resultado inmutable legible por personas o como JSON. |
 | `ExperimentConfigMigrator` | Planificación, aplicación y validación de migraciones exactas hacia delante sin imports del usuario. |
 | `ExperimentConfigMigrationResult` | Preview inmutable diff/YAML/JSON y persistencia YAML atómica explícita. |
@@ -197,7 +198,8 @@ Una ejecución solo está completa cuando:
 1. `result.json` tiene estado `ok`;
 2. su fingerprint científico guardado o recuperado del YAML materializado coincide con el config;
 3. existe el checkpoint seleccionado si la política lo exige; y
-4. existen dentro del directorio todas las rutas de `experiment.required_artifacts`.
+4. cada acción post-run required actual tiene recibo correcto y verificado; y
+5. existen dentro del directorio todas las rutas de `experiment.required_artifacts`.
 
 Con `rerun_completed: false` se omiten las completas. Con `resume: true`, una incompleta usa el
 último checkpoint válido si existe. Los fallos producen un resultado terminal y la suite puede
@@ -248,7 +250,9 @@ variantes como el sobre completo de `summary.json`.
 rutas de salida, controles de checkpoint/reintento, planificación, agregación, retención y metadata
 descriptiva: modifican cómo se opera el intento, no el cálculo científico. Semilla expandida, datos,
 modelo, losses, métricas, optimizador, scheduler, task, trainer, runner, callbacks y `extensions` sí
-forman parte de la identidad. Cambiarlos impide reutilizar una finalización obsoleta.
+forman parte de la identidad. `post_run` queda separado: cada acción combina esa identidad de
+training con target/params/política propios y digest del checkpoint. Cambiarla reconcilia
+postprocesado sin repetir fit.
 
 Antes de que un reintento sustituya el marcador terminal canónico, LambdaForge lo archiva en
 `<run>/.lambdaforge/attempts/result-<attempt-id>.json`. `result.json` representa el intento actual;

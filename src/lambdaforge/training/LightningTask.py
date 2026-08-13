@@ -202,7 +202,8 @@ class LightningTask(LightningModuleBase):
 
         return loss
 
-    def validation_step(self, batch: Mapping[str, Any], batch_idx: int) -> torch.Tensor:
+    def validation_step(self, batch: Mapping[str, Any], batch_idx: int) -> Mapping[str, Any]:
+        """Evaluate once and expose detached model outputs to project callbacks."""
         outputs = self.forward_model(batch)
         loss, loss_values = self.compute_loss_breakdown(outputs, batch)
         self.log_losses("val", loss, loss_values, batch)
@@ -213,7 +214,7 @@ class LightningTask(LightningModuleBase):
         for metric in self.val_metrics:
             metric.update(detached_outputs, detached_batch, self)
 
-        return loss
+        return {"loss": loss.detach(), "model_outputs": detached_outputs}
 
     def test_step(self, batch: Mapping[str, Any], batch_idx: int) -> torch.Tensor:
         outputs = self.forward_model(batch)

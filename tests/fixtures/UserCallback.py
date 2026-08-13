@@ -15,5 +15,7 @@ class UserCallback(CallbackBase):
 
     def on_fit_end(self, trainer: Any, pl_module: Any) -> None:
         """Persist the integration marker."""
-        del trainer, pl_module
+        del pl_module
+        if not bool(getattr(trainer, "is_global_zero", True)):
+            return
         self.marker_path.write_text("callback invoked", encoding="utf-8")

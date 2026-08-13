@@ -15,8 +15,9 @@ seed/sweep/HPO expansion, workflow DAGs, CPU/GPU/SLURM planning, training, aggre
 comparisons, tracking, result auditing, checkpoint/model operations, artifact stores/cache and
 retention. Version 0.6 also provides concise authoring, logical data/code identity, durable direct
 process jobs, SSH connection reuse, global resource views, first-class datasets, config discovery
-and safe internal-storage lifecycle. A consumer project owns its datasets and domain
-code.
+and safe internal-storage lifecycle. Training also exposes validation outputs to project callbacks
+and checkpoint-aware `post_run` actions with independent resume/artifact identity. A consumer
+project owns its datasets and domain code.
 
 Supported Python starts at 3.10. The documented public namespaces are `lambdaforge`,
 `lambdaforge.data`, `lambdaforge.nn`, `lambdaforge.metrics`, `lambdaforge.training`,
@@ -60,6 +61,9 @@ from private file locations.
 | Remove/compress artifacts | preview `lambdaforge retain ...`; apply only with `--apply` |
 | Load a trained model | `Experiment.load_model(seed=..., variant=..., which="best")` |
 | Add a model/loss/metric | follow the contracts below; reference it by importable `target` |
+| Add batch/epoch validation logic | project Lightning `Callback`; log an exact `val_*` name |
+| Analyze each successful run | `PostRunAction`; return `PostRunResult` artifacts |
+| Run heavy/different-resource analysis | independent `Task`/`Workflow`, not `post_run` |
 | Diagnose this or a remote environment | `lambdaforge doctor [--on CLUSTER]` |
 | Preview/submit remote work | `lambdaforge run CONFIG --on CLUSTER --dry-run`; remove dry-run to submit |
 | Reconnect to scheduled work | `lambdaforge jobs list/status/logs/cancel/retry` |
@@ -344,6 +348,28 @@ plan = task.inspect()
 result = task.run()
 records = task.result_catalog().records(include_archived=True)
 ```
+
+## Training lifecycle extension decision
+
+Use a project Lightning callback for batch/epoch hooks. `LightningTask.validation_step` returns a
+mapping with detached `model_outputs` and `loss`, so `on_validation_batch_end` can stream existing
+predictions without another forward. Keep state bounded, reduce distributed metrics explicitly,
+write files only when `trainer.is_global_zero`, and log HPO objectives through the normal exact
+`val_*` contract.
+
+Use `post_run` only for bounded same-allocation work after one successful run. A target implements
+`run(PostRunContext) -> PostRunResult`; the context contains immutable config/result, run directory,
+seed/variant, strict best/last/current/none checkpoint selection and SHA-256, plus an
+identity-specific state directory. Return shared `ArtifactDeclaration` values. `required: true`
+failure keeps the run non-successful; optional failure is recorded but usable. Training and action
+fingerprints are separate, so a changed report reruns only that action. Receipts verify artifacts
+and recover after interruption. Actions are rank-zero and sequential.
+
+For adaptive HPO, list-form `post_run` defaults to confirmation runs. The mapping form accepts
+`scope: confirmed_runs|all_runs`; pauses/cancellations never execute actions. Post-run metrics do
+not feed HPO decisions—use a validation callback. Use a Task/Workflow when work needs another
+cluster, GPU count, long schedule or dependent stages. Read
+`src/lambdaforge/training/README.md` only when exact YAML/Python examples are needed.
 
 ## Adaptive optimization contract
 
@@ -778,6 +804,7 @@ For reusable installed extensions, publish classes under these entry-point group
 - Experiment system: strict Schema validation, versioned migrations, recursive object factory,
   seeds/grids/ablations, sequential/parallel/DDP execution, cancellation and process-tree cleanup,
   environment/plugin provenance, epoch CSVs/checkpoints, typed results, aggregation/plots,
+  callback validation outputs, independently fingerprinted checkpoint-aware post-run actions,
   paired sign/Wilcoxon tests, normal/bootstrap intervals, power estimates, result catalog and
   preview-first transactional retention.
 - Generic work: independent task Schema, immutable plans, facade/CLI dispatch, atomic results,

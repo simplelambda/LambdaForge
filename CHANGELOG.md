@@ -14,6 +14,10 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Generic `PostRunAction` lifecycle with explicit checkpoint roles, per-action required/optional
+  policy, content-verified shared artifacts, independent fingerprints and interruption-safe receipts.
+- Detached validation outputs for project callbacks, enabling one-forward streaming diagnostics and
+  ordinary `val_*` metrics usable by checkpointing and adaptive HPO.
 - Serverless terminal control plane with a detached per-job `ProcessSupervisor`, durable remote
   state/logs/heartbeats/usage, safe process identity/groups, runtime timeouts and recovery inventory.
 - Complete job lifecycle commands for show, pause, resume, cancel, retry, local metadata deletion,
@@ -29,6 +33,9 @@ metadata rather than invented release numbers.
 
 ### Changed
 
+- Training success is durably committed before post-run actions; changing or recovering final
+  analysis reuses the checkpoint instead of repeating fit. Actions are rank-zero and adaptive HPO
+  defaults them to confirmation trials, never multi-fidelity pauses or cancellations.
 - OpenSSH now enables private idle-expiring connection multiplexing by default. Connect,
   authentication, banner, keepalive and command timeouts are independent; scientific commands have
   no implicit transport deadline.

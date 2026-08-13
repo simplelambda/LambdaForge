@@ -1,13 +1,16 @@
 """End-to-end YAML customization and public extension contract tests."""
 
+import csv
 import importlib.metadata as metadata
 import json
 from types import SimpleNamespace
 
 from lambdaforge.experiments import ExperimentRunner, ObjectFactory
+from lambdaforge.hpo.AdaptiveObservationReader import AdaptiveObservationReader
 from lambdaforge.metrics import MetricAlias
 from lambdaforge.plugins import PluginKind, PluginRegistry
 from lambdaforge.training.callbacks import LogKeyFilter
+from tests.fixtures.UserCallback import UserCallback
 
 
 class TestCustomization:
@@ -35,6 +38,60 @@ class TestCustomization:
         assert selector.accepts("epoch_time_s")
         assert not selector.accepts("val_loss_aux")
         assert not selector.accepts("train_accuracy")
+
+    def test_project_callback_artifact_is_rank_zero_only(self, tmp_path) -> None:
+        marker = tmp_path / "rank-zero.txt"
+        callback = UserCallback(str(marker))
+        callback.on_fit_end(SimpleNamespace(is_global_zero=False), object())
+        assert not marker.exists()
+        callback.on_fit_end(SimpleNamespace(is_global_zero=True), object())
+        assert marker.read_text(encoding="utf-8") == "callback invoked"
+
+    def test_validation_callback_reuses_outputs_and_publishes_hpo_metric(self, tmp_path) -> None:
+        marker = tmp_path / "auxiliary.txt"
+        config = {
+            "experiment": {
+                "name": "callback_outputs",
+                "output_root": str(tmp_path / "runs"),
+                "seed": 5,
+                "variant": "base",
+            },
+            "data": {
+                "train": {"target": "tests.fixtures.TinyMappingDataset.TinyMappingDataset"},
+                "val": {"target": "tests.fixtures.TinyMappingDataset.TinyMappingDataset"},
+                "datamodule": {"params": {"batch_size": 8, "num_workers": 0}},
+            },
+            "model": {"target": "tests.fixtures.UserModel.UserModel"},
+            "losses": [{"target": "tests.fixtures.UserLoss.UserLoss"}],
+            "task": {"params": {"model_input_key": "x"}},
+            "trainer": {
+                "max_epochs": 1,
+                "accelerator": "cpu",
+                "devices": 1,
+                "checkpoint_policy": "none",
+                "print_epoch_table": False,
+                "enable_progress_bar": False,
+                "num_sanity_val_steps": 0,
+                "trainer_kwargs": {"enable_model_summary": False},
+            },
+            "callbacks": [
+                {
+                    "target": (
+                        "tests.fixtures.ValidationAuxiliaryCallback.ValidationAuxiliaryCallback"
+                    ),
+                    "params": {"artifact_path": str(marker)},
+                }
+            ],
+        }
+
+        result = ExperimentRunner().run_single_experiment(config)
+        metrics_path = tmp_path / "runs" / "callback_outputs" / "base" / "seed=5" / "metrics.csv"
+        rows = list(csv.DictReader(metrics_path.open(encoding="utf-8")))
+
+        assert result.status.value == "ok"
+        assert marker.read_text(encoding="utf-8") == "rank-zero"
+        assert rows and rows[-1]["val_auxiliary_score"]
+        assert AdaptiveObservationReader._curve(metrics_path, "val_auxiliary_score")
 
     def test_external_model_loss_metric_logger_and_callback_from_yaml(self, tmp_path) -> None:
         marker = tmp_path / "callback.txt"

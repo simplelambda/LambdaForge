@@ -39,6 +39,12 @@ if TYPE_CHECKING:
         MigrationPreviewFormat,
     )
     from lambdaforge.experiments.ObjectFactory import ObjectFactory
+    from lambdaforge.experiments.postrun.PostRunAction import PostRunAction
+    from lambdaforge.experiments.postrun.PostRunActionReceipt import PostRunActionReceipt
+    from lambdaforge.experiments.postrun.PostRunCheckpoint import PostRunCheckpoint
+    from lambdaforge.experiments.postrun.PostRunContext import PostRunContext
+    from lambdaforge.experiments.postrun.PostRunResult import PostRunResult
+    from lambdaforge.experiments.postrun.PostRunService import PostRunService
     from lambdaforge.experiments.results.ResultCatalog import ResultCatalog
     from lambdaforge.experiments.results.ResultRecord import ResultRecord
     from lambdaforge.experiments.results.RunFingerprint import RunFingerprint
@@ -113,6 +119,30 @@ LazyExports.install(
                 "VariantAggregateResult",
             )
         },
+        "PostRunAction": (
+            "lambdaforge.experiments.postrun.PostRunAction",
+            "PostRunAction",
+        ),
+        "PostRunActionReceipt": (
+            "lambdaforge.experiments.postrun.PostRunActionReceipt",
+            "PostRunActionReceipt",
+        ),
+        "PostRunCheckpoint": (
+            "lambdaforge.experiments.postrun.PostRunCheckpoint",
+            "PostRunCheckpoint",
+        ),
+        "PostRunContext": (
+            "lambdaforge.experiments.postrun.PostRunContext",
+            "PostRunContext",
+        ),
+        "PostRunResult": (
+            "lambdaforge.experiments.postrun.PostRunResult",
+            "PostRunResult",
+        ),
+        "PostRunService": (
+            "lambdaforge.experiments.postrun.PostRunService",
+            "PostRunService",
+        ),
         "ResultCatalog": (
             "lambdaforge.experiments.results.ResultCatalog",
             "ResultCatalog",
@@ -276,6 +306,12 @@ __all__ = [
     "ResultRecord",
     "RunFingerprint",
     "StatisticalComparisonConfig",
+    "PostRunAction",
+    "PostRunActionReceipt",
+    "PostRunCheckpoint",
+    "PostRunContext",
+    "PostRunResult",
+    "PostRunService",
     "ValidationReport",
     "VariantAggregateResult",
     "WilcoxonCalculation",

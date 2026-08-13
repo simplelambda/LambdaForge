@@ -122,6 +122,9 @@ class ExperimentValidator:
                 )
 
                 ArtifactRetentionPolicy.from_config(normalized)
+                from lambdaforge.experiments.postrun.PostRunService import PostRunService
+
+                PostRunService().configuration_fingerprint(normalized)
             except Exception as error:
                 errors.append(self._format_error(error))
 
@@ -168,7 +171,15 @@ class ExperimentValidator:
             config, "execution.gpus"
         ):
             raise ValueError("An enabled hpo memory probe policy requires explicit execution.gpus.")
-        forbidden = {"hpo", "sweep", "execution", "retention", "aggregation", "metadata"}
+        forbidden = {
+            "hpo",
+            "sweep",
+            "execution",
+            "retention",
+            "aggregation",
+            "metadata",
+            "post_run",
+        }
         for parameter in optimizer.space.parameters:
             if parameter.path.split(".", 1)[0] in forbidden:
                 raise ValueError(

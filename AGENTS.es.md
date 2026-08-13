@@ -11,7 +11,9 @@ después inspecciona la firma/docstring del símbolo público concreto.
 LambdaForge 0.6.0 es una biblioteca instalable PyTorch/Lightning para tasks genéricas,
 preprocesado, training, workflows, sweeps/HPO, ejecución CPU/GPU/SLURM, resultados, plots,
 artifacts, reproducibilidad y control explícito de clusters. El proyecto consumidor posee modelos,
-datasets y código de dominio. Python >=3.10. Importa sólo desde estos namespaces públicos:
+datasets y código de dominio. Training expone outputs de validation a callbacks del proyecto y
+acciones `post_run` con checkpoint, artifacts y reanudación independientes. Python >=3.10. Importa
+sólo desde estos namespaces públicos:
 `lambdaforge.configuration`, `lambdaforge.controlplane`, `lambdaforge.data`,
 `lambdaforge.execution`, `lambdaforge.experiments`, `lambdaforge.hpo`,
 `lambdaforge.integrations`, `lambdaforge.results`, `lambdaforge.visualization`,
@@ -61,6 +63,9 @@ consumidor fija la wheel correcta de PyTorch. `nvidia-smi` sólo prueba driver; 
 | Remoto ligero | `results sync JOB`; luego fetch explícito de artifact pesado |
 | HPO adaptativo | `hpo.enabled: true`; `examples/adaptive-hpo.yaml` |
 | Inferencia/eval/export | tasks de `lambdaforge.operations` |
+| Lógica de batch/época | `Callback` Lightning del proyecto; publica `val_*` exacto |
+| Análisis de cada run correcto | `PostRunAction`; devuelve artifacts en `PostRunResult` |
+| Análisis pesado/otros recursos | `Task`/`Workflow` independiente, no `post_run` |
 | Limpiar artifacts | `retain` preview; `retain --apply` sólo tras revisar |
 
 En `resources` se aceptan `cpu`/`cpus`, `ram`/`memory`, `gpu`/`gpus`, `gpu_memory`, `storage`,
@@ -193,6 +198,26 @@ preview. `storage gc` sólo considera caché reconstruible sin referencias; nunc
 resultados, checkpoints o work activo. Repetir `--on` crea un job group de réplicas independientes;
 HPO exige `--independent-hpo`. No hay placement automático, workflow multiclúster durable, HPO
 multiclúster coordinado, daemon, servidor o GUI en 0.6.
+
+## Decisión de extensión del lifecycle de training
+
+Usa un callback Lightning del proyecto para hooks de batch/época. `validation_step` devuelve
+`model_outputs` desacoplados y `loss`; `on_validation_batch_end` puede consumir esas predicciones
+sin segundo forward. Mantén memoria acotada, reduce explícitamente en DDP, escribe sólo con
+`trainer.is_global_zero` y publica objetivos HPO mediante el contrato exacto `val_*`.
+
+Usa `post_run` para trabajo acotado con el mismo allocation después de un run correcto. El target
+implementa `run(PostRunContext) -> PostRunResult`. El contexto contiene config/result inmutables,
+run, seed/variant, selección estricta best/last/current/none, SHA-256 y state dir por identidad. Los
+artifacts reutilizan `ArtifactDeclaration`/`TaskArtifact`. Un fallo required impide éxito; uno
+optional queda registrado. Training y acción tienen fingerprints separados: cambiar un informe no
+reentrena. Los recibos permiten repetir sólo acciones ausentes tras una interrupción. Sólo rank cero
+ejecuta acciones y se hacen secuencialmente.
+
+En HPO, la lista `post_run` usa confirmation por defecto; la forma mapping admite
+`scope: confirmed_runs|all_runs`. Pausas/cancelaciones no ejecutan acciones. Una métrica post-run no
+retroalimenta HPO: usa callback. Si el trabajo necesita otro clúster, GPUs, horas o fases, usa
+Task/Workflow. Consulta `src/lambdaforge/training/README.es.md` sólo para ejemplos exactos.
 
 ## HPO adaptativo
 

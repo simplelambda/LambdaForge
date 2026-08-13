@@ -22,7 +22,15 @@ class RunFingerprint:
 
     VERSION = 1
     _OPERATIONAL_SECTIONS = frozenset(
-        {"$schema", "schema_version", "execution", "aggregation", "retention", "metadata"}
+        {
+            "$schema",
+            "schema_version",
+            "execution",
+            "aggregation",
+            "retention",
+            "metadata",
+            "post_run",
+        }
     )
     _OPERATIONAL_EXPERIMENT_KEYS = frozenset(
         {

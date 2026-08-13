@@ -61,4 +61,6 @@ class ResultRecord(JsonResult):
             "started_at_utc": self.result.started_at_utc,
             "finished_at_utc": self.result.finished_at_utc,
             "metrics": dict(self.metrics),
+            "artifacts": [copy.deepcopy(value) for value in self.result.artifacts],
+            "post_run_actions": [copy.deepcopy(value) for value in self.result.post_run_actions],
         }

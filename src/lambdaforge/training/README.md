@@ -13,6 +13,7 @@ bounded resources and explicit shutdown behaviour.
 - [Multiple inputs and optimizer groups](#multiple-inputs-and-optimizer-groups)
 - [Configuration](#configuration)
 - [Checkpoint lifecycle and suite locks](#checkpoint-lifecycle-and-suite-locks)
+- [Callbacks, post-run actions and downstream tasks](#callbacks-post-run-actions-and-downstream-tasks)
 - [Metrics and logging](#metrics-and-logging)
 - [Optional tracking adapters](#optional-tracking-adapters)
 - [Concurrent jobs](#concurrent-jobs)
@@ -370,3 +371,92 @@ model, loss, metric, dataset, logger and callback classes.
   runner expects compatible `fit` and `test` methods.
 - Keep process-sensitive changes covered by spawned-process tests and validate interruption on the
   target operating system and GPU host.
+## Callbacks, post-run actions and downstream tasks
+
+Choose the extension point by lifecycle and resource needs:
+
+| Need | Contract |
+|---|---|
+| Batch/epoch logic or a metric used for early stopping/HPO | Lightning `Callback` |
+| Bounded final analysis of one successful run on its current allocation | `PostRunAction` |
+| Different cluster/resources, long independent work or a multi-step DAG | `Task`/`Workflow` |
+
+`LightningTask.validation_step` returns `loss` and detached `model_outputs`. Therefore a callback can
+consume the predictions already computed by validation in `on_validation_batch_end`, keep bounded
+state, and publish an ordinary exact `val_*` name in `on_validation_epoch_end`. HPO reads that same
+name from `metrics.csv`. Project callbacks must use explicit distributed reduction and guard file
+writes with `trainer.is_global_zero`; LambdaForge does not impose a scientific aggregation policy.
+
+A post-run action uses persisted evidence rather than live Lightning objects:
+
+```python
+from lambdaforge.experiments import PostRunAction, PostRunContext, PostRunResult
+
+
+class GeneratePredictions(PostRunAction):
+    def run(self, context: PostRunContext) -> PostRunResult:
+        # Rebuild from context.config and load context.selected_checkpoint.
+        path = context.artifact_path("analysis/predictions.npz", create_parent=True)
+        write_predictions(path, context.selected_checkpoint)
+        return PostRunResult(
+            artifacts=[
+                {
+                    "name": "predictions",
+                    "path": "analysis/predictions.npz",
+                    "kind": "predictions",
+                }
+            ]
+        )
+```
+
+```yaml
+post_run:
+  - name: predictions
+    target: my_project.analysis.GeneratePredictions
+    checkpoint: best
+    required: true
+    artifacts:
+      - {name: predictions, path: analysis/predictions.npz, kind: predictions}
+  - name: report
+    target: my_project.analysis.GenerateReport
+    params: {theme: paper}
+    checkpoint: best
+    required: false
+```
+
+`checkpoint` is explicit: `best` is the default, `last` selects the final persisted checkpoint,
+`current` is the persisted final/current (`last`) state, and `none` is for actions that do not load
+weights. There is no silent best-to-last fallback. `PostRunContext` also contains the materialized
+config, typed training result, run directory, seed, variant, both checkpoint candidates, selected
+checkpoint SHA-256 and an identity-specific `state_dir` for resumable partial work.
+Long actions can poll the live `context.stop_requested` cooperative-cancellation state.
+
+Each action has a separate identity derived from its target/params/policy, the training scientific
+identity and selected checkpoint bytes. Its atomic receipt stores outputs, metrics, errors and the
+shared `TaskArtifact` records: logical name, safe run-relative path, type, size, SHA-256, media type,
+producer and action identity. A matching successful receipt is reused. If the process is interrupted
+after training, relaunching the same experiment resumes/re-runs only missing actions. Changing a
+report parameter invalidates that action, not the training fingerprint.
+
+A failed `required: true` action makes the whole run failed and non-reusable, while the successful
+training checkpoint remains committed for a post-run-only retry. A failed optional action is visible
+in `result.json` and its receipt but training remains successful. Actions run only on global rank
+zero. `experiment.required_artifacts` remains an additional completion condition and may name files
+created by required actions.
+
+Adaptive HPO defaults post-run work to confirmation trials only. Use the mapping form with
+`scope: all_runs` only when final analysis is intentionally affordable for every successful terminal
+trial. Multi-fidelity pauses and cancelled trials never run actions. A pruned paused checkpoint is
+not silently treated as a final run. Post-run metrics do not feed back into a decision already made;
+use a validation callback when the metric is an HPO objective.
+
+```yaml
+post_run:
+  scope: confirmed_runs
+  actions:
+    - {name: report, target: my_project.analysis.GenerateReport, checkpoint: best}
+```
+
+Post-run actions deliberately reuse the training allocation and are sequential rather than a nested
+scheduler. Express hours-long inference, another GPU count, another cluster or dependent stages as
+an `InferenceTask`, `EvaluationTask`, `ExportTask` or project `Task` in a `Workflow`.

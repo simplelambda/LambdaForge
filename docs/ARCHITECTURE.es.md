@@ -51,6 +51,14 @@ sustituye ubicaciones físicas por referencia e identidad lógica. `ExperimentRu
 `LightningTask` adapta batch/model/losses/metrics; `TrainingOrchestrator` agenda procesos y rellena
 un slot justo después de observar que termina. `EpochMetricsCSV` reescribe atómicamente las curvas.
 
+Las extensiones ligadas al loop siguen siendo callbacks Lightning. Validation devuelve outputs del
+modelo desacoplados para hacer diagnóstico incremental sin otro forward. `TrainingCompletionStore`
+confirma training antes de que `PostRunService` ejecute cada `PostRunAction` en rank cero. La acción
+recibe `PostRunContext`, selecciona checkpoint persistido mediante `CheckpointResolver`, devuelve
+declaraciones de artifact compartidas y confirma un recibo verificado por contenido. Las identidades
+de training/acción están separadas, así que recuperar o cambiar una acción no repite fit. Otro
+allocation sigue siendo responsabilidad de Task/Workflow.
+
 ## 5. HPO adaptativo
 
 `AdaptiveExperimentOptimizer` persiste el controlador y materializa cada START/RESUME/ADD_SEED como
