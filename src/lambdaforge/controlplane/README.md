@@ -41,6 +41,7 @@ clusters:
     workspace: /scratch/user/lambdaforge
     python: /shared/env/bin/python
     environment: managed
+    pytorch: {channel: auto, require_cuda: auto}
     project_module: my_project
     data_environment: atlas
     command_prefix: [apptainer, exec, /images/project.sif]
@@ -66,7 +67,10 @@ lambdaforge run config.yaml --profile one-gpu
 
 `ExecutionBundleBuilder` caches strict YAML, manifest, exact local framework/consumer wheels and
 small path inputs (10 MiB maximum). Large inputs use `DataCatalog`. `managed` creates an idempotent
-user venv keyed by wheel/Python/wheelhouse identity; `existing` only verifies. Offline mode needs a
+user venv keyed by wheel/Python/wheelhouse and exact resolved Torch plan identity; `existing` only
+verifies. `CudaCompatibilityResolver` probes driver/compute capability plus remote Python, verifies
+an official compatible wheel and fails closed when none exists. The provider pins Torch before the
+framework and validates required CUDA before reuse. Offline mode needs a
 target-compatible wheelhouse. No branch clone, driver or system CUDA installation occurs. See the
 [complete cluster guide](../../../docs/CLUSTERS.md).
 
@@ -109,6 +113,7 @@ one heavy artifact.
 - `LocalScheduler`: synchronous execution through a transport.
 - `SlurmScheduler`: one `SlurmProfile` resource/directive/command/script dialect per cluster.
 - `CredentialProvider`: hidden interactive, OS-keyring and environment reference providers.
+- `CudaCompatibilityResolver`: remote facts to exact official `TorchInstallationPlan`.
 - `ControlPlaneFactory`: default provider selection; inject another factory/provider in services.
 
 Implement `Transport` and `Scheduler` for another platform. Return `CommandResult`,

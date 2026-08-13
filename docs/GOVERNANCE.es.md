@@ -14,16 +14,16 @@ Cada release actualiza versión y CHANGELOG, ejecuta formato/lint/mypy/tests/bui
 wheel instalada fuera del source. El tag y GitHub Release se crean después del commit verificado.
 El repositorio aún no elige licencia y no debe inventarse una.
 
-Tras commitear 0.5.2, el owner publica primero el commit y espera toda la matriz CI. Sólo con ese
+Tras commitear 0.5.3, el owner publica primero el commit y espera toda la matriz CI. Sólo con ese
 commit verde crea el tag anotado y la GitHub Release:
 
 ```bash
 git push origin main
 # Esperar a que CI de este commit exacto quede verde.
-git tag -a v0.5.2 -m "LambdaForge 0.5.2"
-git push origin v0.5.2
-gh release create v0.5.2 --verify-tag --generate-notes \
-  --title "LambdaForge 0.5.2"
+git tag -a v0.5.3 -m "LambdaForge 0.5.3"
+git push origin v0.5.3
+gh release create v0.5.3 --verify-tag --generate-notes \
+  --title "LambdaForge 0.5.3"
 ```
 
 Esta preparación no afirma que ya exista un tag/release remoto y esos comandos no deben ejecutarse

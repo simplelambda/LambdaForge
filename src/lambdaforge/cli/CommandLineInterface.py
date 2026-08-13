@@ -33,6 +33,7 @@ from lambdaforge.controlplane.CredentialService import CredentialService
 from lambdaforge.controlplane.Doctor import Doctor
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.JobState import JobState
+from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
 from lambdaforge.data.DataCatalog import DataCatalog
 from lambdaforge.data.DataService import DataService
 from lambdaforge.execution.ResourceRequest import ResourceRequest
@@ -175,6 +176,16 @@ class CommandLineInterface:
                         python=arguments.python,
                         environment=arguments.environment,
                         wheelhouse=(str(arguments.wheelhouse) if arguments.wheelhouse else None),
+                        pytorch=TorchInstallationPolicy(
+                            arguments.torch_channel,
+                            (
+                                True
+                                if arguments.require_cuda
+                                else False
+                                if arguments.no_require_cuda
+                                else None
+                            ),
+                        ),
                         project_module=arguments.project_module,
                         data_environment=arguments.data_environment,
                     )
@@ -1387,6 +1398,15 @@ lambdaforge run {entry}
             "--environment", choices=("existing", "managed"), default="managed"
         )
         cluster_add.add_argument("--wheelhouse", type=Path)
+        cluster_add.add_argument(
+            "--torch-channel",
+            choices=tuple(sorted(TorchInstallationPolicy.CHANNELS)),
+            default="auto",
+            help="Official PyTorch wheel channel; auto probes driver, GPU and remote Python.",
+        )
+        cuda_requirement = cluster_add.add_mutually_exclusive_group()
+        cuda_requirement.add_argument("--require-cuda", action="store_true")
+        cuda_requirement.add_argument("--no-require-cuda", action="store_true")
         cluster_add.add_argument("--project-module")
         cluster_add.add_argument("--data-environment")
         cluster_list = cluster_commands.add_parser("list")

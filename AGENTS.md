@@ -69,6 +69,7 @@ from private file locations.
 | Inspect cluster source/auth | `clusters inspect NAME`; never search YAML for a password value |
 | Manage a legacy SSH password | `clusters credentials set/delete NAME`; prefer OpenSSH |
 | Customize a site scheduler | cluster `resource_mapping`, `scheduler_directives/commands`, `job_script` |
+| Fix managed Torch/CUDA compatibility | keep `pytorch.channel: auto`; inspect bootstrap plan + doctor |
 | Reconnect to jobs | `status`; `logs JOB --follow`; `cancel JOB`; `retry JOB` |
 | Sync small remote evidence | `results sync JOB`; heavy files require `artifact fetch` |
 | Query/compare/export results | `results list/show/compare/export` |
@@ -98,7 +99,7 @@ reproducible release, build/install a versioned LambdaForge wheel instead of the
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.2-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.5.3-py3-none-any.whl
 ```
 
 Let the consumer lock the correct PyTorch wheel. `nvidia-smi` only proves the driver is visible;
@@ -177,7 +178,7 @@ catalog location or be replicated explicitly with preview then `--apply`. `Contr
 are the provider-neutral application layer. Do not execute workflow nodes with non-local `on`:
 version 0.5 exposes placement but refuses execution until durable DAG recovery/transfer exist.
 
-## Version 0.5.2 runtime, results and inspection
+## Version 0.5.3 runtime, results and inspection
 
 Friendly training accepts top-level `name`, singular `loss`, `trainer.epochs` and `resources`, but
 agents should inspect the strict materialization before editing advanced fields. An experiment can
@@ -211,6 +212,17 @@ install CUDA/drivers. Existing environments are verified but owned by the user. 
 a target-compatible explicit wheelhouse. Jobs persist scheduler/scientific/execution/bundle IDs and
 remote paths; top-level `status/logs/cancel/retry` are aliases for the `jobs` service.
 
+Managed `pytorch.channel: auto` probes remote Python/architecture and NVIDIA driver/compute
+capability, checks official wheel availability, pins the exact Torch wheel, and includes the plan in
+`EnvironmentIdentity`. Never infer compatibility from the `nvidia-smi` display label alone. Driver
+floors for automatic native selection are cu118=520.61, cu121=530.30, cu124=550.54,
+cu126=560.28, cu128=570.26 and cu130=580.65; cu128/cu130 also require capability >=7.5, while
+capability <7.0 may use the documented cu118 compatibility floor 450.80 and must pass the installed
+CUDA tensor probe. Missing compatible wheels fail closed. Explicit
+channel/CPU/wheelhouse choices require review because minor compatibility has PTX caveats;
+LambdaForge never changes the driver/system CUDA/forward-compat packages. Doctor must fail when
+CUDA is visible/required but Torch cannot initialize it.
+
 Use the service layer, not filesystem globs:
 
 ```bash
@@ -233,7 +245,7 @@ groups cover inspector/visualizer/schema/exporter/validator.
 
 `results sync JOB` retrieves only allowlisted small evidence. `artifact fetch JOB LOGICAL_NAME`
 downloads one explicit heavy artifact. `plot learning JOB --follow` periodically syncs metrics and
-atomically refreshes until the scheduler is terminal. 0.5.2 intentionally has no automatic
+atomically refreshes until the scheduler is terminal. 0.5.3 intentionally has no automatic
 placement, distributed workflow coordinator, GUI/server, implicit dataset/checkpoint download,
 platform wheel synthesis or new HPO algorithm.
 

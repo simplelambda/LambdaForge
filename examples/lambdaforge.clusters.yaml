@@ -10,6 +10,7 @@ clusters:
     workspace: /scratch/USER/lambdaforge
     python: python3
     environment: managed
+    pytorch: {channel: auto, require_cuda: auto}
     project_module: my_project
     data_environment: atlas
     resource_mapping:

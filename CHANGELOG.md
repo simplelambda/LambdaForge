@@ -10,6 +10,36 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-13
+
+### Added
+
+- Remote `CudaCompatibilityResolver` probing of configured Python/architecture plus NVIDIA driver
+  and compute capability, with verified official PyTorch channel/wheel availability.
+- Explicit cluster `pytorch.channel` and `require_cuda` policy, exact resolved Torch plans in managed
+  environment identity/bootstrap output, and CPU/legacy/offline overrides.
+
+### Changed
+
+- Managed bootstrap pins Torch from a driver-compatible official channel before installing
+  LambdaForge/consumer wheels and constrains dependency resolution against incompatible upgrades.
+- Automatic channels use native toolkit driver floors (rather than assuming minor compatibility
+  and its PTX caveats) for CUDA 12/13, while legacy capability may use the documented cu118
+  compatibility floor when an appropriate remote-Python wheel exists and passes a CUDA probe.
+
+### Fixed
+
+- Generic `torch>=2.1` resolution no longer installs a newest cu130 build on GPU nodes whose older
+  driver cannot initialize it. Cached environments now verify exact framework/Torch and required
+  CUDA availability before reuse; doctor reports GPU driver facts and fails unavailable expected
+  CUDA even without a GPU-requesting config argument.
+
+### Security
+
+- Automatic selection fails closed when driver/capability or a compatible wheel cannot be proven;
+  it never mutates drivers/system CUDA, installs forward-compatibility packages, or silently falls
+  back to CPU when CUDA is required.
+
 ## [0.5.2] - 2026-08-12
 
 ### Added
@@ -247,7 +277,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/simplelambda/LambdaForge/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/simplelambda/LambdaForge/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/simplelambda/LambdaForge/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/simplelambda/LambdaForge/compare/v0.4.1...v0.5.0

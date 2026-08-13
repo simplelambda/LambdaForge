@@ -17,7 +17,7 @@ generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine be
 Python package, so a research project can focus on its data and science instead of rebuilding
 pipelines, training loops, provenance, result management and process scheduling.
 
-> **Status:** `0.5.2`, usable but pre-1.0. The public namespaces documented below are the intended
+> **Status:** `0.5.3`, usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
 > contain a licence file, so redistribution terms still need to be chosen by SimpleLambda.
 
@@ -178,7 +178,7 @@ immutable artifact instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.2-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.5.3-py3-none-any.whl
 ```
 
 Let the consumer project's lock file or constraints select a PyTorch build compatible with its
@@ -636,6 +636,7 @@ clusters:
     workspace: /scratch/my-user/lambdaforge
     python: /shared/envs/research/bin/python
     environment: managed             # or existing for a user/admin-owned environment
+    pytorch: {channel: auto, require_cuda: auto}
     project_module: my_project       # doctor verifies this consumer import
     data_environment: atlas
     resource_mapping:
@@ -696,6 +697,17 @@ installation occurs and the configured Python must already contain the exact fra
 Offline clusters use a target-compatible `wheelhouse`/`--wheelhouse` and `--no-index`. LambdaForge
 verifies PyTorch/CUDA but never installs drivers, system CUDA or cuDNN. The remote command remains
 `python -m lambdaforge run config.yaml`, so there is no second runner.
+
+Managed bootstrap probes the remote Python, NVIDIA driver and compute capabilities, verifies wheel
+availability in official PyTorch indexes, and pins an exact compatible Torch build before installing
+the framework. Automatic mode chooses the newest channel meeting its native toolkit driver floor:
+for example, a 535-series H100 selects `cu121`, not `cu126`/`cu130`, while legacy Pascal-class GPUs
+use `cu118` when a compatible wheel exists. It does not silently rely on minor-version compatibility
+for CUDA 12/13; the documented CUDA 11.8 legacy floor is accepted and verified with an actual GPU
+tensor operation. The exact plan is part of environment identity. If detection cannot
+prove a safe choice, bootstrap fails with an actionable Python/channel/wheelhouse message rather
+than guessing or silently installing CPU. Override with `pytorch.channel` only from reviewed centre
+guidance. See the [cluster guide](docs/CLUSTERS.md) for the complete decision table.
 
 `LocalTransport`, OpenSSH `SshTransport` and optional `PasswordSshTransport`, plus
 `LocalScheduler`/`SlurmScheduler`, are independent public providers. `doctor` checks connection and
@@ -2216,7 +2228,7 @@ modules.
   synthesize platform/CUDA dependency wheels, install drivers, load site modules or build a
   container. Offline sites need a compatible wheelhouse. Existing environments remain user-owned.
   Built-in replication is local/SSH rsync over predeclared locations.
-- Cluster selection is explicit in 0.5.2. Profiles do not auto-discover total capacity, queue delay or
+- Cluster selection is explicit in 0.5.3. Profiles do not auto-discover total capacity, queue delay or
   monetary cost and the control plane does not claim optimal placement. `DataCatalog` resolves
   direct experiment splits and nested typed markers; arbitrary untyped strings stay project-owned.
 - Remote result sync is allowlisted and per-file bounded, not a remote filesystem mirror. Heavy
@@ -2362,7 +2374,7 @@ provider or research method is built in.
 | 45 | Reproducible scientific plotting | Completed: learning/seeds/sweep/HPO/resources, PlotSpec, atomic render and sidecar cache |
 | 46 | Safe artifact toolkit | Completed: bounded NumPy/tabular inspection, export, validators, explicit geometry and plugins |
 | 47 | Preprocessing and dataset inspection | Completed: isolated N-record stage debug and DatasetArtifact report |
-| 48 | Distributed workflow runtime and automatic placement | Deferred explicitly beyond 0.5.2 |
+| 48 | Distributed workflow runtime and automatic placement | Deferred explicitly beyond 0.5.3 |
 
 Future additions should be driven by demonstrated research needs and preserve the boundaries in the
 [technical architecture](docs/ARCHITECTURE.md), rather than reopening this closed 1–30 checklist.

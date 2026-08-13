@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from lambdaforge.controlplane.ClusterBootstrapResult import ClusterBootstrapResult
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
+from lambdaforge.controlplane.CudaCompatibilityResolver import CudaCompatibilityResolver
 from lambdaforge.controlplane.EnvironmentIdentity import EnvironmentIdentity
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
 from lambdaforge.controlplane.ProjectWheelBuilder import ProjectWheelBuilder
@@ -24,10 +25,12 @@ class ClusterService:
         catalog: ClusterCatalog | None = None,
         factory: ControlPlaneFactory | None = None,
         cache_root: str | Path = ".lambdaforge/control",
+        cuda_resolver: CudaCompatibilityResolver | None = None,
     ) -> None:
         self.catalog = catalog or ClusterCatalog.load()
         self.factory = factory or ControlPlaneFactory()
         self.cache_root = Path(cache_root).resolve()
+        self.cuda_resolver = cuda_resolver or CudaCompatibilityResolver()
 
     def bootstrap(
         self, cluster: str, *, wheelhouse: str | Path | None = None
@@ -36,7 +39,17 @@ class ClusterService:
         profile = self.catalog.get(cluster)
         if wheelhouse is not None:
             profile = replace(profile, wheelhouse=str(Path(wheelhouse).expanduser().resolve()))
+        if profile.wheelhouse is not None:
+            wheelhouse_path = Path(profile.wheelhouse).expanduser().resolve()
+            if not wheelhouse_path.is_dir():
+                raise FileNotFoundError(f"Configured wheelhouse does not exist: {wheelhouse_path}")
+            profile = replace(profile, wheelhouse=str(wheelhouse_path))
         transport = self.factory.transport(profile)
+        torch_plan = (
+            self.cuda_resolver.resolve(profile, transport)
+            if profile.environment == "managed"
+            else None
+        )
         created = transport.run(
             (
                 "mkdir",
@@ -58,6 +71,8 @@ class ClusterService:
                 )
             return ClusterBootstrapResult(cluster, "existing", profile.python, True)
 
+        assert torch_plan is not None
+        dependency_policy = {"pytorch": torch_plan.to_dict()}
         framework_root = Path(__file__).resolve().parents[3]
         wheel = ProjectWheelBuilder(self.cache_root / "wheels").build(framework_root)
         descriptors = [
@@ -77,7 +92,10 @@ class ClusterService:
                     }
                 )
         identity = EnvironmentIdentity.create(
-            descriptors, python_requirement=">=3.10", offline=profile.wheelhouse is not None
+            descriptors,
+            python_requirement=f"=={torch_plan.python_version}.*",
+            offline=profile.wheelhouse is not None,
+            dependency_policy=dependency_policy,
         )
         directory = self.cache_root / "bootstrap" / identity.environment_id
         packages = directory / "packages"
@@ -102,6 +120,7 @@ class ClusterService:
             environment_id=identity.environment_id,
             package_names=(wheel.name,),
             offline=identity.offline,
+            environment_policy=identity.dependency_policy,
         )
         remote = (
             PurePosixPath(profile.workspace)
@@ -119,5 +138,9 @@ class ClusterService:
             profile, transport, bundle, remote_bundle_dir=str(remote)
         )
         return ClusterBootstrapResult(
-            cluster, prepared.environment_id, prepared.python, prepared.reused
+            cluster,
+            prepared.environment_id,
+            prepared.python,
+            prepared.reused,
+            torch_plan.to_dict(),
         )

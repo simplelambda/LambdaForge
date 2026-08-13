@@ -10,6 +10,7 @@ from lambdaforge.controlplane.ControlPlane import ControlPlane
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.CredentialProvider import CredentialProvider
 from lambdaforge.controlplane.CredentialService import CredentialService
+from lambdaforge.controlplane.CudaCompatibilityResolver import CudaCompatibilityResolver
 from lambdaforge.controlplane.Doctor import Doctor
 from lambdaforge.controlplane.DoctorCheck import DoctorCheck
 from lambdaforge.controlplane.DoctorReport import DoctorReport
@@ -41,6 +42,8 @@ from lambdaforge.controlplane.SlurmResourceMapping import SlurmResourceMapping
 from lambdaforge.controlplane.SlurmScheduler import SlurmScheduler
 from lambdaforge.controlplane.SshTransport import SshTransport
 from lambdaforge.controlplane.SystemKeyringCredentialProvider import SystemKeyringCredentialProvider
+from lambdaforge.controlplane.TorchInstallationPlan import TorchInstallationPlan
+from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
 from lambdaforge.controlplane.Transport import Transport
 
 __all__ = [
@@ -52,6 +55,7 @@ __all__ = [
     "CommandResult",
     "ControlPlane",
     "ControlPlaneFactory",
+    "CudaCompatibilityResolver",
     "CredentialProvider",
     "CredentialService",
     "Doctor",
@@ -85,5 +89,7 @@ __all__ = [
     "SlurmScheduler",
     "SshTransport",
     "SystemKeyringCredentialProvider",
+    "TorchInstallationPlan",
+    "TorchInstallationPolicy",
     "Transport",
 ]

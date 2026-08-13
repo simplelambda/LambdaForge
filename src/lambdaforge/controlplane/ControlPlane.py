@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
+from lambdaforge.controlplane.CudaCompatibilityResolver import CudaCompatibilityResolver
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
 from lambdaforge.controlplane.ExecutionBundleBuilder import ExecutionBundleBuilder
 from lambdaforge.controlplane.JobHandle import JobHandle
@@ -24,11 +25,13 @@ class ControlPlane:
         jobs: JobService | None = None,
         bundles: ExecutionBundleBuilder | None = None,
         factory: ControlPlaneFactory | None = None,
+        cuda_resolver: CudaCompatibilityResolver | None = None,
     ) -> None:
         self.catalog = catalog or ClusterCatalog.load()
         self.factory = factory or ControlPlaneFactory()
         self.jobs = jobs or JobService(self.catalog, factory=self.factory)
         self.bundles = bundles or ExecutionBundleBuilder()
+        self.cuda_resolver = cuda_resolver or CudaCompatibilityResolver()
 
     def submit(
         self,
@@ -41,7 +44,19 @@ class ControlPlane:
     ) -> tuple[JobHandle, ExecutionBundle]:
         """Build/cache a bundle, stage it and submit the normal remote run command."""
         profile = self.catalog.get(cluster)
-        bundle = self.bundles.build(config_path, profile)
+        transport = self.factory.transport(profile) if cluster != "local" else None
+        torch_plan = (
+            self.cuda_resolver.resolve(profile, transport)
+            if transport is not None and profile.environment == "managed"
+            else None
+        )
+        bundle = self.bundles.build(
+            config_path,
+            profile,
+            dependency_policy=(
+                {"pytorch": torch_plan.to_dict()} if torch_plan is not None else None
+            ),
+        )
         request = resources or ResourceRequest()
         work_dir: str | Path
         if cluster == "local":
@@ -59,7 +74,7 @@ class ControlPlane:
         else:
             state_root = PurePosixPath(profile.workspace) / ".lambdaforge"
             remote_dir = str(state_root / "bundles" / bundle.bundle_id)
-            transport = self.factory.transport(profile)
+            assert transport is not None
             if not dry_run:
                 created = transport.run(("mkdir", "-p", str(PurePosixPath(remote_dir).parent)))
                 if created.returncode:
@@ -109,6 +124,7 @@ class ControlPlane:
                 "scientific_identity": self._scientific_identity(config_path),
                 "execution_identity": f"{cluster}:{bundle.bundle_id}",
                 "remote_config_path": config,
+                "pytorch": torch_plan.to_dict() if torch_plan is not None else None,
             },
         )
         return handle, bundle

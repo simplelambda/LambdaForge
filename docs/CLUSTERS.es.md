@@ -9,8 +9,9 @@
 3. [Autenticación SSH](#3-autenticación-ssh)
 4. [Dialecto SLURM por clúster](#4-dialecto-slurm-por-clúster)
 5. [Registrar, inspeccionar y diagnosticar](#5-registrar-inspeccionar-y-diagnosticar)
-6. [Enviar y reconectar](#6-enviar-y-reconectar)
-7. [Seguridad y límites](#7-seguridad-y-límites)
+6. [PyTorch managed y compatibilidad CUDA](#6-pytorch-managed-y-compatibilidad-cuda)
+7. [Enviar y reconectar](#7-enviar-y-reconectar)
+8. [Seguridad y límites](#8-seguridad-y-límites)
 
 ## 1. Modelo mental
 
@@ -155,7 +156,46 @@ PyTorch/CUDA, cada ejecutable configurado, traducción de recursos y partición;
 `managed` construye wheels locales exactas y un venv de usuario; `existing` no instala. Offline exige
 wheelhouse compatible. Ningún modo instala drivers, CUDA del sistema ni cuDNN.
 
-## 6. Enviar y reconectar
+## 6. PyTorch managed y compatibilidad CUDA
+
+Con `environment: managed`, LambdaForge ya no deja que `torch>=2.1` elija silenciosamente la build
+CUDA más nueva. Consulta Python/arquitectura remotos, driver y compute capability con `nvidia-smi`,
+y comprueba en los índices oficiales qué wheel exacta existe. Canal/versión entran en
+`EnvironmentIdentity`, así que un cambio de compatibilidad crea otro entorno.
+
+```yaml
+environment: managed
+pytorch: {channel: auto, require_cuda: auto}
+```
+
+La política automática conservadora elige el canal más reciente cuyo mínimo nativo de driver se
+cumple. La única excepción legacy es `cu118`, cuyo mínimo documentado de compatibilidad menor se
+acepta y después se comprueba con una operación tensorial CUDA real: `cu130` desde 580.65 y GPU
+>=7.5, `cu128` desde 570.26 y GPU >=7.5, `cu126` desde 560.28, `cu124` desde 550.54, `cu121` desde
+530.30 y `cu118` nativo desde 520.61. Una GPU legacy (<7.0) puede usar `cu118` desde 450.80 y debe
+superar la comprobación tras instalar; sin NVIDIA usa CPU.
+Si el Python remoto no tiene wheel compatible, falla antes de mutar el entorno y pide otro Python o
+wheelhouse revisado. Nunca cae a CPU si se esperaba CUDA.
+
+Puede fijarse `pytorch: {channel: cu118, require_cuda: true}` para una partición Pascal/P40, o
+`{channel: cpu, require_cuda: false}` si CPU es intencional. Los canales admitidos son `cpu`,
+`cu118`, `cu121`, `cu124`, `cu126`, `cu128` y `cu130`. Un canal explícito revisado puede acogerse al
+mínimo de compatibilidad menor de NVIDIA para CUDA 12/13; el modo automático no asume que se cumplan
+sus salvedades PTX. Online se instala/pinea primero Torch y se
+restringe la instalación posterior para que pip no lo actualice. Offline usa la wheel del
+`wheelhouse`, cuyos bytes forman identidad. `doctor` falla si hay GPU visible/requerida pero
+`torch.cuda.is_available()` es falso y muestra el error de inicialización.
+
+Esto sólo selecciona wheels de usuario: no cambia drivers, no instala CUDA del sistema ni paquetes
+forward-compatibility, y no promete soportar hardware demasiado antiguo. Decide por el driver real,
+no por la etiqueta orientativa “CUDA Version” mostrada por `nvidia-smi`.
+La detección describe el host alcanzado por el transporte. Si un login de SLURM no expone GPU/driver,
+LambdaForge no puede inferir con seguridad la imagen de los nodos de cómputo: usa un canal o
+wheelhouse revisado por el administrador (el canal explícito requiere `require_cuda: false`), o un
+entorno existente, y valídalo dentro de una reserva GPU. Ese `false` aplaza explícitamente la
+validación, no demuestra compatibilidad. La versión 0.5.3 no solicita implícitamente un job de prueba.
+
+## 7. Enviar y reconectar
 
 ```bash
 lambdaforge run experiment.yaml --on atlas --dry-run
@@ -170,7 +210,7 @@ Dry-run devuelve clúster, recursos portables, script, directivas, avisos y argv
 al scheduler. Los jobs reales conservan IDs local/remoto, bundle, entorno, identidades y paths para
 reconectar. El sync pequeño y el fetch pesado siguen siendo explícitos.
 
-## 7. Seguridad y límites
+## 8. Seguridad y límites
 
 Ninguna contraseña se acepta en argv, serializa, registra, empaqueta, fingerprinta ni coloca en YAML.
 Los secretos conocidos en memoria se redactan de errores. Transportes/proveedores plugin deben

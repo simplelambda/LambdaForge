@@ -22,6 +22,11 @@ puede quedar expuesta por CI/inspección de procesos fuera de LambdaForge. El pr
 oculto. No hay flag de contraseña ni fichero cifrado propio: crypto casera añadiría gestión de
 claves sin mejorar el límite real.
 
+La selección CUDA managed confía en `nvidia-smi`, Python/pip remotos y TLS al índice oficial de
+PyTorch. Valida driver, capability y wheel, registra el plan exacto y falla cerrado. Nunca instala
+drivers privilegiados, toolkit del sistema ni forward-compat. Offline sustituye red por wheelhouse
+revisado y compatible cuyos bytes se hashean.
+
 Las plantillas de recursos/comandos tienen placeholders fijos y producen argv. Nombres/valores
 rechazan saltos de línea. El batch script sí ejecuta shell: `prologue`/`epilogue` son código confiable
 del perfil y no reciben secretos. Guarda credenciales personales en ámbito usuario y revisa perfiles

@@ -24,6 +24,12 @@ may be exposed by CI/process inspection outside LambdaForge. Interactive input u
 `getpass`. There is no CLI password option or custom encrypted file; custom crypto would create key
 management without improving the system boundary.
 
+Managed CUDA auto-selection trusts the remote `nvidia-smi` binary, configured Python/pip and TLS
+connection to the official PyTorch index. It validates driver family, compute capability and remote
+wheel availability, records the exact plan in environment identity and fails closed. It never
+installs privileged drivers, a system toolkit or NVIDIA forward-compatibility packages. Offline
+clusters replace network trust with a reviewed, target-compatible wheelhouse whose bytes are hashed.
+
 Scheduler resource and command templates use fixed placeholders and argv. Static directive names
 and rendered values reject newlines. Generated batch scripts necessarily execute on a shell;
 `job_script.prologue` and `epilogue` are therefore trusted cluster-profile code and receive no

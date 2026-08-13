@@ -7,6 +7,27 @@ detalle para releases anteriores; esta edición mantiene el resumen operativo en
 
 ## [Sin publicar]
 
+## [0.5.3] - 2026-08-13
+
+### Añadido
+
+- Resolución remota por Python/arquitectura, driver NVIDIA, compute capability y disponibilidad real
+  de wheel oficial; política `pytorch.channel`/`require_cuda` incluida en identidad y bootstrap.
+
+### Corregido
+
+- Bootstrap managed ya no permite que `torch>=2.1` instale cu130 en drivers incompatibles: fija
+  primero Torch compatible, restringe pip y valida CUDA antes de crear/reutilizar el entorno.
+- Los canales automáticos usan mínimos nativos de driver del toolkit sin presuponer compatibilidad
+  menor para CUDA 12/13; capability legacy puede usar el mínimo compatible cu118 si existe wheel y
+  supera el probe CUDA.
+- Doctor falla si hay GPU visible/requerida pero Torch no inicializa CUDA y muestra driver/error.
+
+### Seguridad
+
+- La selección falla cerrado si no demuestra compatibilidad; no cambia drivers/CUDA del sistema,
+  no instala forward-compat ni cae silenciosamente a CPU.
+
 ## [0.5.2] - 2026-08-12
 
 ### Añadido

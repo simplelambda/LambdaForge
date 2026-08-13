@@ -52,7 +52,7 @@ work uses threads; explicitly CPU-bound work uses spawn-safe child processes for
 work stays in one process. This avoids forked CUDA state and concurrent manifest corruption.
 
 `Workflow` schedules complete task/experiment documents in a DAG. It delegates identity and resume
-to each node runner. It does not distribute one DAG across clusters in 0.5.2; remote submission is
+to each node runner. It does not distribute one DAG across clusters in 0.5.3; remote submission is
 one explicit schedulable unit.
 
 ## 4. Experiments and training
@@ -125,11 +125,16 @@ Optuna, BoTorch, cloud stores and trackers stay optional. A new public contract 
 validation, stable re-export, YAML/public-import coverage, focused failure tests, English/Spanish
 documentation and an AGENTS entry.
 
-## 10. Intentional 0.5.2 limits
+`CudaCompatibilityResolver` probes remote Python/architecture plus NVIDIA driver/compute capability,
+verifies an exact official PyTorch wheel, and places its `TorchInstallationPlan` in
+`EnvironmentIdentity`. `ManagedEnvironmentProvider` installs and constrains that wheel before other
+dependencies, then verifies required CUDA initialization. It never manages host drivers/toolkits.
+
+## 10. Intentional 0.5.3 limits
 
 - No automatic cluster selection or mixed-cluster workflow runtime.
 - No server, GUI or resident control-plane daemon.
 - No implicit large-result, checkpoint or dataset download.
 - No automatic CUDA/driver installation or remote platform wheel synthesis.
 - No magical interpretation of arrays as graphs, point clouds or meshes.
-- No new HPO mathematics in 0.5.2; cluster hardening does not alter existing scientific policy.
+- No new HPO mathematics in 0.5.3; CUDA environment resolution does not alter scientific policy.

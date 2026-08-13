@@ -33,6 +33,7 @@ clusters:
     workspace: /scratch/user/lambdaforge
     python: /shared/env/bin/python
     environment: managed
+    pytorch: {channel: auto, require_cuda: auto}
     project_module: mi_proyecto
     data_environment: atlas
     command_prefix: [apptainer, exec, /images/project.sif]
@@ -56,8 +57,10 @@ lambdaforge run config.yaml --profile una-gpu
 ```
 
 El bundle cachea YAML, manifiesto, wheels exactas de framework/proyecto y rutas pequeñas. Una grande
-usa `DataCatalog`. `managed` crea venv de usuario idempotente por identidad; `existing` sólo
-verifica. Offline exige wheelhouse compatible. No clona branches ni instala drivers/CUDA. Véase la
+usa `DataCatalog`. `managed` incluye en identidad el plan Torch exacto: `CudaCompatibilityResolver`
+consulta driver/capability/Python, comprueba wheel oficial, fija Torch antes del framework y valida
+CUDA antes de reutilizar. Si no demuestra compatibilidad falla cerrado. `existing` sólo verifica.
+Offline exige wheelhouse compatible. No clona branches ni instala drivers/CUDA. Véase la
 [guía completa](../../../docs/CLUSTERS.es.md).
 
 ## 4. Jobs
@@ -73,6 +76,7 @@ ID con `retry_of`; nunca pisa el anterior. Usa `status`, `logs JOB --follow`, `c
 - `LocalScheduler` ejecuta síncronamente.
 - `SlurmScheduler` aplica un `SlurmProfile` de mapping/directivas/comandos/script por clúster.
 - `CredentialProvider` cubre prompt oculto, keyring del SO y referencia de entorno.
+- `CudaCompatibilityResolver` convierte hechos remotos en `TorchInstallationPlan` exacto.
 - `ControlPlaneFactory` selecciona defaults y permite inyección para otros centros/tests.
 
 Otro proveedor implementa `Transport`/`Scheduler` y devuelve valores portables; el runner no debe

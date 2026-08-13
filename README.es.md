@@ -18,7 +18,7 @@ paquete estable, para que un proyecto de investigación se concentre en sus dato
 de volver a crear pipelines, bucles de entrenamiento, procedencia, gestión de resultados y
 planificación de procesos.
 
-> **Estado:** `0.5.2`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
+> **Estado:** `0.5.3`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
 > aquí forman la API prevista; todavía no se garantiza compatibilidad entre versiones menores. El
 > repositorio aún no contiene una licencia, por lo que SimpleLambda debe decidir sus condiciones de
 > redistribución.
@@ -183,7 +183,7 @@ ese artefacto inmutable en lugar de una ruta editable:
 
 ```bash
 python -m pip wheel /ruta/absoluta/a/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.5.2-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.5.3-py3-none-any.whl
 ```
 
 Deja que el lock o constraints del proyecto consumidor seleccione primero una compilación PyTorch
@@ -585,6 +585,7 @@ clusters:
     scheduler: slurm
     workspace: /scratch/mi-usuario/lambdaforge
     python: /shared/envs/research/bin/python
+    pytorch: {channel: auto, require_cuda: auto}
     data_environment: atlas
     resource_mapping:
       gpu: {option: gres, value: "gpu:a100:{gpus}"}
@@ -631,6 +632,17 @@ pequeños; se cachea por contenido. El source dirty se construye tal cual, nunca
 `WORKSPACE/.lambdaforge/environments`; `existing` no instala y exige el Python exacto. Sin Internet
 se aporta wheelhouse compatible y se usa `--no-index`. LambdaForge verifica PyTorch/CUDA pero no
 instala drivers, CUDA de sistema ni cuDNN. El remoto ejecuta el mismo `python -m lambdaforge run`.
+
+Bootstrap managed consulta Python, driver NVIDIA y compute capability remotos, comprueba la wheel
+en índices oficiales y fija una build Torch exacta antes del framework. El modo automático usa el
+canal más reciente cuyo mínimo nativo cumple el driver: por ejemplo, una H100 con driver 535 elige
+`cu121`, no `cu126`/`cu130`, y Pascal usa `cu118` si hay wheel compatible. No presupone la
+compatibilidad menor para CUDA 12/13; el mínimo legacy documentado de CUDA 11.8 se acepta y valida
+con una operación tensorial GPU real. El plan forma identidad del entorno. Si no puede
+demostrar una opción segura,
+falla con instrucciones sobre Python/canal/wheelhouse en vez de adivinar o caer silenciosamente a
+CPU. `pytorch.channel` sólo debe fijarse con guía revisada del centro; la
+[guía de clústeres](docs/CLUSTERS.es.md) contiene la tabla completa.
 
 `LocalTransport`, `SshTransport` OpenSSH y `PasswordSshTransport` opcional, junto con los schedulers,
 son proveedores independientes. `doctor` comprueba auth, workspace, Python/proyecto/framework,
@@ -2030,7 +2042,7 @@ implementaciones.
 - Bootstrap managed instala wheels exactas en un venv de usuario, pero no sintetiza wheels de otra
   plataforma/CUDA, drivers, módulos del centro ni contenedores. Offline requiere wheelhouse
   compatible; existing sigue en manos del usuario. Réplica usa rsync sobre ubicaciones declaradas.
-- La selección es explícita en 0.5.2: no descubre capacidad/colas/coste ni promete placement.
+- La selección es explícita en 0.5.3: no descubre capacidad/colas/coste ni promete placement.
   `DataCatalog` resuelve splits y marcadores anidados tipados; strings arbitrarios siguen siendo del
   proyecto. Sync remoto es allowlisted/acotado y artifacts pesados requieren fetch lógico.
 - Random/Optuna finito permanece. HPO adaptativo agenda trials locales independientes; integrar
@@ -2171,7 +2183,7 @@ pública, documentación y pruebas focalizadas; no significa incluir cada provee
 | 45 | Plots reproducibles | Completado: learning/seeds/sweep/HPO/resources, PlotSpec y sidecar |
 | 46 | Toolkit seguro de artifacts | Completado: NumPy/tablas, validación, geometría explícita y plugins |
 | 47 | Debug/dataset inspection | Completado: N records aislados e informe DatasetArtifact |
-| 48 | Workflow distribuido/placement automático | Diferido explícitamente después de 0.5.2 |
+| 48 | Workflow distribuido/placement automático | Diferido explícitamente después de 0.5.3 |
 
 Las ampliaciones futuras deben responder a necesidades de investigación demostradas y conservar las
 fronteras de la [arquitectura técnica](docs/ARCHITECTURE.md), no reabrir lo ya cerrado.

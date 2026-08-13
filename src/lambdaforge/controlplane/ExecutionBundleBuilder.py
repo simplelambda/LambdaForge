@@ -37,7 +37,13 @@ class ExecutionBundleBuilder:
         self.root = Path(root).resolve()
         self.max_inline_bytes = max_inline_bytes
 
-    def build(self, config_path: str | Path, profile: ClusterProfile) -> ExecutionBundle:
+    def build(
+        self,
+        config_path: str | Path,
+        profile: ClusterProfile,
+        *,
+        dependency_policy: dict[str, object] | None = None,
+    ) -> ExecutionBundle:
         """Create or reuse one content-addressed, redaction-safe bundle."""
         source = Path(config_path).resolve()
         materialized = AuthoringConfig.from_yaml(source).materialize()
@@ -48,7 +54,9 @@ class ExecutionBundleBuilder:
                 self._prepare_task_inputs(values, source.parent, profile, staged)
             elif materialized.kind is ConfigurationKind.EXPERIMENT:
                 self._prepare_experiment_data(values, source.parent, profile, staged)
-        environment = self._prepare_environment(source, profile, staged)
+        environment = self._prepare_environment(
+            source, profile, staged, dependency_policy=dependency_policy
+        )
         identity_payload = {
             "bundle_version": 2,
             "lambdaforge_version": LambdaForgeVersion.CURRENT,
@@ -105,6 +113,7 @@ class ExecutionBundleBuilder:
             environment_id=environment.environment_id if environment is not None else None,
             package_names=packages,
             offline=environment.offline if environment is not None else False,
+            environment_policy=(environment.dependency_policy if environment is not None else None),
         )
 
     def _prepare_environment(
@@ -112,6 +121,8 @@ class ExecutionBundleBuilder:
         source: Path,
         profile: ClusterProfile,
         staged: list[tuple[Path, str]],
+        *,
+        dependency_policy: dict[str, object] | None = None,
     ) -> EnvironmentIdentity | None:
         if profile.environment == "existing":
             return None
@@ -152,10 +163,19 @@ class ExecutionBundleBuilder:
                         "size_bytes": wheel.stat().st_size,
                     }
                 )
+        torch_policy = (dependency_policy or {}).get("pytorch", {})
+        remote_python = (
+            torch_policy.get("python_version") if isinstance(torch_policy, dict) else None
+        )
         return EnvironmentIdentity.create(
             descriptors,
-            python_requirement=f">={sys.version_info.major}.{sys.version_info.minor}",
+            python_requirement=(
+                f"=={remote_python}.*"
+                if remote_python
+                else f">={sys.version_info.major}.{sys.version_info.minor}"
+            ),
             offline=offline,
+            dependency_policy=dependency_policy,
         )
 
     @staticmethod

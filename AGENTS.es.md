@@ -8,7 +8,7 @@ después inspecciona la firma/docstring del símbolo público concreto.
 
 ## Qué es y cómo instalarlo
 
-LambdaForge 0.5.2 es una biblioteca instalable PyTorch/Lightning para tasks genéricas,
+LambdaForge 0.5.3 es una biblioteca instalable PyTorch/Lightning para tasks genéricas,
 preprocesado, training, workflows, sweeps/HPO, ejecución CPU/GPU/SLURM, resultados, plots,
 artifacts, reproducibilidad y control explícito de clusters. El proyecto consumidor posee modelos,
 datasets y código de dominio. Python >=3.10. Importa sólo desde estos namespaces públicos:
@@ -32,7 +32,7 @@ python -m pip check
 python -c "import lambdaforge; print(lambdaforge.__version__)"
 ```
 
-Para release reproducible construye/instala `lambdaforge-0.5.2-py3-none-any.whl`. El proyecto
+Para release reproducible construye/instala `lambdaforge-0.5.3-py3-none-any.whl`. El proyecto
 consumidor fija la wheel correcta de PyTorch. `nvidia-smi` sólo prueba driver; comprueba
 `torch.cuda.is_available()` y `torch.version.cuda`. Extras: `hpo`, `adaptive-hpo`, `s3`, `parquet`,
 `onnx`, `viz`, `graph`, `viz3d`, tracking y `dev`.
@@ -152,6 +152,15 @@ wheels exactas del framework/proyecto. `EnvironmentIdentity` incluye wheels, Pyt
 drivers/CUDA. `existing` sólo verifica el intérprete. Offline usa wheelhouse compatible y
 `--no-index`; no sintetices wheels de otra plataforma.
 
+`pytorch.channel: auto` consulta Python/arquitectura, driver y compute capability remotos, comprueba
+índices oficiales, fija la wheel Torch exacta e incluye el plan en `EnvironmentIdentity`. No decidas
+por la etiqueta CUDA de `nvidia-smi`: los mínimos nativos automáticos son cu118=520.61,
+cu121=530.30, cu124=550.54, cu126=560.28, cu128=570.26 y cu130=580.65; cu128/cu130 requieren además
+capability >=7.5, y capability <7.0 puede usar el mínimo compatible cu118=450.80 pero debe superar
+el probe tensorial CUDA instalado. Si no hay wheel falla cerrado. Canal/CPU/wheelhouse
+explícitos requieren revisión porque la compatibilidad menor tiene salvedades PTX. Nunca cambia
+driver/CUDA de sistema/forward-compat; doctor falla si CUDA visible/requerida no inicializa.
+
 `JobRecord` persiste scheduler/scientific/execution/bundle IDs, paths y tiempos; `status` refresca al
 reiniciar el PC. `ClusterCatalog` fusiona usuario < proyecto < explícito y `clusters inspect` muestra
 la fuente. OpenSSH es el default recomendado: conserva aliases/claves/agente/known_hosts/ProxyJump.
@@ -161,7 +170,7 @@ Contraseña opcional sólo puede venir de prompt oculto, referencia `keyring:` o
 directivas, comandos argv/placeholders/regex y líneas de script confiables sin secrets; dry-run debe
 mostrar directivas, avisos y comando. Lee `docs/CLUSTERS.es.md` y `docs/SECURITY.es.md` si modificas
 esta frontera. `results sync` sólo trae evidencia pequeña. No hay placement automático, workflow
-entre clusters, daemon, servidor o GUI en 0.5.2.
+entre clusters, daemon, servidor o GUI en 0.5.3.
 
 ## HPO adaptativo
 

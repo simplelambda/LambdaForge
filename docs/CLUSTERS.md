@@ -9,8 +9,9 @@
 3. [SSH authentication](#3-ssh-authentication)
 4. [Per-cluster SLURM dialect](#4-per-cluster-slurm-dialect)
 5. [Register, inspect and diagnose](#5-register-inspect-and-diagnose)
-6. [Submit and reconnect](#6-submit-and-reconnect)
-7. [Security and intentional limits](#7-security-and-intentional-limits)
+6. [Managed PyTorch and CUDA compatibility](#6-managed-pytorch-and-cuda-compatibility)
+7. [Submit and reconnect](#7-submit-and-reconnect)
+8. [Security and intentional limits](#8-security-and-intentional-limits)
 
 ## 1. Mental model
 
@@ -176,7 +177,65 @@ LambdaForge/consumer wheels and creates a user venv below
 `WORKSPACE/.lambdaforge/environments`; `existing` installs nothing. Offline bootstrap requires an
 explicit target-compatible wheelhouse. No mode installs drivers, system CUDA or cuDNN.
 
-## 6. Submit and reconnect
+## 6. Managed PyTorch and CUDA compatibility
+
+For `environment: managed`, LambdaForge does not let the generic `torch>=2.1` dependency silently
+choose the newest CUDA build. Before creating an environment it queries the remote configured
+Python version/architecture and `nvidia-smi` driver/compute capability, then asks the official
+PyTorch wheel indexes which exact wheel is available for that Python. The selected channel and
+exact version are part of `EnvironmentIdentity`, so changing driver compatibility creates a new
+environment rather than reusing an incompatible one.
+
+```yaml
+environment: managed
+pytorch:
+  channel: auto        # recommended: cpu/cu118/cu12x/cu130 selected conservatively
+  require_cuda: auto   # CUDA required when NVIDIA devices are detected
+```
+
+The automatic safety policy is deliberately conservative. It prefers the newest channel whose
+toolkit driver floor is met natively. The one legacy exception is `cu118`, whose documented
+CUDA 11.x minor-compatibility floor is accepted and then verified by a real CUDA tensor operation:
+
+- driver >=580.65 and compute capability >=7.5: start at `cu130`;
+- driver >=570.26 and compute capability >=7.5: start at `cu128`;
+- driver >=560.28 and compute capability >=7.0: start at `cu126`;
+- driver >=550.54 and compute capability >=7.0: start at `cu124`;
+- driver >=530.30 and compute capability >=7.0: start at `cu121`;
+- driver >=520.61 with no newer native match: use `cu118`;
+- driver >=450.80 with legacy compute capability below 7.0: use `cu118` and verify it after install;
+- no NVIDIA driver/devices: use the official CPU channel;
+- no wheel compatible with the configured Python: fail before environment mutation and recommend
+  another cluster Python or a reviewed wheelhouse—never silently fall back to an incompatible
+  runtime or CPU when CUDA was expected.
+
+Override only when the centre documents a better tested choice:
+
+```yaml
+pytorch: {channel: cu118, require_cuda: true}  # e.g. a Pascal/P40 partition
+# or deliberately use GPU nodes for CPU work:
+pytorch: {channel: cpu, require_cuda: false}
+```
+
+Accepted official channels are `cpu`, `cu118`, `cu121`, `cu124`, `cu126`, `cu128` and `cu130`.
+An explicit reviewed CUDA 12/13 channel may use NVIDIA's documented minor-compatibility family
+floor, but automatic mode intentionally does not assume its PTX caveats are satisfied.
+Online bootstrap pins the resolved Torch version first and constrains the subsequent framework/
+consumer install, preventing pip from upgrading it back to an incompatible build. Offline mode
+does not contact an index: provide the target-compatible Torch wheel in `wheelhouse`; its bytes and
+the detected policy enter the environment identity. `doctor` now fails when NVIDIA devices are
+visible/required but `torch.cuda.is_available()` is false and reports the initialization error.
+
+This chooses user-space Python wheels only. It never changes the host driver, installs a system
+CUDA toolkit, adds NVIDIA forward-compatibility packages or promises that an unsupported old GPU is
+usable. `nvidia-smi` driver data, not its display-only “CUDA Version” label, drives the choice.
+Detection describes the host reached by the configured transport. If a SLURM login node exposes no
+GPU/driver, LambdaForge cannot safely infer the compute-node image: use an administrator-reviewed
+explicit channel with `require_cuda: false`, a reviewed wheelhouse, or an existing site environment,
+and validate it on an allocated GPU node. Setting false here explicitly defers CUDA validation; it
+does not claim compatibility. Version 0.5.3 does not allocate a probe job implicitly.
+
+## 7. Submit and reconnect
 
 ```bash
 lambdaforge run experiment.yaml --on atlas --dry-run
@@ -194,7 +253,7 @@ and scheduler IDs, bundle/environment/scientific/execution identities and remote
 process can reconnect. Small result evidence can be synchronized explicitly; heavy artifacts need
 `artifact fetch`.
 
-## 7. Security and intentional limits
+## 8. Security and intentional limits
 
 No password is accepted on argv, serialized, logged, bundled, fingerprinted or placed in YAML.
 Known in-memory secrets are redacted from transport errors; plugin transports/providers must apply

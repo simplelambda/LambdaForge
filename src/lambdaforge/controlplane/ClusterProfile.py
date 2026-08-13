@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from lambdaforge.controlplane.ClusterAuthentication import ClusterAuthentication
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
+from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
 from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
 
 
@@ -30,6 +31,7 @@ class ClusterProfile:
     python: str = "python"
     environment: str = "existing"
     wheelhouse: str | None = None
+    pytorch: TorchInstallationPolicy = field(default_factory=TorchInstallationPolicy)
     project_module: str | None = None
     data_environment: str | None = None
     ssh_options: tuple[str, ...] = ()
@@ -46,6 +48,10 @@ class ClusterProfile:
             raise ValueError("Cluster scheduler must be 'local' or 'slurm'.")
         if self.environment not in {"existing", "managed"}:
             raise ValueError("Cluster environment must be 'existing' or 'managed'.")
+        pytorch = self.pytorch
+        if not isinstance(pytorch, TorchInstallationPolicy):
+            pytorch = TorchInstallationPolicy.from_mapping(pytorch)
+            object.__setattr__(self, "pytorch", pytorch)
         if self.transport == "ssh" and not self.host:
             raise ValueError("SSH cluster profiles require host.")
         if (
@@ -104,6 +110,7 @@ class ClusterProfile:
             python=str(value.get("python", "python")),
             environment=str(value.get("environment", "existing")),
             wheelhouse=(str(value["wheelhouse"]) if value.get("wheelhouse") else None),
+            pytorch=TorchInstallationPolicy.from_mapping(value.get("pytorch")),
             project_module=(str(value["project_module"]) if value.get("project_module") else None),
             data_environment=(
                 str(value["data_environment"])
@@ -155,6 +162,7 @@ class ClusterProfile:
             "python": self.python,
             "environment": self.environment,
             "wheelhouse": self.wheelhouse,
+            "pytorch": self.pytorch.to_dict(),
             "project_module": self.project_module,
             "data_environment": self.data_environment or self.name,
             "ssh_options": list(self.ssh_options),

@@ -217,17 +217,43 @@ class Doctor:
                 "Install a PyTorch build compatible with the cluster's Python and driver.",
             )
         )
+        nvidia = transport.run(
+            (
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,compute_cap",
+                "--format=csv,noheader,nounits",
+            )
+        )
+        gpu_visible = nvidia.returncode == 0 and bool(nvidia.stdout.strip())
         cuda_required = self._requires_cuda(Path(config_path)) if config_path is not None else False
+        cuda_expected = cuda_required or (
+            gpu_visible
+            and profile.pytorch.channel != "cpu"
+            and profile.pytorch.require_cuda is not False
+        )
+        checks.append(
+            DoctorCheck(
+                "nvidia-driver",
+                nvidia.returncode == 0 or not cuda_expected,
+                nvidia.stdout.strip()
+                or nvidia.stderr.strip()
+                or "No NVIDIA GPU/driver was detected; CPU execution remains available.",
+                "Expose a supported NVIDIA driver/GPU or use an explicit CPU PyTorch policy.",
+            )
+        )
         cuda = transport.run(
             (
                 *profile.command_prefix,
                 selected_python,
                 "-c",
                 (
-                    "import sys, torch; available=torch.cuda.is_available(); "
+                    "import sys, torch; available=torch.cuda.is_available(); error=''; "
+                    "\nif not available:\n"
+                    " try: torch.cuda.init()\n"
+                    " except Exception as exc: error=f'{type(exc).__name__}: {exc}'\n"
                     "print('available=', available, 'runtime=', torch.version.cuda, "
-                    "'devices=', torch.cuda.device_count()); "
-                    f"sys.exit(0 if available or {not cuda_required!r} else 2)"
+                    "'devices=', torch.cuda.device_count(), 'error=', error); "
+                    f"sys.exit(0 if available or {not cuda_expected!r} else 2)"
                 ),
             )
         )
@@ -237,7 +263,8 @@ class Doctor:
                 cuda.returncode == 0,
                 cuda.stdout.strip() or cuda.stderr.strip(),
                 "Select a cluster-provided PyTorch/CUDA environment; LambdaForge never installs "
-                "drivers or the system CUDA toolkit.",
+                "drivers or the system CUDA toolkit. For managed environments rerun bootstrap "
+                "with pytorch.channel=auto or an explicit compatible channel.",
             )
         )
         bundle_cache = transport.run(

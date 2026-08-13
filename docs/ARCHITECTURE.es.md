@@ -40,7 +40,7 @@ anteriores se archivan.
 `PreprocessingTask` compone source, transforms ordenados y sink. Las claves estables gobiernan
 sharding y resume. El padre escribe sink y manifest: I/O usa threads; CPU usa procesos `spawn` sólo
 para transforms; GPU permanece en un proceso. Así no se comparte estado CUDA ni se corrompen
-manifiestos. `Workflow` coordina documentos completos en un DAG, pero 0.5.2 no distribuye un mismo
+manifiestos. `Workflow` coordina documentos completos en un DAG, pero 0.5.3 no distribuye un mismo
 DAG entre clusters.
 
 ## 4. Experimentos y entrenamiento
@@ -73,6 +73,10 @@ bundle por contenido. `EnvironmentIdentity` incluye bytes instalables, Python y 
 `ControlPlane` transfiere mediante `Transport`, prepara el intérprete con `EnvironmentProvider` y
 envía por `Scheduler`. `ManagedEnvironmentProvider` crea un venv idempotente de usuario;
 `ExistingEnvironmentProvider` sólo verifica. `JobStore` permite que `JobService` reconecte después.
+`CudaCompatibilityResolver` consulta Python/arquitectura, driver/capability y wheel oficial, e
+incluye `TorchInstallationPlan` en `EnvironmentIdentity`. `ManagedEnvironmentProvider` instala y
+restringe esa wheel antes del resto y valida CUDA requerida; nunca gestiona drivers/toolkits host.
+
 No hay daemon, placement automático, fichero crypto propio, instalador CUDA ni workflow entre
 clusters. Véanse [operaciones](CLUSTERS.es.md) y [seguridad](SECURITY.es.md).
 
@@ -92,6 +96,6 @@ proveedores reutilizables. Plotly, NetworkX, trimesh, Optuna, BoTorch, stores y 
 opcionales. Una API nueva necesita validación, re-export público, tests focalizados, documentación
 EN/ES y entrada para agentes.
 
-En 0.5.2 no hay placement automático, workflows multiclúster, servidor/GUI, descargas implícitas
+En 0.5.3 no hay placement automático, workflows multiclúster, servidor/GUI, descargas implícitas
 pesadas, instalación CUDA, síntesis de wheels de otra plataforma ni interpretación mágica de
 arrays. Tampoco se amplía la matemática de HPO.
