@@ -16,7 +16,7 @@ datasets, experiments, adaptive hyperparameter searches and durable local, SSH o
 Your project keeps ownership of its models and data; LambdaForge supplies the execution,
 provenance, reuse, result-management and safety machinery around them.
 
-> **Status:** `0.7.1` (pre-1.0). Current YAML and documented public imports are supported, but minor
+> **Status:** `0.7.2` (pre-1.0). Current YAML and documented public imports are supported, but minor
 > releases may deliberately simplify APIs before 1.0. The repository currently has no licence
 > file, so redistribution terms have not yet been granted.
 
@@ -67,7 +67,7 @@ For a reproducible installation, build and install a versioned wheel instead of 
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.7.1-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.7.2-py3-none-any.whl
 ```
 
 The consumer project should select a PyTorch wheel compatible with its target hardware. Optional
@@ -150,6 +150,8 @@ Remote execution is explicit. Register a cluster, diagnose it, preview the submi
 ```bash
 lf clusters add atlas --host atlas-login --scheduler slurm --workspace /scratch/me/lf
 lf doctor --on atlas
+lf clusters bootstrap atlas --dry-run
+lf clusters bootstrap atlas
 lf run experiment.yaml --on atlas --dry-run
 lf run experiment.yaml --on atlas
 lf jobs logs latest --follow
@@ -157,9 +159,21 @@ lf jobs logs latest --follow
 
 OpenSSH is the default and reuses a private `ControlMaster` socket for a bounded idle period, so
 ordinary CLI use does not create an authentication storm. Managed environments are immutable
-user-space virtual environments built from exact project/framework wheels. LambdaForge never
-installs GPU drivers, system CUDA or Python itself. The configured cluster `python` must resolve to
-Python 3.10 or newer; `doctor` reports an older interpreter as incompatible before bootstrap.
+user-space virtual environments built from exact project/framework wheels. With the default
+`python.strategy: auto`, bootstrap first tries the configured and other bounded Python executables,
+then an existing Conda/Mamba/Micromamba, and finally a pinned, checksum-verified micromamba staged
+from the controller. The resulting Python runtime and package environment live below the configured
+cluster cache; LambdaForge never changes system Python, shell startup files, GPU drivers or CUDA.
+Use `python.strategy: existing` when institutional policy requires an administrator-provided Python.
+Older profiles whose YAML contains the scalar `python: python3` deliberately keep that strict
+behavior. Opt one into automatic user-space provisioning, review the plan and apply it with:
+
+```bash
+lf clusters set atlas python.strategy auto
+lf clusters bootstrap atlas --dry-run
+lf clusters bootstrap atlas
+lf doctor --on atlas
+```
 
 ## Python API
 

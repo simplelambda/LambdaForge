@@ -4,6 +4,12 @@ from lambdaforge.LazyExports import LazyExports
 
 _DOCTOR_NAMES = ("Doctor", "DoctorCheck", "DoctorReport")
 _JOB_NAMES = ("JobGroup", "JobHandle", "JobRecord", "JobState")
+_PYTHON_RUNTIME_NAMES = (
+    "NoCompatiblePythonRuntimeError",
+    "PythonRuntime",
+    "PythonRuntimePolicy",
+    "PythonRuntimeRequirements",
+)
 _NAMES = (
     "ClusterAuthentication",
     "ClusterBootstrapResult",
@@ -66,8 +72,27 @@ LazyExports.install(
     {
         **{name: ("lambdaforge.controlplane.Doctor", name) for name in _DOCTOR_NAMES},
         **{name: ("lambdaforge.controlplane.jobs", name) for name in _JOB_NAMES},
+        **{
+            name: ("lambdaforge.controlplane.python_runtime", name)
+            for name in _PYTHON_RUNTIME_NAMES
+        },
+        "MicromambaArtifactStore": (
+            "lambdaforge.controlplane.MicromambaArtifactStore",
+            "MicromambaArtifactStore",
+        ),
+        "PythonRuntimeResolver": (
+            "lambdaforge.controlplane.PythonRuntimeResolver",
+            "PythonRuntimeResolver",
+        ),
         **{name: (f"lambdaforge.controlplane.{name}", name) for name in _NAMES},
     },
 )
 
-__all__ = [*_DOCTOR_NAMES, *_JOB_NAMES, *_NAMES]
+__all__ = [
+    *_DOCTOR_NAMES,
+    *_JOB_NAMES,
+    "MicromambaArtifactStore",
+    "PythonRuntimeResolver",
+    *_PYTHON_RUNTIME_NAMES,
+    *_NAMES,
+]

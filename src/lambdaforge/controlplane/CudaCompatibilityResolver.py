@@ -6,9 +6,13 @@ import re
 from collections.abc import Sequence
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
+from lambdaforge.controlplane.python_runtime import PythonRuntimeRequirements
 from lambdaforge.controlplane.TorchInstallationPlan import TorchInstallationPlan
 from lambdaforge.controlplane.Transport import Transport
-from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
+
+
+class NoCompatibleTorchWheelError(RuntimeError):
+    """Signal that another otherwise valid Python candidate may solve wheel availability."""
 
 
 class CudaCompatibilityResolver:
@@ -33,16 +37,26 @@ class CudaCompatibilityResolver:
     }
     MINIMUM_COMPUTE_CAPABILITY = {"cu128": (7, 5), "cu130": (7, 5)}
 
-    def resolve(self, profile: ClusterProfile, transport: Transport) -> TorchInstallationPlan:
+    def resolve(
+        self,
+        profile: ClusterProfile,
+        transport: Transport,
+        *,
+        python_executable: str | None = None,
+    ) -> TorchInstallationPlan:
         """Probe remote Python/GPU facts and resolve one installable exact wheel version."""
-        python = self._python(profile, transport)
-        if self._version(python[0]) < LambdaForgeVersion.MINIMUM_PYTHON:
-            minimum = ".".join(str(item) for item in LambdaForgeVersion.MINIMUM_PYTHON)
+        executable = python_executable or profile.python
+        python = self._python(profile, transport, executable)
+        requirement = PythonRuntimeRequirements.framework()
+        if not PythonRuntimeRequirements.compatible(python[0], (requirement,)):
+            displayed_requirement = requirement.replace(">=", ">= ")
             raise RuntimeError(
-                f"LambdaForge {LambdaForgeVersion.CURRENT} requires Python >= {minimum}, but "
-                f"clusters.{profile.name}.python resolves to Python {python[0]}. Configure a "
+                f"LambdaForge requires Python {displayed_requirement}, but "
+                f"clusters.{profile.name}.python "
+                f"resolves to Python {python[0]}. Configure a "
                 "supported cluster Python executable or load the site's Python module before "
-                "bootstrap; LambdaForge does not install a system Python."
+                "bootstrap; python.strategy=existing never installs or changes system Python. "
+                "Use python.strategy=auto or managed to permit a user-space runtime."
             )
         driver, capabilities = self._nvidia(transport)
         has_cuda = driver is not None and bool(capabilities)
@@ -104,7 +118,7 @@ class CudaCompatibilityResolver:
         failures: list[str] = []
         for channel in candidates:
             index = f"{self.INDEX_ROOT}/{channel}"
-            version = self._available_version(profile, transport, index)
+            version = self._available_version(profile, transport, index, executable)
             if version is not None:
                 accelerator = "cpu" if channel == "cpu" else "cuda"
                 return TorchInstallationPlan(
@@ -120,7 +134,7 @@ class CudaCompatibilityResolver:
                     require_cuda and accelerator == "cuda",
                 )
             failures.append(channel)
-        raise RuntimeError(
+        raise NoCompatibleTorchWheelError(
             "No compatible official PyTorch wheel was found for remote Python "
             f"{python[0]} ({python[1]}) in channels {tuple(failures)}. Choose another configured "
             "Python (older clusters commonly need Python 3.10-3.12), set an explicit supported "
@@ -128,11 +142,11 @@ class CudaCompatibilityResolver:
         )
 
     @staticmethod
-    def _python(profile: ClusterProfile, transport: Transport) -> tuple[str, str]:
+    def _python(profile: ClusterProfile, transport: Transport, executable: str) -> tuple[str, str]:
         result = transport.run(
             (
                 *profile.command_prefix,
-                profile.python,
+                executable,
                 "-c",
                 "import platform,sys; "
                 "print(f'{sys.version_info.major}.{sys.version_info.minor}'); "
@@ -183,12 +197,16 @@ class CudaCompatibilityResolver:
         return driver, tuple(sorted(capabilities, key=cls._version))
 
     def _available_version(
-        self, profile: ClusterProfile, transport: Transport, index_url: str
+        self,
+        profile: ClusterProfile,
+        transport: Transport,
+        index_url: str,
+        executable: str,
     ) -> str | None:
         result = transport.run(
             (
                 *profile.command_prefix,
-                profile.python,
+                executable,
                 "-m",
                 "pip",
                 "index",

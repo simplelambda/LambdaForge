@@ -63,6 +63,11 @@ class StorageService:
                 for record in active
                 if record.metadata.get("environment_id") not in {None, "existing"}
             ],
+            "runtimes": [
+                str(record.metadata["python_runtime_id"])
+                for record in active
+                if record.metadata.get("python_runtime_id")
+            ],
             "stage_cache": ["*"]
             if any(record.job_type == "dataset-build" for record in active)
             else [],

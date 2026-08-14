@@ -18,6 +18,7 @@ from lambdaforge.controlplane import (
     CommandResult,
     PreparedEnvironment,
     ProjectWheelBuilder,
+    PythonRuntime,
     TorchInstallationPlan,
     Transport,
 )
@@ -26,7 +27,7 @@ from lambdaforge.controlplane import (
 class FakeInstalledDistribution:
     """Expose only the metadata required to repack an installed wheel."""
 
-    version = "0.7.1"
+    version = "0.7.2"
     metadata = {"Name": "lambdaforge"}
     files: tuple[object, ...] = ()
 
@@ -37,7 +38,7 @@ class FakeInstalledDistribution:
         values = {
             "direct_url.json": self.direct_url,
             "METADATA": (
-                "Metadata-Version: 2.4\nName: lambdaforge\nVersion: 0.7.1\n"
+                "Metadata-Version: 2.4\nName: lambdaforge\nVersion: 0.7.2\n"
                 "Requires-Python: >=3.10\n"
             ),
             "WHEEL": (
@@ -104,8 +105,14 @@ class BootstrapFactory:
 class BootstrapCudaResolver:
     """Avoid hardware probing while preserving an exact managed dependency plan."""
 
-    def resolve(self, profile: ClusterProfile, transport: Transport) -> TorchInstallationPlan:
-        del profile, transport
+    def resolve(
+        self,
+        profile: ClusterProfile,
+        transport: Transport,
+        *,
+        python_executable: str | None = None,
+    ) -> TorchInstallationPlan:
+        del profile, transport, python_executable
         return TorchInstallationPlan(
             channel="cpu",
             version="2.1.0",
@@ -131,12 +138,39 @@ class RecordingWheelBuilder:
         return self.wheel
 
 
+class BootstrapRuntimeResolver:
+    """Return a verified runtime while this test isolates framework-wheel resolution."""
+
+    def resolve(
+        self, profile: ClusterProfile, transport: Transport, **kwargs: Any
+    ) -> PythonRuntime:
+        del profile, transport, kwargs
+        return PythonRuntime(
+            "python-runtime-test",
+            "/usr/bin/python3.10",
+            "3.10.14",
+            "CPython",
+            "Linux",
+            "x86_64",
+            "existing",
+            None,
+            False,
+            True,
+            "reuse",
+        )
+
+    def activate(
+        self, profile: ClusterProfile, transport: Transport, runtime: PythonRuntime
+    ) -> None:
+        del profile, transport, runtime
+
+
 def test_installed_distribution_repacking_is_deterministic_and_installable(tmp_path: Path) -> None:
     """A normal wheel install can bootstrap again without its original checkout or index."""
     package = tmp_path / "installed" / "lambdaforge"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(
-        'version = "0.7.1"\n__version__ = version\n', encoding="utf-8"
+        'version = "0.7.2"\n__version__ = version\n', encoding="utf-8"
     )
     schemas = package / "schemas"
     schemas.mkdir()
@@ -152,7 +186,7 @@ def test_installed_distribution_repacking_is_deterministic_and_installable(tmp_p
         names = set(archive.namelist())
         assert "lambdaforge/__init__.py" in names
         assert "lambdaforge/schemas/task.schema.json" in names
-        assert "lambdaforge-0.7.1.dist-info/RECORD" in names
+        assert "lambdaforge-0.7.2.dist-info/RECORD" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
     target = tmp_path / "target"
     completed = subprocess.run(
@@ -183,7 +217,7 @@ def test_installed_distribution_repacking_is_deterministic_and_installable(tmp_p
         env=environment,
     )
     assert imported.returncode == 0, imported.stderr
-    assert imported.stdout.strip() == "0.7.1"
+    assert imported.stdout.strip() == "0.7.2"
 
 
 def test_editable_distribution_resolves_direct_url_not_virtualenv_parent(tmp_path: Path) -> None:
@@ -205,7 +239,7 @@ def test_editable_distribution_resolves_direct_url_not_virtualenv_parent(tmp_pat
 
 def test_cluster_bootstrap_requests_the_installed_framework_distribution(tmp_path: Path) -> None:
     """Regress the former ``.venv/lib/pythonX/pyproject.toml`` source-root assumption."""
-    wheel = tmp_path / "lambdaforge-0.7.1-py3-none-any.whl"
+    wheel = tmp_path / "lambdaforge-0.7.2-py3-none-any.whl"
     wheel.write_bytes(b"framework-wheel")
     builder = RecordingWheelBuilder(wheel)
     profile = ClusterProfile(
@@ -221,6 +255,7 @@ def test_cluster_bootstrap_requests_the_installed_framework_distribution(tmp_pat
         tmp_path / "control",
         BootstrapCudaResolver(),  # type: ignore[arg-type]
         builder,  # type: ignore[arg-type]
+        BootstrapRuntimeResolver(),  # type: ignore[arg-type]
     )
 
     result = service.bootstrap("gpu")
@@ -228,3 +263,31 @@ def test_cluster_bootstrap_requests_the_installed_framework_distribution(tmp_pat
     assert result.python == "/remote/env/bin/python"
     assert len(builder.calls) == 1
     assert builder.calls[0][0] == "lambdaforge"
+
+
+def test_cluster_bootstrap_dry_run_does_not_build_or_stage_wheels(tmp_path: Path) -> None:
+    wheel = tmp_path / "lambdaforge-0.7.2-py3-none-any.whl"
+    wheel.write_bytes(b"unused")
+    builder = RecordingWheelBuilder(wheel)
+    profile = ClusterProfile(
+        "gpu",
+        transport="ssh",
+        host="gpu.example",
+        workspace="/work/user",
+        environment="managed",
+    )
+    factory = BootstrapFactory()
+    service = ClusterService(
+        ClusterCatalog({"gpu": profile}),
+        factory,  # type: ignore[arg-type]
+        tmp_path / "control",
+        BootstrapCudaResolver(),  # type: ignore[arg-type]
+        builder,  # type: ignore[arg-type]
+        BootstrapRuntimeResolver(),  # type: ignore[arg-type]
+    )
+
+    result = service.bootstrap("gpu", dry_run=True)
+
+    assert result.planned
+    assert result.runtime is not None
+    assert builder.calls == []

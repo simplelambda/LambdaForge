@@ -340,8 +340,8 @@ def test_doctor_fails_when_visible_gpu_cannot_initialize_cuda() -> None:
     assert "driver too old" in cuda.message
 
 
-def test_doctor_marks_reachable_but_unsupported_python_as_an_issue() -> None:
-    """A successful ``python --version`` is not enough for managed bootstrap readiness."""
+def test_doctor_explains_that_auto_can_replace_an_old_system_python() -> None:
+    """An old default interpreter is evidence, not a blocker for managed runtime bootstrap."""
     profile = ClusterProfile(
         "legacy-python",
         transport="ssh",
@@ -354,7 +354,9 @@ def test_doctor_marks_reachable_but_unsupported_python_as_an_issue() -> None:
         factory=DoctorFactory(UnsupportedPythonDoctorTransport()),  # type: ignore[arg-type]
     ).check("legacy-python")
 
-    python = next(check for check in report.checks if check.name == "python")
-    assert not python.ok
-    assert python.message == "Python 3.9.21"
-    assert python.fix is not None and "Python >= 3.10" in python.fix
+    python = next(check for check in report.checks if check.name == "system-python")
+    runtime = next(check for check in report.checks if check.name == "python-runtime")
+    assert python.ok
+    assert "Python 3.9.21" in python.message and "incompatible" in python.message
+    assert runtime.ok
+    assert "can resolve one during bootstrap" in runtime.message

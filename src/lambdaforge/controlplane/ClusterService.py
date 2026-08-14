@@ -11,10 +11,21 @@ from pathlib import Path, PurePosixPath
 from lambdaforge.controlplane.ClusterBootstrapResult import ClusterBootstrapResult
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
-from lambdaforge.controlplane.CudaCompatibilityResolver import CudaCompatibilityResolver
+from lambdaforge.controlplane.CudaCompatibilityResolver import (
+    CudaCompatibilityResolver,
+    NoCompatibleTorchWheelError,
+)
 from lambdaforge.controlplane.EnvironmentIdentity import EnvironmentIdentity
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
+from lambdaforge.controlplane.MicromambaArtifactStore import MicromambaArtifactStore
 from lambdaforge.controlplane.ProjectWheelBuilder import ProjectWheelBuilder
+from lambdaforge.controlplane.python_runtime import (
+    NoCompatiblePythonRuntimeError,
+    PythonRuntime,
+    PythonRuntimePolicy,
+    PythonRuntimeRequirements,
+)
+from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
 
 
 class ClusterService:
@@ -27,15 +38,23 @@ class ClusterService:
         cache_root: str | Path = ".lambdaforge/control",
         cuda_resolver: CudaCompatibilityResolver | None = None,
         wheel_builder: ProjectWheelBuilder | None = None,
+        runtime_resolver: PythonRuntimeResolver | None = None,
     ) -> None:
         self.catalog = catalog or ClusterCatalog.load()
         self.factory = factory or ControlPlaneFactory()
         self.cache_root = Path(cache_root).resolve()
         self.cuda_resolver = cuda_resolver or CudaCompatibilityResolver()
         self.wheel_builder = wheel_builder or ProjectWheelBuilder(self.cache_root / "wheels")
+        self.runtime_resolver = runtime_resolver or PythonRuntimeResolver(
+            MicromambaArtifactStore(self.cache_root / "runtime-installers")
+        )
 
     def bootstrap(
-        self, cluster: str, *, wheelhouse: str | Path | None = None
+        self,
+        cluster: str,
+        *,
+        wheelhouse: str | Path | None = None,
+        dry_run: bool = False,
     ) -> ClusterBootstrapResult:
         """Create workspace and idempotently verify/install the configured environment."""
         profile = self.catalog.get(cluster)
@@ -50,11 +69,71 @@ class ClusterService:
         assert profile.storage is not None
         storage = profile.storage
         transport = self.factory.transport(profile)
-        torch_plan = (
-            self.cuda_resolver.resolve(profile, transport)
-            if profile.environment == "managed"
-            else None
-        )
+        if dry_run:
+            if profile.environment == "existing":
+                return ClusterBootstrapResult(
+                    cluster, "existing", profile.python, True, runtime=None, planned=True
+                )
+            planned_runtime = self.runtime_resolver.resolve(
+                profile,
+                transport,
+                requirements=self._requirements(),
+                dry_run=True,
+            )
+            pytorch: dict[str, object]
+            if planned_runtime.ready:
+                pytorch = self.cuda_resolver.resolve(
+                    profile, transport, python_executable=planned_runtime.executable
+                ).to_dict()
+            else:
+                pytorch = {
+                    "status": "pending-runtime",
+                    "reason": "Exact wheel resolution follows managed Python provisioning.",
+                }
+            return ClusterBootstrapResult(
+                cluster,
+                f"planned-for-{planned_runtime.runtime_id}",
+                planned_runtime.executable,
+                planned_runtime.action == "reuse",
+                pytorch,
+                planned_runtime.to_dict(),
+                True,
+            )
+        runtime: PythonRuntime | None = None
+        torch_plan = None
+        effective_profile = profile
+        if profile.environment == "managed":
+            rejected: list[str] = []
+            while True:
+                try:
+                    runtime = self.runtime_resolver.resolve(
+                        profile,
+                        transport,
+                        requirements=self._requirements(),
+                        excluded_runtime_ids=rejected,
+                    )
+                except NoCompatiblePythonRuntimeError as error:
+                    if rejected:
+                        raise NoCompatibleTorchWheelError(
+                            "No Python runtime satisfies the combined LambdaForge, consumer "
+                            "project and official PyTorch wheel constraints. Candidate runtimes "
+                            f"rejected by PyTorch: {tuple(rejected)}."
+                        ) from error
+                    raise
+                try:
+                    torch_plan = self.cuda_resolver.resolve(
+                        profile, transport, python_executable=runtime.executable
+                    )
+                    break
+                except NoCompatibleTorchWheelError:
+                    rejected.append(runtime.runtime_id)
+                    if profile.runtime_policy.strategy == "existing":
+                        raise
+            effective_profile = replace(
+                profile,
+                python=runtime.executable,
+                python_runtime=PythonRuntimePolicy("existing", runtime.executable),
+            )
         created = transport.run(
             (
                 "mkdir",
@@ -80,7 +159,11 @@ class ClusterService:
             return ClusterBootstrapResult(cluster, "existing", profile.python, True)
 
         assert torch_plan is not None
-        dependency_policy = {"pytorch": torch_plan.to_dict()}
+        assert runtime is not None
+        dependency_policy = {
+            "python_runtime": runtime.to_dict(),
+            "pytorch": torch_plan.to_dict(),
+        }
         wheel = self.wheel_builder.build_installed(
             "lambdaforge", source_hint=Path(__file__).resolve().parents[3]
         )
@@ -102,7 +185,7 @@ class ClusterService:
                 )
         identity = EnvironmentIdentity.create(
             descriptors,
-            python_requirement=f"=={torch_plan.python_version}.*",
+            python_requirement=f"=={'.'.join(runtime.version.split('.')[:2])}.*",
             offline=profile.wheelhouse is not None,
             dependency_policy=dependency_policy,
         )
@@ -138,13 +221,30 @@ class ClusterService:
             if parent.returncode:
                 raise RuntimeError(f"Could not create bootstrap cache: {parent.stderr.strip()}")
             transport.put(directory, str(remote))
-        prepared = self.factory.environment_provider(profile).prepare(
-            profile, transport, bundle, remote_bundle_dir=str(remote)
+        prepared = self.factory.environment_provider(effective_profile).prepare(
+            effective_profile, transport, bundle, remote_bundle_dir=str(remote)
         )
+        self.runtime_resolver.activate(profile, transport, runtime)
         return ClusterBootstrapResult(
             cluster,
             prepared.environment_id,
             prepared.python,
             prepared.reused,
             torch_plan.to_dict(),
+            runtime.to_dict(),
         )
+
+    @staticmethod
+    def _requirements() -> tuple[str, ...]:
+        """Include a nearby consumer project constraint when bootstrap runs inside one."""
+        current = Path.cwd().resolve()
+        root = next(
+            (
+                candidate
+                for candidate in (current, *current.parents)
+                if (candidate / "pyproject.toml").is_file()
+            ),
+            None,
+        )
+        requirement = PythonRuntimeRequirements.project(root)
+        return (requirement,) if requirement else ()

@@ -21,7 +21,11 @@ clusters:
       dataset_root: /project/PROJECT/datasets
       cache_max_size: 50GiB
       cache_max_age: 30d
-    python: python3
+    python:
+      strategy: auto
+      executable: python3
+      version: null
+      allow_managed_install: true
     environment: managed
     pytorch: {channel: auto, require_cuda: auto}
     project_module: my_project

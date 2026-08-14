@@ -62,6 +62,10 @@ class ClusterStoragePolicy:
         return str(PurePosixPath(self.cache_root) / "environments")
 
     @property
+    def runtime_root(self) -> str:
+        return str(PurePosixPath(self.cache_root) / "runtimes")
+
+    @property
     def job_root(self) -> str:
         return self.run_root
 

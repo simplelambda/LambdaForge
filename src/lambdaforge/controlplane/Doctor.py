@@ -9,6 +9,8 @@ from typing import cast
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
+from lambdaforge.controlplane.python_runtime import PythonRuntimeRequirements
+from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
@@ -119,6 +121,7 @@ class Doctor:
             )
         )
         selected_python = profile.python
+        active_environment = False
         if profile.environment == "managed":
             pointer = PurePosixPath(profile.storage.state_root) / "active-environment"
             active = transport.run(("cat", str(pointer)))
@@ -127,6 +130,7 @@ class Doctor:
                 active = transport.run(("cat", str(legacy)))
             if active.returncode == 0 and active.stdout.strip():
                 selected_python = active.stdout.strip()
+                active_environment = True
             checks.append(
                 DoctorCheck(
                     "managed-environment",
@@ -144,25 +148,84 @@ class Doctor:
                 f"Run 'lambdaforge clusters bootstrap {cluster}'.",
             )
         )
-        python = transport.run((*profile.command_prefix, selected_python, "--version"))
-        python_message = (python.stdout or python.stderr).strip() or "Python was not found."
-        python_match = re.search(r"Python\s+(\d+)\.(\d+)", python_message)
-        python_supported = bool(
-            python.returncode == 0
-            and python_match is not None
-            and tuple(int(value) for value in python_match.groups())
-            >= LambdaForgeVersion.MINIMUM_PYTHON
+        requirement = PythonRuntimeRequirements.framework()
+        system_python = transport.run((*profile.command_prefix, profile.python, "--version"))
+        system_message = (
+            system_python.stdout or system_python.stderr
+        ).strip() or "Python was not found."
+        system_match = re.search(r"Python\s+(\d+(?:\.\d+){1,2})", system_message)
+        system_compatible = bool(
+            system_match
+            and PythonRuntimeRequirements.compatible(system_match.group(1), (requirement,))
         )
-        minimum_python = ".".join(str(item) for item in LambdaForgeVersion.MINIMUM_PYTHON)
         checks.append(
             DoctorCheck(
-                "python",
-                python_supported,
-                python_message,
-                f"Set clusters.{cluster}.python to a working Python >= {minimum_python} "
-                "executable; LambdaForge does not install system Python.",
+                "system-python" if profile.environment == "managed" else "python",
+                system_python.returncode == 0 and system_match is not None,
+                f"{system_message} ({'compatible' if system_compatible else 'incompatible'} "
+                f"with {requirement})",
+                (
+                    f"Set clusters.{cluster}.python.executable to a working Python."
+                    if system_python.returncode
+                    else None
+                ),
             )
         )
+        if profile.environment == "managed":
+            runtime = PythonRuntimeResolver().active(profile, transport)
+            if runtime is None:
+                checks.append(
+                    DoctorCheck(
+                        "python-runtime",
+                        True,
+                        (
+                            "No managed runtime is active yet; "
+                            f"python.strategy={profile.runtime_policy.strategy} can resolve one "
+                            "during bootstrap."
+                        ),
+                    )
+                )
+            else:
+                runtime_probe = transport.run(
+                    (*profile.command_prefix, runtime.executable, "--version")
+                )
+                runtime_message = (
+                    runtime_probe.stdout or runtime_probe.stderr
+                ).strip() or runtime.executable
+                runtime_match = re.search(r"Python\s+(\d+(?:\.\d+){1,2})", runtime_message)
+                runtime_ok = bool(
+                    runtime_probe.returncode == 0
+                    and runtime_match
+                    and PythonRuntimeRequirements.compatible(runtime_match.group(1), (requirement,))
+                )
+                checks.append(
+                    DoctorCheck(
+                        "python-runtime",
+                        runtime_ok,
+                        f"{runtime_message}; {runtime.executable} ({runtime.provider})",
+                        f"Rerun 'lf clusters bootstrap {cluster}' to repair the managed runtime.",
+                    )
+                )
+            if active_environment:
+                managed = transport.run((*profile.command_prefix, selected_python, "--version"))
+                managed_message = (
+                    managed.stdout or managed.stderr
+                ).strip() or "Python was not found."
+                managed_match = re.search(r"Python\s+(\d+(?:\.\d+){1,2})", managed_message)
+                checks.append(
+                    DoctorCheck(
+                        "managed-python",
+                        bool(
+                            managed.returncode == 0
+                            and managed_match
+                            and PythonRuntimeRequirements.compatible(
+                                managed_match.group(1), (requirement,)
+                            )
+                        ),
+                        f"{managed_message}; {selected_python}",
+                        f"Rerun 'lf clusters bootstrap {cluster}'.",
+                    )
+                )
         if profile.project_module:
             project = transport.run(
                 (

@@ -50,7 +50,10 @@ class StorageOperations:
     ) -> dict[str, Any]:
         roots = cls._roots(descriptor)
         cache_root = Path(str(descriptor["cache_root"])).expanduser().resolve()
-        markers = tuple(cache_root.glob(".environment-build-*.lock"))
+        markers = (
+            *cache_root.glob(".environment-build-*.lock"),
+            *cache_root.glob(".python-runtime-*.lock"),
+        )
         if markers:
             return {
                 "candidates": [],
@@ -62,13 +65,19 @@ class StorageOperations:
         candidate_paths: set[str] = set()
         now = time.time()
         maximum_age = descriptor.get("cache_max_age")
+        runtime_references = cls._runtime_references(roots, references.get("runtimes", ()))
         for category, reference_key in (
             ("bundles", "bundles"),
             ("environments", "environments"),
+            ("runtimes", "runtimes"),
             ("stage_cache", "stage_cache"),
         ):
             root = roots[category]
-            protected = set(str(item) for item in references.get(reference_key, ()))
+            protected = (
+                runtime_references
+                if category == "runtimes"
+                else set(str(item) for item in references.get(reference_key, ()))
+            )
             if not root.is_dir() or root.is_symlink():
                 continue
             for child in sorted(root.iterdir()):
@@ -117,6 +126,10 @@ class StorageOperations:
             cache_roots = (
                 roots["bundles"],
                 roots["environments"],
+                roots["runtimes"],
+                roots["runtime_managers"],
+                roots["conda_packages"],
+                roots["runtime_packages"],
                 roots["package_cache"],
                 roots["stage_cache"],
                 roots["temporary"],
@@ -127,9 +140,14 @@ class StorageOperations:
             for category, reference_key in (
                 ("bundles", "bundles"),
                 ("environments", "environments"),
+                ("runtimes", "runtimes"),
                 ("stage_cache", "stage_cache"),
             ):
-                protected = set(str(item) for item in references.get(reference_key, ()))
+                protected = (
+                    runtime_references
+                    if category == "runtimes"
+                    else set(str(item) for item in references.get(reference_key, ()))
+                )
                 root = roots[category]
                 if not root.is_dir() or root.is_symlink():
                     continue
@@ -185,6 +203,10 @@ class StorageOperations:
             "state": state,
             "bundles": cache / "bundles",
             "environments": cache / "environments",
+            "runtimes": cache / "runtimes",
+            "runtime_managers": cache / "runtime-managers",
+            "conda_packages": cache / "conda-pkgs",
+            "runtime_packages": cache / "runtime-packages",
             "package_cache": cache / "pip",
             "stage_cache": cache / "dataset-stages",
             "job_workspaces": run,
@@ -212,8 +234,35 @@ class StorageOperations:
     def _complete(category: str, path: Path) -> bool:
         if category == "stage_cache":
             return any(candidate.is_file() for candidate in path.rglob("result.json"))
+        if category == "runtimes":
+            return (path / ".lambdaforge-python-runtime.json").is_file()
         marker = "manifest.json" if category == "bundles" else ".lambdaforge-environment.json"
         return (path / marker).is_file()
+
+    @staticmethod
+    def _runtime_references(roots: Mapping[str, Path], explicit: Sequence[str]) -> set[str]:
+        """Protect runtimes selected globally or embedded in retained environment receipts."""
+        protected = {str(item) for item in explicit}
+        active = roots["state"] / "active-python-runtime.json"
+        candidates = [active]
+        environment_root = roots["environments"]
+        if environment_root.is_dir() and not environment_root.is_symlink():
+            candidates.extend(environment_root.glob("*/.lambdaforge-environment.json"))
+        for candidate in candidates:
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            runtime = payload.get("runtime_id")
+            if runtime is None:
+                policy = payload.get("environment_policy", {})
+                python = policy.get("python_runtime", {}) if isinstance(policy, dict) else {}
+                runtime = python.get("runtime_id") if isinstance(python, dict) else None
+            if runtime:
+                protected.add(str(runtime))
+        return protected
 
     @classmethod
     def main(cls, argv: Sequence[str] | None = None) -> int:

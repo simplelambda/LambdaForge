@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from lambdaforge.controlplane.ClusterAuthentication import ClusterAuthentication
 from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
+from lambdaforge.controlplane.python_runtime import PythonRuntimePolicy
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
 from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
@@ -42,6 +43,7 @@ class ClusterProfile:
     command_prefix: tuple[str, ...] = ()
     scheduler_options: Mapping[str, Any] = field(default_factory=dict)
     slurm_profile: SlurmProfile | Mapping[str, Any] | None = None
+    python_runtime: PythonRuntimePolicy | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -52,6 +54,12 @@ class ClusterProfile:
             raise ValueError("Cluster scheduler must be 'local' or 'slurm'.")
         if self.environment not in {"existing", "managed"}:
             raise ValueError("Cluster environment must be 'existing' or 'managed'.")
+        runtime = self.python_runtime
+        if runtime is not None and not isinstance(runtime, PythonRuntimePolicy):
+            runtime = PythonRuntimePolicy.from_value(runtime)
+            object.__setattr__(self, "python_runtime", runtime)
+        if runtime is not None and self.python != runtime.executable:
+            object.__setattr__(self, "python", runtime.executable)
         pytorch = self.pytorch
         if not isinstance(pytorch, TorchInstallationPolicy):
             pytorch = TorchInstallationPolicy.from_mapping(pytorch)
@@ -110,6 +118,8 @@ class ClusterProfile:
         prefix = value.get("command_prefix", ())
         if not isinstance(prefix, Sequence) or isinstance(prefix, (str, bytes, bytearray)):
             raise TypeError("command_prefix must be an argument list.")
+        raw_python = value.get("python", "python")
+        runtime = PythonRuntimePolicy.from_value(raw_python)
         return cls(
             name=name,
             transport=str(value.get("transport", "local")),
@@ -129,7 +139,8 @@ class ClusterProfile:
                 value.get("storage"),
                 workspace=str(value.get("workspace", ".lambdaforge/remote")),
             ),
-            python=str(value.get("python", "python")),
+            python=runtime.executable,
+            python_runtime=(runtime if isinstance(raw_python, Mapping) else None),
             environment=str(value.get("environment", "existing")),
             wheelhouse=(str(value["wheelhouse"]) if value.get("wheelhouse") else None),
             pytorch=TorchInstallationPolicy.from_mapping(value.get("pytorch")),
@@ -183,7 +194,9 @@ class ClusterProfile:
             "connection": self.connection.to_dict(),
             "workspace": self.workspace,
             "storage": cast(ClusterStoragePolicy, self.storage).to_dict(),
-            "python": self.python,
+            "python": (
+                self.python_runtime.to_dict() if self.python_runtime is not None else self.python
+            ),
             "environment": self.environment,
             "wheelhouse": self.wheelhouse,
             "pytorch": self.pytorch.to_dict(),
@@ -194,3 +207,8 @@ class ClusterProfile:
             "scheduler_options": copy.deepcopy(self.scheduler_options),
             **(slurm_descriptor if self.scheduler == "slurm" else {}),
         }
+
+    @property
+    def runtime_policy(self) -> PythonRuntimePolicy:
+        """Return the explicit policy or the backward-compatible string interpretation."""
+        return self.python_runtime or PythonRuntimePolicy("existing", self.python)

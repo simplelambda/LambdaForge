@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -31,14 +32,24 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         """Build under an advisory marker so cache GC fails closed during mutation."""
         assert profile.storage is not None
         cache_root = PurePosixPath(profile.storage.cache_root)
-        marker = cache_root / f".environment-build-{uuid4().hex}.lock"
+        if bundle.environment_id is None:
+            raise ValueError("Managed environment bundles require an environment identity.")
+        marker = cache_root / f".environment-build-{bundle.environment_id}.lock"
+        completion = (
+            PurePosixPath(profile.storage.environment_root)
+            / bundle.environment_id
+            / ".lambdaforge-environment.json"
+        )
         created = transport.run(("mkdir", "-p", str(cache_root)))
         if created.returncode:
             raise RuntimeError(f"Could not create managed cache root: {created.stderr.strip()}")
-        marked = transport.run(("touch", str(marker)))
-        if marked.returncode:
-            raise RuntimeError(
-                f"Could not acquire environment build marker: {marked.stderr.strip()}"
+        acquired = self._acquire(transport, marker, completion)
+        if not acquired:
+            return self._prepare(
+                profile,
+                transport,
+                bundle,
+                remote_bundle_dir=remote_bundle_dir,
             )
         try:
             return self._prepare(
@@ -48,7 +59,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
                 remote_bundle_dir=remote_bundle_dir,
             )
         finally:
-            transport.run(("rm", "-f", str(marker)))
+            transport.run(("rmdir", str(marker)))
 
     def _prepare(
         self,
@@ -277,3 +288,22 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         ):
             raise ValueError(f"Refusing to clean an unexpected environment path: {path}")
         transport.run(("rm", "-rf", str(path)))
+
+    @staticmethod
+    def _acquire(
+        transport: Transport,
+        lock: PurePosixPath,
+        completion: PurePosixPath,
+        *,
+        timeout: float = 30.0,
+    ) -> bool:
+        """Serialize identical environment creation with a bounded remote mkdir lock."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if transport.run(("mkdir", str(lock))).returncode == 0:
+                return True
+            if transport.run(("test", "-f", str(completion))).returncode == 0:
+                return False
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"Timed out waiting for managed environment lock {lock}.")
+            time.sleep(0.2)

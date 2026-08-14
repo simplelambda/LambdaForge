@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -170,6 +171,46 @@ def test_storage_gc_fails_closed_during_environment_build(tmp_path: Path) -> Non
     )
     assert payload["candidates"] == []
     assert "environment build" in payload["blocked_reason"]
+
+
+def test_storage_gc_keeps_referenced_python_runtimes_and_selects_stale_unused_one(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    state = tmp_path / "state"
+    state.mkdir()
+    active = cache / "runtimes" / "python-runtime-active"
+    retained = cache / "runtimes" / "python-runtime-retained"
+    active_job = cache / "runtimes" / "python-runtime-active-job"
+    unused = cache / "runtimes" / "python-runtime-unused"
+    for runtime in (active, retained, active_job, unused):
+        runtime.mkdir(parents=True)
+        (runtime / ".lambdaforge-python-runtime.json").write_text("{}", encoding="utf-8")
+        os.utime(runtime, (1, 1))
+    (state / "active-python-runtime.json").write_text(
+        json.dumps({"runtime_id": active.name}), encoding="utf-8"
+    )
+    environment = cache / "environments" / "env-retained"
+    environment.mkdir(parents=True)
+    (environment / ".lambdaforge-environment.json").write_text(
+        json.dumps({"environment_policy": {"python_runtime": {"runtime_id": retained.name}}}),
+        encoding="utf-8",
+    )
+
+    preview = StorageOperations.gc(
+        {
+            "state_root": str(state),
+            "cache_root": str(cache),
+            "run_root": str(tmp_path / "jobs"),
+            "cache_max_age": 1,
+        },
+        {"runtimes": [active_job.name], "environments": [], "bundles": []},
+    )
+
+    runtime_candidates = {
+        item["name"] for item in preview["candidates"] if item["category"] == "runtimes"
+    }
+    assert runtime_candidates == {unused.name}
 
 
 def test_build_materialization_plans_inputs_and_rejects_missing_lineage(tmp_path: Path) -> None:

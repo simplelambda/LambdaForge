@@ -157,14 +157,19 @@ ControlMaster socket until the configured idle `persist` time. Password mode res
 interactive, `keyring:` or `env:` references and must never put values in argv/YAML/bundles/state,
 fingerprints or logs.
 
+Keep `PythonRuntime -> PythonEnvironment -> InstalledPackages` separate. New managed profiles use
+`python.strategy=auto`: probe the configured/bounded alternatives, reuse a Conda-family manager, or
+stage the pinned verified micromamba and create a runtime below `storage.cache_root`. A legacy
+`python: python3` string means strict `existing`; migrate it with
+`lf clusters set NAME python.strategy auto`. Use `bootstrap --dry-run` before provisioning.
 Managed environments are immutable user-space venvs identified by exact framework/consumer/
-dependency wheel bytes, target Python, offline policy and Torch plan. LambdaForge never clones a
-branch, changes drivers/system CUDA, installs compatibility packages or silently falls back to CPU.
+dependency wheel bytes, resolved runtime, offline policy and Torch plan. Never use `conda activate`,
+modify shell startup files, system Python, drivers/CUDA, or silently fall back to CPU.
 Bootstrap accepts LambdaForge itself from either an editable PEP 610 source or a regular installed
 wheel; never infer a source root from `lambdaforge.__file__` or require `pyproject.toml` inside a
-consumer virtual environment. The configured cluster Python must satisfy the framework floor
-(currently >=3.10); `doctor` and bootstrap fail early with that profile fix because LambdaForge does
-not install system Python.
+consumer virtual environment. Read `Requires-Python` from release and consumer metadata; do not
+duplicate the version floor in code. Runtime/package caches are reconstructible, but GC must retain
+runtimes referenced by active jobs, the active pointer or retained environments.
 Automatic Torch selection uses actual remote Python, driver and compute capability plus official
 wheel availability, and the installed environment must pass a CUDA tensor probe when required.
 

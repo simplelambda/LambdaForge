@@ -22,6 +22,7 @@ from lambdaforge.controlplane.ClusterService import ClusterService
 from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
 from lambdaforge.controlplane.CredentialService import CredentialService
 from lambdaforge.controlplane.Doctor import Doctor
+from lambdaforge.controlplane.python_runtime import PythonRuntimePolicy
 from lambdaforge.controlplane.ResourceService import ResourceService
 from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
 from lambdaforge.controlplane.StorageService import StorageService
@@ -47,6 +48,13 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
             )
             if not credential.startswith("keyring:"):
                 raise ValueError("--store-password requires a keyring: reference.")
+        runtime_policy = PythonRuntimePolicy(
+            arguments.python_strategy
+            or ("auto" if arguments.environment == "managed" else "existing"),
+            arguments.python,
+            arguments.python_version,
+            not arguments.no_managed_python,
+        )
         cluster_profile = ClusterProfile(
             arguments.name,
             transport="ssh" if arguments.host else "local",
@@ -83,6 +91,7 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
                 workspace=arguments.workspace,
             ),
             python=arguments.python,
+            python_runtime=runtime_policy,
             environment=arguments.environment,
             wheelhouse=(str(arguments.wheelhouse) if arguments.wheelhouse else None),
             pytorch=TorchInstallationPolicy(
@@ -144,6 +153,10 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
         descriptor = cluster_profile.to_dict(include_defaults=False)
         descriptor.pop("name", None)
         if arguments.cluster_command == "set":
+            if arguments.key.startswith("python.") and isinstance(descriptor.get("python"), str):
+                descriptor["python"] = PythonRuntimePolicy(
+                    "existing", str(descriptor["python"])
+                ).to_dict()
             set_dotted(
                 descriptor,
                 arguments.key,
@@ -217,15 +230,28 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
         )
         return 0 if cluster_report.ok else 1
     bootstrapped = ClusterService(cluster_catalog).bootstrap(
-        cluster_profile.name, wheelhouse=arguments.wheelhouse
+        cluster_profile.name,
+        wheelhouse=arguments.wheelhouse,
+        dry_run=arguments.dry_run,
     )
     print(
         json.dumps(bootstrapped.to_dict(), indent=2)
         if arguments.json
         else (
-            f"Cluster {bootstrapped.cluster!r} is ready with "
+            f"Cluster {bootstrapped.cluster!r} "
+            f"{'plans' if bootstrapped.planned else 'is ready with'} "
             f"{bootstrapped.environment_id} "
-            f"({'reused' if bootstrapped.reused else 'created'})."
+            f"({bootstrap_action(bootstrapped.planned, bootstrapped.reused)}).\n"
+            f"Python: {bootstrapped.python}\n"
+            f"Runtime: {dict(bootstrapped.runtime or {})}\n"
+            f"PyTorch: {dict(bootstrapped.pytorch or {})}"
         )
     )
     return 0
+
+
+def bootstrap_action(planned: bool, reused: bool) -> str:
+    """Render the mutually exclusive bootstrap disposition compactly."""
+    if planned:
+        return "planned"
+    return "reused" if reused else "created"

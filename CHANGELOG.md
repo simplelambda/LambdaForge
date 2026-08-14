@@ -8,6 +8,30 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-14
+
+### Added
+
+- Managed cluster Python runtime resolution with explicit `auto`, `existing` and `managed`
+  strategies, bounded interpreter discovery, consumer `Requires-Python` constraints and a
+  preview-only `clusters bootstrap --dry-run` plan.
+- Reusable user-space Conda-family runtime prefixes and a pinned micromamba fallback staged from the
+  controller after local and remote SHA-256 verification. Offline wheelhouse profiles prefetch and
+  transfer the target Python package cache instead of requiring cluster internet access.
+
+### Changed
+
+- New managed cluster profiles default to automatic Python resolution. Legacy `python: EXECUTABLE`
+  profiles retain strict existing-runtime behavior until explicitly migrated.
+- Environment identity, doctor output, storage accounting and reference-aware GC now distinguish
+  the Python runtime, isolated package environment and installed framework/project packages.
+
+### Security
+
+- Managed Python never invokes sudo, edits shell startup files, activates a global Conda
+  environment or changes drivers/system CUDA. Runtime and environment publication is verified,
+  locked, staged and atomic; corrupt downloads and incomplete prefixes are not activated.
+
 ## [0.7.1] - 2026-08-14
 
 ### Changed
@@ -389,7 +413,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/simplelambda/LambdaForge/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/simplelambda/LambdaForge/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/simplelambda/LambdaForge/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/simplelambda/LambdaForge/compare/v0.5.3...v0.6.0

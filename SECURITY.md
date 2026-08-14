@@ -34,6 +34,9 @@ required. Do not include real credentials or private datasets.
 - Scheduler command/resource placeholders are allowlisted and rendered to argv. Profile
   prologue/epilogue lines are trusted shell code and must not interpolate secrets or accept
   unreviewed experiment values.
+- Managed Python provisioning is unprivileged and confined to the configured cache root. The pinned
+  micromamba fallback is downloaded over HTTPS on the controller and SHA-256 verified before and
+  after transfer; bootstrap never edits shell profiles, system Python, drivers or system CUDA.
 - Tracking and S3-compatible providers expand the trust boundary to their SDK, credentials, network
   and service. They are optional and loaded only when configured.
 

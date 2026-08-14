@@ -16,7 +16,7 @@ generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine be
 Python package, so a research project can focus on its data and science instead of rebuilding
 pipelines, training loops, provenance, result management and process scheduling.
 
-> **Status:** `0.7.1`, usable but pre-1.0. The public namespaces documented below are the intended
+> **Status:** `0.7.2`, usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
 > contain a licence file, so redistribution terms still need to be chosen by SimpleLambda.
 
@@ -167,7 +167,7 @@ immutable artifact instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.7.1-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.7.2-py3-none-any.whl
 ```
 
 Let the consumer project's lock file or constraints select a PyTorch build compatible with its
@@ -630,7 +630,11 @@ clusters:
     auth: {mode: openssh}             # recommended: keys/agent/ProxyJump remain native
     scheduler: slurm
     workspace: /scratch/my-user/lambdaforge
-    python: /shared/envs/research/bin/python
+    python:
+      strategy: auto                   # auto | existing | managed
+      executable: python3              # tried first
+      version: null                    # optionally pin a minor such as "3.13"
+      allow_managed_install: true
     environment: managed             # or existing for a user/admin-owned environment
     pytorch: {channel: auto, require_cuda: auto}
     project_module: my_project       # doctor verifies this consumer import
@@ -651,7 +655,7 @@ clusters:
     scheduler: slurm
     workspace: /scratch/my-user/lambdaforge
     command_prefix: [apptainer, exec, /shared/images/project.sif]
-    python: python
+    python: {strategy: existing, executable: /usr/bin/python3.12}
 profiles:
   one-gpu:
     cluster: atlas
@@ -659,7 +663,9 @@ profiles:
 ```
 
 `command_prefix` is an argument vector, so containers/site wrappers can be selected without local
-shell interpolation. OpenSSH is the default and preserves aliases, keys, agent, `known_hosts` and
+shell interpolation. It is not a shell script: put `module load` in a reviewed scheduler prologue,
+or configure the absolute Python/site wrapper exposed by the centre. OpenSSH is the default and
+preserves aliases, keys, agent, `known_hosts` and
 ProxyJump. A private `ControlMaster=auto` socket lets short operations reuse one authenticated
 connection until `connection.persist` seconds of inactivity. Connection/auth/banner, keepalive and
 command deadlines are independent; long scientific commands have no transport timeout unless one
@@ -679,11 +685,86 @@ lambdaforge clusters add atlas --host atlas-login --workspace /scratch/my-user/l
 lambdaforge clusters list
 lambdaforge clusters inspect atlas
 lambdaforge clusters test atlas
+lambdaforge clusters bootstrap atlas --dry-run
 lambdaforge clusters bootstrap atlas
 lambdaforge run experiment.yaml --on atlas --dry-run
 lambdaforge run experiment.yaml --on atlas --cpus 8 --memory 32GiB --resource-gpus 1 --time 4h
 lambdaforge run experiment.yaml --profile one-gpu
 ```
+
+### Managed Python runtime
+
+There are three separate layers. A **Python runtime** is the real CPython interpreter; a **Python
+environment** is the isolated `venv`; **installed packages** are the exact LambdaForge, consumer,
+PyTorch and dependency distributions inside that environment. A `venv` made with Python 3.9 is
+still Python 3.9, so managed bootstrap resolves the runtime before it resolves CUDA/PyTorch or
+computes the environment identity.
+
+| Strategy | Meaning |
+|---|---|
+| `existing` | Use only `python.executable`; never provision a runtime. |
+| `auto` | Try the configured executable, bounded supported Python minor alternatives, a cached runtime, an existing Conda/Mamba/Micromamba, then the managed fallback. |
+| `managed` | Reuse or create a LambdaForge-owned runtime even if a compatible system Python exists. |
+
+New `clusters add --environment managed` profiles default to `auto`. For backward compatibility,
+the old scalar `python: python3` means strict `existing`; it never begins downloading software
+silently. Migrate and optionally pin it without editing YAML:
+
+```bash
+lf clusters set atlas python.strategy auto
+lf clusters set atlas python.version 3.13
+lf clusters set atlas python.allow_managed_install false  # institutional no-install policy
+```
+
+`bootstrap --dry-run` performs discovery and reports the default interpreter, runtime action/path
+and either the exact PyTorch plan or that its final wheel resolution awaits the planned runtime. It
+does not create cluster directories, download the manager or install packages. Real bootstrap uses
+this order:
+
+```text
+transport/platform -> Python constraints -> runtime -> PyTorch/CUDA wheel
+                   -> environment identity -> venv/packages -> verification -> active pointers
+```
+
+LambdaForge reads its own `Requires-Python` from installed release metadata and the nearest
+consumer project's `project.requires-python`. It tries another candidate if the official selected
+PyTorch channel has no wheel for an otherwise valid Python. The chosen runtime version,
+architecture, provider/version and package fingerprint enter environment identity, so changing
+Python cannot silently reuse an incompatible environment.
+
+Existing `micromamba`, `mamba` or `conda` is reused only to create a dedicated prefix with `-p`
+below `storage.cache_root`; global/base environments are not modified. If none exists and managed
+installation is allowed, LambdaForge stages pinned micromamba 2.8.1-0 from the official mamba-org
+release. The controller downloads over HTTPS, verifies a built-in SHA-256 for Linux x86-64,
+AArch64 or ppc64le, transfers the single executable and verifies the checksum again. It never runs
+`conda activate`, `conda init`, edits `.bashrc`, uses sudo or changes system Python/CUDA/drivers.
+Micromamba supplies only the reusable CPython runtime; ordinary pip policy still installs the exact
+framework/project/PyTorch packages into the content-addressed `venv`.
+
+Runtimes, managers, Conda packages and environments are separate cache categories:
+
+```text
+storage.cache_root/
+  runtime-managers/     pinned micromamba executable
+  runtimes/             verified Python prefixes
+  conda-pkgs/            reusable package cache
+  runtime-packages/      staged offline solves
+  environments/          exact LambdaForge/project/PyTorch venvs
+```
+
+With an offline `wheelhouse`, the controller uses micromamba to prefetch the target-platform Python
+solve and transfers that package cache before remote `--offline` creation. The controller must be
+Linux for this cross-target prefetch; otherwise provide an existing compatible runtime. Runtime and
+environment creation use bounded locks, unique staging paths, verification and atomic publication.
+A verified runtime may remain as reconstructible cache when later package installation fails, but
+no active pointer references an incomplete runtime/environment. `storage status` accounts for all
+categories and `storage gc` never selects a runtime referenced by the active pointer, a retained
+environment or an active/queued job.
+
+`doctor` reports the system/default Python separately from the active resolved runtime and managed
+environment Python. Thus Python 3.9 can be a healthy system probe while bootstrap is still able to
+provide Python 3.13; under `strategy: existing`, the same incompatibility remains an actionable
+failure.
 
 The portable `ResourceRequest` normalizes CPU cores, RAM, GPUs, GPU memory, duration, storage and
 process count. One validated per-cluster translation layer emits standard `gpus`, generic/typed
@@ -702,18 +783,18 @@ nearest consumer project, and only explicitly bounded small inputs. It is conten
 wheel install reuses its original local wheel when available or deterministically reconstructs a
 pure-Python wheel from the installed package and metadata; bootstrap does not assume that
 `pyproject.toml` exists inside `.venv` and does not require contacting an index for LambdaForge
-itself. In `managed` mode those wheel bytes and compatible dependency policy identify an
-idempotent user-space venv under `WORKSPACE/.lambdaforge/environments`. In `existing` mode no
+itself. In `managed` mode those wheel bytes, resolved Python-runtime identity and compatible
+dependency policy identify an idempotent user-space venv below `storage.cache_root/environments`.
+In `existing` mode no
 installation occurs and the configured Python must already contain the exact framework/project.
 Offline clusters use a target-compatible `wheelhouse`/`--wheelhouse` and `--no-index`. LambdaForge
 verifies PyTorch/CUDA but never installs drivers, system CUDA or cuDNN. The remote command remains
 `python -m lambdaforge run config.yaml`, so there is no second runner.
 
-Managed bootstrap probes the remote Python, NVIDIA driver and compute capabilities, verifies wheel
-availability in official PyTorch indexes, and pins an exact compatible Torch build before installing
-the framework. The configured `clusters.NAME.python` must resolve to Python 3.10 or newer. If a
-login node defaults to Python 3.9, select a supported executable or load the centre's Python module
-through the profile; LambdaForge deliberately does not install system Python. Automatic mode
+Managed bootstrap resolves a constraint-compatible Python runtime, probes the NVIDIA driver and
+compute capabilities, verifies wheel availability in official PyTorch indexes, and pins an exact
+compatible Torch build before installing the framework. A legacy scalar Python remains strict;
+`strategy: auto` can safely replace an incompatible login-node default in user space. Automatic mode
 chooses the newest channel meeting its native toolkit driver floor:
 for example, a 535-series H100 selects `cu121`, not `cu126`/`cu130`, while legacy Pascal-class GPUs
 use `cu118` when a compatible wheel exists. It does not silently rely on minor-version compatibility
@@ -2215,7 +2296,9 @@ content changes but do not encrypt data. HMAC-protected cache records require a 
 secret key.
 
 Remote bootstrap is unprivileged. It installs reviewed wheels in a user-owned virtual environment
-and never changes drivers, system CUDA, modules, firewall or scheduler policy. Scheduler prologues,
+and may create a verified Python runtime only below the configured cache root. It never changes
+system Python, shell profiles, drivers, system CUDA, modules, firewall or scheduler policy.
+Scheduler prologues,
 epilogues and custom commands are trusted administrator/user configuration and therefore use
 validated placeholders rather than secret interpolation.
 
@@ -2260,9 +2343,11 @@ secret redaction, process identity, host verification, dataset integrity or stor
 - Workflow execution remains bounded and local. Workflow plans record `on` placement, and the
   control plane submits individual configs to local/SSH plus process/SLURM providers, but it does
   not pretend to coordinate mixed-cluster DAG artifact transfer or durable dependency recovery.
-- Managed bootstrap installs exact framework/consumer wheels into a user-space venv; it cannot
-  synthesize platform/CUDA dependency wheels, install drivers, load site modules or build a
-  container. Offline sites need a compatible wheelhouse. Existing environments remain user-owned.
+- Managed bootstrap can provision Linux CPython through a Conda-family prefix, then installs exact
+  framework/consumer wheels into a user-space venv. It cannot synthesize missing platform/CUDA
+  dependency wheels, install drivers, interpret interactive module functions or build a container.
+  Offline sites need a compatible wheelhouse and a Linux controller for automatic Python-package
+  prefetch. Existing environments remain user-owned.
   Built-in replication is local/SSH rsync over predeclared locations.
 - Cluster selection is explicit. Profiles observe resources but cannot derive optimal
   placement from incomplete capacity, queue-delay or monetary-cost information. `DataCatalog` resolves

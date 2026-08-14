@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
-from lambdaforge.controlplane.CudaCompatibilityResolver import CudaCompatibilityResolver
+from lambdaforge.controlplane.CudaCompatibilityResolver import (
+    CudaCompatibilityResolver,
+    NoCompatibleTorchWheelError,
+)
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
 from lambdaforge.controlplane.ExecutionBundleBuilder import ExecutionBundleBuilder
 from lambdaforge.controlplane.jobs import JobHandle
 from lambdaforge.controlplane.JobService import JobService
+from lambdaforge.controlplane.python_runtime import (
+    NoCompatiblePythonRuntimeError,
+    PythonRuntime,
+    PythonRuntimePolicy,
+    PythonRuntimeRequirements,
+)
+from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
 
@@ -26,12 +37,14 @@ class ControlPlane:
         bundles: ExecutionBundleBuilder | None = None,
         factory: ControlPlaneFactory | None = None,
         cuda_resolver: CudaCompatibilityResolver | None = None,
+        runtime_resolver: PythonRuntimeResolver | None = None,
     ) -> None:
         self.catalog = catalog or ClusterCatalog.load()
         self.factory = factory or ControlPlaneFactory()
         self.jobs = jobs or JobService(self.catalog, factory=self.factory)
         self.bundles = bundles or ExecutionBundleBuilder()
         self.cuda_resolver = cuda_resolver or CudaCompatibilityResolver()
+        self.runtime_resolver = runtime_resolver or PythonRuntimeResolver()
 
     def submit(
         self,
@@ -48,16 +61,60 @@ class ControlPlane:
         assert profile.storage is not None
         storage = profile.storage
         transport = self.factory.transport(profile) if cluster != "local" else None
-        torch_plan = (
-            self.cuda_resolver.resolve(profile, transport)
-            if transport is not None and profile.environment == "managed"
-            else None
-        )
+        runtime: PythonRuntime | None = None
+        effective_profile = profile
+        torch_plan = None
+        if transport is not None and profile.environment == "managed":
+            project = self._project_root(Path(config_path).resolve().parent)
+            requirement = PythonRuntimeRequirements.project(project)
+            rejected: list[str] = []
+            while True:
+                try:
+                    runtime = self.runtime_resolver.resolve(
+                        profile,
+                        transport,
+                        requirements=((requirement,) if requirement else ()),
+                        excluded_runtime_ids=rejected,
+                        dry_run=dry_run,
+                    )
+                except NoCompatiblePythonRuntimeError as error:
+                    if rejected:
+                        raise NoCompatibleTorchWheelError(
+                            "No Python runtime satisfies the combined LambdaForge, consumer "
+                            "project and official PyTorch wheel constraints. Candidate runtimes "
+                            f"rejected by PyTorch: {tuple(rejected)}."
+                        ) from error
+                    raise
+                if not runtime.ready:
+                    raise RuntimeError(
+                        "This read-only run plan requires a managed Python runtime that is not "
+                        f"provisioned yet ({runtime.version}). Inspect with 'lf clusters bootstrap "
+                        f"{cluster} --dry-run', then bootstrap the cluster before planning work."
+                    )
+                try:
+                    torch_plan = self.cuda_resolver.resolve(
+                        profile, transport, python_executable=runtime.executable
+                    )
+                    break
+                except NoCompatibleTorchWheelError:
+                    rejected.append(runtime.runtime_id)
+                    if profile.runtime_policy.strategy == "existing":
+                        raise
+            effective_profile = replace(
+                profile,
+                python=runtime.executable,
+                python_runtime=PythonRuntimePolicy("existing", runtime.executable),
+            )
         bundle = self.bundles.build(
             config_path,
-            profile,
+            effective_profile,
             dependency_policy=(
-                {"pytorch": torch_plan.to_dict()} if torch_plan is not None else None
+                {
+                    "python_runtime": runtime.to_dict(),
+                    "pytorch": torch_plan.to_dict(),
+                }
+                if torch_plan is not None and runtime is not None
+                else None
             ),
         )
         request = resources or ResourceRequest()
@@ -100,13 +157,15 @@ class ControlPlane:
                     else profile.python
                 )
             else:
-                prepared = self.factory.environment_provider(profile).prepare(
-                    profile,
+                prepared = self.factory.environment_provider(effective_profile).prepare(
+                    effective_profile,
                     transport,
                     bundle,
                     remote_bundle_dir=remote_dir,
                 )
                 remote_python = prepared.python
+                if runtime is not None:
+                    self.runtime_resolver.activate(profile, transport, runtime)
             work_dir = remote_dir
             config = str(PurePosixPath(remote_dir) / "config.yaml")
             if profile.scheduler == "slurm" and not dry_run:
@@ -159,6 +218,7 @@ class ControlPlane:
                 "execution_identity": f"{cluster}:{bundle.bundle_id}",
                 "remote_config_path": config,
                 "pytorch": torch_plan.to_dict() if torch_plan is not None else None,
+                "python_runtime_id": runtime.runtime_id if runtime is not None else None,
                 "datasets": list(self._configuration_datasets(config_path)),
             },
             job_id=reserved_job_id,
@@ -166,6 +226,17 @@ class ControlPlane:
             job_type=self._configuration_type(config_path),
         )
         return handle, bundle
+
+    @staticmethod
+    def _project_root(start: Path) -> Path | None:
+        return next(
+            (
+                candidate
+                for candidate in (start, *start.parents)
+                if (candidate / "pyproject.toml").is_file()
+            ),
+            None,
+        )
 
     @staticmethod
     def _scientific_identity(config_path: str | Path) -> str:

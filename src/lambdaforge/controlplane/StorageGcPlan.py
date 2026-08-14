@@ -28,6 +28,7 @@ class StorageGcPlan:
                 "results",
                 "checkpoints",
                 "active job workspaces",
+                "Python runtimes referenced by active jobs or retained environments",
                 "stage cache while a dataset build is active",
             ],
         }

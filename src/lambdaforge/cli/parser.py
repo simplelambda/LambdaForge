@@ -147,6 +147,17 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_add.add_argument("--cache-max-size")
     cluster_add.add_argument("--cache-max-age")
     cluster_add.add_argument("--python", default="python3")
+    cluster_add.add_argument(
+        "--python-strategy",
+        choices=("auto", "existing", "managed"),
+        help="Python runtime policy; managed clusters default to auto.",
+    )
+    cluster_add.add_argument("--python-version", help="Optional managed Python minor, e.g. 3.13.")
+    cluster_add.add_argument(
+        "--no-managed-python",
+        action="store_true",
+        help="Allow discovery but prohibit provisioning a user-space Python runtime.",
+    )
     cluster_add.add_argument("--environment", choices=("existing", "managed"), default="managed")
     cluster_add.add_argument("--wheelhouse", type=Path)
     cluster_add.add_argument(
@@ -194,6 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_bootstrap = cluster_commands.add_parser("bootstrap")
     cluster_bootstrap.add_argument("name")
     cluster_bootstrap.add_argument("--wheelhouse", type=Path)
+    cluster_bootstrap.add_argument("--dry-run", action="store_true")
     cluster_bootstrap.add_argument("--json", action="store_true")
     cluster_resources = cluster_commands.add_parser("resources")
     cluster_resources.add_argument("name")

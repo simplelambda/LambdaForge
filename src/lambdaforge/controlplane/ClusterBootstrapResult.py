@@ -17,10 +17,14 @@ class ClusterBootstrapResult:
     python: str
     reused: bool
     pytorch: Mapping[str, Any] | None = None
+    runtime: Mapping[str, Any] | None = None
+    planned: bool = False
 
     def __post_init__(self) -> None:
         if self.pytorch is not None:
             object.__setattr__(self, "pytorch", FrozenJsonMapping(self.pytorch))
+        if self.runtime is not None:
+            object.__setattr__(self, "runtime", FrozenJsonMapping(self.runtime))
 
     def to_dict(self) -> dict[str, Any]:
         """Return a machine-readable result."""
@@ -30,4 +34,6 @@ class ClusterBootstrapResult:
             "python": self.python,
             "reused": self.reused,
             "pytorch": copy.deepcopy(self.pytorch),
+            "runtime": copy.deepcopy(self.runtime),
+            "planned": self.planned,
         }
