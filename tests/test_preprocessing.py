@@ -36,6 +36,7 @@ class TestPreprocessing:
             "task": {
                 "target": "lambdaforge.preprocessing.PreprocessingTask",
                 "params": {
+                    "dataset_name": "records",
                     "source": {
                         "target": "lambdaforge.preprocessing.JsonLinesSource",
                         "params": {"path": "records.jsonl", "key_field": "id"},

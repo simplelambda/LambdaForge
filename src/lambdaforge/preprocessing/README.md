@@ -138,9 +138,11 @@ deterministic, disjoint and cover the source. Run each shard as an explicit task
 its own name/output; this release does not launch or merge shards automatically. General local/HPC
 workflow scheduling remains a subsequent roadmap item.
 
-## DatasetArtifact
+## Optional legacy DatasetArtifact publication
 
-Every successful `PreprocessingTask` writes `dataset-artifact.json`. It records:
+Every successful task writes `preprocessing-manifest.json`; it is not a DatasetVersion by default.
+`publish_dataset: true` or legacy `dataset_name` explicitly adds `dataset-artifact.json`. New
+multi-stage datasets should use a `kind: dataset` recipe. The compatible v2 manifest records:
 
 - a content-derived `dataset_id`;
 - human dataset name/version;
@@ -150,17 +152,16 @@ Every successful `PreprocessingTask` writes `dataset-artifact.json`. It records:
 - SHA-256 and size of every sink artifact;
 - creation time, LambdaForge version, environment-manifest link and user metadata.
 
-The ID excludes creation time and absolute execution location. Equal declared science and equal
+The content ID excludes creation time and absolute execution location. Equal science and equal
 artifact bytes produce the same identity. Split counts cannot be negative or exceed total samples.
 The manifest links to `environment.json`, which owns Git, Python, package, CUDA and plugin
 provenance.
 
 ## Boundaries
 
-- Schema 1.0 preprocessing is sequential inside one task. Use explicit shards for independent
-  parallel work; CPU process pools and DAG scheduling are intentionally not hidden in this release.
-- Local inputs and outputs are supported. Shared/remote artifact stores need future lease and
-  atomicity contracts.
+- `workers=1` is sequential; `io` uses threads, `cpu` a spawn pool, `auto` conservative threads and
+  `gpu` requires one worker. Use explicit shards/jobs for multi-GPU work.
+- DatasetRecipe/DatasetService own publication and placement; the sink owns ordinary task artifacts.
 - Arbitrary Python targets/refs are trusted code. JSON output validation is not sandboxing.
 - The framework cannot infer the scientific meaning of an undeclared external input. Built-in
   `PreprocessingTask` therefore requires at least one top-level content-hashed `inputs` entry, and

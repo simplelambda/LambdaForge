@@ -31,7 +31,8 @@ namespaces; file locations are implementation details.
 `AuthoringConfig` is the beginner-facing compiler. It accepts concise forms such as `name`, one
 `loss`, `trainer.epochs`, logical datasets and portable resources, then produces a
 `MaterializedConfig`. Existing strict task Schema 1.0, experiment Schema 1.1 and workflow Schema 1.0
-remain the runner IR. `ConfigurationComposer` resolves `extends`, `include` and restricted
+remain runner IRs; `kind: dataset` Schema 1.0 is the authoring contract for a dataset recipe.
+`ConfigurationComposer` resolves `extends`, `include` and restricted
 interpolation before normalization. Validators check Schema, imports and constructor signatures
 without constructing user objects. `ObjectFactory` performs trusted recursive construction only at
 execution time.
@@ -52,13 +53,15 @@ work uses threads; explicitly CPU-bound work uses spawn-safe child processes for
 work stays in one process. This avoids forked CUDA state and concurrent manifest corruption.
 
 `Workflow` schedules complete task/experiment documents in a DAG. It delegates identity and resume
-to each node runner. It does not distribute one DAG across clusters in 0.6; remote submission is
+to each node runner. It does not distribute one DAG across clusters in 0.7; remote submission is
 one explicit schedulable unit.
 
 ## 4. Experiments and training
 
-`ExperimentConfig` normalizes and expands seeds, grids and ablations. It also resolves only typed
-`DatasetReference` markers through `DataCatalog`; ordinary strings are never guessed to be paths.
+`ExperimentConfig` normalizes and expands seeds, grids and ablations. It resolves only typed
+`DatasetReference` markers through the shared `DatasetResolver`; ordinary strings are never guessed
+to be paths. The resolver uses `DatasetRegistry` first for managed versions and placements, then
+`DataCatalog` for explicit aliases, loaders and external data.
 `RunFingerprint` removes operational locations and replaces physical dataset paths with logical
 references plus their declared identity.
 
@@ -118,7 +121,7 @@ and `ArtifactValidator` contracts. Built-ins inspect NumPy and tabular formats w
 pickle disabled. Geometry requires explicit semantic roles. `RemoteResultService` synchronizes only
 allowlisted small evidence; `RemoteArtifactService` fetches one explicitly named artifact.
 
-### 0.6 control-plane ownership
+### Control-plane ownership
 
 `SshConnectionPolicy` owns reuse and independent deadlines; transports only execute/transfer.
 `ProcessScheduler` translates a request into a durable job directory; `ProcessSupervisor` owns the
@@ -126,20 +129,49 @@ scientific child, process/resource leases, heartbeat and atomic remote state. `J
 provider-neutral application layer and `JobStore` is only the local reconnection index.
 `ResourceService` selects the direct or SLURM probe and preserves offline last-known observations.
 
-`DatasetArtifact` remains authoritative. `DatasetRegistry` is an atomic reconciliable index;
-`DatasetService` coordinates discovery/profiling/verification/lifecycle and `DatasetOperations`
-performs bounded exact-root work where bytes live. `ProjectConfigService` indexes source YAML
-without replacing it. `StorageService` delegates exact-root status/GC, protects active references
-and never owns results or dataset deletion.
+## 8. Dataset lifecycle ownership
 
-## 8. Storage, observability and reproducibility
+The four public entities are deliberately different:
+
+```text
+DatasetRecipe (how) -> DatasetBuild (execution) -> DatasetVersion (what)
+                                                   -> DatasetPlacement (where)
+```
+
+`DatasetRecipeConfig` validates the scientific recipe and compiles its stages into the established
+`WorkflowConfig`; it does not implement another DAG engine. `DatasetBuildService` plans stage
+`REUSE`/`EXECUTE` from ordinary task fingerprints, propagates granular force downstream and submits
+one durable `dataset-build` job through `ControlPlane`. Completed task results are the verified
+stage cache. `StorageService` may collect unreferenced stage-cache entries, but never published
+versions, result trees or dataset placements.
+
+`DatasetPublisher` is the only publication boundary: it checks required stages, validates the
+streaming `DatasetIndex`, member IDs, contained assets, checksums and any target schema; copies into
+staging; atomically renames; and only then updates `DatasetRegistry`. A failed build therefore keeps
+useful completed stages but creates no version.
+
+`DatasetArtifact` v2 is the immutable manifest. Its `content_id`/`dataset_id` hashes logical members,
+partitions, targets, semantic metadata and asset identities without physical roots. Its `build_id`
+hashes recipe/stage/input/code provenance. `DatasetRecord` is the small registry projection and
+`DatasetPlacement` records each physical copy. Moving identical bytes adds a placement and cannot
+change content identity. V1 manifests/records remain readable.
+
+`DatasetResolver` is the sole managed-data resolution policy used by tasks, experiments and bundle
+construction. It pins name, version and content identity into materialized scientific state while
+keeping the chosen placement operational. `DatasetService` coordinates discovery, planning,
+materialization, profiling, member inspection, diff, lineage and destructive-operation safety;
+`DatasetOperations` performs bounded exact-root work beside the bytes. `DataCatalog` remains for
+external data, logical aliases, loader definitions and explicit pins—not as a duplicate placement
+registry. See [dataset lifecycle](DATASETS.md).
+
+## 9. Storage, observability and reproducibility
 
 Artifact stores expose immutable references; local/S3 providers and the shared cache own transfer
 and verification. `ExperimentRegistry` is a read-only view over result trees, never a second source
 of truth. Event/resource/profiler adapters record bounded evidence. Reproducibility profiles,
 scoped seed derivation and environment exports make runtime policy explicit.
 
-## 9. Extension policy
+## 10. Extension policy
 
 Prefer a consumer-project class referenced by `target`. Use entry points only for independently
 versioned reusable providers. Keep core dependencies provider-neutral; Plotly, NetworkX, trimesh,
@@ -152,11 +184,11 @@ verifies an exact official PyTorch wheel, and places its `TorchInstallationPlan`
 `EnvironmentIdentity`. `ManagedEnvironmentProvider` installs and constrains that wheel before other
 dependencies, then verifies required CUDA initialization. It never manages host drivers/toolkits.
 
-## 10. Intentional 0.6 limits
+## 11. Intentional 0.7 limits
 
 - No automatic cluster selection or mixed-cluster workflow runtime.
 - No central server or GUI. Per-job supervisors are workers, not a global daemon.
 - No implicit large-result, checkpoint or dataset download.
 - No automatic CUDA/driver installation or remote platform wheel synthesis.
 - No magical interpretation of arrays as graphs, point clouds or meshes.
-- No new HPO mathematics in 0.6; control-plane work does not alter scientific policy.
+- No new HPO mathematics in 0.7; dataset/CLI work does not alter scientific policy.

@@ -8,7 +8,7 @@ después inspecciona la firma/docstring del símbolo público concreto.
 
 ## Qué es y cómo instalarlo
 
-LambdaForge 0.6.0 es una biblioteca instalable PyTorch/Lightning para tasks genéricas,
+LambdaForge 0.7.0 es una biblioteca instalable PyTorch/Lightning para tasks genéricas,
 preprocesado, training, workflows, sweeps/HPO, ejecución CPU/GPU/SLURM, resultados, plots,
 artifacts, reproducibilidad y control explícito de clusters. El proyecto consumidor posee modelos,
 datasets y código de dominio. Training expone outputs de validation a callbacks del proyecto y
@@ -34,7 +34,7 @@ python -m pip check
 python -c "import lambdaforge; print(lambdaforge.__version__)"
 ```
 
-Para release reproducible construye/instala `lambdaforge-0.6.0-py3-none-any.whl`. El proyecto
+Para release reproducible construye/instala `lambdaforge-0.7.0-py3-none-any.whl`. El proyecto
 consumidor fija la wheel correcta de PyTorch. `nvidia-smi` sólo prueba driver; comprueba
 `torch.cuda.is_available()` y `torch.version.cuda`. Extras: `hpo`, `adaptive-hpo`, `s3`, `parquet`,
 `onnx`, `viz`, `graph`, `viz3d`, tracking y `dev`.
@@ -48,7 +48,10 @@ consumidor fija la wheel correcta de PyTorch. `nvidia-smi` sólo prueba driver; 
 | Preprocesar | empieza con `examples/preprocessing-simple.yaml` |
 | Debug de N registros | `debug CONFIG --records N` |
 | Workflow local | `kind: workflow`; validate/inspect/run |
-| Dataset lógico | `data_catalog` + `dataset:NAME/subpath` |
+| Dataset externo/alias | DataCatalog + `dataset:NAME/subpath` |
+| Dataset gestionado 0.7 | `dataset:NAME@VERSION/subpath`; Registry resuelve placement |
+| Build de dataset | `datasets plan/build RECETA [--force-stage STAGE]` |
+| Inspeccionar colección | `datasets members/member/diff/stats/show` |
 | Cluster | `clusters add`; `doctor --on`; `clusters bootstrap`; `run --on` |
 | Reconectar job | `jobs list --all`; `status`; `logs JOB --follow`; `cancel`; `retry` |
 | Vista global | `status`; `overview --json`; `top --follow` |
@@ -67,6 +70,33 @@ consumidor fija la wheel correcta de PyTorch. `nvidia-smi` sólo prueba driver; 
 | Análisis de cada run correcto | `PostRunAction`; devuelve artifacts en `PostRunResult` |
 | Análisis pesado/otros recursos | `Task`/`Workflow` independiente, no `post_run` |
 | Limpiar artifacts | `retain` preview; `retain --apply` sólo tras revisar |
+
+## Lifecycle de datasets 0.7
+
+Mantén separados `DatasetRecipe -> DatasetBuild -> DatasetVersion -> DatasetPlacement`. Una Task o
+un artifact intermedio no es DatasetVersion. `PreprocessingTask` sólo publica con
+`publish_dataset: true` o `dataset_name` legacy; usa `kind: dataset` en diseños nuevos. Sus stages
+reutilizan Workflow. `required` expresa necesidad científica y `reuse: auto|never` es una decisión
+ortogonal. `--force-stage X` fuerza X y downstream. Build es un job durable y publish valida en
+staging, renombra atómicamente y registra al final.
+
+La stage final aporta `publish.root` y un `DatasetIndex` JSONL canónico en `publish.index`. Cada
+`DatasetMember` tiene ID, partitions/targets arbitrarios, metadata científica, display fuera de
+identidad y assets file/directory/record/URI con checksums. Artifact v2 usa
+`content_id == dataset_id` independiente del path y `build_id` para provenance. Nunca mutar una
+versión publicada.
+
+Registry manda sobre placements gestionados y DatasetResolver fija nombre/versión/content antes de
+elegir entorno. No dupliques rutas en DataCatalog; éste sigue para externos, aliases, loaders, pins
+y overrides. Prefiere versión explícita. `materialize --apply` hace NOOP, réplica verificada/atómica
+o envía BUILD. Inspecciona con `members --partition NOMBRE=VALOR`, `member`, `diff`, `stats` y
+`verify`. Los profilers del proyecto corren junto al placement remoto en el entorno managed.
+
+La CLI es `lf <recurso> <acción> <objeto> [--on CONTEXTO]`; aliases: `ds`, `exp`, `env`, `ls`.
+`completion bash|zsh|fish` genera completion. `default_cluster` de proyecto/usuario sólo se usa sin
+`--on` y la salida identifica su origen. Dry-run se
+guarda como `PLANNED` terminal, no `CREATED` activo; jobs admite ID, nombre inequívoco o `latest`.
+`lf project status` resume raíz/versión/default/configs/registry/jobs sin daemon.
 
 En `resources` se aceptan `cpu`/`cpus`, `ram`/`memory`, `gpu`/`gpus`, `gpu_memory`, `storage`,
 `time` y `processes`. En comparaciones declara `--direction` para etiquetar best/worst. En sweeps

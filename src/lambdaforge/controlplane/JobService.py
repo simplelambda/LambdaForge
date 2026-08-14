@@ -97,7 +97,7 @@ class JobService:
             record_metadata["scheduler_preview"] = submission.to_dict()
         record = record.with_updates(
             scheduler_id=submission.scheduler_id,
-            state=submission.state,
+            state=JobState.PLANNED if dry_run else submission.state,
             work_dir=submission.work_dir or str(work_dir),
             stdout=submission.stdout,
             stderr=submission.stderr,
@@ -112,6 +112,31 @@ class JobService:
             record.scheduler_id,
             submission.to_dict() if dry_run else None,
         )
+
+    def resolve_selector(self, selector: str) -> str:
+        """Resolve an exact ID, ``latest`` or one unambiguous job name."""
+        try:
+            return self.store.get(selector).job_id
+        except (KeyError, FileNotFoundError):
+            pass
+        records = self.store.records()
+        if selector == "latest":
+            if not records:
+                raise KeyError("No persistent jobs exist.")
+            return max(records, key=lambda value: value.created_at_utc).job_id
+        matches = tuple(
+            value
+            for value in records
+            if value.metadata.get("name") == selector or value.job_id.startswith(selector)
+        )
+        if not matches:
+            raise KeyError(f"Unknown job selector {selector!r}.")
+        if len(matches) > 1:
+            raise ValueError(
+                f"Job selector {selector!r} is ambiguous: "
+                f"{tuple(value.job_id for value in matches)}."
+            )
+        return matches[0].job_id
 
     @staticmethod
     def new_id() -> str:

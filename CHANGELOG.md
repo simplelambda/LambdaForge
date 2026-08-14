@@ -10,6 +10,40 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-14
+
+### Added
+
+- First-class `kind: dataset` recipes and durable DatasetBuild jobs compiled onto the existing
+  Workflow DAG, with content-addressed stage reuse, granular downstream force and build plans.
+- Streaming JSONL `DatasetIndex`, generic `DatasetMember`/`DatasetAsset`, arbitrary partitions and
+  targets, bounded member inspection, logical diff and explicit schema validation.
+- DatasetArtifact/Record v2 with path-independent content identity separated from build provenance,
+  richer lineage/global assets and compatible v1 readers.
+- Registry-first `DatasetResolver`, versioned references, exact reproducibility bindings and managed
+  remote-bundle resolution without duplicated DataCatalog placements.
+- Real NOOP/verified atomic REPLICATE/durable BUILD materialization, atomic final publication and
+  reconstructible stage-cache GC.
+- `lf` entry point, root `plan`, moderate resource/action aliases, shell completion, default-cluster
+  preference, friendly job selectors and terminal PLANNED dry-runs.
+
+### Changed
+
+- Preprocessing is again an ordinary Task by default. Dataset publication is explicit through a
+  recipe, `publish_dataset`, or compatible legacy `dataset_name`.
+- DataCatalog now primarily describes aliases, external data, loaders, pins and overrides;
+  DatasetRegistry is authoritative for managed placements.
+- Dataset stats derive members/partitions/assets from the index and project profilers can execute
+  beside remote data in the exact managed consumer environment.
+- Job and top output distinguish running, queued, staging and paused states and human job lists now
+  include stable headers, name, type, age and resource requests.
+
+### Security
+
+- Dataset publication and replication use verified staging before atomic rename/registration;
+  immutable aliases cannot overwrite different content. Dataset deletion and normal cache GC remain
+  exact-root and preview-first.
+
 ## [0.6.0] - 2026-08-13
 
 ### Added
@@ -325,7 +359,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/simplelambda/LambdaForge/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/simplelambda/LambdaForge/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/simplelambda/LambdaForge/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/simplelambda/LambdaForge/compare/v0.5.1...v0.5.2

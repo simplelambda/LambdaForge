@@ -7,5 +7,6 @@ class ConfigurationKind(str, Enum):
     """Identify the runner selected for one authoring document."""
 
     EXPERIMENT = "experiment"
+    DATASET = "dataset"
     TASK = "task"
     WORKFLOW = "workflow"

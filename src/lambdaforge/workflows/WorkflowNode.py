@@ -24,6 +24,7 @@ class WorkflowNode:
     resources: Mapping[str, Any] = field(default_factory=dict)
     cluster: str = "local"
     continue_on_failure: bool = False
+    source: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.strip():
@@ -57,6 +58,11 @@ class WorkflowNode:
             resources=value.get("resources", {}),
             cluster=str(value.get("on", "local")),
             continue_on_failure=bool(value.get("continue_on_failure", False)),
+            source=(
+                None
+                if isinstance(config, Path)
+                else source_dir / ".lambdaforge-embedded-workflow-node.yaml"
+            ),
         )
 
     def materialize(
@@ -66,4 +72,4 @@ class WorkflowNode:
         if isinstance(self.config, Path):
             resolution = ConfigurationComposer().resolve(self.config)
             return copy.deepcopy(dict(resolution.values)), self.config, resolution
-        return copy.deepcopy(dict(self.config)), None, None
+        return copy.deepcopy(dict(self.config)), self.source, None

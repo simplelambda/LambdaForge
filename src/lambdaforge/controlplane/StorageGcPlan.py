@@ -23,5 +23,11 @@ class StorageGcPlan:
             "reclaimable_bytes": self.reclaimable_bytes,
             "applied": self.applied,
             "blocked_reason": self.blocked_reason,
-            "protected": ["datasets", "results", "checkpoints", "active job workspaces"],
+            "protected": [
+                "published datasets",
+                "results",
+                "checkpoints",
+                "active job workspaces",
+                "stage cache while a dataset build is active",
+            ],
         }

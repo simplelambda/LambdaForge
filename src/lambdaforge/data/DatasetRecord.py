@@ -25,11 +25,22 @@ class DatasetRecord:
     producer: Mapping[str, Any] = field(default_factory=dict)
     lineage: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    build_id: str | None = None
+    index: Mapping[str, Any] = field(default_factory=dict)
+    partitions: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+    target_schema: Mapping[str, Any] = field(default_factory=dict)
+    global_assets: Mapping[str, Any] = field(default_factory=dict)
+    lineage_graph: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "splits", FrozenJsonMapping(self.splits))
         object.__setattr__(self, "producer", FrozenJsonMapping(self.producer))
         object.__setattr__(self, "metadata", FrozenJsonMapping(self.metadata))
+        object.__setattr__(self, "index", FrozenJsonMapping(self.index))
+        object.__setattr__(self, "partitions", FrozenJsonMapping(self.partitions))
+        object.__setattr__(self, "target_schema", FrozenJsonMapping(self.target_schema))
+        object.__setattr__(self, "global_assets", FrozenJsonMapping(self.global_assets))
+        object.__setattr__(self, "lineage_graph", FrozenJsonMapping(self.lineage_graph))
 
     @property
     def key(self) -> str:
@@ -51,11 +62,17 @@ class DatasetRecord:
             value.get("producer", {}),
             tuple(str(item) for item in value.get("lineage", ())),
             value.get("metadata", {}),
+            str(value["build_id"]) if value.get("build_id") is not None else None,
+            value.get("index", {}),
+            value.get("partitions", {}),
+            value.get("target_schema", {}),
+            value.get("global_assets", {}),
+            value.get("lineage_graph", {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "dataset_record_version": 1,
+            "dataset_record_version": 2,
             "name": self.name,
             "version": self.version,
             "dataset_id": self.dataset_id,
@@ -66,4 +83,11 @@ class DatasetRecord:
             "producer": copy.deepcopy(self.producer),
             "lineage": list(self.lineage),
             "metadata": copy.deepcopy(self.metadata),
+            "content_id": self.dataset_id,
+            "build_id": self.build_id,
+            "index": copy.deepcopy(self.index),
+            "partitions": copy.deepcopy(self.partitions),
+            "target_schema": copy.deepcopy(self.target_schema),
+            "global_assets": copy.deepcopy(self.global_assets),
+            "lineage_graph": copy.deepcopy(self.lineage_graph),
         }

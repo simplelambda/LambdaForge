@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lambdaforge"
-version = "0.6.0"
+version = "0.7.0"
 description = "Reproducible AI workflows from local authoring to multi-cluster execution."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -92,6 +92,7 @@ dev = [
 
 [project.scripts]
 lambdaforge = "lambdaforge.cli.CommandLineInterface:CommandLineInterface.main"
+lf = "lambdaforge.cli.CommandLineInterface:CommandLineInterface.main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -123,11 +124,17 @@ lambdaforge = [
     "examples/preprocessing-simple.yaml",
     "examples/preprocessing.yaml",
     "examples/workflow.yaml",
+    "examples/dataset-recipe.yaml",
+    "examples/dataset-stage-roster.yaml",
+    "examples/dataset-stage-normalize.yaml",
+    "examples/dataset-stage-labels.yaml",
 ]
 "share/lambdaforge/docs" = [
     "docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.md",
     "docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.es.md",
     "docs/ARCHITECTURE.md",
+    "docs/AUDIT_0.6_TO_0.7.md",
+    "docs/AUDIT_0.6_TO_0.7.es.md",
     "docs/ARCHITECTURE.es.md",
     "docs/ARTIFACTS.md",
     "docs/ARTIFACTS.es.md",

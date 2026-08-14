@@ -1,0 +1,10 @@
+kind: task
+schema_version: "1.0"
+name: normalize-records
+required_artifacts: [normalized]
+task:
+  # The recipe binding injects the verified upstream roster path.
+  target: my_project.dataset_tasks.NormalizeRecordsTask
+  params:
+    roster: null
+

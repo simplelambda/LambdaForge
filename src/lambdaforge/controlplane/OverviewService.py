@@ -31,7 +31,10 @@ class OverviewService:
         return {
             "clusters": [value.to_dict() for value in resource_values],
             "jobs": {
-                "active": sum(not value.state.terminal for value in job_values),
+                "active": sum(
+                    value.state.value in {"staging", "queued", "running", "paused"}
+                    for value in job_values
+                ),
                 "total": len(job_values),
                 "by_state": {
                     state: sum(value.state.value == state for value in job_values)

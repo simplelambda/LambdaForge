@@ -9,6 +9,9 @@ if TYPE_CHECKING:
     from lambdaforge.artifacts.ArtifactService import ArtifactService
     from lambdaforge.configuration.MaterializedConfig import MaterializedConfig
     from lambdaforge.controlplane.JobHandle import JobHandle
+    from lambdaforge.data.DatasetBuildPlan import DatasetBuildPlan
+    from lambdaforge.data.DatasetBuildResult import DatasetBuildResult
+    from lambdaforge.data.DatasetRecipe import DatasetRecipe
     from lambdaforge.experiments.AggregateResult import AggregateResult
     from lambdaforge.experiments.Experiment import Experiment
     from lambdaforge.experiments.results.ResultCatalog import ResultCatalog
@@ -55,6 +58,9 @@ LazyExports.install(
             "ArtifactRetentionResult",
         ),
         "Experiment": ("lambdaforge.experiments.Experiment", "Experiment"),
+        "DatasetBuildPlan": ("lambdaforge.data.DatasetBuildPlan", "DatasetBuildPlan"),
+        "DatasetBuildResult": ("lambdaforge.data.DatasetBuildResult", "DatasetBuildResult"),
+        "DatasetRecipe": ("lambdaforge.data.DatasetRecipe", "DatasetRecipe"),
         "LambdaForge": ("lambdaforge.LambdaForge", "LambdaForge"),
         "JobHandle": ("lambdaforge.controlplane.JobHandle", "JobHandle"),
         "MaterializedConfig": (
@@ -101,6 +107,9 @@ __all__ = [
     "ArtifactRetentionPlan",
     "ArtifactRetentionResult",
     "Experiment",
+    "DatasetBuildPlan",
+    "DatasetBuildResult",
+    "DatasetRecipe",
     "LambdaForge",
     "JobHandle",
     "MaterializedConfig",

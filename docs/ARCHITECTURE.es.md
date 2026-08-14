@@ -27,7 +27,8 @@ importan código desde YAML. Se importa desde namespaces públicos, no desde ubi
 
 `AuthoringConfig` compila la sintaxis sencilla (`name`, una `loss`, `trainer.epochs`, datasets
 lógicos y recursos portables) a `MaterializedConfig`. Los Schema estrictos de task 1.0, experiment
-1.1 y workflow 1.0 siguen siendo el IR del runner. `ConfigurationComposer` resuelve composición e
+1.1 y workflow 1.0 siguen siendo IR del runner; `kind: dataset` Schema 1.0 describe una receta.
+`ConfigurationComposer` resuelve composición e
 interpolación restringida. Los validadores comprueban Schema, imports y firmas sin construir código
 del usuario; `ObjectFactory` construye recursivamente sólo al ejecutar.
 
@@ -40,13 +41,15 @@ anteriores se archivan.
 `PreprocessingTask` compone source, transforms ordenados y sink. Las claves estables gobiernan
 sharding y resume. El padre escribe sink y manifest: I/O usa threads; CPU usa procesos `spawn` sólo
 para transforms; GPU permanece en un proceso. Así no se comparte estado CUDA ni se corrompen
-manifiestos. `Workflow` coordina documentos completos en un DAG, pero 0.6 no distribuye un mismo
+manifiestos. `Workflow` coordina documentos completos en un DAG, pero 0.7 no distribuye un mismo
 DAG entre clusters.
 
 ## 4. Experimentos y entrenamiento
 
 `ExperimentConfig` normaliza y expande seeds, grids y ablaciones. Resuelve únicamente marcadores
-tipados `DatasetReference`; jamás adivina paths por el aspecto de un string. `RunFingerprint`
+tipados `DatasetReference` mediante el `DatasetResolver` compartido; jamás adivina paths por el
+aspecto de un string. El resolver usa primero `DatasetRegistry` para versiones/placements gestionados
+y después `DataCatalog` para aliases, loaders y datos externos. `RunFingerprint`
 sustituye ubicaciones físicas por referencia e identidad lógica. `ExperimentRunner` posee un run;
 `LightningTask` adapta batch/model/losses/metrics; `TrainingOrchestrator` agenda procesos y rellena
 un slot justo después de observar que termina. `EpochMetricsCSV` reescribe atómicamente las curvas.
@@ -97,25 +100,53 @@ visualizer, schema y validator. NumPy/tablas tienen límites y pickle deshabilit
 requiere roles explícitos. Los servicios remotos sincronizan evidencia pequeña y sólo descargan el
 artifact que se pide.
 
-### Responsabilidades del plano 0.6
+### Responsabilidades del plano de control
 
 `SshConnectionPolicy` posee reutilización/deadlines; los transports sólo ejecutan/transfieren.
 `ProcessScheduler` crea el directorio durable y `ProcessSupervisor` posee hijo, leases, heartbeat y
 estado remoto atómico. `JobService` es la capa neutral y `JobStore` sólo el índice local.
 `ResourceService` elige probe directo/SLURM y conserva la última observación si queda offline.
 
-`DatasetArtifact` es autoritativo. `DatasetRegistry` es índice atómico reconstruible;
-`DatasetService` coordina discovery/profiling/verificación/lifecycle y `DatasetOperations` opera de
-forma acotada donde viven los bytes. `ProjectConfigService` indexa YAML sin sustituirlo.
-`StorageService` protege referencias y nunca posee resultados o delete de datasets.
+## 8. Responsabilidades del ciclo de datasets
 
-## 8. Extensión y límites
+Las cuatro entidades públicas tienen responsabilidades distintas:
+
+```text
+DatasetRecipe (cómo) -> DatasetBuild (ejecución) -> DatasetVersion (qué)
+                                                    -> DatasetPlacement (dónde)
+```
+
+`DatasetRecipeConfig` valida la receta científica y compila sus etapas al `WorkflowConfig` ya
+existente; no crea otro motor DAG. `DatasetBuildService` decide `REUSE`/`EXECUTE` con fingerprints de
+Task, propaga `force-stage` downstream y envía un job durable `dataset-build` por `ControlPlane`.
+Los resultados Task verificados forman la caché de etapas. `StorageService` puede recoger caché sin
+referencias, pero nunca versiones publicadas, resultados ni placements.
+
+`DatasetPublisher` es la única frontera de publicación: comprueba etapas requeridas, valida
+`DatasetIndex`, IDs, contención, checksums y schema de targets, copia a staging, renombra
+atómicamente y sólo entonces actualiza `DatasetRegistry`. Un build fallido conserva etapas útiles
+pero no publica versión.
+
+`DatasetArtifact` v2 es el manifiesto inmutable. `content_id`/`dataset_id` depende de members,
+partitions, targets, metadata semántica e identidades de assets, no de roots físicos; `build_id`
+depende de recipe/stages/inputs/código. `DatasetRecord` es la proyección pequeña del Registry y
+`DatasetPlacement` cada copia física. Mover los mismos bytes añade un placement sin cambiar el
+contenido. Los manifiestos/registros v1 siguen siendo legibles.
+
+`DatasetResolver` es la única política de resolución de datos gestionados para tasks, experimentos y
+bundles. Fija nombre, versión y contenido en el estado científico y mantiene el placement como dato
+operacional. `DatasetService` coordina discovery, plan, materialización, profiling, inspección,
+diff, lineage y seguridad; `DatasetOperations` ejecuta operaciones acotadas junto a los bytes.
+`DataCatalog` queda para datos externos, aliases, loaders y pins explícitos, no como segundo registry
+de placements. Véase [ciclo de datasets](DATASETS.es.md).
+
+## 9. Extensión y límites
 
 Se prefiere una clase del proyecto consumidor mediante `target`; los entry points son para
 proveedores reutilizables. Plotly, NetworkX, trimesh, Optuna, BoTorch, stores y trackers siguen
 opcionales. Una API nueva necesita validación, re-export público, tests focalizados, documentación
 EN/ES y entrada para agentes.
 
-En 0.6 no hay placement automático, workflows multiclúster durables, servidor central/GUI, descargas implícitas
+En 0.7 no hay placement automático, workflows multiclúster durables, servidor central/GUI, descargas implícitas
 pesadas, instalación CUDA, síntesis de wheels de otra plataforma ni interpretación mágica de
 arrays. Tampoco se amplía la matemática de HPO.

@@ -32,7 +32,10 @@ class AuthoringConfigNormalizer:
                 f"current is {self.VERSION!r}."
             )
         kind = self.detect(data)
-        if kind is ConfigurationKind.TASK:
+        if kind is ConfigurationKind.DATASET:
+            data.setdefault("kind", "dataset")
+            data.setdefault("schema_version", "1.0")
+        elif kind is ConfigurationKind.TASK:
             data = self._task(data)
         elif kind is ConfigurationKind.WORKFLOW:
             data.setdefault("kind", "workflow")
@@ -96,11 +99,17 @@ class AuthoringConfigNormalizer:
         if preprocess is not None:
             values["task"] = self._preprocessing(preprocess, values, authoring)
             configured_outputs = authoring.get("outputs", {"processed": "processed"})
+            preprocessing_params = values["task"].get("params", {})
+            publishes_dataset = bool(
+                preprocessing_params.get("publish_dataset", False)
+                or preprocessing_params.get("dataset_name")
+            )
             values.setdefault(
                 "required_artifacts",
                 [
                     *dict.fromkeys(str(path) for path in configured_outputs.values()),
-                    "dataset-artifact.json",
+                    "preprocessing-manifest.json",
+                    *(["dataset-artifact.json"] if publishes_dataset else []),
                 ],
             )
         elif "task" in values:
@@ -229,6 +238,7 @@ class AuthoringConfigNormalizer:
             "workload",
             "on_error",
             "checkpoint_interval",
+            "publish_dataset",
             "dataset_name",
             "dataset_version",
             "dataset_splits",

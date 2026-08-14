@@ -62,13 +62,22 @@ class StorageOperations:
         candidate_paths: set[str] = set()
         now = time.time()
         maximum_age = descriptor.get("cache_max_age")
-        for category, reference_key in (("bundles", "bundles"), ("environments", "environments")):
+        for category, reference_key in (
+            ("bundles", "bundles"),
+            ("environments", "environments"),
+            ("stage_cache", "stage_cache"),
+        ):
             root = roots[category]
             protected = set(str(item) for item in references.get(reference_key, ()))
             if not root.is_dir() or root.is_symlink():
                 continue
             for child in sorted(root.iterdir()):
-                if child.is_symlink() or not child.is_dir() or child.name in protected:
+                if (
+                    child.is_symlink()
+                    or not child.is_dir()
+                    or child.name in protected
+                    or "*" in protected
+                ):
                     continue
                 incomplete = ".tmp-" in child.name or not cls._complete(category, child)
                 stale = maximum_age is not None and now - child.stat().st_mtime >= float(
@@ -109,6 +118,7 @@ class StorageOperations:
                 roots["bundles"],
                 roots["environments"],
                 roots["package_cache"],
+                roots["stage_cache"],
                 roots["temporary"],
             )
             cache_bytes = sum(int(cls._usage(path)["bytes"]) for path in cache_roots)
@@ -117,6 +127,7 @@ class StorageOperations:
             for category, reference_key in (
                 ("bundles", "bundles"),
                 ("environments", "environments"),
+                ("stage_cache", "stage_cache"),
             ):
                 protected = set(str(item) for item in references.get(reference_key, ()))
                 root = roots[category]
@@ -128,6 +139,7 @@ class StorageOperations:
                         child.is_dir()
                         and not child.is_symlink()
                         and child.name not in protected
+                        and "*" not in protected
                         and resolved not in candidate_paths
                     ):
                         quota_candidates.append((child.stat().st_mtime, category, child))
@@ -174,6 +186,7 @@ class StorageOperations:
             "bundles": cache / "bundles",
             "environments": cache / "environments",
             "package_cache": cache / "pip",
+            "stage_cache": cache / "dataset-stages",
             "job_workspaces": run,
             "temporary": cache / "tmp",
             "datasets": Path(str(dataset)).expanduser().resolve()
@@ -197,6 +210,8 @@ class StorageOperations:
 
     @staticmethod
     def _complete(category: str, path: Path) -> bool:
+        if category == "stage_cache":
+            return any(candidate.is_file() for candidate in path.rglob("result.json"))
         marker = "manifest.json" if category == "bundles" else ".lambdaforge-environment.json"
         return (path / marker).is_file()
 

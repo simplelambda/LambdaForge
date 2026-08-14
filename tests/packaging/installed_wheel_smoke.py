@@ -12,10 +12,11 @@ from lambdaforge.configuration import AuthoringConfig
 
 def main() -> None:
     """Verify imports, packaged resources and one minimal authoring operation."""
-    assert lambdaforge.__version__ == "0.6.0"
+    assert lambdaforge.__version__ == "0.7.0"
     assert files("lambdaforge").joinpath("schemas/experiment.schema.json").is_file()
     assert files("lambdaforge").joinpath("schemas/task.schema.json").is_file()
     assert files("lambdaforge").joinpath("schemas/authoring.schema.json").is_file()
+    assert files("lambdaforge").joinpath("schemas/dataset.schema.json").is_file()
     assert files("lambdaforge.tasks").joinpath("README.md").is_file()
     installed = distribution("lambdaforge")
     installed_files = tuple(installed.files or ())
@@ -23,6 +24,9 @@ def main() -> None:
         "share/lambdaforge/AGENTS.md",
         "share/lambdaforge/AGENTS.es.md",
         "share/lambdaforge/examples/preprocessing-simple.yaml",
+        "share/lambdaforge/examples/dataset-recipe.yaml",
+        "share/lambdaforge/docs/DATASETS.md",
+        "share/lambdaforge/docs/DATASETS.es.md",
         "share/lambdaforge/docs/RESULTS.md",
         "share/lambdaforge/docs/RESULTS.es.md",
     ):
@@ -32,6 +36,12 @@ def main() -> None:
             if item.as_posix().endswith(relative) and installed.locate_file(item).is_file()
         )
         assert len(matches) == 1, relative
+    scripts = {
+        entry.name: entry.value
+        for entry in installed.entry_points
+        if entry.group == "console_scripts"
+    }
+    assert scripts["lf"] == scripts["lambdaforge"]
     materialized = AuthoringConfig(
         {
             "name": "wheel-only",

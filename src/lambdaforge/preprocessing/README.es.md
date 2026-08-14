@@ -135,9 +135,11 @@ deterministas, disjuntos y cubren la fuente. Ejecuta cada shard como configuraci
 propio nombre/output; esta versión no los lanza ni fusiona automáticamente. El scheduling local/HPC
 general pertenece a la siguiente fase del roadmap.
 
-## DatasetArtifact
+## Publicación legacy opcional de DatasetArtifact
 
-Cada `PreprocessingTask` correcto escribe `dataset-artifact.json` con:
+Cada task correcta escribe `preprocessing-manifest.json`; no es DatasetVersion por defecto.
+`publish_dataset: true` o `dataset_name` legacy añade explícitamente `dataset-artifact.json`. Para
+datasets multi-stage nuevos usa una receta `kind: dataset`. El manifiesto v2 compatible incluye:
 
 - `dataset_id` derivado del contenido;
 - nombre y versión humanos;
@@ -147,16 +149,15 @@ Cada `PreprocessingTask` correcto escribe `dataset-artifact.json` con:
 - SHA-256 y tamaño de cada artefacto del sink;
 - fecha, versión LambdaForge, enlace al environment manifest y metadata.
 
-El ID excluye fecha y ubicación absoluta. La misma ciencia y bytes producen la misma identidad.
+El content ID excluye fecha y ubicación absoluta. La misma ciencia y bytes producen la misma identidad.
 Los splits no pueden ser negativos ni superar el total. `environment.json` conserva Git, Python,
 paquetes, CUDA y plugins.
 
 ## Límites
 
-- Schema 1.0 procesa secuencialmente dentro de un task. Usa shards explícitos para trabajo paralelo;
-  los pools CPU y DAG no se ocultan en esta versión.
-- Inputs/outputs son locales. Stores compartidos/remotos necesitan futuros contratos de leases y
-  atomicidad.
+- `workers=1` es secuencial; `io` usa threads, `cpu` spawn pool, `auto` threads conservadores y
+  `gpu` exige un worker. Usa shards/jobs explícitos para multi-GPU.
+- DatasetRecipe/DatasetService gobiernan publicación/placement; el sink conserva artifacts de task.
 - Los targets/refs Python son código de confianza. Validar JSON no es sandboxing.
 - El framework no puede inferir un input externo no declarado. `PreprocessingTask` exige al menos un
   `inputs` content-hashed en el nivel superior, y las rutas de sources JSONL/árbol deben coincidir

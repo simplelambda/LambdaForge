@@ -23,7 +23,7 @@ directories.
 
 ## Start here
 
-The package version (`0.6.0`) and a YAML `schema_version` describe different things. The package
+The package version (`0.7.0`) and a YAML `schema_version` describe different things. The package
 version identifies the installed LambdaForge release. The Schema version identifies the shape of a
 configuration document. Upgrade a document only when `validate` reports an old/unsupported shape
 or when reviewing a repository-wide framework upgrade.

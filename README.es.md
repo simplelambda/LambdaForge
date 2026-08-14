@@ -18,7 +18,7 @@ paquete estable, para que un proyecto de investigación se concentre en sus dato
 de volver a crear pipelines, bucles de entrenamiento, procedencia, gestión de resultados y
 planificación de procesos.
 
-> **Estado:** `0.6.0`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
+> **Estado:** `0.7.0`, utilizable pero anterior a 1.0. Los espacios de nombres públicos documentados
 > aquí forman la API prevista; todavía no se garantiza compatibilidad entre versiones menores. El
 > repositorio aún no contiene una licencia, por lo que SimpleLambda debe decidir sus condiciones de
 > redistribución.
@@ -66,8 +66,8 @@ planificación de procesos.
 - Una familia YAML estricta e independiente de tareas genéricas para preprocesado y otros trabajos
   reproducibles sin entrenamiento, con planes dry-run, entradas dirigidas por contenido, artefactos
   tipados e historial de intentos.
-- Preprocesado componible source/transform/sink, checkpoints atómicos por registro, shards
-  deterministas y un manifiesto `DatasetArtifact` versionado.
+- Preprocesado componible source/transform/sink, checkpoints atómicos por registro y shards
+  deterministas; publicar un dataset es una frontera explícita y separada.
 - DAG task/experiment, composición/interpolación segura, procedencia/diff y planificación CPU o
   heterogénea acotada.
 - Tareas de inferencia/evaluación/ensemble/export, HPO finito/adaptativo y backends local/SLURM
@@ -98,8 +98,8 @@ planificación de procesos.
   política de logits son parámetros explícitos del experimento.
 - Adaptadores de logger MLflow, TensorBoard y Weights & Biases opcionales y cargados de forma lazy,
   seleccionables solos o juntos sin añadir un servicio de tracking a la instalación base.
-- Una fachada pequeña (`LambdaForge`), APIs (`Experiment`, `TaskRun`, `Workflow`) y una sola CLI
-  (`lambdaforge`).
+- Una fachada pequeña (`LambdaForge`), APIs (`Experiment`, `TaskRun`, `Workflow`, `DatasetRecipe`) y
+  una CLI con entry points equivalentes `lambdaforge` y `lf`.
 
 LambdaForge es agnóstico respecto a la tarea en sus capas de configuración y orquestación. El
 proyecto usuario aporta el `Dataset`, el collator opcional y, cuando el contrato de mapas por defecto
@@ -183,7 +183,7 @@ ese artefacto inmutable en lugar de una ruta editable:
 
 ```bash
 python -m pip wheel /ruta/absoluta/a/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.6.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.7.0-py3-none-any.whl
 ```
 
 Deja que el lock o constraints del proyecto consumidor seleccione primero una compilación PyTorch
@@ -469,7 +469,8 @@ planificar. Cambiar los bytes originales selecciona un nuevo directorio de run c
 vez de reutilizar silenciosamente resultados obsoletos. Cada intento terminal registra
 configuración, entorno/plugins, logs, errores estructurados, métricas escalares y artefactos
 SHA-256. `PreprocessingTask` guarda además checkpoints por clave estable para reintentos seguros,
-admite shards explícitos deterministas y publica un `dataset-artifact.json` dirigido por contenido.
+admite shards explícitos deterministas y sólo publica `dataset-artifact.json` con
+`publish_dataset: true` o `dataset_name` legacy. La publicación multi-stage nueva usa DatasetRecipe.
 
 La lógica específica permanece en el paquete instalado del proyecto consumidor. Usa
 `CallableTransform` para una función pequeña o implementa los contratos públicos
@@ -697,7 +698,39 @@ metadata/métricas/manifests/resúmenes/plots pequeños; `plot learning JOB --fo
 `artifact list JOB` y `artifact fetch JOB best-checkpoint` enumeran y descargan un artifact lógico
 explícito. Nunca se copian checkpoints/datasets grandes de forma implícita.
 
-Los datos grandes nunca se copian por usar `--on`. Un catálogo separa identidad y ubicación:
+Los datos grandes nunca se copian por usar `--on`. LambdaForge 0.7 distingue:
+
+```text
+DatasetRecipe (cómo) -> DatasetBuild (ejecución) -> DatasetVersion (qué)
+                                                     -> DatasetPlacement (dónde)
+```
+
+Una Task de preprocesado sólo produce artifacts salvo publicación explícita. Una receta
+`kind: dataset` reutiliza Workflow para stages content-addressed y publica atómicamente una colección
+lógica inmutable. `DatasetMember`/`DatasetIndex` describen IDs, partitions, targets, metadata y
+assets con cualquier layout. Artifact v2 separa `content_id` independiente del path y `build_id` de
+provenance; v1 sigue legible.
+
+```bash
+lf datasets plan example-records --on atlas
+lf datasets plan example-records --on atlas --verbose
+lf datasets build example-records --on atlas
+lf datasets members example-records@1 --partition split=train --limit 50
+lf datasets diff example-records@1 example-records@2
+lf datasets materialize example-records@1 --on atlas --apply
+```
+
+Build es un job durable; reruns reutilizan stages verificadas, `--force-stage` invalida downstream y
+un fallo no publica. Publish valida índice/assets/schema en staging, renombra atómicamente y después
+registra. Materialize aplica NOOP, REPLICATE o BUILD. Consulta la
+[guía completa](docs/DATASETS.es.md) y la [receta genérica](examples/dataset-recipe.yaml).
+Un plan remoto desde el controlador no trata la caché local como remota: muestra `MISSING` cuando no
+puede observarla y el worker durable vuelve a comprobar fingerprints exactos antes de ejecutar.
+
+DatasetRegistry manda sobre placements gestionados, de modo que el consumidor usa
+`dataset:example-records@1` sin duplicar rutas. DatasetResolver fija content/versión y deja el path
+fuera de identidad científica. DataCatalog sigue compatible para aliases, externos, loaders, pins
+y overrides. Por ejemplo, un externo aún puede declarar:
 
 ```yaml
 datasets:
@@ -730,14 +763,14 @@ Los experimentos usan el mismo catálogo. `data.train: dataset:raw-corpus/train`
 Sólo se resuelven esos marcadores tipados, nunca strings ordinarios. El mount puede variar, pero el
 fingerprint conserva referencia e identidad lógica.
 
-0.6 registra automáticamente los `DatasetArtifact` correctos y permite operar sin catálogo:
+Los datasets gestionados permiten operar sin catálogo:
 
 ```bash
-lambdaforge datasets list --all
-lambdaforge datasets show raw-corpus@v3
-lambdaforge datasets stats raw-corpus@v3 --on atlas
-lambdaforge datasets verify raw-corpus@v3 --on atlas
-lambdaforge datasets materialize raw-corpus@v3 --on gpu-lab
+lf datasets list --all
+lf datasets show raw-corpus@v3
+lf datasets stats raw-corpus@v3 --on atlas
+lf datasets verify raw-corpus@v3 --on atlas
+lf datasets materialize raw-corpus@v3 --on gpu-lab
 ```
 
 `remove` sólo cambia el registro. `delete` físico verifica manifiesto, hashes y consumidores, es
@@ -1018,6 +1051,7 @@ modificar el entorno.
 | `inspect CONFIG --resolved` | Compila autoría corta al documento estricto. | no |
 | `inspect CONFIG` | Runs expandidos o plan task/workflow. | no |
 | `run CONFIG --dry-run` | Plan exacto. | no |
+| `plan CONFIG [--on CLUSTER]` | Shortcut uniforme al mejor dry-run/preflight. | no |
 | `run CONFIG` | Ejecuta experimento, tarea o workflow. | sí |
 | `run CONFIG --force|--restart|--no-resume` | Controla reutilización y continuación parcial. | sí |
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Cachea un bundle y envía al plano de control. | metadata; remoto sin dry-run |
@@ -1026,7 +1060,7 @@ modificar el entorno.
 | `jobs list [--all]|show|logs|pause|resume|cancel|retry|delete|reconcile`, `jobs group list|show` | Reconecta y controla trabajos/grupos persistentes. | sólo lifecycle |
 | `resources [--on C|--all] [--processes]` | Hechos observados, vista scheduler y recursos declarados. | no |
 | `configs|experiments|tasks list|show|validate|plan|run`; `experiments status|history|results` | Descubre YAML y opera por nombre no ambiguo. | sólo run |
-| `datasets list|show|locations|stats|verify|lineage|add|remove|delete|materialize|replicate` | Descubrimiento y ciclo de vida preview-first. | mutaciones explícitas/`--apply` |
+| `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|delete|materialize|replicate` | Receta/build/versión/placement e inspección. | build/add/remove o `--apply` |
 | `storage status|gc`, `environments list|show|gc` | Bytes/ficheros y GC de caché reconstruible sin referencias. | sólo GC `--apply` |
 | `data --catalog FILE list|locations|inspect|replicate` | Ubicaciones/manifest y réplica explícita. | sólo `--apply` |
 | `compose CONFIG` | Materialización oculta + procedencia. | no |
@@ -1041,6 +1075,8 @@ modificar el entorno.
 | `plot learning|sweep|seeds|hpo|resources` | `PlotSpec` JSON o figuras atómicas. | salvo `--json` |
 | `artifact inspect|export|validate|visualize|list|fetch|plugins` | Inspección acotada y retrieval/geometría explícitos. | según acción |
 | `debug CONFIG --records N` | Muestra preprocesado sin sink/finalización de producción. | sólo intermediates |
+| `completion bash|zsh|fish` | Genera completion para `lambdaforge` y `lf`. | no |
+| `project status` | Raíz/versión/cluster por defecto/configs/registry/jobs activos. | no |
 | `aggregate CONFIG` | Regenera agregados. | sí |
 | `retain CONFIG` | Preview; sólo `--apply` muta. | no |
 | `registry ROOT [--output FILE]` | Consulta/exporta registro. | sólo con output |
@@ -1049,6 +1085,13 @@ modificar el entorno.
 `lambdaforge init mi-proyecto --template preprocessing` es la vía rápida para datos; `training`
 crea un baseline pequeño ejecutable, `minimal` una tarea y `full` ambas familias. Renombra
 `my_project`, implementa el dominio, instala con `pip install -e .` y valida.
+
+`lf` es exactamente el mismo entrypoint. La gramática canónica es
+`lf <recurso> <acción> <objeto> [--on CONTEXTO]`; los aliases moderados son `ds`, `exp`, `env` y
+`ls`. Un nombre de config inequívoco sustituye al path. `default_cluster` en
+`lambdaforge.yaml`/`lambdaforge.clusters.yaml` del proyecto o en el catálogo XDG del usuario se usa
+sólo si se omite `--on`; el flag explícito siempre gana. La salida humana/JSON indica si el target
+es explícito, default del proyecto o del usuario.
 
 ## 17. API pública
 
@@ -1061,12 +1104,13 @@ Los puntos de entrada admitidos son deliberadamente reducidos:
 | `from lambdaforge import Experiment` | Inspeccionar, ejecutar, agregar y cargar una suite. |
 | `from lambdaforge import TaskRun, TaskResult, TaskExecutionPlan` | Validar, inspeccionar, ejecutar y auditar una tarea genérica. |
 | `from lambdaforge import Workflow, WorkflowPlan, WorkflowResult, WorkflowValidationReport` | Validar, planificar y ejecutar un DAG task/experiment. |
+| `from lambdaforge import DatasetRecipe, DatasetBuildPlan, DatasetBuildResult` | Validar, planificar y construir una receta de dataset inmutable. |
 | `from lambdaforge import RunResult, AggregateResult` | Resultados tipados e inmutables compatibles con dict/JSON legado. |
 | `from lambdaforge.experiments import PostRunAction, PostRunContext, PostRunResult` | Contrato de análisis final por run con contexto estable de checkpoint/artifacts. |
 | `from lambdaforge import ResultCatalog, ResultRecord` | Discovery por identidad y selección explícita del historial de intentos. |
 | `from lambdaforge import ResultService, VisualizationService, PlotSpec, ArtifactService` | Servicios estables de consulta, plots e inspección. |
 | `from lambdaforge import ArtifactRetentionPlan, ArtifactRetentionResult` | Previsualizaciones y resultados tipados e inmutables de retención. |
-| `lambdaforge.data` | Identidad/catálogo/ubicación, transferencias, adaptadores y cachés. |
+| `lambdaforge.data` | Members/índices, recipe/build/version/placement, resolución, transferencias, adaptadores y cachés. |
 | `lambdaforge.tasks` | Contratos genéricos de tarea, contexto, plan, resultado y artefacto. |
 | `lambdaforge.preprocessing` | Preprocesado componible de registros y manifiestos de dataset. |
 | `lambdaforge.configuration` | Autoría a IR, includes, interpolación, secretos, procedencia y diff. |
@@ -1089,7 +1133,7 @@ Los puntos de entrada admitidos son deliberadamente reducidos:
 | `lambdaforge.tracking` | Adaptadores lazy y opcionales para loggers MLflow, TensorBoard y Weights & Biases. |
 | `lambdaforge.training` | Tarea, runner, configuración y orquestación de procesos. |
 | `lambdaforge.experiments` | Configuración, migraciones, planificación, agregación y carga de bajo nivel. |
-| `python -m lambdaforge` / `lambdaforge` | Interfaz de terminal para la misma API de objetos. |
+| `python -m lambdaforge` / `lambdaforge` / `lf` | Interfaz de terminal para la misma API de objetos. |
 
 `LambdaForge.build(spec)` expone la factoría genérica:
 
@@ -2228,6 +2272,7 @@ python -c "from importlib.metadata import distribution; print(distribution('lamb
 - [Ejemplo de preprocesado conciso](examples/preprocessing-simple.yaml)
 - [Ejemplo de catálogo de clústeres](examples/lambdaforge.clusters.yaml) · [Ejemplo de catálogo de datos](examples/data-catalog.yaml)
 - [Ejemplo de workflow](examples/workflow.yaml)
+- [Ejemplo de DatasetRecipe](examples/dataset-recipe.yaml)
 - [Ejemplo de HPO adaptativo](examples/adaptive-hpo.yaml)
 
 Cada guía enlaza de vuelta aquí y a su traducción. Los docstrings de clase son la referencia más
@@ -2237,6 +2282,17 @@ precisa para los argumentos de cada constructor.
 
 La hoja de ruta vive aquí para que su estado no diverja en otro fichero. “Completado” significa API
 pública, documentación y pruebas focalizadas; no significa incluir cada proveedor o método externo.
+
+| Prioridad 0.7 | Lifecycle de datasets y refinamiento CLI | Estado |
+|---:|---|---|
+| 1 | Modelo explícito Receta → Build → Versión → Placement | Completado |
+| 2 | DatasetMember/DatasetIndex streaming y compatibilidad Artifact/Record v2 | Completado |
+| 3 | Reuse Workflow, force granular, build durable y publish atómico | Completado |
+| 4 | DatasetResolver Registry-first y DataCatalog externo/legacy | Completado |
+| 5 | Apply real NOOP/REPLICATE/BUILD | Completado en un target; providers del centro son extensión |
+| 6 | Members, diff, stats y profiler remoto managed | Completado |
+| 7 | `lf`, gramática, plan, aliases, completion y errores accionables | Completado |
+| 8 | Scheduler DAG multi-cluster/placement automático | Diferido explícitamente |
 
 | Prioridad 0.6 | Capacidad del plano terminal | Estado |
 |---:|---|---|

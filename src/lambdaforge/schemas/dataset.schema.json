@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.dev/lambdaforge/schemas/dataset-1.0.json",
+  "title": "LambdaForge dataset recipe",
+  "description": "A typed recipe that reuses the Workflow DAG and publishes one immutable DatasetVersion.",
+  "type": "object",
+  "required": ["kind", "schema_version", "dataset", "stages", "publish"],
+  "additionalProperties": false,
+  "properties": {
+    "kind": {"const": "dataset"},
+    "schema_version": {"const": "1.0"},
+    "output_root": {"type": "string", "minLength": 1},
+    "max_parallel": {"type": "integer", "minimum": 1},
+    "metadata": {"type": "object"},
+    "dataset": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": ["string", "number"]},
+        "inputs": {"type": "array", "items": {"type": "string"}},
+        "target_schema": {"type": "object"},
+        "global_assets": {"type": "object"},
+        "loader": {"type": "object"},
+        "lineage": {"type": "object"},
+        "metadata": {"type": "object"}
+      }
+    },
+    "stages": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["task"],
+        "additionalProperties": false,
+        "properties": {
+          "task": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object"}]},
+          "needs": {"oneOf": [{"type": "string"}, {"type": "array", "uniqueItems": true, "items": {"type": "string"}}]},
+          "bindings": {"type": "object"},
+          "required": {"type": "boolean", "default": true},
+          "reuse": {"enum": ["auto", "never"], "default": "auto"}
+        }
+      }
+    },
+    "publish": {
+      "type": "object",
+      "required": ["from", "index"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {"type": "string", "minLength": 1},
+        "root": {"type": "string", "minLength": 1, "default": "."},
+        "index": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

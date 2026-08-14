@@ -36,9 +36,12 @@ class DataCatalog:
     def descriptor(self, reference: DatasetReference | str) -> dict[str, Any]:
         """Return a detached logical dataset descriptor."""
         parsed = DatasetReference.parse(reference) if isinstance(reference, str) else reference
+        keys = (parsed.selector, parsed.name) if parsed.version is not None else (parsed.name,)
         try:
-            value = self._datasets[parsed.name]
+            value = next(self._datasets[key] for key in keys if key in self._datasets)
         except KeyError as error:
+            raise KeyError(f"Unknown dataset reference {parsed!s}.") from error
+        except StopIteration as error:
             raise KeyError(f"Unknown dataset reference {parsed!s}.") from error
         if not isinstance(value, Mapping):
             raise TypeError(f"Dataset catalog entry {parsed.name!r} must be a mapping.")

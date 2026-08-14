@@ -17,7 +17,7 @@ generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine be
 Python package, so a research project can focus on its data and science instead of rebuilding
 pipelines, training loops, provenance, result management and process scheduling.
 
-> **Status:** `0.6.0`, usable but pre-1.0. The public namespaces documented below are the intended
+> **Status:** `0.7.0`, usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
 > contain a licence file, so redistribution terms still need to be chosen by SimpleLambda.
 
@@ -63,8 +63,8 @@ pipelines, training loops, provenance, result management and process scheduling.
   train/validation/test metrics.
 - A separate, strict generic-task YAML family for preprocessing and other reproducible non-training
   work, with dry-run plans, content-addressed inputs, typed artifacts and attempt history.
-- Composable source/transform/sink preprocessing, atomic per-record checkpoints, deterministic
-  shards and a versioned `DatasetArtifact` manifest.
+- Composable source/transform/sink preprocessing, atomic per-record checkpoints and deterministic
+  shards; dataset publication is a separate explicit recipe/publication boundary.
 - Task/experiment workflow DAGs, safe YAML composition/interpolation, semantic provenance/diff and
   bounded CPU-only or heterogeneous resource planning.
 - Reusable checkpoint inference/evaluation/ensemble/export tasks, finite and adaptive HPO and
@@ -94,8 +94,8 @@ pipelines, training loops, provenance, result management and process scheduling.
   and logits policy are explicit experiment parameters.
 - Optional, lazily loaded MLflow, TensorBoard and Weights & Biases logger adapters, selectable alone
   or together without adding a tracking service to the base installation.
-- A small facade (`LambdaForge`), object APIs (`Experiment`, `TaskRun` and `Workflow`) and one CLI
-  (`lambdaforge`).
+- A small facade (`LambdaForge`), object APIs (`Experiment`, `TaskRun`, `Workflow` and
+  `DatasetRecipe`) and one CLI exposed by equivalent `lambdaforge` and `lf` entry points.
 
 LambdaForge is task-agnostic at the configuration and orchestration layers. A user project supplies
 the domain-specific `Dataset`, optional collator and, when the default mapping contract is not
@@ -178,7 +178,7 @@ immutable artifact instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.6.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.7.0-py3-none-any.whl
 ```
 
 Let the consumer project's lock file or constraints select a PyTorch build compatible with its
@@ -480,8 +480,9 @@ Every top-level input is resolved relative to the YAML and uses strict content h
 Changing raw bytes selects a new fingerprinted run directory instead of silently reusing stale output. Each
 terminal attempt records configuration, environment/plugins, logs, structured errors, scalar
 metrics and SHA-256 artifacts. `PreprocessingTask` additionally checkpoints stable record keys for
-safe retry, supports deterministic explicit shards and publishes a content-derived
-`dataset-artifact.json`.
+safe retry and supports deterministic explicit shards. It publishes `dataset-artifact.json` only
+when `publish_dataset: true` or legacy `dataset_name` is explicit; new multi-stage publication uses
+the DatasetRecipe lifecycle in section 11.
 
 Project-specific logic remains in the installed consumer package. Use a `CallableTransform` for a
 small function or implement the public `PreprocessingSource`, `PreprocessingTransform` and
@@ -774,8 +775,41 @@ lambdaforge artifact fetch JOB best-checkpoint --output checkpoints/best.ckpt
 Sync allowlists result/metrics/environment/manifests/summaries/plots up to 16 MiB per file by
 default. Checkpoints, datasets and other heavy artifacts are never implicit.
 
-Large data is never copied merely because `run --on` was used. Register logical names in a data
-catalog:
+Large data is never copied merely because `run --on` was used. LambdaForge 0.7 distinguishes:
+
+```text
+DatasetRecipe (how) -> DatasetBuild (execution) -> DatasetVersion (what)
+                                                   -> DatasetPlacement (where)
+```
+
+A preprocessing Task produces ordinary artifacts unless publication is explicit. A
+`kind: dataset` recipe reuses the Workflow DAG for content-addressed stages and atomically publishes
+one immutable logical collection. `DatasetMember` and streaming `DatasetIndex` describe stable IDs,
+arbitrary partitions/targets/metadata and any file/directory/record/URI asset layout. Artifact v2
+keeps path-independent `content_id` separate from provenance `build_id`; v1 remains readable.
+
+```bash
+lf datasets plan example-records --on atlas
+lf datasets plan example-records --on atlas --verbose
+lf datasets build example-records --on atlas
+lf datasets members example-records@1 --partition split=train --limit 50
+lf datasets diff example-records@1 example-records@2
+lf datasets materialize example-records@1 --on atlas --apply
+```
+
+Builds are durable jobs; reruns reuse verified stages, `--force-stage` invalidates downstream work,
+and failed builds publish no DatasetVersion. Publication validates the index/assets/schema in
+staging, renames atomically, and only then registers. Materialization really applies NOOP,
+REPLICATE or BUILD rather than returning a producer command. Read the complete
+[dataset lifecycle guide](docs/DATASETS.md) and [generic recipe](examples/dataset-recipe.yaml).
+Remote controller-side plans never reuse the local cache as if it were remote: unobserved cache is
+shown as `MISSING`, and the durable target worker rechecks the exact fingerprints before execution.
+
+DatasetRegistry is the placement authority for managed versions, so a consumer can simply use
+`dataset:example-records@1` without duplicating cluster paths. `DatasetResolver` pins the exact
+version/content and records the selected placement outside scientific identity. DataCatalog remains
+compatible for aliases, external/unmanaged data, loaders, explicit pins and institutional
+overrides. For example, an external dataset can still use:
 
 ```yaml
 datasets:
@@ -793,7 +827,7 @@ data_catalog: ../data-catalog.yaml
 inputs: {raw: dataset:raw-corpus}
 ```
 
-The target profile's `data_environment` selects a physical location. If it is missing, submission
+The target profile's `data_environment` selects an external physical location. If it is missing, submission
 fails before scheduling and tells the user to register or replicate the data. Ordinary local path
 inputs up to 10 MiB are copied into the small execution bundle; larger implicit transfers are
 refused. Data movement is a separate preview-first command:
@@ -817,15 +851,14 @@ plus `path_parameter`; LambdaForge injects the selected location. Inside nested 
 guessed. The physical mount can differ by cluster while the scientific fingerprint retains the
 logical reference and declared dataset identity.
 
-Version 0.6 also indexes successful `DatasetArtifact` manifests automatically and discovers them
-without requiring a catalogue for operational queries:
+Managed versions are discovered without a catalogue for operational queries:
 
 ```bash
-lambdaforge datasets list --all
-lambdaforge datasets show raw-corpus@v3
-lambdaforge datasets stats raw-corpus@v3 --on atlas
-lambdaforge datasets verify raw-corpus@v3 --on atlas
-lambdaforge datasets materialize raw-corpus@v3 --on gpu-lab
+lf datasets list --all
+lf datasets show raw-corpus@v3
+lf datasets stats raw-corpus@v3 --on atlas
+lf datasets verify raw-corpus@v3 --on atlas
+lf datasets materialize raw-corpus@v3 --on gpu-lab
 ```
 
 `remove` changes registration only. Physical `delete` is a matching-manifest, active-consumer-
@@ -1197,6 +1230,7 @@ snapshot without changing the environment.
 | `inspect CONFIG --resolved` | Concise YAML compiled to strict runner configuration. | no |
 | `inspect CONFIG` | Expanded runs or immutable task/workflow plan. | no |
 | `run CONFIG --dry-run` | Exact execution plan. | no |
+| `plan CONFIG [--on CLUSTER]` | Uniform shortcut for the best available dry-run/preflight. | no |
 | `run CONFIG` | Execute experiment, task or workflow. | yes |
 | `run CONFIG --force|--restart|--no-resume` | Explicitly control success reuse and partial continuation. | yes |
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Cache a small bundle and submit through the control plane. | job metadata; remote only without dry-run |
@@ -1205,7 +1239,7 @@ snapshot without changing the environment.
 | `jobs list [--all]|show|logs|pause|resume|cancel|retry|delete|reconcile`, `jobs group list|show` | Reconnect and safely control persistent work/groups. | lifecycle commands only |
 | `resources [--on C|--all] [--processes]` | Separate observed host facts, scheduler view and declared job requests. | no |
 | `configs|experiments|tasks list|show|validate|plan|run`; `experiments status|history|results` | Discover project YAML and operate it by unambiguous name. | only run |
-| `datasets list|show|locations|stats|verify|lineage|add|remove|delete|materialize|replicate` | First-class dataset discovery and preview-first lifecycle. | add/remove; delete/transfer only with `--apply` |
+| `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|delete|materialize|replicate` | Recipe/build/version/placement lifecycle and inspection. | build/add/remove; delete/transfer only with `--apply` |
 | `storage status|gc`, `environments list|show|gc` | Inspect bytes/file counts and collect only reconstructible unreferenced cache. | GC only with `--apply` |
 | `data --catalog FILE list|locations|inspect|replicate` | Inspect logical datasets/manifests; replication needs `--apply`. | only replicate `--apply` |
 | `compose CONFIG` | Redacted materialization plus provenance. | no |
@@ -1220,6 +1254,8 @@ snapshot without changing the environment.
 | `plot learning|sweep|seeds|hpo|resources` | Create `PlotSpec` JSON or atomic static/HTML figures. | only without `--json` |
 | `artifact inspect|export|validate|visualize|list|fetch|plugins` | Safe bounded inspection and explicit retrieval/geometry. | export/visualize/fetch |
 | `debug CONFIG --records N` | Sample preprocessing transforms without production sink/finalization. | only requested intermediates |
+| `completion bash|zsh|fish` | Generate completion for both `lambdaforge` and `lf`. | no |
+| `project status` | Project root/version/default cluster/configs/registry/active jobs. | no |
 | `aggregate CONFIG` | Rebuild experiment aggregates. | yes |
 | `retain CONFIG` | Retention preview; only `--apply` mutates artifacts. | no |
 | `registry ROOT [--output FILE]` | Query JSON or export JSON/CSV/Parquet. | only with output |
@@ -1230,6 +1266,13 @@ snapshot without changing the environment.
 both families. Rename `my_project`, implement the generated domain code, install it with
 `pip install -e .`, and validate its YAML. The scaffold includes `.gitignore` rules for
 environments, caches, builds and run output.
+
+`lf` is an exact second entry point. Canonical grammar is
+`lf <resource> <action> <object> [--on CONTEXT]`; moderate aliases are `ds`, `exp`, `env` and
+`ls`. Project config names can replace paths when unambiguous. A top-level `default_cluster` in
+project `lambdaforge.yaml`/`lambdaforge.clusters.yaml`, or the XDG user cluster catalog, supplies
+`--on` only when the user omitted it; explicit `--on` always wins. Human and JSON output identify
+whether the target was explicit, a project default or a user default.
 
 ## 17. Public API
 
@@ -1242,12 +1285,13 @@ The supported entry points are deliberately narrow:
 | `from lambdaforge import Experiment` | Inspect, execute, aggregate and load one experiment suite. |
 | `from lambdaforge import TaskRun, TaskResult, TaskExecutionPlan` | Validate, inspect, execute and audit one generic task. |
 | `from lambdaforge import Workflow, WorkflowPlan, WorkflowResult, WorkflowValidationReport` | Validate, plan and run a task/experiment DAG. |
+| `from lambdaforge import DatasetRecipe, DatasetBuildPlan, DatasetBuildResult` | Validate, plan and build one immutable dataset recipe. |
 | `from lambdaforge import RunResult, AggregateResult` | Typed immutable results with legacy dict/JSON compatibility. |
 | `from lambdaforge.experiments import PostRunAction, PostRunContext, PostRunResult` | Per-run final analysis contract with stable checkpoint/artifact context. |
 | `from lambdaforge import ResultCatalog, ResultRecord` | Identity-aware discovery and explicit selection of attempt history. |
 | `from lambdaforge import ResultService, VisualizationService, PlotSpec, ArtifactService` | Stable query, plotting and safe artifact application services. |
 | `from lambdaforge import ArtifactRetentionPlan, ArtifactRetentionResult` | Typed immutable retention previews and outcomes. |
-| `lambdaforge.data` | Logical identity/catalog/location, explicit transfers, dataset adapters and bounded caches. |
+| `lambdaforge.data` | Dataset members/indexes, recipe/build/version/placement lifecycle, unified resolution, transfers, adapters and caches. |
 | `lambdaforge.tasks` | Generic task, context, plan, result and artifact contracts. |
 | `lambdaforge.preprocessing` | Composable record preprocessing and dataset manifests. |
 | `lambdaforge.configuration` | Authoring-to-IR compilation, includes, safe interpolation, redaction, provenance and diff. |
@@ -1270,7 +1314,7 @@ The supported entry points are deliberately narrow:
 | `lambdaforge.tracking` | Lazy optional MLflow, TensorBoard and Weights & Biases logger adapters. |
 | `lambdaforge.training` | Task, runner, configuration and process orchestration. |
 | `lambdaforge.experiments` | Lower-level configuration, migrations, scheduling, aggregation and loading. |
-| `python -m lambdaforge` / `lambdaforge` | CLI front end to the same object API. |
+| `python -m lambdaforge` / `lambdaforge` / `lf` | CLI front end to the same object API. |
 
 `LambdaForge.build(spec)` exposes the generic object factory:
 
@@ -2425,6 +2469,7 @@ python -c "from importlib.metadata import distribution; print(distribution('lamb
 - [Concise preprocessing example](examples/preprocessing-simple.yaml)
 - [Cluster catalogue example](examples/lambdaforge.clusters.yaml) · [Data catalogue example](examples/data-catalog.yaml)
 - [Workflow example](examples/workflow.yaml)
+- [DatasetRecipe example](examples/dataset-recipe.yaml)
 - [Adaptive HPO example](examples/adaptive-hpo.yaml)
 
 Each sub-guide links back here and to its translation. Class docstrings are the most precise source
@@ -2435,6 +2480,17 @@ for individual constructor arguments.
 The roadmap lives here so status cannot drift into a separate planning document. “Completed” means
 a public implementation, documentation and focused tests; it does not claim that every external
 provider or research method is built in.
+
+| 0.7 priority | Dataset lifecycle and CLI refinement | Status |
+|---:|---|---|
+| 1 | Explicit Recipe → Build → Version → Placement model | Completed |
+| 2 | Streaming DatasetMember/DatasetIndex and Artifact/Record v2 compatibility | Completed |
+| 3 | Workflow-backed stage reuse, granular force, durable build and atomic publish | Completed |
+| 4 | Registry-first DatasetResolver with DataCatalog external/legacy compatibility | Completed |
+| 5 | Real NOOP/REPLICATE/BUILD materialization apply | Completed for one target cluster; site transfer remains an extension |
+| 6 | Members, diff, universal stats and managed remote project profilers | Completed |
+| 7 | `lf`, canonical grammar, plan, aliases, completion and actionable errors | Completed |
+| 8 | General multi-cluster DAG scheduler/automatic placement | Explicitly deferred |
 
 | 0.6 priority | Terminal control-plane capability | Status |
 |---:|---|---|

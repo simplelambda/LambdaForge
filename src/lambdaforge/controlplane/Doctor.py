@@ -285,60 +285,58 @@ class Doctor:
         return DoctorReport(cluster, tuple(checks))
 
     def _data_checks(self, cluster: str, config_path: Path) -> tuple[DoctorCheck, ...]:
-        """Validate catalog declarations and target locations for one requested config."""
+        """Resolve logical data through the same Registry-first policy used at runtime."""
         try:
             from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
             from lambdaforge.controlplane.ExecutionBundleBuilder import ExecutionBundleBuilder
             from lambdaforge.data.DataCatalog import DataCatalog
+            from lambdaforge.data.DatasetRegistry import DatasetRegistry
+            from lambdaforge.data.DatasetResolver import DatasetResolver
 
             materialized = AuthoringConfig.from_yaml(config_path).materialize().to_dict()
+            references = ExecutionBundleBuilder._experiment_dataset_references(materialized)
+            if not references:
+                return (
+                    DoctorCheck(
+                        "datasets",
+                        True,
+                        "The configuration declares no logical dataset references.",
+                    ),
+                )
             extensions = materialized.get("extensions", {})
             authoring = extensions.get("authoring", {}) if isinstance(extensions, dict) else {}
             catalog_value = authoring.get("data_catalog") if isinstance(authoring, dict) else None
-            if catalog_value is None:
-                return (
-                    DoctorCheck(
-                        "data-catalog",
-                        True,
-                        "The configuration declares no data catalog.",
-                        "Add data_catalog only when logical datasets are used.",
-                    ),
-                )
-            source = Path(str(catalog_value))
-            source = source if source.is_absolute() else (config_path.resolve().parent / source)
-            catalog = DataCatalog.from_yaml(source)
-            names = ExecutionBundleBuilder._experiment_dataset_names(materialized)
-            environment = self.catalog.get(cluster).data_environment or cluster
-            missing = [name for name in names if not self._has_location(catalog, name, environment)]
+            catalog = None
+            if catalog_value is not None:
+                source = Path(str(catalog_value))
+                source = source if source.is_absolute() else (config_path.resolve().parent / source)
+                catalog = DataCatalog.from_yaml(source)
+            profile = self.catalog.get(cluster)
+            resolver = DatasetResolver(
+                DatasetRegistry(DatasetRegistry.project_path(config_path.resolve().parent)),
+                catalog,
+                environment=profile.data_environment or cluster,
+                managed_environment=cluster,
+                source_dir=config_path.resolve().parent,
+            )
+            resolved = tuple(resolver.resolve(reference) for reference in references)
             return (
                 DoctorCheck(
-                    "data-catalog",
-                    not missing,
-                    (
-                        f"Datasets {names} resolve for {environment!r}."
-                        if not missing
-                        else f"Missing {environment!r} locations for {tuple(missing)}."
-                    ),
-                    "Add each target location or replicate the dataset explicitly.",
+                    "datasets",
+                    True,
+                    "Logical datasets resolve exactly: "
+                    + ", ".join(value.exact_reference for value in resolved),
                 ),
             )
         except Exception as error:
             return (
                 DoctorCheck(
-                    "data-catalog",
+                    "datasets",
                     False,
                     f"{error.__class__.__name__}: {error}",
-                    "Fix the config/catalog and run validate before submission.",
+                    "Register/materialize managed data or fix the explicit external catalog.",
                 ),
             )
-
-    @staticmethod
-    def _has_location(catalog: object, name: str, environment: str) -> bool:
-        try:
-            catalog.resolve(f"dataset:{name}", environment=environment)  # type: ignore[attr-defined]
-        except (KeyError, TypeError, ValueError):
-            return False
-        return True
 
     @staticmethod
     def _requires_cuda(config_path: Path) -> bool:

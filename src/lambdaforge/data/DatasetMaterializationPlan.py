@@ -19,6 +19,8 @@ class DatasetMaterializationPlan:
     reason: str = ""
     requires_controller_online: bool = False
     prerequisites: tuple[dict[str, Any], ...] = ()
+    stages: tuple[dict[str, Any], ...] = ()
+    job_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,4 +33,6 @@ class DatasetMaterializationPlan:
             "reason": self.reason,
             "requires_controller_online": self.requires_controller_online,
             "prerequisites": [dict(value) for value in self.prerequisites],
+            "stages": [dict(value) for value in self.stages],
+            "job_id": self.job_id,
         }

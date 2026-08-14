@@ -132,6 +132,9 @@ class ProjectConfigService:
         experiment = payload.get("experiment")
         if isinstance(experiment, Mapping) and experiment.get("name"):
             return str(experiment["name"])
+        dataset = payload.get("dataset")
+        if isinstance(dataset, Mapping) and dataset.get("name"):
+            return str(dataset["name"])
         return str(payload.get("name", path.stem))
 
     @classmethod
@@ -143,7 +146,9 @@ class ProjectConfigService:
             if isinstance(item, str) and item.startswith("dataset:"):
                 found.add(item.removeprefix("dataset:").split("/", 1)[0])
             elif isinstance(item, Mapping):
-                if set(item).issubset({"dataset", "subpath"}) and item.get("dataset"):
+                if set(item).issubset(
+                    {"dataset", "version", "content_id", "subpath"}
+                ) and item.get("dataset"):
                     found.add(str(item["dataset"]))
                 for nested in item.values():
                     visit(nested)
@@ -201,7 +206,13 @@ class ProjectConfigService:
             return False
         return any(
             token in prefix
-            for token in ("schema_version:", "kind: task", "kind: workflow", "experiment:")
+            for token in (
+                "schema_version:",
+                "kind: task",
+                "kind: workflow",
+                "kind: dataset",
+                "experiment:",
+            )
         )
 
     @staticmethod
@@ -212,7 +223,7 @@ class ProjectConfigService:
             return ProjectConfigService._looks_like_lambdaforge(path)
         if not isinstance(value, Mapping):
             return False
-        if value.get("kind") in {"task", "workflow"} or "experiment" in value:
+        if value.get("kind") in {"task", "workflow", "dataset"} or "experiment" in value:
             return True
         if "extends" in value or "include" in value:
             return True

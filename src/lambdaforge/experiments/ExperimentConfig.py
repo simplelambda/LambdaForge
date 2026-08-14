@@ -140,16 +140,19 @@ class ExperimentConfig(Mapping[str, Any]):
         authoring = self._authoring
         configured = authoring.get("data_catalog")
         data = self._data.get("data")
-        if configured is None or not isinstance(data, Mapping):
+        if not isinstance(data, Mapping):
             return
-        catalog_path = Path(str(configured))
-        catalog_path = (
-            catalog_path
-            if catalog_path.is_absolute()
-            else (self.source_dir / catalog_path).resolve()
-        )
+        catalog = None
+        if configured is not None:
+            catalog_path = Path(str(configured))
+            catalog_path = (
+                catalog_path
+                if catalog_path.is_absolute()
+                else (self.source_dir / catalog_path).resolve()
+            )
+            catalog = DataCatalog.from_yaml(catalog_path)
         resolver = DatasetReferenceResolver(
-            DataCatalog.from_yaml(catalog_path),
+            catalog,
             environment=str(authoring.get("environment", "local")),
             source_dir=self.source_dir,
         )

@@ -15,7 +15,9 @@ seed/sweep/HPO expansion, workflow DAGs, CPU/GPU/SLURM planning, training, aggre
 comparisons, tracking, result auditing, checkpoint/model operations, artifact stores/cache and
 retention. Version 0.6 also provides concise authoring, logical data/code identity, durable direct
 process jobs, SSH connection reuse, global resource views, first-class datasets, config discovery
-and safe internal-storage lifecycle. Training also exposes validation outputs to project callbacks
+and safe internal-storage lifecycle. Version 0.7 separates dataset recipe/build/version/placement,
+adds logical member indexes, Registry-first resolution, durable reusable builds and the `lf` CLI.
+Training also exposes validation outputs to project callbacks
 and checkpoint-aware `post_run` actions with independent resume/artifact identity. A consumer
 project owns its datasets and domain code.
 
@@ -33,7 +35,8 @@ from private file locations.
 
 | Need | Use |
 |---|---|
-| Run a configured study | `lambdaforge run experiment.yaml` |
+| Run a configured study | `lf run experiment.yaml` (`lambdaforge` is identical) |
+| Uniform execution preflight | `lf plan CONFIG [--on CLUSTER]` |
 | See concise YAML as strict runner input | `lambdaforge inspect CONFIG --resolved` |
 | Run reproducible non-training work | concise `task`/`preprocess`, or strict `kind: task` |
 | Preprocess JSONL or file trees | start from `examples/preprocessing.yaml` |
@@ -69,7 +72,8 @@ from private file locations.
 | Reconnect to scheduled work | `lambdaforge jobs list/status/logs/cancel/retry` |
 | Declare large-data locations | `DataCatalog`; inspect/replicate with `lambdaforge data` |
 | Use concise training YAML | `name`, `model`, one `loss`, `trainer.epochs`, `resources` compile to strict IR |
-| Use logical experiment data | `data_catalog`, then `dataset:NAME/subpath` or `{dataset, subpath}` |
+| Use a managed dataset | `dataset:NAME@VERSION/subpath`; Registry supplies placement |
+| Use external/aliased data | optional DataCatalog plus `dataset:NAME/subpath` |
 | Register/bootstrap cluster | `clusters add`; `doctor --on`; `clusters bootstrap` |
 | Inspect cluster source/auth | `clusters inspect NAME`; never search YAML for a password value |
 | Manage a legacy SSH password | `clusters credentials set/delete NAME`; prefer OpenSSH |
@@ -80,7 +84,9 @@ from private file locations.
 | Durable process lifecycle | `jobs show/logs/pause/resume/cancel/retry/delete/reconcile` |
 | Inspect host/scheduler resources | `resources --on CLUSTER`; use `--all` for bounded parallel queries |
 | Discover project YAML by name | `configs`, `experiments` or `tasks` `list/show/validate/plan/run` |
-| Discover/manage dataset versions | `datasets list/show/stats/verify/lineage/materialize`; delete is preview-first |
+| Build a DatasetVersion | `datasets plan/build RECIPE_NAME [--force-stage STAGE]` |
+| Inspect dataset members/change | `datasets members/member/diff/stats/show` |
+| Place/manage a version | `datasets materialize/replicate/locations/verify`; delete is preview-first |
 | Inspect/collect internal cache | `storage status`; `storage gc`; apply only after preview |
 | Sync small remote evidence | `results sync JOB`; heavy files require `artifact fetch` |
 | Query/compare/export results | `results list/show/compare/export` |
@@ -88,6 +94,39 @@ from private file locations.
 | Inspect a scientific artifact | `artifact inspect/export/validate/visualize/list/plugins` |
 | Debug N preprocessing records | `debug preprocessing.yaml --records N` |
 | Inspect a DatasetArtifact | `data --catalog CATALOG inspect dataset:NAME` |
+
+## Version 0.7 dataset lifecycle
+
+Keep `DatasetRecipe -> DatasetBuild -> DatasetVersion -> DatasetPlacement` distinct. A Task or stage
+artifact is not a DatasetVersion. `PreprocessingTask` publishes only with `publish_dataset: true` or
+legacy `dataset_name`; new pipelines should publish through `kind: dataset`. The recipe compiles its
+`stages` to the existing Workflow DAG. `required` is scientific necessity; `reuse: auto|never` is an
+independent cache decision. Plan before building; `--force-stage X` forces X and its transitive
+downstream. Builds are durable `dataset-build` jobs and final publication is validated/staged/atomic.
+
+The final stage must provide the root and canonical JSONL `DatasetIndex` named by `publish.root` and
+`publish.index`. Each `DatasetMember` owns stable `id`, arbitrary partitions/targets, scientific
+metadata, non-identity display data and named file/directory/record/URI `DatasetAsset` objects. Use
+real checksums. DatasetArtifact v2 uses path-independent `content_id == dataset_id`; `build_id`
+identifies recipe/stage provenance. Never mutate or overwrite a published alias.
+
+For managed datasets, DatasetRegistry owns placements and DatasetResolver pins exact name/version/
+content before choosing the target environment. Do not add duplicate DataCatalog locations.
+DataCatalog remains for external/unmanaged datasets, aliases, loader ObjectSpecs, pins and overrides.
+Direct training split references need `loader.path_parameter`; nested `{dataset, version, subpath}`
+markers inject a path into project params. Prefer explicit versions; an unversioned multi-match is
+an error. `materialize --apply` performs NOOP/verified atomic REPLICATE or submits the recipe BUILD.
+
+Inspect with `datasets members ... --partition NAME=VALUE --limit N`, `member`, `diff`, `stats` and
+`verify`. Project profilers selected by schema run in the managed environment beside remote data.
+Stage cache is reconstructible GC input; published datasets/results/job work are never normal GC.
+Read `docs/DATASETS.md` only when changing this boundary.
+
+CLI grammar is `lf <resource> <action> <object> [--on CONTEXT]`. `ds`, `exp`, `env` and `ls` are
+the documented aliases. `lf completion bash|zsh|fish` generates completion. A project or XDG-user
+`default_cluster` is used only when `--on` is absent and output identifies its source. Dry-run jobs persist as terminal `PLANNED`,
+not active `CREATED`; job selectors accept exact IDs, unambiguous names and `latest`.
+Use `lf project status` for one bounded project/version/default/config/registry/job summary.
 
 ## Install into a consumer project
 
@@ -110,7 +149,7 @@ reproducible release, build/install a versioned LambdaForge wheel instead of the
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.6.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.7.0-py3-none-any.whl
 ```
 
 Let the consumer lock the correct PyTorch wheel. `nvidia-smi` only proves the driver is visible;
@@ -483,7 +522,7 @@ output_root: runs/tasks
 resume: true
 inputs:
   - {name: raw, path: data/raw.jsonl}
-required_artifacts: [processed, dataset-artifact.json]
+required_artifacts: [processed, preprocessing-manifest.json, dataset-artifact.json]
 task:
   target: lambdaforge.preprocessing.PreprocessingTask
   params:
@@ -496,6 +535,7 @@ task:
     sink:
       target: lambdaforge.preprocessing.JsonDirectorySink
       params: {output_dir: processed}
+    dataset_name: normalized-records  # explicit legacy single-task publication
 ```
 
 Declare every scientific local input at top level. LambdaForge hashes file/directory contents
@@ -534,8 +574,8 @@ For preprocessing, a `PreprocessingSource.records(context)` yields stable-key
 `PreprocessingRecord`s, each `PreprocessingTransform.transform(record, context)` preserves the key,
 and a `PreprocessingSink` writes/verifies/finalizes output. `PreprocessingTask` checkpoints a
 per-record manifest, retries failed/missing outputs, supports `fail`/`skip` error policy and assigns
-explicit shards by stable SHA-256 modulo. It writes `dataset-artifact.json` with a content-derived
-dataset ID, sample/split counts, source, task fingerprint and artifact hashes. Run each shard as an
+explicit shards by stable SHA-256 modulo. Only `publish_dataset`/legacy `dataset_name` writes an
+artifacts-only `dataset-artifact.json`; otherwise this is an ordinary stage producer. Run each shard as an
 explicit node/configuration and merge with a project task when needed; implicit shard discovery and
 domain-specific merging are intentionally not guessed.
 
@@ -854,8 +894,9 @@ based; remote stores must first materialize a coherent tree.
 
 Generic task attempts follow the same selection discipline. Use
 `LambdaForge.task(CONFIG).result_catalog()` and choose an explicit attempt/fingerprint; never select
-preprocessing output by modification time. `dataset-artifact.json` identifies the processed
-dataset, while `result.json` identifies the execution attempt that produced it.
+preprocessing output by modification time. When publication was requested,
+`dataset-artifact.json` identifies that compatible single-task version; `result.json` always
+identifies the execution attempt.
 
 ## Repository modification rules
 

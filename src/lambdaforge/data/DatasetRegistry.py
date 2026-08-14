@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from lambdaforge.data.DatasetPlacement import DatasetPlacement
 from lambdaforge.data.DatasetRecord import DatasetRecord
+from lambdaforge.data.InvalidDatasetBuildError import InvalidDatasetBuildError
 from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 
@@ -20,7 +21,7 @@ class DatasetRegistry:
 
     def __init__(self, path: str | Path | None = None) -> None:
         if path is None:
-            path = self.project_path()
+            path = os.environ.get("LAMBDAFORGE_DATASET_REGISTRY") or self.project_path()
         self.path = Path(path).expanduser().resolve()
 
     @staticmethod
@@ -80,7 +81,7 @@ class DatasetRegistry:
             if isinstance(previous, Mapping):
                 existing = DatasetRecord.from_mapping(previous)
                 if existing.dataset_id != record.dataset_id:
-                    raise ValueError(
+                    raise InvalidDatasetBuildError(
                         f"Dataset {record.key} already has a different immutable identity."
                     )
                 by_cluster = {item.cluster: item for item in existing.placements}
@@ -96,6 +97,12 @@ class DatasetRegistry:
                     record.producer or existing.producer,
                     record.lineage or existing.lineage,
                     record.metadata or existing.metadata,
+                    record.build_id or existing.build_id,
+                    record.index or existing.index,
+                    record.partitions or existing.partitions,
+                    record.target_schema or existing.target_schema,
+                    record.global_assets or existing.global_assets,
+                    record.lineage_graph or existing.lineage_graph,
                 )
             datasets[record.key] = record.to_dict()
             value["dataset_registry_version"] = 1
@@ -117,7 +124,10 @@ class DatasetRegistry:
             cluster, str(physical_root), artifact.created_at_utc, size, files, True
         )
         metadata = dict(artifact.metadata)
-        lineage = tuple(str(item) for item in metadata.pop("lineage", ()))
+        legacy_lineage = metadata.pop("lineage", ())
+        lineage = tuple(str(item) for item in legacy_lineage)
+        if artifact.lineage.get("inputs"):
+            lineage = tuple(str(item) for item in artifact.lineage["inputs"])
         record = DatasetRecord(
             artifact.name,
             artifact.version,
@@ -126,9 +136,17 @@ class DatasetRegistry:
             artifact.splits,
             artifact.created_at_utc,
             (placement,),
-            producer or {"preprocessing_fingerprint": artifact.preprocessing_fingerprint},
+            producer
+            or dict(artifact.producer)
+            or {"preprocessing_fingerprint": artifact.preprocessing_fingerprint},
             lineage,
             metadata,
+            artifact.build_id,
+            artifact.index,
+            artifact.partitions,
+            artifact.target_schema,
+            {name: value.to_dict() for name, value in artifact.global_assets.items()},
+            artifact.lineage,
         )
         return self.register(record)
 
@@ -162,6 +180,12 @@ class DatasetRegistry:
                     record.producer,
                     record.lineage,
                     record.metadata,
+                    record.build_id,
+                    record.index,
+                    record.partitions,
+                    record.target_schema,
+                    record.global_assets,
+                    record.lineage_graph,
                 )
                 datasets[record.key] = updated.to_dict()
             self._write(value)

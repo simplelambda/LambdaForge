@@ -7,6 +7,7 @@ class JobState(str, Enum):
     """Normalize provider-specific scheduler states."""
 
     CREATED = "created"
+    PLANNED = "planned"
     STAGING = "staging"
     QUEUED = "queued"
     RUNNING = "running"
@@ -20,4 +21,4 @@ class JobState(str, Enum):
     @property
     def terminal(self) -> bool:
         """Return whether no further state transition is expected."""
-        return self in {self.SUCCEEDED, self.FAILED, self.CANCELLED, self.TIMEOUT}
+        return self in {self.PLANNED, self.SUCCEEDED, self.FAILED, self.CANCELLED, self.TIMEOUT}

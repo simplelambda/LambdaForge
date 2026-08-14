@@ -10,6 +10,7 @@ from lambdaforge.data.DataCatalog import DataCatalog
 from lambdaforge.data.DataIdentityProviderRegistry import DataIdentityProviderRegistry
 from lambdaforge.data.DatasetIdentity import DatasetIdentity
 from lambdaforge.data.DatasetReference import DatasetReference
+from lambdaforge.data.DatasetResolver import DatasetResolver
 from lambdaforge.experiments.JsonResult import JsonResult
 
 
@@ -50,20 +51,25 @@ class TaskInput(JsonResult):
     ) -> TaskInput:
         """Resolve, validate and hash one configured local input."""
         dataset_reference: str | None = None
+        resolved_dataset_identity: DatasetIdentity | None = None
         descriptor = dict(value)
         location_base = Path(source_dir)
         if "dataset" in descriptor:
             dataset_reference = str(descriptor["dataset"])
             reference = DatasetReference.parse(dataset_reference)
-            if catalog is None:
-                raise ValueError(
-                    f"Input {reference!s} requires data_catalog in the task configuration."
+            resolution = DatasetResolver(
+                catalog=catalog,
+                environment=environment,
+                source_dir=source_dir,
+            ).resolve(reference)
+            descriptor = {**dict(resolution.descriptor), **descriptor}
+            descriptor["identity"] = dict(resolution.identity)
+            if resolution.managed and resolution.record is not None:
+                resolved_dataset_identity = DatasetIdentity(
+                    "dataset_id", resolution.record.dataset_id
                 )
-            catalog_descriptor = catalog.descriptor(reference)
-            location = catalog.resolve(reference, environment=environment)
-            descriptor = {**catalog_descriptor, **descriptor}
-            configured = Path(location.uri.removeprefix("file://"))
-            if catalog.source is not None:
+            configured = Path(resolution.location.uri.removeprefix("file://"))
+            if not resolution.managed and catalog is not None and catalog.source is not None:
                 location_base = catalog.source.parent
         else:
             configured = Path(str(descriptor["path"]))
@@ -83,7 +89,7 @@ class TaskInput(JsonResult):
         for key in ("manifest", "version", "namespace"):
             if key in descriptor and key not in identity_descriptor:
                 identity_descriptor[key] = descriptor[key]
-        identity = (
+        identity = resolved_dataset_identity or (
             DataIdentityProviderRegistry()
             .create(identity_descriptor)
             .identify(resolved, identity_descriptor, source_dir=Path(source_dir))

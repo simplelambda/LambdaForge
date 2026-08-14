@@ -7,6 +7,37 @@ detalle para releases anteriores; esta edición mantiene el resumen operativo en
 
 ## [Sin publicar]
 
+## [0.7.0] - 2026-08-14
+
+### Añadido
+
+- Recetas `kind: dataset` y builds durables sobre Workflow con reuse content-addressed, force
+  downstream granular y planes detallados.
+- DatasetIndex JSONL streaming, DatasetMember/DatasetAsset genéricos, partitions/targets arbitrarios,
+  inspección paginada, diff lógico y schemas explícitos.
+- Artifact/Record v2 con identidad de contenido independiente del path separada de build provenance,
+  manteniendo lectura v1.
+- DatasetResolver Registry-first, referencias versionadas y bundles remotos sin duplicar placements
+  gestionados en DataCatalog.
+- Materialización NOOP/réplica atómica verificada/BUILD durable, publicación atómica y GC de stage
+  cache reconstruible.
+- Entrypoint `lf`, `plan`, aliases moderados, completion, cluster por defecto, selectors de job y
+  estado terminal PLANNED para dry-run.
+
+### Cambiado
+
+- Preprocessing vuelve a ser Task normal por defecto; sólo receta, `publish_dataset` o
+  `dataset_name` legacy publica un DatasetVersion.
+- Registry manda sobre placements gestionados; DataCatalog queda para externos, aliases, loaders,
+  pins y overrides.
+- Stats usa el índice y profilers del proyecto pueden correr junto al placement remoto en el entorno
+  managed exacto. Jobs/top separan running, queued, staging y paused.
+
+### Seguridad
+
+- Publish/réplica verifican staging antes del rename/registro y nunca sobrescriben un alias inmutable
+  con contenido distinto. Delete y GC siguen exact-root y preview-first.
+
 ## [0.6.0] - 2026-08-13
 
 ### Añadido

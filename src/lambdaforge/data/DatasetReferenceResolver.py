@@ -9,22 +9,39 @@ from typing import Any
 
 from lambdaforge.data.DataCatalog import DataCatalog
 from lambdaforge.data.DatasetReference import DatasetReference
+from lambdaforge.data.DatasetRegistry import DatasetRegistry
+from lambdaforge.data.DatasetResolver import DatasetResolver
 
 
 class DatasetReferenceResolver:
     """Resolve only typed dataset markers, never strings that merely resemble paths."""
 
-    def __init__(self, catalog: DataCatalog, *, environment: str, source_dir: Path) -> None:
+    def __init__(
+        self,
+        catalog: DataCatalog | None,
+        *,
+        environment: str,
+        source_dir: Path,
+        registry: DatasetRegistry | None = None,
+    ) -> None:
         self.catalog = catalog
         self.environment = environment
         self.source_dir = source_dir
+        self.resolver = DatasetResolver(
+            registry,
+            catalog,
+            environment=environment,
+            source_dir=source_dir,
+        )
         self.bindings: list[dict[str, Any]] = []
 
     def resolve(self, value: Any, *, path: str = "") -> Any:
         """Resolve explicit ``{dataset, subpath}`` markers recursively."""
         if isinstance(value, Mapping):
             mapping = dict(value)
-            if "dataset" in mapping and set(mapping).issubset({"dataset", "subpath"}):
+            if "dataset" in mapping and set(mapping).issubset(
+                {"dataset", "version", "content_id", "subpath"}
+            ):
                 return self._physical(DatasetReference.from_mapping(mapping), path)
             return {
                 str(key): self.resolve(item, path=f"{path}.{key}".strip("."))
@@ -42,7 +59,8 @@ class DatasetReferenceResolver:
         if not isinstance(value, str) or not value.startswith("dataset:"):
             return self.resolve(value, path=path)
         reference = DatasetReference.parse(value)
-        descriptor = self.catalog.descriptor(reference)
+        resolution = self.resolver.resolve(reference)
+        descriptor = dict(resolution.descriptor)
         loader = descriptor.get("loader")
         if not isinstance(loader, Mapping):
             raise ValueError(
@@ -67,16 +85,14 @@ class DatasetReferenceResolver:
         return self.resolve(specification, path=path)
 
     def _physical(self, reference: DatasetReference, path: str) -> str:
-        descriptor = self.catalog.descriptor(reference)
-        location = self.catalog.resolve(reference, environment=self.environment)
-        physical = str(location.local_path(self.source_dir))
-        self.bindings.append(
-            {
-                "path": path,
-                "reference": str(reference),
-                "identity": copy.deepcopy(descriptor.get("identity", {})),
-                "resolved_path": physical,
-                "environment": self.environment,
-            }
+        resolution = self.resolver.resolve(reference)
+        base = (
+            self.catalog.source.parent
+            if not resolution.managed and self.catalog is not None and self.catalog.source
+            else self.source_dir
         )
+        physical = str(resolution.location.local_path(base))
+        binding = resolution.to_binding(path=path)
+        binding["resolved_path"] = physical
+        self.bindings.append(binding)
         return physical

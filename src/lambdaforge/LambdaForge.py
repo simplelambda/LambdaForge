@@ -13,6 +13,10 @@ from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 if TYPE_CHECKING:
     from lambdaforge.configuration.MaterializedConfig import MaterializedConfig
     from lambdaforge.controlplane.JobHandle import JobHandle
+    from lambdaforge.data.DatasetBuildPlan import DatasetBuildPlan
+    from lambdaforge.data.DatasetBuildResult import DatasetBuildResult
+    from lambdaforge.data.DatasetRecipe import DatasetRecipe
+    from lambdaforge.data.DatasetRecipeValidationReport import DatasetRecipeValidationReport
     from lambdaforge.execution.ResourceRequest import ResourceRequest
     from lambdaforge.experiments.migrations.ExperimentConfigMigrationResult import (
         ExperimentConfigMigrationResult,
@@ -37,8 +41,8 @@ if TYPE_CHECKING:
 class LambdaForge:
     """Framework facade for experiments and YAML object construction.
 
-    Most users start with :meth:`experiment`, :meth:`task` or :meth:`run`. Lower-level
-    components remain available from the documented ``lambdaforge.data``,
+    Most users start with :meth:`experiment`, :meth:`task`, :meth:`dataset` or :meth:`run`.
+    Lower-level components remain available from the documented ``lambdaforge.data``,
     ``lambdaforge.nn``, ``lambdaforge.metrics``, ``lambdaforge.plugins``,
     ``lambdaforge.training``, ``lambdaforge.experiments``, ``lambdaforge.tasks`` and
     ``lambdaforge.preprocessing`` namespaces.
@@ -66,8 +70,15 @@ class LambdaForge:
         return Workflow.from_yaml(path)
 
     @staticmethod
-    def load(path: str | Path) -> Experiment | TaskRun | Workflow:
-        """Dispatch YAML to its workflow, task or training experiment API."""
+    def dataset(path: str | Path) -> DatasetRecipe:
+        """Load a `kind: dataset` YAML into the recipe/build API."""
+        from lambdaforge.data.DatasetRecipe import DatasetRecipe
+
+        return DatasetRecipe.from_yaml(path)
+
+    @staticmethod
+    def load(path: str | Path) -> Experiment | TaskRun | Workflow | DatasetRecipe:
+        """Dispatch YAML to its dataset, workflow, task or training experiment API."""
         from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
         from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
         from lambdaforge.tasks.TaskConfig import TaskConfig
@@ -75,6 +86,8 @@ class LambdaForge:
         if TaskConfig.is_task_file(path):
             return LambdaForge.task(path)
         resolved_kind = AuthoringConfig.from_yaml(path).materialize().kind
+        if resolved_kind is ConfigurationKind.DATASET:
+            return LambdaForge.dataset(path)
         return (
             LambdaForge.workflow(path)
             if resolved_kind is ConfigurationKind.WORKFLOW
@@ -96,8 +109,10 @@ class LambdaForge:
         | TaskExecutionPlan
         | WorkflowResult
         | WorkflowPlan
+        | DatasetBuildResult
+        | DatasetBuildPlan
     ):
-        """Load and execute an experiment, generic task or workflow in one call."""
+        """Load and execute an experiment, task, workflow or dataset recipe in one call."""
         configured = LambdaForge.load(path)
         if isinstance(configured, Experiment):
             return configured.run(
@@ -106,7 +121,14 @@ class LambdaForge:
                 aggregate_plots=aggregate_plots,
             )
         if execution_overrides and any(value is not None for value in execution_overrides.values()):
-            raise ValueError("Experiment execution overrides cannot be applied to kind: task.")
+            raise ValueError(
+                "Experiment execution overrides cannot be applied to tasks, workflows or "
+                "dataset recipes."
+            )
+        from lambdaforge.data.DatasetRecipe import DatasetRecipe
+
+        if isinstance(configured, DatasetRecipe):
+            return configured.inspect() if dry_run else configured.run()
         return configured.run(dry_run=dry_run)
 
     @staticmethod
@@ -114,8 +136,13 @@ class LambdaForge:
         path: str | Path,
         *,
         check_imports: bool = True,
-    ) -> ValidationReport | TaskValidationReport | WorkflowValidationReport:
-        """Validate one experiment, task or workflow without creating artifacts."""
+    ) -> (
+        ValidationReport
+        | TaskValidationReport
+        | WorkflowValidationReport
+        | DatasetRecipeValidationReport
+    ):
+        """Validate one experiment, task, workflow or dataset recipe without artifacts."""
         from lambdaforge.tasks.TaskConfig import TaskConfig
         from lambdaforge.tasks.TaskValidator import TaskValidator
 
@@ -124,7 +151,10 @@ class LambdaForge:
         from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
         from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
 
-        if AuthoringConfig.from_yaml(path).materialize().kind is ConfigurationKind.WORKFLOW:
+        kind = AuthoringConfig.from_yaml(path).materialize().kind
+        if kind is ConfigurationKind.DATASET:
+            return LambdaForge.dataset(path).validate(check_imports=check_imports)
+        if kind is ConfigurationKind.WORKFLOW:
             from lambdaforge.workflows.WorkflowValidator import WorkflowValidator
 
             return WorkflowValidator().validate_file(path, check_imports=check_imports)
@@ -135,8 +165,14 @@ class LambdaForge:
     @staticmethod
     def inspect(
         path: str | Path,
-    ) -> list[dict[str, Any]] | AdaptiveExperimentPlan | TaskExecutionPlan | WorkflowPlan:
-        """Expand an experiment or return a task/workflow plan without running."""
+    ) -> (
+        list[dict[str, Any]]
+        | AdaptiveExperimentPlan
+        | TaskExecutionPlan
+        | WorkflowPlan
+        | DatasetBuildPlan
+    ):
+        """Expand an experiment or return a task/workflow/dataset plan without running."""
         configured = LambdaForge.load(path)
         return configured.inspect()
 
@@ -209,7 +245,7 @@ class LambdaForge:
             return configured.results(status=status, include_archived=include_archived)
         if not isinstance(configured, TaskRun):
             raise ValueError(
-                "Workflow results are stored per node; query the registry at its output root."
+                "Workflow/dataset results are stored per node/build; query their service layer."
             )
         return configured.result_catalog().records(
             status=status,

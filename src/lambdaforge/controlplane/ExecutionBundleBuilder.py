@@ -20,6 +20,7 @@ from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
 from lambdaforge.controlplane.ProjectWheelBuilder import ProjectWheelBuilder
 from lambdaforge.data.DataCatalog import DataCatalog
 from lambdaforge.data.DatasetReference import DatasetReference
+from lambdaforge.data.DatasetResolver import DatasetResolver
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 
 
@@ -54,6 +55,8 @@ class ExecutionBundleBuilder:
                 self._prepare_task_inputs(values, source.parent, profile, staged)
             elif materialized.kind is ConfigurationKind.EXPERIMENT:
                 self._prepare_experiment_data(values, source.parent, profile, staged)
+            elif materialized.kind is ConfigurationKind.DATASET:
+                self._prepare_dataset_recipe(values, source, profile, staged)
         environment = self._prepare_environment(
             source, profile, staged, dependency_policy=dependency_policy
         )
@@ -101,7 +104,7 @@ class ExecutionBundleBuilder:
             if item.is_file() and not item.is_symlink()
         )
         for path, _ in staged:
-            if path.parent == self.root and path.name.startswith(".catalog-"):
+            if path.parent == self.root and path.name.startswith((".catalog-", ".dataset-stage-")):
                 path.unlink(missing_ok=True)
         packages = tuple(sorted(path.name for path in (directory / "packages").glob("*.whl")))
         return ExecutionBundle(
@@ -191,6 +194,7 @@ class ExecutionBundleBuilder:
         source_dir: Path,
         profile: ClusterProfile,
         staged: list[tuple[Path, str]],
+        prefix: str = "",
     ) -> None:
         inputs = values.get("inputs", [])
         if not isinstance(inputs, list):
@@ -198,7 +202,8 @@ class ExecutionBundleBuilder:
         authoring = self._authoring(values)
         catalog_path = authoring.get("data_catalog")
         catalog = None
-        remote_catalog: dict[str, object] = {"datasets": {}}
+        remote_datasets: dict[str, object] = {}
+        remote_catalog: dict[str, object] = {"datasets": remote_datasets}
         if catalog_path is not None:
             path = Path(str(catalog_path))
             path = path if path.is_absolute() else (source_dir / path).resolve()
@@ -207,14 +212,23 @@ class ExecutionBundleBuilder:
             if not isinstance(raw, dict):
                 continue
             if "dataset" in raw:
-                if catalog is None:
-                    raise ValueError(f"Remote input {raw['dataset']!r} requires data_catalog.")
                 reference = DatasetReference.parse(str(raw["dataset"]))
-                descriptor = catalog.descriptor(reference)
                 environment = profile.data_environment or profile.name
-                location = catalog.resolve(reference, environment=environment)
-                descriptor["locations"] = {environment: location.to_dict()}
-                remote_catalog["datasets"][reference.name] = descriptor  # type: ignore[index]
+                resolution = DatasetResolver(
+                    catalog=catalog,
+                    environment=environment,
+                    managed_environment=profile.name,
+                    source_dir=source_dir,
+                ).resolve(reference)
+                descriptor = dict(resolution.descriptor)
+                descriptor["identity"] = dict(resolution.identity)
+                descriptor["version"] = (
+                    resolution.record.version if resolution.record else reference.version
+                )
+                descriptor["dataset_id"] = resolution.identity.get("dataset_id")
+                descriptor["locations"] = {environment: resolution.location.to_dict()}
+                remote_datasets[reference.selector] = descriptor
+                remote_datasets.setdefault(reference.name, descriptor)
                 authoring["environment"] = environment
                 continue
             if "path" not in raw:
@@ -227,11 +241,11 @@ class ExecutionBundleBuilder:
                     f"Input {local} is {size} bytes and will not be transferred implicitly. "
                     "Register it in data_catalog with a location for the target cluster."
                 )
-            relative = f"inputs/{index}-{local.name}"
+            relative = f"{prefix}inputs/{index}-{local.name}"
             raw["path"] = relative
             staged.append((local, relative))
         if remote_catalog["datasets"]:
-            relative = "data-catalog.yaml"
+            relative = f"{prefix}data-catalog.yaml"
             catalog_file = self.root / f".catalog-{uuid4().hex}.yaml"
             catalog_file.parent.mkdir(parents=True, exist_ok=True)
             catalog_file.write_text(
@@ -239,6 +253,40 @@ class ExecutionBundleBuilder:
             )
             staged.append((catalog_file, relative))
             authoring["data_catalog"] = relative
+
+    def _prepare_dataset_recipe(
+        self,
+        values: dict[str, object],
+        source: Path,
+        profile: ClusterProfile,
+        staged: list[tuple[Path, str]],
+    ) -> None:
+        """Stage recipe task documents and their bounded inputs into one durable bundle."""
+        stages = values.get("stages")
+        if not isinstance(stages, dict):
+            raise TypeError("Dataset recipe stages must be a mapping.")
+        for name, descriptor in stages.items():
+            if not isinstance(descriptor, dict) or not isinstance(descriptor.get("task"), str):
+                continue
+            configured = Path(str(descriptor["task"]))
+            task_path = (
+                configured if configured.is_absolute() else (source.parent / configured).resolve()
+            )
+            stage_values = AuthoringConfig.from_yaml(task_path).materialize().to_dict()
+            prefix = f"stage-data/{name}/"
+            self._prepare_task_inputs(stage_values, task_path.parent, profile, staged, prefix)
+            temporary = self.root / f".dataset-stage-{name}-{uuid4().hex}.yaml"
+            temporary.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                yaml.safe_dump(stage_values, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            # Keep staged task documents at the bundle root.  Every rewritten input/catalog
+            # path above is relative to that root; nesting the YAML under ``stages/`` would
+            # make an otherwise valid relocatable bundle point at ``stages/stage-data``.
+            relative = f"dataset-stage-{name}.yaml"
+            staged.append((temporary, relative))
+            descriptor["task"] = relative
 
     def _prepare_experiment_data(
         self,
@@ -254,22 +302,36 @@ class ExecutionBundleBuilder:
         if not isinstance(authoring, dict):
             raise TypeError("Experiment authoring extensions must be a mapping.")
         catalog_value = authoring.get("data_catalog")
-        if catalog_value is None:
-            return
-        catalog_path = Path(str(catalog_value))
-        catalog_path = (
-            catalog_path if catalog_path.is_absolute() else (source_dir / catalog_path).resolve()
-        )
-        catalog = DataCatalog.from_yaml(catalog_path)
+        catalog = None
+        if catalog_value is not None:
+            catalog_path = Path(str(catalog_value))
+            catalog_path = (
+                catalog_path
+                if catalog_path.is_absolute()
+                else (source_dir / catalog_path).resolve()
+            )
+            catalog = DataCatalog.from_yaml(catalog_path)
         environment = profile.data_environment or profile.name
-        referenced = self._experiment_dataset_names(values.get("data", {}))
-        remote_catalog: dict[str, object] = {"datasets": {}}
-        for name in referenced:
-            reference = DatasetReference(name)
-            descriptor = catalog.descriptor(reference)
-            location = catalog.resolve(reference, environment=environment)
-            descriptor["locations"] = {environment: location.to_dict()}
-            remote_catalog["datasets"][name] = descriptor  # type: ignore[index]
+        referenced = self._experiment_dataset_references(values.get("data", {}))
+        remote_datasets: dict[str, object] = {}
+        remote_catalog: dict[str, object] = {"datasets": remote_datasets}
+        resolver = DatasetResolver(
+            catalog=catalog,
+            environment=environment,
+            managed_environment=profile.name,
+            source_dir=source_dir,
+        )
+        for reference in referenced:
+            resolution = resolver.resolve(reference)
+            descriptor = dict(resolution.descriptor)
+            descriptor["identity"] = dict(resolution.identity)
+            descriptor["version"] = (
+                resolution.record.version if resolution.record else reference.version
+            )
+            descriptor["dataset_id"] = resolution.identity.get("dataset_id")
+            descriptor["locations"] = {environment: resolution.location.to_dict()}
+            remote_datasets[reference.selector] = descriptor
+            remote_datasets.setdefault(reference.name, descriptor)
         if referenced:
             catalog_file = self.root / f".catalog-{uuid4().hex}.yaml"
             catalog_file.parent.mkdir(parents=True, exist_ok=True)
@@ -281,20 +343,32 @@ class ExecutionBundleBuilder:
             authoring["environment"] = environment
 
     @classmethod
-    def _experiment_dataset_names(cls, value: object) -> tuple[str, ...]:
-        names: set[str] = set()
+    def _experiment_dataset_references(cls, value: object) -> tuple[DatasetReference, ...]:
+        references: set[DatasetReference] = set()
         if isinstance(value, str) and value.startswith("dataset:"):
-            names.add(DatasetReference.parse(value).name)
+            references.add(DatasetReference.parse(value))
         elif isinstance(value, dict):
             if "dataset" in value:
                 raw = str(value["dataset"])
-                names.add(DatasetReference.parse(raw).name if raw.startswith("dataset:") else raw)
+                reference = (
+                    DatasetReference.parse(raw)
+                    if raw.startswith("dataset:")
+                    else DatasetReference(raw)
+                )
+                if value.get("subpath") is not None:
+                    reference = DatasetReference(
+                        reference.name,
+                        str(value["subpath"]),
+                        reference.version,
+                        reference.content_id,
+                    )
+                references.add(reference)
             for item in value.values():
-                names.update(cls._experiment_dataset_names(item))
+                references.update(cls._experiment_dataset_references(item))
         elif isinstance(value, list):
             for item in value:
-                names.update(cls._experiment_dataset_names(item))
-        return tuple(sorted(names))
+                references.update(cls._experiment_dataset_references(item))
+        return tuple(sorted(references, key=str))
 
     @staticmethod
     def _authoring(values: dict[str, object]) -> dict[str, object]:

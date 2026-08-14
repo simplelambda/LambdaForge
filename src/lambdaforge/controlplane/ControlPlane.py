@@ -61,18 +61,17 @@ class ControlPlane:
             ),
         )
         request = resources or ResourceRequest()
+        materialized_kind = AuthoringConfig.from_yaml(config_path).materialize().kind
         reserved_job_id: str | None = None
         work_dir: str | Path
         if cluster == "local":
             work_dir = Path(config_path).resolve().parent
-            command = (
-                *profile.command_prefix,
+            command = self._command(
+                profile.command_prefix,
                 profile.python,
-                "-m",
-                "lambdaforge",
-                "run",
                 str(Path(config_path).resolve()),
-                *tuple(run_arguments),
+                materialized_kind.value,
+                run_arguments,
             )
             config = str(Path(config_path).resolve())
         else:
@@ -120,14 +119,29 @@ class ControlPlane:
                 if copied.returncode:
                     raise RuntimeError(f"Could not stage SLURM job workspace: {copied.stderr}")
                 config = str(PurePosixPath(str(work_dir)) / "config.yaml")
-            command = (
-                *profile.command_prefix,
+            environment_prefix: tuple[str, ...] = ()
+            if materialized_kind.value == "dataset":
+                if storage.dataset_root is None:
+                    raise RuntimeError(
+                        f"Cluster {cluster!r} must configure storage.dataset_root for builds."
+                    )
+                environment_prefix = (
+                    "env",
+                    "LAMBDAFORGE_DATASET_REGISTRY="
+                    f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
+                    f"LAMBDAFORGE_DATASET_ROOT={storage.dataset_root}",
+                    "LAMBDAFORGE_DATASET_BUILD_ROOT="
+                    f"{PurePosixPath(storage.run_root) / 'dataset-builds'}",
+                    "LAMBDAFORGE_STAGE_CACHE_ROOT="
+                    f"{PurePosixPath(storage.cache_root) / 'dataset-stages'}",
+                    f"LAMBDAFORGE_CLUSTER={cluster}",
+                )
+            command = self._command(
+                (*profile.command_prefix, *environment_prefix),
                 remote_python,
-                "-m",
-                "lambdaforge",
-                "run",
                 config,
-                *tuple(run_arguments),
+                materialized_kind.value,
+                run_arguments,
             )
         handle = self.jobs.submit(
             command,
@@ -192,6 +206,35 @@ class ControlPlane:
         hpo = materialized.values.get("hpo", {})
         if isinstance(hpo, dict) and hpo.get("enabled"):
             return "hpo"
+        if materialized.kind.value == "dataset":
+            return "dataset-build"
         if materialized.kind.value == "task" and "preprocess" in materialized.values:
             return "preprocessing"
         return materialized.kind.value
+
+    @staticmethod
+    def _command(
+        prefix: Sequence[str],
+        python: str,
+        config: str,
+        kind: str,
+        arguments: Sequence[str],
+    ) -> tuple[str, ...]:
+        if kind == "dataset":
+            return (
+                *prefix,
+                python,
+                "-m",
+                "lambdaforge.data.DatasetBuildWorker",
+                config,
+                *tuple(arguments),
+            )
+        return (
+            *prefix,
+            python,
+            "-m",
+            "lambdaforge",
+            "run",
+            config,
+            *tuple(arguments),
+        )

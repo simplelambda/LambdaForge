@@ -53,6 +53,7 @@ class PreprocessingTask(Task):
         checkpoint_interval: int = 1,
         workers: int = 1,
         workload: PreprocessingWorkload | str = PreprocessingWorkload.AUTO,
+        publish_dataset: bool = False,
         dataset_name: str | None = None,
         dataset_version: str = "1",
         dataset_splits: Mapping[str, int] | None = None,
@@ -85,6 +86,9 @@ class PreprocessingTask(Task):
         self.checkpoint_interval = int(checkpoint_interval)
         self.workers = int(workers)
         self.workload = PreprocessingWorkload(workload)
+        if not isinstance(publish_dataset, bool):
+            raise TypeError("Preprocessing publish_dataset must be a bool.")
+        self.publish_dataset = publish_dataset or dataset_name is not None
         if self.workload is PreprocessingWorkload.GPU and self.workers != 1:
             raise ValueError(
                 "GPU preprocessing requires workers=1. Use explicit task sharding and "
@@ -209,54 +213,63 @@ class PreprocessingTask(Task):
         )
         successful = sum(value.get("status") == "ok" for value in records.values())
         splits = self.dataset_splits or {"all": successful}
-        dataset = DatasetArtifact.create(
-            name=self.dataset_name or context.name,
-            version=self.dataset_version,
-            sample_count=successful,
-            splits=splits,
-            preprocessing_fingerprint=context.config_fingerprint,
-            source=self.dataset_source
-            or {
-                "type": f"{type(self.source).__module__}.{type(self.source).__name__}",
-                "inputs": [
-                    {
-                        "name": value["name"],
-                        "path": value["path"],
-                        "sha256": value["sha256"],
-                        "size_bytes": value["size_bytes"],
-                    }
-                    for value in context.inputs
-                ],
-            },
-            artifacts=content_artifacts,
-            metadata={
-                **self.dataset_metadata,
-                "shard_count": self.shard_count,
-                "shard_index": self.shard_index,
-            },
-        )
-        dataset_path = context.output_path("dataset-artifact.json", create_parent=True)
-        dataset.write_json(dataset_path)
-        declarations = (
+        declarations: tuple[ArtifactDeclaration, ...] = (
             *final_declarations,
             ArtifactDeclaration(
                 "preprocessing-manifest.json",
                 kind=ArtifactType.REPORT,
                 media_type="application/json",
             ),
-            ArtifactDeclaration(
-                "dataset-artifact.json",
-                kind=ArtifactType.DATASET,
-                media_type="application/json",
-                metadata={"dataset_id": dataset.dataset_id},
-            ),
         )
+        outputs: dict[str, Any] = {
+            "preprocessing_manifest": "preprocessing-manifest.json",
+        }
+        if self.publish_dataset:
+            dataset = DatasetArtifact.create(
+                name=self.dataset_name or context.name,
+                version=self.dataset_version,
+                sample_count=successful,
+                splits=splits,
+                preprocessing_fingerprint=context.config_fingerprint,
+                source=self.dataset_source
+                or {
+                    "type": f"{type(self.source).__module__}.{type(self.source).__name__}",
+                    "inputs": [
+                        {
+                            "name": value["name"],
+                            "path": value["path"],
+                            "sha256": value["sha256"],
+                            "size_bytes": value["size_bytes"],
+                        }
+                        for value in context.inputs
+                    ],
+                },
+                artifacts=content_artifacts,
+                metadata={
+                    **self.dataset_metadata,
+                    "shard_count": self.shard_count,
+                    "shard_index": self.shard_index,
+                },
+            )
+            dataset_path = context.output_path("dataset-artifact.json", create_parent=True)
+            dataset.write_json(dataset_path)
+            outputs.update(
+                {
+                    "dataset_id": dataset.dataset_id,
+                    "dataset_manifest": "dataset-artifact.json",
+                }
+            )
+            declarations = (
+                *declarations,
+                ArtifactDeclaration(
+                    "dataset-artifact.json",
+                    kind=ArtifactType.DATASET,
+                    media_type="application/json",
+                    metadata={"dataset_id": dataset.dataset_id},
+                ),
+            )
         return TaskOutput(
-            outputs={
-                "dataset_id": dataset.dataset_id,
-                "dataset_manifest": "dataset-artifact.json",
-                "preprocessing_manifest": "preprocessing-manifest.json",
-            },
+            outputs=outputs,
             metrics={
                 "records_selected": selected,
                 "records_processed": processed,

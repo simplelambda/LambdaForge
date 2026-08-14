@@ -63,6 +63,9 @@ class StorageService:
                 for record in active
                 if record.metadata.get("environment_id") not in {None, "existing"}
             ],
+            "stage_cache": ["*"]
+            if any(record.job_type == "dataset-build" for record in active)
+            else [],
         }
         payload = self._invoke(
             cluster, "gc", profile.storage.to_dict(), references=references, apply=apply

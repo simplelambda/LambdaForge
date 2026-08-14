@@ -12,17 +12,27 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import uuid4
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.JobService import JobService
+from lambdaforge.data.AmbiguousDatasetVersionError import AmbiguousDatasetVersionError
 from lambdaforge.data.ClassificationDatasetProfiler import ClassificationDatasetProfiler
+from lambdaforge.data.DatasetBuildService import DatasetBuildService
 from lambdaforge.data.DatasetDeletionPlan import DatasetDeletionPlan
 from lambdaforge.data.DatasetMaterializationPlan import DatasetMaterializationPlan
 from lambdaforge.data.DatasetOperations import DatasetOperations
 from lambdaforge.data.DatasetPlacement import DatasetPlacement
+from lambdaforge.data.DatasetRecipeConfig import DatasetRecipeConfig
 from lambdaforge.data.DatasetRecord import DatasetRecord
 from lambdaforge.data.DatasetRegistry import DatasetRegistry
+from lambdaforge.data.MissingDatasetPlacementError import MissingDatasetPlacementError
+from lambdaforge.data.MissingDatasetRecipeError import MissingDatasetRecipeError
+from lambdaforge.data.MissingManagedEnvironmentError import MissingManagedEnvironmentError
+from lambdaforge.data.OfflineClusterError import OfflineClusterError
+from lambdaforge.data.UnknownDatasetError import UnknownDatasetError
+from lambdaforge.data.UnsafeDatasetOperationError import UnsafeDatasetOperationError
 
 
 class DatasetService:
@@ -84,6 +94,12 @@ class DatasetService:
                 previous.producer or record.producer,
                 previous.lineage or record.lineage,
                 previous.metadata or record.metadata,
+                previous.build_id or record.build_id,
+                previous.index or record.index,
+                previous.partitions or record.partitions,
+                previous.target_schema or record.target_schema,
+                previous.global_assets or record.global_assets,
+                previous.lineage_graph or record.lineage_graph,
             )
         values = tuple(sorted(by_identity.values(), key=lambda value: (value.name, value.version)))
         if cluster is not None:
@@ -96,17 +112,29 @@ class DatasetService:
 
     def show(self, selector: str) -> DatasetRecord:
         """Resolve a local or reconciled remote logical dataset version."""
-        try:
-            return self.registry.get(selector)
-        except KeyError:
-            matches = tuple(
-                record
-                for record in self.list(all_clusters=True)
-                if record.name == selector or record.key == selector
+        local = tuple(
+            record
+            for record in self.registry.records()
+            if record.key == selector or ("@" not in selector and record.name == selector)
+        )
+        if len(local) == 1:
+            return local[0]
+        if len(local) > 1:
+            raise AmbiguousDatasetVersionError(
+                selector, tuple(sorted(record.version for record in local))
             )
-            if not matches:
-                raise
-            return sorted(matches, key=lambda value: value.created_at_utc, reverse=True)[0]
+        matches = tuple(
+            record
+            for record in self.list(all_clusters=True)
+            if record.key == selector or ("@" not in selector and record.name == selector)
+        )
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise AmbiguousDatasetVersionError(
+                selector, tuple(sorted(record.version for record in matches))
+            )
+        raise UnknownDatasetError(selector, tuple(record.key for record in self.registry.records()))
 
     def add(
         self,
@@ -135,8 +163,10 @@ class DatasetService:
         placement = self._placement(record, cluster)
         payload = self._operation(placement.cluster, "stats", placement.root)
         if schema:
-            if placement.cluster != "local":
-                payload["profile"] = "Project profilers must run where their plugin is installed."
+            if placement.cluster != "local" and (
+                schema.get("task") == "classification" or schema.get("profiler") is not None
+            ):
+                payload.update(self._remote_profile(placement, record, schema))
             elif schema.get("task") == "classification":
                 payload.update(
                     ClassificationDatasetProfiler().profile(Path(placement.root), record, schema)
@@ -150,6 +180,51 @@ class DatasetService:
                     raise TypeError("Dataset profiler must expose profile(root, record, schema).")
                 payload.update(method(Path(placement.root), record, schema))
         return payload
+
+    def members(
+        self,
+        selector: str,
+        *,
+        cluster: str | None = None,
+        partitions: Mapping[str, str] | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Inspect a bounded page of logical members on the selected placement."""
+        placement = self._placement(self.show(selector), cluster)
+        options = json.dumps(
+            {"partitions": dict(partitions or {}), "offset": offset, "limit": limit},
+            separators=(",", ":"),
+        )
+        return self._operation(placement.cluster, "members", placement.root, options)
+
+    def member(
+        self, selector: str, member_id: str, *, cluster: str | None = None
+    ) -> dict[str, Any]:
+        """Inspect one exact logical member."""
+        placement = self._placement(self.show(selector), cluster)
+        return self._operation(placement.cluster, "member", placement.root, member_id)
+
+    def diff(self, left: str, right: str, *, cluster: str | None = None) -> dict[str, Any]:
+        """Compare two immutable versions at one common placement."""
+        left_record = self.show(left)
+        right_record = self.show(right)
+        if cluster is None:
+            common = sorted(
+                {value.cluster for value in left_record.placements}
+                & {value.cluster for value in right_record.placements},
+                key=lambda value: (value != "local", value),
+            )
+            if not common:
+                raise MissingDatasetPlacementError(
+                    f"{left_record.key} and {right_record.key}",
+                    "a shared cluster",
+                    tuple(sorted({value.cluster for value in left_record.placements})),
+                )
+            cluster = common[0]
+        left_placement = self._placement(left_record, cluster)
+        right_placement = self._placement(right_record, cluster)
+        return self._operation(cluster, "diff", left_placement.root, right_placement.root)
 
     def verify(self, selector: str, *, cluster: str | None = None) -> dict[str, Any]:
         record = self.show(selector)
@@ -174,7 +249,9 @@ class DatasetService:
         applied = False
         if apply:
             if not safe:
-                raise RuntimeError("Dataset deletion is unsafe: " + " ".join(reasons))
+                raise UnsafeDatasetOperationError(
+                    "Dataset deletion is unsafe: " + " ".join(reasons)
+                )
             self._operation(cluster, "delete", placement.root, record.dataset_id, "--apply")
             self.registry.remove(selector, cluster=cluster)
             if cluster != "local":
@@ -197,6 +274,8 @@ class DatasetService:
             "dataset": record.key,
             "inputs": list(record.lineage),
             "producer": dict(record.producer),
+            "graph": dict(record.lineage_graph),
+            "build_id": record.build_id,
         }
 
     def materialize(
@@ -210,7 +289,13 @@ class DatasetService:
         """Deterministically plan NOOP/REPLICATE/BUILD; never transfer large bytes silently."""
         if strategy not in {"auto", "replicate", "build"}:
             raise ValueError("Dataset materialization strategy must be auto, replicate or build.")
-        record = self.show(selector)
+        try:
+            record = self.show(selector)
+        except (KeyError, UnknownDatasetError):
+            recipe = self._recipe(selector)
+            if strategy == "replicate":
+                raise RuntimeError("An unbuilt dataset cannot be replicated.") from None
+            return self._build_materialization(recipe, cluster, apply=apply)
         if any(item.cluster == cluster for item in record.placements):
             return DatasetMaterializationPlan(
                 record.key, cluster, "NOOP", reason="Already present."
@@ -218,8 +303,6 @@ class DatasetService:
         source = next(iter(sorted(record.placements, key=lambda value: value.cluster)), None)
         producer = str(record.producer.get("config", "")) or None
         if strategy == "build" or (source is None and producer):
-            if producer is None:
-                raise RuntimeError("Dataset has no registered producer for BUILD.")
             prerequisites: list[dict[str, Any]] = []
             for input_selector in record.lineage:
                 try:
@@ -254,20 +337,37 @@ class DatasetService:
                         "estimated_bytes": input_source.size_bytes,
                     }
                 )
-            plan = DatasetMaterializationPlan(
-                record.key,
-                cluster,
-                "BUILD",
-                producer=producer,
-                reason="Run the registered producer after materializing its declared inputs.",
-                prerequisites=tuple(prerequisites),
-            )
+            try:
+                recipe = self._recipe(producer or record.name)
+            except MissingDatasetRecipeError:
+                try:
+                    recipe = self._recipe(record.name)
+                except MissingDatasetRecipeError:
+                    if apply:
+                        raise
+                    return DatasetMaterializationPlan(
+                        record.key,
+                        cluster,
+                        "BUILD",
+                        producer=producer,
+                        reason=(
+                            "Legacy task producer is recorded, but automatic BUILD apply "
+                            "requires a kind: dataset recipe. Preview remains compatible."
+                        ),
+                        prerequisites=tuple(prerequisites),
+                    )
             if apply:
-                raise RuntimeError(
-                    "BUILD plans require 'lambdaforge tasks run PRODUCER --on CLUSTER'; "
-                    "automatic mixed lineage execution remains intentionally explicit."
-                )
-            return plan
+                for item in prerequisites:
+                    if item["action"] == "REPLICATE":
+                        self.replicate(
+                            str(item["dataset"]),
+                            source=str(item["source_cluster"]),
+                            destination=cluster,
+                            apply=True,
+                        )
+            return self._build_materialization(
+                recipe, cluster, apply=apply, prerequisites=tuple(prerequisites)
+            )
         if source is None:
             raise RuntimeError("Dataset has neither a placement nor a usable producer.")
         plan = DatasetMaterializationPlan(
@@ -301,39 +401,174 @@ class DatasetService:
             self._replicate(record, placement, destination)
         return plan
 
+    def _recipe(self, selector_or_path: str) -> DatasetRecipeConfig:
+        """Resolve a recipe path/name without introducing a second project registry."""
+        from lambdaforge.configuration.ProjectConfigService import ProjectConfigService
+
+        raw = str(selector_or_path)
+        path = Path(raw)
+        if path.is_file():
+            return DatasetRecipeConfig.from_yaml(path)
+        name = raw.removeprefix("dataset:").split("@", 1)[0]
+        try:
+            resolved = ProjectConfigService().resolve(name, kind="dataset")
+        except (KeyError, ValueError) as error:
+            known = tuple(
+                record.name
+                for record in ProjectConfigService().list(kind="dataset")
+                if record.valid
+            )
+            raise MissingDatasetRecipeError(name, known) from error
+        recipe = DatasetRecipeConfig.from_yaml(resolved)
+        requested_version = raw.partition("@")[2] or None
+        if requested_version is not None and recipe.version != requested_version:
+            raise MissingDatasetRecipeError(raw, (recipe.selector,))
+        return recipe
+
+    def _build_materialization(
+        self,
+        recipe: DatasetRecipeConfig,
+        cluster: str,
+        *,
+        apply: bool,
+        prerequisites: tuple[dict[str, Any], ...] = (),
+    ) -> DatasetMaterializationPlan:
+        service = DatasetBuildService(
+            self.registry, JobService(self.clusters, factory=self.factory)
+        )
+        build_plan = service.plan(recipe, cluster=cluster)
+        handle = service.submit(recipe, cluster=cluster) if apply else None
+        return DatasetMaterializationPlan(
+            recipe.selector,
+            cluster,
+            "BUILD",
+            producer=str(recipe.source) if recipe.source is not None else None,
+            reason=(
+                "Dataset recipe submitted as one durable dataset-build job."
+                if apply
+                else "Missing placement can be produced by the registered dataset recipe."
+            ),
+            prerequisites=prerequisites,
+            stages=tuple(stage.to_dict() for stage in build_plan.stages),
+            job_id=handle.job_id if handle is not None else None,
+        )
+
+    def _remote_profile(
+        self,
+        placement: DatasetPlacement,
+        record: DatasetRecord,
+        schema: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Run an installed project profiler beside remote bytes in the managed environment."""
+        profile = self.clusters.get(placement.cluster)
+        transport = self.factory.transport(profile)
+        python = self._python(placement.cluster, transport)
+        code = (
+            "import json,sys; "
+            "from pathlib import Path; "
+            "from lambdaforge.data import ClassificationDatasetProfiler,DatasetRecord; "
+            "from lambdaforge.experiments.ObjectFactory import ObjectFactory; "
+            "schema=json.loads(sys.argv[2]); "
+            "record=DatasetRecord.from_mapping(json.loads(sys.argv[3])); "
+            "profiler=(ClassificationDatasetProfiler() if schema.get('task')=='classification' "
+            "else ObjectFactory.build(schema['profiler'])); "
+            "print(json.dumps(profiler.profile(Path(sys.argv[1]),record,schema),default=str))"
+        )
+        result = transport.run(
+            (
+                *profile.command_prefix,
+                python,
+                "-c",
+                code,
+                placement.root,
+                json.dumps(dict(schema), separators=(",", ":")),
+                json.dumps(record.to_dict(), separators=(",", ":")),
+            )
+        )
+        if result.returncode:
+            raise RuntimeError(f"Remote dataset profiler failed: {result.stderr}")
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict):
+            raise TypeError("Remote dataset profiler must return a JSON object.")
+        return payload
+
     def _replicate(self, record: DatasetRecord, source: DatasetPlacement, destination: str) -> None:
         target = self.clusters.get(destination)
         assert target.storage is not None
         if target.storage.dataset_root is None:
             raise RuntimeError("Target cluster must configure storage.dataset_root.")
-        target_root = str(PurePosixPath(target.storage.dataset_root) / record.name / record.version)
+        target_root = str(
+            PurePosixPath(target.storage.dataset_root)
+            / record.name
+            / record.version
+            / record.dataset_id.removeprefix("sha256:")[:16]
+        )
         if source.cluster != "local":
             raise RuntimeError(
                 "The built-in safe transfer provider currently needs a local source. "
                 "Use a shared filesystem/provider or stage an explicit durable transfer job."
             )
         if target.transport == "local":
-            shutil.copytree(source.root, target_root, dirs_exist_ok=True)
+            destination_path = Path(target_root)
+            if destination_path.exists():
+                verification = DatasetOperations.verify(destination_path, record.dataset_id)
+                if not verification["valid"]:
+                    raise RuntimeError("Existing target placement has invalid/different bytes.")
+            else:
+                staging = destination_path.with_name(f".{destination_path.name}.{uuid4().hex}.tmp")
+                destination_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copytree(source.root, staging)
+                    verification = DatasetOperations.verify(staging, record.dataset_id)
+                    if not verification["valid"]:
+                        raise RuntimeError("Replicated dataset failed validation before publish.")
+                    os.replace(staging, destination_path)
+                finally:
+                    if staging.exists():
+                        shutil.rmtree(staging)
         else:
-            destination_value = (
-                f"{target.user + '@' if target.user else ''}{target.host}:{target_root}"
-            )
-            completed = subprocess.run(
-                (
-                    "rsync",
-                    "-a",
-                    "--protect-args",
-                    "--",
-                    source.root.rstrip("/") + "/",
-                    destination_value,
-                ),
-                check=False,
-                capture_output=True,
-                text=True,
-                shell=False,
-            )
-            if completed.returncode:
-                raise RuntimeError(f"Dataset replication failed: {completed.stderr}")
+            transport = self.factory.transport(target)
+            exists = transport.run(("test", "-e", target_root))
+            if exists.returncode == 0:
+                verified = self._operation(destination, "verify", target_root, record.dataset_id)
+                if not verified.get("valid"):
+                    raise RuntimeError("Existing target placement has invalid/different bytes.")
+            else:
+                remote_staging = f"{target_root}.tmp-{uuid4().hex}"
+                created = transport.run(
+                    ("mkdir", "-p", str(PurePosixPath(remote_staging).parent))
+                )
+                if created.returncode:
+                    raise RuntimeError(f"Cannot create remote dataset staging: {created.stderr}")
+                destination_value = (
+                    f"{target.user + '@' if target.user else ''}{target.host}:{remote_staging}"
+                )
+                completed = subprocess.run(
+                    (
+                        "rsync",
+                        "-a",
+                        "--protect-args",
+                        "--",
+                        source.root.rstrip("/") + "/",
+                        destination_value.rstrip("/") + "/",
+                    ),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    shell=False,
+                )
+                if completed.returncode:
+                    transport.run(("rm", "-rf", remote_staging))
+                    raise RuntimeError(f"Dataset replication failed: {completed.stderr}")
+                verified = self._operation(
+                    destination, "verify", remote_staging, record.dataset_id
+                )
+                if not verified.get("valid"):
+                    transport.run(("rm", "-rf", remote_staging))
+                    raise RuntimeError("Replicated dataset failed validation before publish.")
+                published = transport.run(("mv", remote_staging, target_root))
+                if published.returncode:
+                    raise RuntimeError(f"Atomic dataset publish failed: {published.stderr}")
         placement = DatasetPlacement(
             destination,
             target_root,
@@ -353,6 +588,12 @@ class DatasetService:
             record.producer,
             record.lineage,
             record.metadata,
+            record.build_id,
+            record.index,
+            record.partitions,
+            record.target_schema,
+            record.global_assets,
+            record.lineage_graph,
         )
         self.registry.register(updated)
         self._publish_remote(updated, destination)
@@ -439,20 +680,35 @@ class DatasetService:
                 return DatasetOperations.verify(root, arguments[0])
             if operation == "delete":
                 return DatasetOperations.delete(root, arguments[0], apply="--apply" in arguments)
+            if operation == "members":
+                options = json.loads(arguments[0]) if arguments else {}
+                return DatasetOperations.members(
+                    root,
+                    partitions=options.get("partitions"),
+                    offset=int(options.get("offset", 0)),
+                    limit=int(options.get("limit", 100)),
+                )
+            if operation == "member":
+                return DatasetOperations.member(root, arguments[0])
+            if operation == "diff":
+                return DatasetOperations.diff(root, arguments[0])
         profile = self.clusters.get(cluster)
         assert profile.storage is not None
         transport = self.factory.transport(profile)
-        result = transport.run(
-            (
-                *profile.command_prefix,
-                self._python(cluster, transport),
-                "-m",
-                "lambdaforge.data.DatasetOperations",
-                operation,
-                root,
-                *arguments,
+        try:
+            result = transport.run(
+                (
+                    *profile.command_prefix,
+                    self._python(cluster, transport),
+                    "-m",
+                    "lambdaforge.data.DatasetOperations",
+                    operation,
+                    root,
+                    *arguments,
+                )
             )
-        )
+        except (OSError, TimeoutError) as error:
+            raise OfflineClusterError(cluster, str(error)) from error
         if result.returncode:
             raise RuntimeError(f"Remote dataset {operation} failed: {result.stderr}")
         return json.loads(result.stdout)
@@ -471,7 +727,11 @@ class DatasetService:
         if cluster is not None:
             values = tuple(value for value in values if value.cluster == cluster)
         if not values:
-            raise KeyError(f"Dataset {record.key} has no placement on {cluster!r}.")
+            raise MissingDatasetPlacementError(
+                record.key,
+                cluster or "an explicitly selected cluster",
+                tuple(sorted(value.cluster for value in record.placements)),
+            )
         if cluster is None and len(values) > 1:
             local = tuple(value for value in values if value.cluster == "local")
             if local:
@@ -489,4 +749,6 @@ class DatasetService:
         if result.returncode or not result.stdout.strip():
             legacy = PurePosixPath(profile.workspace) / ".lambdaforge" / "active-environment"
             result = transport.run(("cat", str(legacy)), timeout=15.0)
-        return result.stdout.strip() if result.returncode == 0 else profile.python
+        if result.returncode or not result.stdout.strip():
+            raise MissingManagedEnvironmentError(cluster)
+        return result.stdout.strip()

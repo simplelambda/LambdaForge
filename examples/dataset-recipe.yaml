@@ -1,0 +1,35 @@
+kind: dataset
+dataset:
+  name: example-records
+  version: "1"
+  target_schema:
+    type: object
+    properties:
+      category: {type: string}
+    required: [category]
+  metadata:
+    description: Generic discover → normalize → label example
+stages:
+  discover:
+    task: dataset-stage-roster.yaml
+    required: true
+    reuse: auto
+  normalize:
+    task: dataset-stage-normalize.yaml
+    needs: [discover]
+    bindings:
+      task.params.roster: ${nodes.discover.artifacts.roster.jsonl}
+    required: true
+    reuse: auto
+  label:
+    task: dataset-stage-labels.yaml
+    needs: [normalize]
+    bindings:
+      task.params.records: ${nodes.normalize.artifacts.normalized}
+    required: true
+    reuse: auto
+publish:
+  from: label
+  root: dataset
+  index: members.jsonl
+

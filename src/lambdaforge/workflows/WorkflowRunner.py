@@ -51,7 +51,12 @@ class WorkflowRunner:
         )
 
     def run(
-        self, config: WorkflowConfig, *, dry_run: bool = False
+        self,
+        config: WorkflowConfig,
+        *,
+        dry_run: bool = False,
+        force_nodes: frozenset[str] = frozenset(),
+        node_output_root: str | Path | None = None,
     ) -> WorkflowResult | WorkflowPlan:
         """Execute ready nodes; failed branches block only their descendants."""
         plan = self.plan(config)
@@ -84,7 +89,14 @@ class WorkflowRunner:
                 mp_context=mp.get_context("spawn"),
             ) as pool:
                 futures = {
-                    pool.submit(self._execute, node, outcomes): node.name for node in runnable
+                    pool.submit(
+                        self._execute,
+                        node,
+                        outcomes,
+                        node.name in force_nodes,
+                        str(node_output_root) if node_output_root is not None else None,
+                    ): node.name
+                    for node in runnable
                 }
                 for future in as_completed(futures):
                     name = futures[future]
@@ -104,8 +116,16 @@ class WorkflowRunner:
         self._write_result(config.run_dir / "workflow-result.json", result.to_dict())
         return result
 
-    def _execute(self, node: WorkflowNode, outcomes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    def _execute(
+        self,
+        node: WorkflowNode,
+        outcomes: dict[str, dict[str, Any]],
+        force: bool = False,
+        output_root: str | None = None,
+    ) -> dict[str, Any]:
         data, source, resolution = node.materialize()
+        if output_root is not None:
+            data["output_root"] = str(Path(output_root) / node.name)
         for path, value in node.bindings.items():
             ExperimentConfig.set_value(data, str(path), self._resolve(value, outcomes))
         if AuthoringConfigNormalizer().detect(data) is ConfigurationKind.TASK:
@@ -118,7 +138,10 @@ class WorkflowRunner:
                     },
                     resolution.sources,
                 )
-            result = TaskRun(TaskConfig(data, source=source, resolution=resolution)).run()
+            task_config = TaskConfig(data, source=source, resolution=resolution)
+            if force:
+                task_config = task_config.with_execution_policy(force=True)
+            result = TaskRun(task_config).run()
             payload = result.to_dict()
             return {
                 "status": payload["status"],
