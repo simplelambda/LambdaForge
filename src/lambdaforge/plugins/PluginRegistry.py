@@ -247,7 +247,7 @@ class PluginRegistry:
 
             return Metric
         if kind is PluginKind.ACTIVATION:
-            from lambdaforge.nn.activations.Activation import Activation
+            from lambdaforge.nn.activations.base import Activation
 
             return Activation
         if kind is PluginKind.NORMALIZATION:

@@ -20,15 +20,12 @@ from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.experiments.StdIOCapture import StdIOCapture
 from lambdaforge.observability.EventLogger import EventLogger
 from lambdaforge.plugins.PluginRegistry import PluginRegistry
-from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
-from lambdaforge.tasks.TaskArtifact import TaskArtifact
+from lambdaforge.tasks.artifacts import ArtifactDeclaration, TaskArtifact
 from lambdaforge.tasks.TaskConfig import TaskConfig
 from lambdaforge.tasks.TaskContext import TaskContext
-from lambdaforge.tasks.TaskExecutionPlan import TaskExecutionPlan
+from lambdaforge.tasks.TaskExecutionPlan import TaskExecutionPlan, TaskPlanAction
 from lambdaforge.tasks.TaskOutput import TaskOutput
-from lambdaforge.tasks.TaskPlanAction import TaskPlanAction
-from lambdaforge.tasks.TaskResult import TaskResult
-from lambdaforge.tasks.TaskStatus import TaskStatus
+from lambdaforge.tasks.TaskResult import TaskResult, TaskStatus
 from lambdaforge.tasks.TaskValidator import TaskValidator
 
 

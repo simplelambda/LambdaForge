@@ -8,8 +8,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.GELU import GELU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.smooth import GELU
 from lambdaforge.nn.models.vision.ConvNeXtBlock2D import ConvNeXtBlock2D
 from lambdaforge.nn.models.vision.HierarchicalBackbone2D import HierarchicalBackbone2D
 from lambdaforge.nn.normalizations.ChannelLayerNorm import ChannelLayerNorm

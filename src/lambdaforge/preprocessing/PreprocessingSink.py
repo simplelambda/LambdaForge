@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
 from lambdaforge.preprocessing.PreprocessingRecord import PreprocessingRecord
-from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
+from lambdaforge.tasks.artifacts import ArtifactDeclaration
 from lambdaforge.tasks.TaskContext import TaskContext
 
 

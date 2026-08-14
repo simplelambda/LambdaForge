@@ -138,7 +138,7 @@ class TestPluginDiscovery:
     def test_usage_session_captures_component_alias_fallback(self, monkeypatch) -> None:
         entry = self._entry_point(
             "externalgelu",
-            "lambdaforge.nn.activations.GELU:GELU",
+            "lambdaforge.nn.activations:GELU",
             PluginKind.ACTIVATION,
         )
         self._publish(monkeypatch, [entry])
@@ -558,7 +558,7 @@ class TestPluginDiscovery:
         entries = [
             self._entry_point(
                 "externalgelu",
-                "lambdaforge.nn.activations.GELU:GELU",
+                "lambdaforge.nn.activations:GELU",
                 PluginKind.ACTIVATION,
             ),
             self._entry_point(

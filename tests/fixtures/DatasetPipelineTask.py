@@ -73,9 +73,7 @@ class DatasetPipelineTask:
             for member in members:
                 directory = root / "annotations" / member.member_id
                 directory.mkdir(parents=True, exist_ok=True)
-                (directory / "annotation.json").write_text(
-                    '{"quality":"ok"}\n', encoding="utf-8"
-                )
+                (directory / "annotation.json").write_text('{"quality":"ok"}\n', encoding="utf-8")
                 enriched.append(
                     DatasetMember(
                         member.member_id,
@@ -100,7 +98,4 @@ class DatasetPipelineTask:
     @staticmethod
     def _asset(root: Path, path: Path, *, kind: str = "file") -> DatasetAsset:
         digest, size = TaskArtifact.fingerprint_path(path)
-        return DatasetAsset(
-            path.relative_to(root).as_posix(), kind, f"sha256:{digest}", size
-        )
-
+        return DatasetAsset(path.relative_to(root).as_posix(), kind, f"sha256:{digest}", size)

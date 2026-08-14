@@ -7,8 +7,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.Tanh import Tanh
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.smooth import Tanh
 from lambdaforge.nn.ComponentRegistry import ComponentRegistry
 from lambdaforge.nn.models.Scatter import Scatter
 from lambdaforge.nn.pooling.sparse.SparsePooling import SparsePooling

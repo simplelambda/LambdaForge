@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from lambdaforge.nn.activations.Entmax15 import Entmax15
+from lambdaforge.nn.activations.sparse import Entmax15
 from lambdaforge.nn.models.Model import Model
 
 

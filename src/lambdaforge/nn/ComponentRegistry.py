@@ -4,29 +4,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.CELU import CELU
-from lambdaforge.nn.activations.ELU import ELU
-from lambdaforge.nn.activations.Entmax15 import Entmax15
-from lambdaforge.nn.activations.Entmoid15 import Entmoid15
-from lambdaforge.nn.activations.GELU import GELU
-from lambdaforge.nn.activations.Hardsigmoid import Hardsigmoid
-from lambdaforge.nn.activations.Hardswish import Hardswish
-from lambdaforge.nn.activations.Identity import Identity
-from lambdaforge.nn.activations.LeakyReLU import LeakyReLU
-from lambdaforge.nn.activations.Mish import Mish
-from lambdaforge.nn.activations.PReLU import PReLU
-from lambdaforge.nn.activations.ReLU import ReLU
-from lambdaforge.nn.activations.ReLU6 import ReLU6
-from lambdaforge.nn.activations.SELU import SELU
-from lambdaforge.nn.activations.Sigmoid import Sigmoid
-from lambdaforge.nn.activations.SiLU import SiLU
-from lambdaforge.nn.activations.Sine import Sine
-from lambdaforge.nn.activations.Snake import Snake
-from lambdaforge.nn.activations.Softplus import Softplus
-from lambdaforge.nn.activations.Softsign import Softsign
-from lambdaforge.nn.activations.SquarePlus import SquarePlus
-from lambdaforge.nn.activations.Tanh import Tanh
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.periodic import Sine, Snake
+from lambdaforge.nn.activations.rectifiers import CELU, ELU, SELU, LeakyReLU, PReLU, ReLU, ReLU6
+from lambdaforge.nn.activations.smooth import (
+    GELU,
+    Hardsigmoid,
+    Hardswish,
+    Identity,
+    Mish,
+    Sigmoid,
+    SiLU,
+    Softplus,
+    Softsign,
+    SquarePlus,
+    Tanh,
+)
+from lambdaforge.nn.activations.sparse import Entmax15, Entmoid15
 from lambdaforge.nn.normalizations.BatchNorm import BatchNorm
 from lambdaforge.nn.normalizations.ChannelLayerNorm import ChannelLayerNorm
 from lambdaforge.nn.normalizations.GroupNorm import GroupNorm

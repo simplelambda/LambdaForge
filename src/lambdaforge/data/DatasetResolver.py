@@ -5,15 +5,17 @@ from __future__ import annotations
 import copy
 from pathlib import Path, PurePosixPath
 
-from lambdaforge.data.AmbiguousDatasetVersionError import AmbiguousDatasetVersionError
 from lambdaforge.data.DataCatalog import DataCatalog
 from lambdaforge.data.DatasetLocation import DatasetLocation
 from lambdaforge.data.DatasetRecord import DatasetRecord
 from lambdaforge.data.DatasetReference import DatasetReference
 from lambdaforge.data.DatasetRegistry import DatasetRegistry
 from lambdaforge.data.DatasetResolution import DatasetResolution
-from lambdaforge.data.MissingDatasetPlacementError import MissingDatasetPlacementError
-from lambdaforge.data.UnknownDatasetError import UnknownDatasetError
+from lambdaforge.data.errors import (
+    AmbiguousDatasetVersionError,
+    MissingDatasetPlacementError,
+    UnknownDatasetError,
+)
 
 
 class DatasetResolver:
@@ -77,11 +79,7 @@ class DatasetResolver:
         descriptor: dict[str, object] | None,
     ) -> DatasetResolution:
         placement = next(
-            (
-                value
-                for value in record.placements
-                if value.cluster == self.managed_environment
-            ),
+            (value for value in record.placements if value.cluster == self.managed_environment),
             None,
         )
         if placement is None:

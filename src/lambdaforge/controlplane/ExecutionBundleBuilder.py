@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sys
+from importlib.metadata import distribution
 from pathlib import Path
 from uuid import uuid4
 
@@ -130,17 +131,13 @@ class ExecutionBundleBuilder:
         if profile.environment == "existing":
             return None
         builder = ProjectWheelBuilder(self.root.parent / "wheels")
-        framework_root = Path(__file__).resolve().parents[3]
-        if not (framework_root / "pyproject.toml").is_file():
-            raise RuntimeError(
-                "Managed source deployment requires an installed release wheel or a LambdaForge "
-                "source checkout containing pyproject.toml."
-            )
-        roots = [framework_root]
+        framework_hint = Path(__file__).resolve().parents[3]
+        installed = distribution("lambdaforge")
+        framework_root = builder.installed_project_root(installed, source_hint=framework_hint)
+        wheels = [builder.build_installed("lambdaforge", source_hint=framework_hint)]
         consumer = self._project_root(source.parent)
         if consumer is not None and consumer != framework_root:
-            roots.append(consumer)
-        wheels = [builder.build(root) for root in roots]
+            wheels.append(builder.build(consumer))
         descriptors = []
         for wheel in wheels:
             relative = f"packages/{wheel.name}"

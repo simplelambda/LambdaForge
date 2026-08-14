@@ -10,7 +10,7 @@ from typing import Any
 
 from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
 from lambdaforge.experiments.JsonResult import JsonResult
-from lambdaforge.tasks.TaskArtifact import TaskArtifact
+from lambdaforge.tasks.artifacts import TaskArtifact
 
 
 class PostRunActionReceipt(JsonResult):

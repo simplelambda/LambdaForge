@@ -2,6 +2,8 @@
 
 from lambdaforge.LazyExports import LazyExports
 
+_DOCTOR_NAMES = ("Doctor", "DoctorCheck", "DoctorReport")
+_JOB_NAMES = ("JobGroup", "JobHandle", "JobRecord", "JobState")
 _NAMES = (
     "ClusterAuthentication",
     "ClusterBootstrapResult",
@@ -15,9 +17,6 @@ _NAMES = (
     "CredentialProvider",
     "CredentialService",
     "CudaCompatibilityResolver",
-    "Doctor",
-    "DoctorCheck",
-    "DoctorReport",
     "EnvironmentCredentialProvider",
     "EnvironmentIdentity",
     "EnvironmentProvider",
@@ -26,12 +25,8 @@ _NAMES = (
     "ExecutionProfile",
     "ExistingEnvironmentProvider",
     "InteractiveCredentialProvider",
-    "JobGroup",
     "JobGroupStore",
-    "JobHandle",
-    "JobRecord",
     "JobService",
-    "JobState",
     "JobStore",
     "LocalScheduler",
     "LocalTransport",
@@ -68,7 +63,11 @@ _NAMES = (
 
 LazyExports.install(
     __name__,
-    {name: (f"lambdaforge.controlplane.{name}", name) for name in _NAMES},
+    {
+        **{name: ("lambdaforge.controlplane.Doctor", name) for name in _DOCTOR_NAMES},
+        **{name: ("lambdaforge.controlplane.jobs", name) for name in _JOB_NAMES},
+        **{name: (f"lambdaforge.controlplane.{name}", name) for name in _NAMES},
+    },
 )
 
-__all__ = list(_NAMES)
+__all__ = [*_DOCTOR_NAMES, *_JOB_NAMES, *_NAMES]

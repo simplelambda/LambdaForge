@@ -12,9 +12,7 @@ from uuid import uuid4
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
-from lambdaforge.controlplane.JobHandle import JobHandle
-from lambdaforge.controlplane.JobRecord import JobRecord
-from lambdaforge.controlplane.JobState import JobState
+from lambdaforge.controlplane.jobs import JobHandle, JobRecord, JobState
 from lambdaforge.controlplane.JobStore import JobStore
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 

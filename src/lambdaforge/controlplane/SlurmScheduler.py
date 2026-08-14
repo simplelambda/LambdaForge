@@ -7,7 +7,7 @@ import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from lambdaforge.controlplane.JobState import JobState
+from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.Scheduler import Scheduler
 from lambdaforge.controlplane.SchedulerCapabilities import SchedulerCapabilities
 from lambdaforge.controlplane.SchedulerSubmission import SchedulerSubmission

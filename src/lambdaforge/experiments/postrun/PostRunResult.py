@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
-from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
+from lambdaforge.tasks.artifacts import ArtifactDeclaration
 
 
 class PostRunResult:

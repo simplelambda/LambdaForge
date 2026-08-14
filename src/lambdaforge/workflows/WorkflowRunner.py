@@ -18,10 +18,9 @@ from lambdaforge.experiments.Experiment import Experiment
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
 from lambdaforge.tasks.TaskConfig import TaskConfig
 from lambdaforge.tasks.TaskRun import TaskRun
+from lambdaforge.workflows.models import WorkflowPlan, WorkflowResult
 from lambdaforge.workflows.WorkflowConfig import WorkflowConfig
 from lambdaforge.workflows.WorkflowNode import WorkflowNode
-from lambdaforge.workflows.WorkflowPlan import WorkflowPlan
-from lambdaforge.workflows.WorkflowResult import WorkflowResult
 
 
 class WorkflowRunner:

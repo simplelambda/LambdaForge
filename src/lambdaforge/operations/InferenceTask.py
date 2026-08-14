@@ -8,7 +8,7 @@ from typing import Any
 import torch
 
 from lambdaforge.operations.ModelOperation import ModelOperation
-from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
+from lambdaforge.tasks.artifacts import ArtifactDeclaration
 from lambdaforge.tasks.Task import Task
 from lambdaforge.tasks.TaskContext import TaskContext
 from lambdaforge.tasks.TaskOutput import TaskOutput

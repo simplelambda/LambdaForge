@@ -5,13 +5,23 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Mapping, Sequence
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
 from lambdaforge.experiments.JsonResult import JsonResult
-from lambdaforge.tasks.TaskArtifact import TaskArtifact
-from lambdaforge.tasks.TaskStatus import TaskStatus
+from lambdaforge.tasks.artifacts import TaskArtifact
+
+
+class TaskStatus(str, Enum):
+    """Stable machine-readable states written by the generic task runner."""
+
+    OK = "ok"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    DRY_RUN = "dry_run"
+    UNKNOWN = "unknown"
 
 
 class TaskResult(JsonResult):

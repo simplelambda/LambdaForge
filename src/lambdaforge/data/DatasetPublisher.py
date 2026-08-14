@@ -9,15 +9,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from lambdaforge.data.DatasetAsset import DatasetAsset
-from lambdaforge.data.DatasetIndex import DatasetIndex
 from lambdaforge.data.DatasetOperations import DatasetOperations
-from lambdaforge.data.DatasetRecipeConfig import DatasetRecipeConfig
 from lambdaforge.data.DatasetRecord import DatasetRecord
 from lambdaforge.data.DatasetRegistry import DatasetRegistry
-from lambdaforge.data.InvalidDatasetBuildError import InvalidDatasetBuildError
+from lambdaforge.data.errors import InvalidDatasetBuildError
+from lambdaforge.data.index import DatasetAsset, DatasetIndex
+from lambdaforge.data.recipe_config import DatasetRecipeConfig
 from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
-from lambdaforge.tasks.TaskArtifact import TaskArtifact
+from lambdaforge.tasks.artifacts import TaskArtifact
 
 
 class DatasetPublisher:

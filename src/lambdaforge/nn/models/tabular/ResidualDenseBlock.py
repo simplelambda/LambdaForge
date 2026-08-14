@@ -7,8 +7,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.GELU import GELU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.smooth import GELU
 from lambdaforge.nn.ComponentRegistry import ComponentRegistry
 from lambdaforge.nn.normalizations.LayerNorm import LayerNorm
 from lambdaforge.nn.normalizations.Normalization import Normalization

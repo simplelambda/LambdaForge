@@ -7,8 +7,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.ReLU import ReLU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.rectifiers import ReLU
 from lambdaforge.nn.models.Model import Model
 from lambdaforge.nn.models.sequence.SequenceOutput import SequenceOutput
 from lambdaforge.nn.models.sequence.SequenceOutputMode import SequenceOutputMode

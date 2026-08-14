@@ -17,22 +17,24 @@ from uuid import uuid4
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.JobService import JobService
-from lambdaforge.data.AmbiguousDatasetVersionError import AmbiguousDatasetVersionError
 from lambdaforge.data.ClassificationDatasetProfiler import ClassificationDatasetProfiler
 from lambdaforge.data.DatasetBuildService import DatasetBuildService
 from lambdaforge.data.DatasetDeletionPlan import DatasetDeletionPlan
 from lambdaforge.data.DatasetMaterializationPlan import DatasetMaterializationPlan
 from lambdaforge.data.DatasetOperations import DatasetOperations
 from lambdaforge.data.DatasetPlacement import DatasetPlacement
-from lambdaforge.data.DatasetRecipeConfig import DatasetRecipeConfig
 from lambdaforge.data.DatasetRecord import DatasetRecord
 from lambdaforge.data.DatasetRegistry import DatasetRegistry
-from lambdaforge.data.MissingDatasetPlacementError import MissingDatasetPlacementError
-from lambdaforge.data.MissingDatasetRecipeError import MissingDatasetRecipeError
-from lambdaforge.data.MissingManagedEnvironmentError import MissingManagedEnvironmentError
-from lambdaforge.data.OfflineClusterError import OfflineClusterError
-from lambdaforge.data.UnknownDatasetError import UnknownDatasetError
-from lambdaforge.data.UnsafeDatasetOperationError import UnsafeDatasetOperationError
+from lambdaforge.data.errors import (
+    AmbiguousDatasetVersionError,
+    MissingDatasetPlacementError,
+    MissingDatasetRecipeError,
+    MissingManagedEnvironmentError,
+    OfflineClusterError,
+    UnknownDatasetError,
+    UnsafeDatasetOperationError,
+)
+from lambdaforge.data.recipe_config import DatasetRecipeConfig
 
 
 class DatasetService:
@@ -535,9 +537,7 @@ class DatasetService:
                     raise RuntimeError("Existing target placement has invalid/different bytes.")
             else:
                 remote_staging = f"{target_root}.tmp-{uuid4().hex}"
-                created = transport.run(
-                    ("mkdir", "-p", str(PurePosixPath(remote_staging).parent))
-                )
+                created = transport.run(("mkdir", "-p", str(PurePosixPath(remote_staging).parent)))
                 if created.returncode:
                     raise RuntimeError(f"Cannot create remote dataset staging: {created.stderr}")
                 destination_value = (
@@ -560,9 +560,7 @@ class DatasetService:
                 if completed.returncode:
                     transport.run(("rm", "-rf", remote_staging))
                     raise RuntimeError(f"Dataset replication failed: {completed.stderr}")
-                verified = self._operation(
-                    destination, "verify", remote_staging, record.dataset_id
-                )
+                verified = self._operation(destination, "verify", remote_staging, record.dataset_id)
                 if not verified.get("valid"):
                     transport.run(("rm", "-rf", remote_staging))
                     raise RuntimeError("Replicated dataset failed validation before publish.")

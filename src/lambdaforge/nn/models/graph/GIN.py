@@ -5,8 +5,8 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.ReLU import ReLU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.rectifiers import ReLU
 from lambdaforge.nn.ComponentRegistry import ComponentRegistry
 from lambdaforge.nn.models.graph.GINLayer import GINLayer
 from lambdaforge.nn.models.graph.GraphNormalization import GraphNormalization

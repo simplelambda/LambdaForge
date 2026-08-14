@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from lambdaforge.controlplane.JobState import JobState
+from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.ProcessIdentity import ProcessIdentity
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 from lambdaforge.training.orchestration.ProcessGuard import ProcessGuard

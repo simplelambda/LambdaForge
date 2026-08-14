@@ -26,11 +26,13 @@ class ClusterService:
         factory: ControlPlaneFactory | None = None,
         cache_root: str | Path = ".lambdaforge/control",
         cuda_resolver: CudaCompatibilityResolver | None = None,
+        wheel_builder: ProjectWheelBuilder | None = None,
     ) -> None:
         self.catalog = catalog or ClusterCatalog.load()
         self.factory = factory or ControlPlaneFactory()
         self.cache_root = Path(cache_root).resolve()
         self.cuda_resolver = cuda_resolver or CudaCompatibilityResolver()
+        self.wheel_builder = wheel_builder or ProjectWheelBuilder(self.cache_root / "wheels")
 
     def bootstrap(
         self, cluster: str, *, wheelhouse: str | Path | None = None
@@ -79,8 +81,9 @@ class ClusterService:
 
         assert torch_plan is not None
         dependency_policy = {"pytorch": torch_plan.to_dict()}
-        framework_root = Path(__file__).resolve().parents[3]
-        wheel = ProjectWheelBuilder(self.cache_root / "wheels").build(framework_root)
+        wheel = self.wheel_builder.build_installed(
+            "lambdaforge", source_hint=Path(__file__).resolve().parents[3]
+        )
         descriptors = [
             {
                 "name": wheel.name,

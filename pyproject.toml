@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lambdaforge"
-version = "0.7.0"
+version = "0.7.1"
 description = "Reproducible AI workflows from local authoring to multi-cluster execution."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -100,20 +100,13 @@ where = ["src"]
 [tool.setuptools.package-data]
 lambdaforge = [
     "schemas/*.json",
-    "*/README.md",
-    "*/README.es.md",
-    "*/*/README.md",
-    "*/*/README.es.md",
 ]
 
 [tool.setuptools.data-files]
 "share/lambdaforge" = [
     "AGENTS.md",
-    "AGENTS.es.md",
     "CHANGELOG.md",
-    "CHANGELOG.es.md",
     "SECURITY.md",
-    "SECURITY.es.md",
 ]
 "share/lambdaforge/examples" = [
     "examples/adaptive-hpo.yaml",
@@ -121,7 +114,6 @@ lambdaforge = [
     "examples/data-catalog.yaml",
     "examples/lambdaforge.clusters.yaml",
     "examples/preprocessing-input.jsonl",
-    "examples/preprocessing-simple.yaml",
     "examples/preprocessing.yaml",
     "examples/workflow.yaml",
     "examples/dataset-recipe.yaml",
@@ -130,30 +122,7 @@ lambdaforge = [
     "examples/dataset-stage-labels.yaml",
 ]
 "share/lambdaforge/docs" = [
-    "docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.md",
-    "docs/ADAPTIVE_OPTIMIZATION_ARCHITECTURE.es.md",
-    "docs/ARCHITECTURE.md",
-    "docs/AUDIT_0.6_TO_0.7.md",
-    "docs/AUDIT_0.6_TO_0.7.es.md",
-    "docs/ARCHITECTURE.es.md",
-    "docs/ARTIFACTS.md",
-    "docs/ARTIFACTS.es.md",
-    "docs/CLUSTERS.md",
-    "docs/CLUSTERS.es.md",
-    "docs/CONTROL_PLANE.md",
-    "docs/CONTROL_PLANE.es.md",
-    "docs/DATASETS.md",
-    "docs/DATASETS.es.md",
-    "docs/GOVERNANCE.md",
-    "docs/GOVERNANCE.es.md",
-    "docs/JOBS.md",
-    "docs/JOBS.es.md",
-    "docs/PREPROCESSING.md",
-    "docs/PREPROCESSING.es.md",
-    "docs/RESULTS.md",
-    "docs/RESULTS.es.md",
-    "docs/STORAGE.md",
-    "docs/STORAGE.es.md",
+    "docs/MANUAL.md",
 ]
 
 [tool.pytest.ini_options]

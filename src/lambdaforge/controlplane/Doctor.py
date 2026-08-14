@@ -2,16 +2,60 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
-from lambdaforge.controlplane.DoctorCheck import DoctorCheck
-from lambdaforge.controlplane.DoctorReport import DoctorReport
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorCheck:
+    """Represent one actionable and portable environment diagnostic."""
+
+    name: str
+    ok: bool
+    message: str
+    fix: str | None = None
+
+    def to_dict(self) -> dict[str, str | bool | None]:
+        """Return a machine-readable check."""
+        return {"name": self.name, "ok": self.ok, "message": self.message, "fix": self.fix}
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorReport:
+    """Collect diagnostic checks for one local or remote profile."""
+
+    cluster: str
+    checks: tuple[DoctorCheck, ...]
+
+    @property
+    def ok(self) -> bool:
+        """Return whether all required checks passed."""
+        return all(check.ok for check in self.checks)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable report envelope."""
+        return {
+            "cluster": self.cluster,
+            "ok": self.ok,
+            "checks": [check.to_dict() for check in self.checks],
+        }
+
+    def summary(self) -> str:
+        """Render actionable terminal output."""
+        lines = [f"LambdaForge doctor ({self.cluster}): {'OK' if self.ok else 'ISSUES'}"]
+        for check in self.checks:
+            lines.append(f"[{'ok' if check.ok else '!!'}] {check.name}: {check.message}")
+            if not check.ok and check.fix:
+                lines.append(f"     fix: {check.fix}")
+        return "\n".join(lines)
 
 
 class Doctor:
@@ -101,12 +145,22 @@ class Doctor:
             )
         )
         python = transport.run((*profile.command_prefix, selected_python, "--version"))
+        python_message = (python.stdout or python.stderr).strip() or "Python was not found."
+        python_match = re.search(r"Python\s+(\d+)\.(\d+)", python_message)
+        python_supported = bool(
+            python.returncode == 0
+            and python_match is not None
+            and tuple(int(value) for value in python_match.groups())
+            >= LambdaForgeVersion.MINIMUM_PYTHON
+        )
+        minimum_python = ".".join(str(item) for item in LambdaForgeVersion.MINIMUM_PYTHON)
         checks.append(
             DoctorCheck(
                 "python",
-                python.returncode == 0,
-                (python.stdout or python.stderr).strip() or "Python was not found.",
-                f"Set clusters.{cluster}.python to a working Python executable.",
+                python_supported,
+                python_message,
+                f"Set clusters.{cluster}.python to a working Python >= {minimum_python} "
+                "executable; LambdaForge does not install system Python.",
             )
         )
         if profile.project_module:

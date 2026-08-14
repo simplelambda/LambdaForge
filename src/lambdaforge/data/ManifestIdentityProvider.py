@@ -8,7 +8,7 @@ from typing import Any
 
 from lambdaforge.data.DataIdentityProvider import DataIdentityProvider
 from lambdaforge.data.DatasetIdentity import DatasetIdentity
-from lambdaforge.tasks.TaskArtifact import TaskArtifact
+from lambdaforge.tasks.artifacts import TaskArtifact
 
 
 class ManifestIdentityProvider(DataIdentityProvider):

@@ -6,8 +6,8 @@ from typing import Any
 
 import torch
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.ReLU import ReLU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.rectifiers import ReLU
 from lambdaforge.nn.models.MLP import MLP
 from lambdaforge.nn.models.Model import Model
 from lambdaforge.nn.normalizations.IdentityNorm import IdentityNorm

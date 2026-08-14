@@ -10,12 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from lambdaforge.data.DatasetAsset import DatasetAsset
-from lambdaforge.data.DatasetIndex import DatasetIndex
+from lambdaforge.data.index import DatasetAsset, DatasetIndex
 from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
 from lambdaforge.experiments.JsonResult import JsonResult
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
-from lambdaforge.tasks.TaskArtifact import TaskArtifact
+from lambdaforge.tasks.artifacts import TaskArtifact
 
 
 class DatasetArtifact(JsonResult):

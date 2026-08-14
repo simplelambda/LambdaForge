@@ -9,8 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.ReLU import ReLU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.rectifiers import ReLU
 from lambdaforge.nn.ComponentRegistry import ComponentRegistry
 from lambdaforge.nn.models.Model import Model
 from lambdaforge.nn.models.vision.ResidualBlock2D import ResidualBlock2D

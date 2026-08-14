@@ -11,8 +11,7 @@ from lambdaforge.tasks.TaskConfig import TaskConfig
 from lambdaforge.tasks.TaskExecutionPlan import TaskExecutionPlan
 from lambdaforge.tasks.TaskResult import TaskResult
 from lambdaforge.tasks.TaskRunner import TaskRunner
-from lambdaforge.tasks.TaskValidationReport import TaskValidationReport
-from lambdaforge.tasks.TaskValidator import TaskValidator
+from lambdaforge.tasks.TaskValidator import TaskValidationReport, TaskValidator
 
 
 class TaskRun:

@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
 from lambdaforge.experiments.JsonResult import JsonResult
-from lambdaforge.tasks.TaskPlanAction import TaskPlanAction
+
+
+class TaskPlanAction(str, Enum):
+    """Distinguish real execution from reuse of a verified successful result."""
+
+    RUN = "run"
+    SKIP = "skip"
 
 
 class TaskExecutionPlan(JsonResult):

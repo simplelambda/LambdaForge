@@ -7,7 +7,6 @@ from lambdaforge.LazyExports import LazyExports
 if TYPE_CHECKING:
     from lambdaforge.experiments.AggregateResult import AggregateResult
     from lambdaforge.experiments.CheckpointChoice import CheckpointChoice
-    from lambdaforge.experiments.DetachedRunState import DetachedRunState
     from lambdaforge.experiments.ExecutionConfig import ExecutionConfig
     from lambdaforge.experiments.ExecutionMode import ExecutionMode
     from lambdaforge.experiments.Experiment import Experiment
@@ -101,7 +100,6 @@ LazyExports.install(
             for name in (
                 "AggregateResult",
                 "CheckpointChoice",
-                "DetachedRunState",
                 "ExecutionConfig",
                 "ExecutionMode",
                 "Experiment",
@@ -278,7 +276,6 @@ __all__ = [
     "CheckpointRetention",
     "ConfidenceIntervalMethod",
     "ConfidenceIntervalResult",
-    "DetachedRunState",
     "ExecutionConfig",
     "ExecutionMode",
     "Experiment",

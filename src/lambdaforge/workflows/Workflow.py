@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from lambdaforge.workflows.models import WorkflowPlan, WorkflowResult, WorkflowValidationReport
 from lambdaforge.workflows.WorkflowConfig import WorkflowConfig
-from lambdaforge.workflows.WorkflowPlan import WorkflowPlan
-from lambdaforge.workflows.WorkflowResult import WorkflowResult
-from lambdaforge.workflows.WorkflowValidationReport import WorkflowValidationReport
 
 
 class Workflow:

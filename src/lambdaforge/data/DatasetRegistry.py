@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from lambdaforge.data.DatasetPlacement import DatasetPlacement
 from lambdaforge.data.DatasetRecord import DatasetRecord
-from lambdaforge.data.InvalidDatasetBuildError import InvalidDatasetBuildError
+from lambdaforge.data.errors import InvalidDatasetBuildError
 from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 

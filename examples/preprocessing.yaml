@@ -1,36 +1,22 @@
-schema_version: "1.0"
-kind: task
+# Runnable concise preprocessing; replace builtins.dict with project logic as needed.
 name: jsonl-preprocessing
 output_root: ../runs/tasks
-resume: true
-rerun_completed: false
 inputs:
-  - name: raw_records
-    path: preprocessing-input.jsonl
-required_artifacts:
-  - processed
-  - preprocessing-manifest.json
-  - dataset-artifact.json
-task:
-  target: lambdaforge.preprocessing.PreprocessingTask
-  params:
-    source:
-      target: lambdaforge.preprocessing.JsonLinesSource
-      params:
-        path: preprocessing-input.jsonl
-        key_field: id
-    transforms: []
-    sink:
-      target: lambdaforge.preprocessing.JsonDirectorySink
-      params:
-        output_dir: processed
-    shard_count: 1
-    shard_index: 0
-    on_error: fail
-    checkpoint_interval: 1
-    dataset_name: example-records
-    dataset_version: "1"
-execution:
-  mode: sequential
-metadata:
-  purpose: Runnable preprocessing and generic-task example.
+  raw: preprocessing-input.jsonl
+outputs:
+  processed: processed
+preprocess:
+  function: builtins.dict
+  input: raw
+  output: processed
+  key_field: id
+  workers: 2
+  workload: io
+  checkpoint_interval: 1
+  publish_dataset: true
+  dataset_name: example-records
+  dataset_version: "1"
+resources:
+  cpus: 2
+  memory: 1GiB
+  time: 5m

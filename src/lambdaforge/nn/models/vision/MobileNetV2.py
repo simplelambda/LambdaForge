@@ -8,8 +8,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.ReLU6 import ReLU6
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.rectifiers import ReLU6
 from lambdaforge.nn.ComponentRegistry import ComponentRegistry
 from lambdaforge.nn.models.vision.HierarchicalBackbone2D import HierarchicalBackbone2D
 from lambdaforge.nn.models.vision.InvertedResidualBlock2D import InvertedResidualBlock2D

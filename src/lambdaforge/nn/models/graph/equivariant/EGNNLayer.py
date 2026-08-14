@@ -9,8 +9,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.SiLU import SiLU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.smooth import SiLU
 from lambdaforge.nn.models.Aggregation import Aggregation
 from lambdaforge.nn.models.graph.GraphEdgeData import GraphEdgeData
 from lambdaforge.nn.models.graph.GraphEdgeIndex import GraphEdgeIndex

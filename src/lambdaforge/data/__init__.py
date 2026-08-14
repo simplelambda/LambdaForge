@@ -19,6 +19,25 @@ _CACHE_NAMES = (
     "NumpyDatasetSerializer",
     "PickleDatasetSerializer",
 )
+_BUILD_MODEL_NAMES = (
+    "DatasetBuildPlan",
+    "DatasetBuildResult",
+    "DatasetRecipeValidationReport",
+    "DatasetStagePlan",
+)
+_ERROR_NAMES = (
+    "AmbiguousDatasetVersionError",
+    "DatasetResolutionError",
+    "InvalidDatasetBuildError",
+    "MissingDatasetPlacementError",
+    "MissingDatasetRecipeError",
+    "MissingManagedEnvironmentError",
+    "OfflineClusterError",
+    "UnknownDatasetError",
+    "UnsafeDatasetOperationError",
+)
+_RECIPE_CONFIG_NAMES = ("DatasetRecipeConfig", "DatasetRecipeStage")
+_INDEX_NAMES = ("DatasetAsset", "DatasetIndex", "DatasetMember")
 _DATA_NAMES = (
     "CategoricalFeatureEncoder",
     "ClassificationDatasetProfiler",
@@ -29,56 +48,49 @@ _DATA_NAMES = (
     "DataService",
     "DataTransferProvider",
     "DatasetDeletionPlan",
-    "DatasetAsset",
-    "DatasetBuildPlan",
-    "DatasetBuildResult",
     "DatasetBuildService",
     "DatasetBuildWorker",
     "DatasetIdIdentityProvider",
     "DatasetIdentity",
-    "DatasetIndex",
     "DatasetLocation",
     "DatasetMaterializationPlan",
-    "DatasetMember",
     "DatasetPlacement",
     "DatasetProfiler",
     "DatasetPublisher",
     "DatasetRecipe",
-    "DatasetRecipeConfig",
     "DatasetRecipeSchemaCatalog",
-    "DatasetRecipeStage",
-    "DatasetRecipeValidationReport",
     "DatasetRecord",
     "DatasetReference",
     "DatasetReferenceResolver",
     "DatasetRegistry",
     "DatasetResolution",
-    "DatasetResolutionError",
     "DatasetResolver",
     "DatasetService",
-    "DatasetStagePlan",
     "ExplicitVersionIdentityProvider",
     "FileDataset",
     "ManifestIdentityProvider",
     "NumpyMemmapDataset",
     "RsyncDataTransferProvider",
     "StrictContentHashIdentityProvider",
-    "AmbiguousDatasetVersionError",
-    "InvalidDatasetBuildError",
-    "MissingDatasetPlacementError",
-    "MissingDatasetRecipeError",
-    "MissingManagedEnvironmentError",
-    "OfflineClusterError",
-    "UnknownDatasetError",
-    "UnsafeDatasetOperationError",
 )
 
 LazyExports.install(
     __name__,
     {
         **{name: (f"lambdaforge.data.cache.{name}", name) for name in _CACHE_NAMES},
+        **{name: ("lambdaforge.data.build_models", name) for name in _BUILD_MODEL_NAMES},
+        **{name: ("lambdaforge.data.errors", name) for name in _ERROR_NAMES},
+        **{name: ("lambdaforge.data.index", name) for name in _INDEX_NAMES},
+        **{name: ("lambdaforge.data.recipe_config", name) for name in _RECIPE_CONFIG_NAMES},
         **{name: (f"lambdaforge.data.{name}", name) for name in _DATA_NAMES},
     },
 )
 
-__all__ = [*_CACHE_NAMES, *_DATA_NAMES]
+__all__ = [
+    *_CACHE_NAMES,
+    *_BUILD_MODEL_NAMES,
+    *_ERROR_NAMES,
+    *_INDEX_NAMES,
+    *_RECIPE_CONFIG_NAMES,
+    *_DATA_NAMES,
+]

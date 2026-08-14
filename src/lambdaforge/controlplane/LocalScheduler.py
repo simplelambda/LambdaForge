@@ -8,7 +8,7 @@ from lambdaforge.controlplane.Transport import Transport
 
 
 class LocalScheduler(ProcessScheduler):
-    """Preserve the public 0.5 name while providing durable asynchronous execution."""
+    """Provide durable asynchronous execution on the local host."""
 
     def __init__(self, transport: Transport, profile: ClusterProfile | None = None) -> None:
         super().__init__(transport, profile or ClusterProfile("local"))

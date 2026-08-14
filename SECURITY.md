@@ -1,7 +1,5 @@
 # Security policy
 
-[English](SECURITY.md) | [Español](SECURITY.es.md)
-
 ## Supported versions
 
 LambdaForge is pre-1.0. Security fixes are applied to the current development branch and the most
@@ -39,6 +37,5 @@ required. Do not include real credentials or private datasets.
 - Tracking and S3-compatible providers expand the trust boundary to their SDK, credentials, network
   and service. They are optional and loaded only when configured.
 
-The detailed trust boundaries and data flow are documented in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the cluster-specific threat model in
-[docs/SECURITY.md](docs/SECURITY.md).
+The detailed trust boundaries and data flow are documented in the
+[canonical manual](docs/MANUAL.md#27-security-model).

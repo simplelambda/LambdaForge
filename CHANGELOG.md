@@ -1,7 +1,5 @@
 # Changelog
 
-[English](CHANGELOG.md) | [Español](CHANGELOG.es.md)
-
 All notable LambdaForge changes are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The repository currently has no Git
@@ -9,6 +7,38 @@ tags; the 0.1.0 and 0.2.0 entries below were reconstructed from their version co
 metadata rather than invented release numbers.
 
 ## [Unreleased]
+
+## [0.7.1] - 2026-08-14
+
+### Changed
+
+- Consolidated fragmented bilingual and package documentation into a brief landing README, one
+  canonical user/maintainer manual and a compact operational agent guide.
+- Reorganized release-named tests around stable behavioral contracts and added lightweight
+  documentation, example, entry-point and package-version staleness checks.
+- Grouped cohesive dataset, job, workflow and task models/errors and split CLI parsing/dispatch by
+  domain while preserving documented imports, YAML and command behavior.
+
+### Removed
+
+- Historical audit documents, closed roadmap prose, duplicated translations, internal package
+  READMEs and unused detached-run state left over from earlier development iterations.
+
+### Fixed
+
+- Managed cluster bootstrap no longer derives the LambdaForge project root from
+  `lambdaforge.__file__`, which incorrectly searched for `pyproject.toml` under a normal virtual
+  environment. Editable installs use their PEP 610 source, local wheel installs reuse the original
+  artifact when available, and other wheel installs are repacked deterministically from verified
+  installed code and metadata without requiring a package index.
+- `doctor` and managed Torch resolution now reject a reachable but unsupported remote Python below
+  3.10 before CUDA selection, wheel construction or transfer, with an actionable cluster-profile
+  fix instead of a later pip failure.
+
+### Security
+
+- Installed-distribution repacking excludes bytecode and symlinks, rebuilds wheel `RECORD` hashes
+  deterministically and preserves installed package metadata rather than executing remote source.
 
 ## [0.7.0] - 2026-08-14
 
@@ -359,7 +389,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/simplelambda/LambdaForge/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/simplelambda/LambdaForge/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/simplelambda/LambdaForge/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/simplelambda/LambdaForge/compare/v0.5.2...v0.5.3

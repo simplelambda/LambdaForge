@@ -1,5 +1,4 @@
 include AGENTS.md
-include README.es.md
 include CHANGELOG.md
 include SECURITY.md
 recursive-include docs *.md

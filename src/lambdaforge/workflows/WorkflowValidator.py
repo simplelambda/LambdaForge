@@ -11,11 +11,10 @@ from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
 from lambdaforge.experiments.ExperimentValidator import ExperimentValidator
 from lambdaforge.experiments.ValidationReport import ValidationReport
 from lambdaforge.tasks.TaskConfig import TaskConfig
-from lambdaforge.tasks.TaskValidationReport import TaskValidationReport
-from lambdaforge.tasks.TaskValidator import TaskValidator
+from lambdaforge.tasks.TaskValidator import TaskValidationReport, TaskValidator
+from lambdaforge.workflows.models import WorkflowValidationReport
 from lambdaforge.workflows.WorkflowConfig import WorkflowConfig
 from lambdaforge.workflows.WorkflowRunner import WorkflowRunner
-from lambdaforge.workflows.WorkflowValidationReport import WorkflowValidationReport
 
 
 class WorkflowValidator:

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from lambdaforge.controlplane.JobRecord import JobRecord
+from lambdaforge.controlplane.jobs import JobRecord
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 
 

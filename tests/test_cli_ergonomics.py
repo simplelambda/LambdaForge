@@ -1,9 +1,13 @@
 """Focused tests for scaffold and discoverability commands."""
 
+import ast
+import importlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
+from lambdaforge import LambdaForge
 from lambdaforge.cli import CommandLineInterface
 
 
@@ -42,6 +46,29 @@ def test_init_creates_complete_non_overwriting_consumer(tmp_path: Path, capsys: 
     assert "slurm-*.out" in ignored
     assert CommandLineInterface.main(["init", str(project)]) == 1
     assert "refusing to overwrite" in capsys.readouterr().err
+
+
+def test_every_scaffold_template_has_valid_python_and_yaml(tmp_path: Path, capsys: Any) -> None:
+    """Keep generated consumer projects executable rather than merely present."""
+    for template in ("minimal", "preprocessing", "training", "full"):
+        project = tmp_path / template
+        assert CommandLineInterface.main(["init", str(project), "--template", template]) == 0
+        capsys.readouterr()
+        for source in project.joinpath("src").rglob("*.py"):
+            ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+
+        source_root = str(project / "src")
+        sys.path.insert(0, source_root)
+        importlib.invalidate_caches()
+        try:
+            for config in project.joinpath("experiments").glob("*.yaml"):
+                report = LambdaForge.validate(config, check_imports=True)
+                assert report.is_valid, f"{template}/{config.name}: {report.summary()}"
+        finally:
+            sys.path.remove(source_root)
+            for name in tuple(sys.modules):
+                if name == "my_project" or name.startswith("my_project."):
+                    del sys.modules[name]
 
 
 def test_explain_and_target_make_public_contracts_discoverable(capsys: Any) -> None:

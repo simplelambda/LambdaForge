@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from lambdaforge.controlplane.JobState import JobState
+from lambdaforge.controlplane.jobs import JobState
 
 
 @dataclass(frozen=True, slots=True)

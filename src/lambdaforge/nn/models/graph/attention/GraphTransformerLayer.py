@@ -9,8 +9,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.GELU import GELU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.smooth import GELU
 from lambdaforge.nn.models.graph.GraphEdgeData import GraphEdgeData
 from lambdaforge.nn.models.graph.GraphEdgeIndex import GraphEdgeIndex
 from lambdaforge.nn.models.graph.GraphNormalization import GraphNormalization

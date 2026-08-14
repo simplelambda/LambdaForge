@@ -9,8 +9,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.ELU import ELU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.rectifiers import ELU
 from lambdaforge.nn.ComponentRegistry import ComponentRegistry
 from lambdaforge.nn.models.graph.attention.GATv2Layer import GATv2Layer
 from lambdaforge.nn.models.graph.GraphNormalization import GraphNormalization

@@ -12,18 +12,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from lambdaforge.controlplane.JobHandle import JobHandle
+from lambdaforge.controlplane.jobs import JobHandle
 from lambdaforge.controlplane.JobService import JobService
-from lambdaforge.data.DatasetBuildPlan import DatasetBuildPlan
-from lambdaforge.data.DatasetBuildResult import DatasetBuildResult
+from lambdaforge.data.build_models import DatasetBuildPlan, DatasetBuildResult, DatasetStagePlan
 from lambdaforge.data.DatasetPublisher import DatasetPublisher
-from lambdaforge.data.DatasetRecipeConfig import DatasetRecipeConfig
 from lambdaforge.data.DatasetRegistry import DatasetRegistry
-from lambdaforge.data.DatasetStagePlan import DatasetStagePlan
+from lambdaforge.data.recipe_config import DatasetRecipeConfig
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
 from lambdaforge.tasks.TaskConfig import TaskConfig
-from lambdaforge.tasks.TaskPlanAction import TaskPlanAction
+from lambdaforge.tasks.TaskExecutionPlan import TaskPlanAction
 from lambdaforge.tasks.TaskRun import TaskRun
 from lambdaforge.workflows.WorkflowRunner import WorkflowRunner
 

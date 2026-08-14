@@ -11,8 +11,7 @@ from uuid import uuid4
 
 from lambdaforge.preprocessing.PreprocessingRecord import PreprocessingRecord
 from lambdaforge.preprocessing.PreprocessingSink import PreprocessingSink
-from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
-from lambdaforge.tasks.ArtifactType import ArtifactType
+from lambdaforge.tasks.artifacts import ArtifactDeclaration, ArtifactType
 from lambdaforge.tasks.TaskContext import TaskContext
 
 

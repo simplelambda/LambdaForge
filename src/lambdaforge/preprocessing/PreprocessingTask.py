@@ -25,10 +25,8 @@ from lambdaforge.preprocessing.PreprocessingManifest import PreprocessingManifes
 from lambdaforge.preprocessing.PreprocessingRecord import PreprocessingRecord
 from lambdaforge.preprocessing.PreprocessingWorker import PreprocessingWorker
 from lambdaforge.preprocessing.PreprocessingWorkload import PreprocessingWorkload
-from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
-from lambdaforge.tasks.ArtifactType import ArtifactType
+from lambdaforge.tasks.artifacts import ArtifactDeclaration, ArtifactType, TaskArtifact
 from lambdaforge.tasks.Task import Task
-from lambdaforge.tasks.TaskArtifact import TaskArtifact
 from lambdaforge.tasks.TaskContext import TaskContext
 from lambdaforge.tasks.TaskOutput import TaskOutput
 

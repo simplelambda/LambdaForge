@@ -12,8 +12,7 @@ from typing import Any, cast
 
 from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
 from lambdaforge.experiments.postrun.PostRunCheckpoint import PostRunCheckpoint
-from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
-from lambdaforge.tasks.ArtifactType import ArtifactType
+from lambdaforge.tasks.artifacts import ArtifactDeclaration, ArtifactType
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,11 +12,13 @@ from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 
 if TYPE_CHECKING:
     from lambdaforge.configuration.MaterializedConfig import MaterializedConfig
-    from lambdaforge.controlplane.JobHandle import JobHandle
-    from lambdaforge.data.DatasetBuildPlan import DatasetBuildPlan
-    from lambdaforge.data.DatasetBuildResult import DatasetBuildResult
+    from lambdaforge.controlplane.jobs import JobHandle
+    from lambdaforge.data.build_models import (
+        DatasetBuildPlan,
+        DatasetBuildResult,
+        DatasetRecipeValidationReport,
+    )
     from lambdaforge.data.DatasetRecipe import DatasetRecipe
-    from lambdaforge.data.DatasetRecipeValidationReport import DatasetRecipeValidationReport
     from lambdaforge.execution.ResourceRequest import ResourceRequest
     from lambdaforge.experiments.migrations.ExperimentConfigMigrationResult import (
         ExperimentConfigMigrationResult,
@@ -31,11 +33,9 @@ if TYPE_CHECKING:
     from lambdaforge.tasks.TaskExecutionPlan import TaskExecutionPlan
     from lambdaforge.tasks.TaskResult import TaskResult
     from lambdaforge.tasks.TaskRun import TaskRun
-    from lambdaforge.tasks.TaskValidationReport import TaskValidationReport
+    from lambdaforge.tasks.TaskValidator import TaskValidationReport
+    from lambdaforge.workflows.models import WorkflowPlan, WorkflowResult, WorkflowValidationReport
     from lambdaforge.workflows.Workflow import Workflow
-    from lambdaforge.workflows.WorkflowPlan import WorkflowPlan
-    from lambdaforge.workflows.WorkflowResult import WorkflowResult
-    from lambdaforge.workflows.WorkflowValidationReport import WorkflowValidationReport
 
 
 class LambdaForge:

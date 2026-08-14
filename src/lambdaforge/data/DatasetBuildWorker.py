@@ -7,7 +7,7 @@ import json
 from collections.abc import Sequence
 
 from lambdaforge.data.DatasetBuildService import DatasetBuildService
-from lambdaforge.data.DatasetRecipeConfig import DatasetRecipeConfig
+from lambdaforge.data.recipe_config import DatasetRecipeConfig
 
 
 class DatasetBuildWorker:

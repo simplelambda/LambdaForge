@@ -9,8 +9,8 @@ from uuid import uuid4
 from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlane import ControlPlane
-from lambdaforge.controlplane.JobGroup import JobGroup
 from lambdaforge.controlplane.JobGroupStore import JobGroupStore
+from lambdaforge.controlplane.jobs import JobGroup
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
 

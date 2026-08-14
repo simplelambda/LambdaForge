@@ -7,8 +7,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from lambdaforge.nn.activations.Activation import Activation
-from lambdaforge.nn.activations.ReLU import ReLU
+from lambdaforge.nn.activations.base import Activation
+from lambdaforge.nn.activations.rectifiers import ReLU
 from lambdaforge.nn.ComponentRegistry import ComponentRegistry
 from lambdaforge.nn.normalizations.BatchNorm import BatchNorm
 from lambdaforge.nn.normalizations.IdentityNorm import IdentityNorm

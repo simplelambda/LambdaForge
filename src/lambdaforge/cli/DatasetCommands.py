@@ -12,8 +12,8 @@ from lambdaforge.configuration.ProjectConfigService import ProjectConfigService
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.data.DatasetBuildService import DatasetBuildService
-from lambdaforge.data.DatasetRecipeConfig import DatasetRecipeConfig
 from lambdaforge.data.DatasetService import DatasetService
+from lambdaforge.data.recipe_config import DatasetRecipeConfig
 
 
 class DatasetCommands:
@@ -143,10 +143,7 @@ class DatasetCommands:
             return
         if operation == "plan":
             source = f" ({default_source})" if default_source else ""
-            print(
-                f"Dataset: {payload['dataset']}  "
-                f"Target: {payload['target_cluster']}{source}"
-            )
+            print(f"Dataset: {payload['dataset']}  Target: {payload['target_cluster']}{source}")
             print("STAGE  ACTION" + ("  REASON" if verbose else ""))
             for stage in payload["stages"]:
                 suffix = f"  {stage['reason']}" if verbose else ""

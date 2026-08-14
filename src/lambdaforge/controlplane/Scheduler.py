@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from pathlib import Path
 
-from lambdaforge.controlplane.JobState import JobState
+from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.SchedulerCapabilities import SchedulerCapabilities
 from lambdaforge.controlplane.SchedulerSubmission import SchedulerSubmission
 from lambdaforge.execution.ResourceRequest import ResourceRequest

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.TorchInstallationPlan import TorchInstallationPlan
 from lambdaforge.controlplane.Transport import Transport
+from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 
 
 class CudaCompatibilityResolver:
@@ -35,6 +36,14 @@ class CudaCompatibilityResolver:
     def resolve(self, profile: ClusterProfile, transport: Transport) -> TorchInstallationPlan:
         """Probe remote Python/GPU facts and resolve one installable exact wheel version."""
         python = self._python(profile, transport)
+        if self._version(python[0]) < LambdaForgeVersion.MINIMUM_PYTHON:
+            minimum = ".".join(str(item) for item in LambdaForgeVersion.MINIMUM_PYTHON)
+            raise RuntimeError(
+                f"LambdaForge {LambdaForgeVersion.CURRENT} requires Python >= {minimum}, but "
+                f"clusters.{profile.name}.python resolves to Python {python[0]}. Configure a "
+                "supported cluster Python executable or load the site's Python module before "
+                "bootstrap; LambdaForge does not install a system Python."
+            )
         driver, capabilities = self._nvidia(transport)
         has_cuda = driver is not None and bool(capabilities)
         required = profile.pytorch.require_cuda

@@ -11,7 +11,7 @@ from typing import cast
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
-from lambdaforge.controlplane.JobState import JobState
+from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.Scheduler import Scheduler
 from lambdaforge.controlplane.SchedulerCapabilities import SchedulerCapabilities
 from lambdaforge.controlplane.SchedulerSubmission import SchedulerSubmission

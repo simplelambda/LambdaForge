@@ -146,9 +146,9 @@ class ProjectConfigService:
             if isinstance(item, str) and item.startswith("dataset:"):
                 found.add(item.removeprefix("dataset:").split("/", 1)[0])
             elif isinstance(item, Mapping):
-                if set(item).issubset(
-                    {"dataset", "version", "content_id", "subpath"}
-                ) and item.get("dataset"):
+                if set(item).issubset({"dataset", "version", "content_id", "subpath"}) and item.get(
+                    "dataset"
+                ):
                     found.add(str(item["dataset"]))
                 for nested in item.values():
                     visit(nested)

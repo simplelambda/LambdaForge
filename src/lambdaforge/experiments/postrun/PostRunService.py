@@ -24,8 +24,7 @@ from lambdaforge.experiments.retention.CheckpointResolver import CheckpointResol
 from lambdaforge.experiments.RunResult import RunResult
 from lambdaforge.experiments.RunStatus import RunStatus
 from lambdaforge.plugins.PluginRegistry import PluginRegistry
-from lambdaforge.tasks.ArtifactDeclaration import ArtifactDeclaration
-from lambdaforge.tasks.TaskArtifact import TaskArtifact
+from lambdaforge.tasks.artifacts import ArtifactDeclaration, TaskArtifact
 
 
 class PostRunService:

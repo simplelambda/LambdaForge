@@ -8,9 +8,8 @@ from lambdaforge.LazyExports import LazyExports
 if TYPE_CHECKING:
     from lambdaforge.artifacts.ArtifactService import ArtifactService
     from lambdaforge.configuration.MaterializedConfig import MaterializedConfig
-    from lambdaforge.controlplane.JobHandle import JobHandle
-    from lambdaforge.data.DatasetBuildPlan import DatasetBuildPlan
-    from lambdaforge.data.DatasetBuildResult import DatasetBuildResult
+    from lambdaforge.controlplane.jobs import JobHandle
+    from lambdaforge.data.build_models import DatasetBuildPlan, DatasetBuildResult
     from lambdaforge.data.DatasetRecipe import DatasetRecipe
     from lambdaforge.experiments.AggregateResult import AggregateResult
     from lambdaforge.experiments.Experiment import Experiment
@@ -28,10 +27,8 @@ if TYPE_CHECKING:
     from lambdaforge.tasks.TaskRun import TaskRun
     from lambdaforge.visualization.PlotSpec import PlotSpec
     from lambdaforge.visualization.VisualizationService import VisualizationService
+    from lambdaforge.workflows.models import WorkflowPlan, WorkflowResult, WorkflowValidationReport
     from lambdaforge.workflows.Workflow import Workflow
-    from lambdaforge.workflows.WorkflowPlan import WorkflowPlan
-    from lambdaforge.workflows.WorkflowResult import WorkflowResult
-    from lambdaforge.workflows.WorkflowValidationReport import WorkflowValidationReport
 
 LazyExports.install(
     __name__,
@@ -58,11 +55,11 @@ LazyExports.install(
             "ArtifactRetentionResult",
         ),
         "Experiment": ("lambdaforge.experiments.Experiment", "Experiment"),
-        "DatasetBuildPlan": ("lambdaforge.data.DatasetBuildPlan", "DatasetBuildPlan"),
-        "DatasetBuildResult": ("lambdaforge.data.DatasetBuildResult", "DatasetBuildResult"),
+        "DatasetBuildPlan": ("lambdaforge.data.build_models", "DatasetBuildPlan"),
+        "DatasetBuildResult": ("lambdaforge.data.build_models", "DatasetBuildResult"),
         "DatasetRecipe": ("lambdaforge.data.DatasetRecipe", "DatasetRecipe"),
         "LambdaForge": ("lambdaforge.LambdaForge", "LambdaForge"),
-        "JobHandle": ("lambdaforge.controlplane.JobHandle", "JobHandle"),
+        "JobHandle": ("lambdaforge.controlplane.jobs", "JobHandle"),
         "MaterializedConfig": (
             "lambdaforge.configuration.MaterializedConfig",
             "MaterializedConfig",
@@ -85,10 +82,10 @@ LazyExports.install(
         "TaskResult": ("lambdaforge.tasks.TaskResult", "TaskResult"),
         "TaskRun": ("lambdaforge.tasks.TaskRun", "TaskRun"),
         "Workflow": ("lambdaforge.workflows.Workflow", "Workflow"),
-        "WorkflowPlan": ("lambdaforge.workflows.WorkflowPlan", "WorkflowPlan"),
-        "WorkflowResult": ("lambdaforge.workflows.WorkflowResult", "WorkflowResult"),
+        "WorkflowPlan": ("lambdaforge.workflows.models", "WorkflowPlan"),
+        "WorkflowResult": ("lambdaforge.workflows.models", "WorkflowResult"),
         "WorkflowValidationReport": (
-            "lambdaforge.workflows.WorkflowValidationReport",
+            "lambdaforge.workflows.models",
             "WorkflowValidationReport",
         ),
         "VisualizationService": (

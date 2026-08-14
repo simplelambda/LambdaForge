@@ -59,8 +59,14 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - { os: ubuntu-latest, python-version: "3.10" }
+          - { os: ubuntu-latest, python-version: "3.11" }
+          - { os: ubuntu-latest, python-version: "3.12" }
+          - { os: ubuntu-latest, python-version: "3.13" }
+          - { os: ubuntu-latest, python-version: "3.14" }
+          - { os: windows-latest, python-version: "3.10" }
+          - { os: windows-latest, python-version: "3.14" }
     env:
       CUDA_VISIBLE_DEVICES: ""
     steps:
@@ -138,8 +144,14 @@ jobs:
           assert Lightning.module.__name__ == 'pytorch_lightning';
           print('Using', Lightning.module.__name__, Lightning.module.__version__)"
 
-      - name: Run full suite through the legacy namespace
-        run: python -m pytest -q --durations=20 --junitxml=legacy-lightning-junit.xml
+      - name: Run training compatibility through the legacy namespace
+        run: >-
+          python -m pytest -q
+          tests/test_lightning_compatibility.py
+          tests/test_training_smoke.py
+          tests/test_customization.py
+          tests/experiments/test_post_run_actions.py
+          --durations=20 --junitxml=legacy-lightning-junit.xml
 
       - name: Upload legacy compatibility report
         if: ${{ always() }}

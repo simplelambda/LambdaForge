@@ -9,9 +9,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from lambdaforge.data.DatasetIndex import DatasetIndex
+from lambdaforge.data.index import DatasetIndex
 from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
-from lambdaforge.tasks.TaskArtifact import TaskArtifact
+from lambdaforge.tasks.artifacts import TaskArtifact
 
 
 class DatasetOperations:

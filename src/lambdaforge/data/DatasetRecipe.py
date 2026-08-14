@@ -5,12 +5,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from lambdaforge.data.DatasetBuildPlan import DatasetBuildPlan
-from lambdaforge.data.DatasetBuildResult import DatasetBuildResult
+from lambdaforge.data.build_models import (
+    DatasetBuildPlan,
+    DatasetBuildResult,
+    DatasetRecipeValidationReport,
+)
 from lambdaforge.data.DatasetBuildService import DatasetBuildService
-from lambdaforge.data.DatasetRecipeConfig import DatasetRecipeConfig
 from lambdaforge.data.DatasetRecipeSchemaCatalog import DatasetRecipeSchemaCatalog
-from lambdaforge.data.DatasetRecipeValidationReport import DatasetRecipeValidationReport
+from lambdaforge.data.recipe_config import DatasetRecipeConfig
 from lambdaforge.tasks.TaskConfig import TaskConfig
 from lambdaforge.tasks.TaskRun import TaskRun
 
@@ -54,8 +56,7 @@ class DatasetRecipe:
                         TaskConfig(
                             stage.task,
                             source=(
-                                self.config.source_dir
-                                / ".lambdaforge-embedded-dataset-stage.yaml"
+                                self.config.source_dir / ".lambdaforge-embedded-dataset-stage.yaml"
                             ),
                         )
                     )

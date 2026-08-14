@@ -11,7 +11,7 @@ from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.CudaCompatibilityResolver import CudaCompatibilityResolver
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
 from lambdaforge.controlplane.ExecutionBundleBuilder import ExecutionBundleBuilder
-from lambdaforge.controlplane.JobHandle import JobHandle
+from lambdaforge.controlplane.jobs import JobHandle
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
