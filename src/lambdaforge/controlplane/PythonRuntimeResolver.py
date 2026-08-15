@@ -56,6 +56,7 @@ class PythonRuntimeResolver:
         required = PythonRuntimeRequirements.normalized(
             (PythonRuntimeRequirements.framework(), *requirements)
         )
+        detected: list[str] = []
         excluded = set(excluded_runtime_ids)
         active = self.active(profile, transport)
         if (
@@ -64,6 +65,7 @@ class PythonRuntimeResolver:
             and (policy.strategy != "managed" or active.managed)
         ):
             probed = self._probe(profile, transport, active.executable)
+            self._record_probe(detected, active.executable, probed)
             if probed is not None and self._acceptable(probed, policy, required):
                 return self._with_action(probed, active, "reuse")
 
@@ -71,6 +73,7 @@ class PythonRuntimeResolver:
             names = self._existing_candidates(policy)
             for executable in names:
                 runtime = self._probe(profile, transport, executable)
+                self._record_probe(detected, executable, runtime)
                 if (
                     runtime is not None
                     and runtime.runtime_id not in excluded
@@ -78,10 +81,16 @@ class PythonRuntimeResolver:
                 ):
                     return runtime
             if policy.strategy == "existing":
-                raise self._failure(profile, policy, required, names)
+                raise self._failure(profile, policy, required, names, detected)
 
         if not policy.allow_managed_install:
-            raise self._failure(profile, policy, required, self._existing_candidates(policy))
+            raise self._failure(
+                profile,
+                policy,
+                required,
+                self._existing_candidates(policy),
+                detected,
+            )
 
         system, architecture = self._platform(transport)
         platform_tag = self.platform_tag(system, architecture)
@@ -104,6 +113,7 @@ class PythonRuntimeResolver:
                 and (policy.strategy != "managed" or cached.managed)
             ):
                 probed = self._probe(profile, transport, cached.executable)
+                self._record_probe(detected, cached.executable, probed)
                 if probed is not None and self._acceptable(probed, policy, required):
                     return self._with_action(probed, cached, "reuse")
             planned_path = str(
@@ -139,7 +149,13 @@ class PythonRuntimeResolver:
                 platform_tag,
                 request_id,
             )
-        raise self._failure(profile, policy, required, self._existing_candidates(policy))
+        raise self._failure(
+            profile,
+            policy,
+            required,
+            self._existing_candidates(policy),
+            detected,
+        )
 
     def active(self, profile: ClusterProfile, transport: Transport) -> PythonRuntime | None:
         """Read the last successfully activated runtime without provisioning anything."""
@@ -616,11 +632,29 @@ class PythonRuntimeResolver:
         policy: PythonRuntimePolicy,
         requirements: Sequence[str],
         candidates: Sequence[str],
+        detected: Sequence[str] = (),
     ) -> NoCompatiblePythonRuntimeError:
         managed = "enabled" if policy.allow_managed_install else "disabled"
         return NoCompatiblePythonRuntimeError(
             "No compatible Python runtime could be prepared. "
-            f"Detected candidates: {tuple(candidates)}. Required: {tuple(requirements)}. "
+            f"Probed runtimes: {tuple(detected) or tuple(candidates)}. "
+            f"Required: {tuple(requirements)}. "
             f"Managed runtime installation is {managed}. Set clusters.{profile.name}.python."
-            "strategy=auto, allow managed installation, or configure python.executable explicitly."
+            "strategy=auto, allow managed installation, or configure python.executable explicitly.",
+            cluster=profile.name,
+            strategy=policy.strategy,
+            requirements=requirements,
+            candidates=candidates,
+            detected=detected,
         )
+
+    @staticmethod
+    def _record_probe(detected: list[str], executable: str, runtime: PythonRuntime | None) -> None:
+        """Record bounded non-secret evidence for an eventual resolution diagnostic."""
+        evidence = (
+            f"{executable} -> Python {runtime.version}"
+            if runtime is not None
+            else f"{executable} -> unavailable"
+        )
+        if evidence not in detected:
+            detected.append(evidence)

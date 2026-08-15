@@ -258,6 +258,18 @@ def test_incompatible_constraint_intersection_fails_before_installation() -> Non
     assert not any("create" in command for command in transport.commands)
 
 
+def test_existing_runtime_failure_retains_detected_version_and_policy() -> None:
+    transport = RuntimeResolutionTransport({"python3": "3.9.21"})
+
+    with pytest.raises(NoCompatiblePythonRuntimeError) as raised:
+        PythonRuntimeResolver().resolve(managed_profile(strategy="existing"), transport)
+
+    assert raised.value.strategy == "existing"
+    assert raised.value.requirements
+    assert "python3 -> Python 3.9.21" in raised.value.detected
+    assert raised.value.cluster == "gpu"
+
+
 def test_existing_conda_creates_and_reuses_a_dedicated_runtime_prefix() -> None:
     transport = RuntimeResolutionTransport({"python3": "3.9.21"}, manager="conda")
     resolver = PythonRuntimeResolver()
@@ -276,9 +288,7 @@ def test_existing_conda_creates_and_reuses_a_dedicated_runtime_prefix() -> None:
 
 
 def test_concurrent_runtime_requests_create_once_then_reuse() -> None:
-    transport = RuntimeResolutionTransport(
-        {"python3": "3.9.21"}, manager="conda", create_delay=0.3
-    )
+    transport = RuntimeResolutionTransport({"python3": "3.9.21"}, manager="conda", create_delay=0.3)
     resolver = PythonRuntimeResolver(lock_timeout=3.0)
     profile = managed_profile()
 
@@ -298,9 +308,7 @@ def test_rejected_runtime_advances_to_the_next_python_minor() -> None:
     profile = managed_profile(strategy="managed")
 
     first = resolver.resolve(profile, transport)
-    second = resolver.resolve(
-        profile, transport, excluded_runtime_ids=(first.runtime_id,)
-    )
+    second = resolver.resolve(profile, transport, excluded_runtime_ids=(first.runtime_id,))
 
     assert first.version.startswith("3.13")
     assert second.version.startswith("3.12")

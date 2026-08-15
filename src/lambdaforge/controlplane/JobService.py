@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,11 @@ from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.jobs import JobHandle, JobRecord, JobState
 from lambdaforge.controlplane.JobStore import JobStore
+from lambdaforge.diagnostics import (
+    DiagnosticClassifier,
+    DiagnosticContext,
+    LambdaForgeError,
+)
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
 
@@ -84,13 +90,45 @@ class JobService:
                 kwargs["job_id"] = job_id
             submission = scheduler.submit(command, resources, **kwargs)
         except Exception as error:
+            context = DiagnosticContext(
+                (),
+                "job submission",
+                cluster,
+            )
+            base = DiagnosticClassifier().classify(error, context)
             failed = record.with_updates(
                 state=JobState.FAILED,
                 stderr=f"{error.__class__.__name__}: {error}",
+                metadata={
+                    **record_metadata,
+                    "failure_phase": "submission",
+                    "failure_category": base.category.value,
+                },
                 updated_at_utc=datetime.now(timezone.utc).isoformat(),
             )
             self.store.write(failed)
-            raise
+            commands = (
+                ("Job details", f"lf jobs show {job_id} --json"),
+                ("Submission record", f"lf jobs logs {job_id} --tail 300"),
+                ("Diagnose cluster", f"lf doctor --on {cluster}"),
+                ("Retry after fixing", f"lf jobs retry {job_id}"),
+                ("Retry with internals", f"lf jobs retry {job_id} --debug"),
+            )
+            raise LambdaForgeError(
+                replace(
+                    base,
+                    title=f"Job {job_id} could not be submitted: {base.title}",
+                    impact=(
+                        "A durable failed submission record was created for inspection.",
+                        "The scheduler did not acknowledge a scientific job.",
+                    ),
+                    commands=commands,
+                    context={**dict(base.context), "cluster": cluster, "job": job_id},
+                    operation="job submission",
+                    job_id=job_id,
+                    details=(*base.details, "Failure occurred before scheduler acknowledgement."),
+                )
+            ) from error
         if dry_run:
             record_metadata["scheduler_preview"] = submission.to_dict()
         record = record.with_updates(
@@ -319,7 +357,16 @@ class JobService:
         scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
         capability = getattr(scheduler.capabilities, f"supports_{operation}")
         if not capability:
-            raise RuntimeError(f"{operation.title()} is not supported by this scheduler.")
+            raise LambdaForgeError(
+                DiagnosticClassifier().classify(
+                    RuntimeError(f"{operation.title()} is not supported by this scheduler."),
+                    DiagnosticContext(
+                        ("jobs", operation, job_id),
+                        f"job {operation}",
+                        record.cluster,
+                    ),
+                )
+            )
         getattr(scheduler, operation)(record.scheduler_id)
         metadata = dict(record.metadata)
         if target is JobState.PAUSED:
@@ -337,6 +384,9 @@ class JobService:
         previous = self.get(job_id)
         if not previous.state.terminal:
             raise ValueError("Only terminal jobs can be retried.")
+        retry_metadata = dict(previous.metadata)
+        retry_metadata.pop("failure_phase", None)
+        retry_metadata.pop("failure_category", None)
         return self.submit(
             previous.command,
             cluster=previous.cluster,
@@ -346,7 +396,7 @@ class JobService:
             bundle_id=previous.bundle_id,
             config_path=previous.config_path,
             retry_of=previous.job_id,
-            metadata=previous.metadata,
+            metadata=retry_metadata,
             job_type=previous.job_type,
             group_id=previous.group_id,
         )

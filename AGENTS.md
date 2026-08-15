@@ -31,6 +31,7 @@ or infer CUDA usability from `nvidia-smi` alone.
 | Inspect dataset content | `lf datasets show/members/member/diff/stats/verify ...` |
 | Place a dataset | `lf datasets materialize SELECTOR --on CLUSTER`; add `--apply` after review |
 | Diagnose a cluster | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
+| Diagnose any failed command | read its next action; add `--debug`; use `--json` for tools |
 | Reconnect to work | `lf jobs list/status/logs/cancel/retry`; selectors accept ID, name, prefix, `latest` |
 | Global runtime view | `lf status`; `lf overview --json`; `lf top --follow` |
 | Query or compare results | `lf results list/show/compare/export` |
@@ -42,6 +43,30 @@ or infer CUDA usability from `nvidia-smi` alone.
 
 `lf` and `lambdaforge` are identical entry points. CLI grammar is generally
 `lf <resource> <action> <object> [--on CONTEXT]`; `ds`, `exp`, `env` and `ls` are documented aliases.
+
+## Error and diagnostic contract
+
+Do not parse prose or catch a private implementation exception in agent automation. CLI failures
+use the stable categories `configuration`, `validation`, `environment`, `execution`, `resource`,
+`connection`, `authentication`, `data`, `storage`, `operation_refused`, `internal`, `warning` and
+`cancelled`. Append `--json` anywhere and consume `category`, `exit_code`, `retryable`, `job_id`,
+`context` and `commands`; append `--debug` only when traceback internals are needed. `--verbose` is
+operational detail, not debug.
+
+Exit codes are 2 for configuration/validation/refusal, 3 for environment/connection/authentication,
+4 for execution/data, 5 for resource/storage, 10 for unexpected internal failures and 130 for
+cancellation. Warnings remain exit 0. A preflight error explicitly means no job was submitted;
+`EXECUTION FAILED` means code started. For failed jobs use `lf jobs logs JOB --tail 300` and
+`lf jobs show JOB --json`. Dataset/workflow diagnostics present one root `FAILED` component and
+dependent `BLOCKED` components; never treat every blocked node as another root failure.
+
+Boundary failures persist a redacted record below `$XDG_STATE_HOME/lambdaforge/logs/errors`
+(normally `~/.local/state/lambdaforge/logs/errors`). Secrets must never be copied from debug output
+or injected into commands. When extending LambdaForge, raise `LambdaForgeError(ErrorDiagnostic)`
+only where the domain knows WHAT/WHY/IMPACT/FIX; preserve the original with `raise ... from error`.
+Ordinary internal `ValueError`/`TypeError` contracts may remain technical because the central CLI
+classifier handles the operational boundary. Public diagnostic types live in
+`lambdaforge.diagnostics`.
 
 ## Consumer installation
 

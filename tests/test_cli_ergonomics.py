@@ -52,7 +52,7 @@ def test_init_creates_complete_non_overwriting_consumer(tmp_path: Path, capsys: 
     capsys.readouterr()
     assert (project / "src/my_project/tasks.py").is_file()
     assert (project / "schemas/lambdaforge-task.schema.json").is_file()
-    assert "lambdaforge>=0.7,<0.8" in (project / "pyproject.toml").read_text(encoding="utf-8")
+    assert "lambdaforge>=0.8,<0.9" in (project / "pyproject.toml").read_text(encoding="utf-8")
     assert json.loads((project / ".vscode/settings.json").read_text(encoding="utf-8"))
     ignored = (project / ".gitignore").read_text(encoding="utf-8")
     assert ".lambdaforge/" in ignored
@@ -60,8 +60,8 @@ def test_init_creates_complete_non_overwriting_consumer(tmp_path: Path, capsys: 
     assert "!.env.example" in ignored
     assert "*.whl" in ignored
     assert "slurm-*.out" in ignored
-    assert CommandLineInterface.main(["init", str(project)]) == 1
-    assert "refusing to overwrite" in capsys.readouterr().err
+    assert CommandLineInterface.main(["init", str(project)]) == 2
+    assert "refusing to overwrite" in capsys.readouterr().err.lower()
 
 
 def test_every_scaffold_template_has_valid_python_and_yaml(tmp_path: Path, capsys: Any) -> None:

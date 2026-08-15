@@ -4,4 +4,4 @@
 class LambdaForgeVersion:
     """Expose the package version without importing runtime subsystems."""
 
-    CURRENT = "0.7.2"
+    CURRENT = "0.8.0"

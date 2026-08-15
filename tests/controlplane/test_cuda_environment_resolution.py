@@ -340,8 +340,8 @@ def test_doctor_fails_when_visible_gpu_cannot_initialize_cuda() -> None:
     assert "driver too old" in cuda.message
 
 
-def test_doctor_explains_that_auto_can_replace_an_old_system_python() -> None:
-    """An old default interpreter is evidence, not a blocker for managed runtime bootstrap."""
+def test_doctor_warns_that_legacy_python_disables_managed_fallback() -> None:
+    """An old scalar interpreter is visible and its surprising strict policy is actionable."""
     profile = ClusterProfile(
         "legacy-python",
         transport="ssh",
@@ -358,5 +358,7 @@ def test_doctor_explains_that_auto_can_replace_an_old_system_python() -> None:
     runtime = next(check for check in report.checks if check.name == "python-runtime")
     assert python.ok
     assert "Python 3.9.21" in python.message and "incompatible" in python.message
+    assert python.warning
     assert runtime.ok
-    assert "can resolve one during bootstrap" in runtime.message
+    assert runtime.warning
+    assert runtime.command == "lf clusters set legacy-python python.strategy auto"

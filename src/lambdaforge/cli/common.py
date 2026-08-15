@@ -2,10 +2,46 @@
 
 from __future__ import annotations
 
+import shlex
 import sys
-from collections.abc import Callable
+import traceback
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+from lambdaforge.diagnostics import (
+    DiagnosticClassifier,
+    DiagnosticContext,
+    DiagnosticRecorder,
+    DiagnosticRenderer,
+    ErrorCategory,
+    ErrorDiagnostic,
+    LambdaForgeError,
+    diagnostic,
+)
+
+_CONTEXT: ContextVar[DiagnosticContext | None] = ContextVar(
+    "lambdaforge_cli_diagnostic_context",
+    default=None,
+)
+
+
+@contextmanager
+def diagnostic_context(context: DiagnosticContext) -> Iterator[None]:
+    """Scope recursive CLI dispatch to one invocation without global mutable state."""
+    token = _CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _CONTEXT.reset(token)
+
+
+def current_diagnostic_context() -> DiagnosticContext:
+    """Expose the immutable invocation facts to command adapters."""
+    return _CONTEXT.get() or DiagnosticContext((), "LambdaForge command")
 
 
 def guarded(action: Callable[[], int]) -> int:
@@ -13,8 +49,62 @@ def guarded(action: Callable[[], int]) -> int:
     try:
         return action()
     except Exception as error:
-        print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-        return 1
+        return report_error(error)
+
+
+def report_error(error: BaseException) -> int:
+    """Classify, persist and render one boundary failure with consistent exit semantics."""
+    context = current_diagnostic_context()
+    value = DiagnosticClassifier().classify(error, context)
+    record = DiagnosticRecorder().record(value, error, context)
+    if record is not None:
+        value = value.with_diagnostic_path(str(record))
+    traceback_text = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    renderer = DiagnosticRenderer()
+    rendered = (
+        renderer.json(
+            value,
+            debug=context.debug,
+            exception_type=type(error).__name__,
+            traceback_text=traceback_text,
+        )
+        if context.json_output
+        else renderer.human(
+            value,
+            debug=context.debug,
+            exception_type=type(error).__name__,
+            traceback_text=traceback_text,
+        )
+    )
+    print(rendered, end="", file=sys.stdout if context.json_output else sys.stderr)
+    return value.exit_code
+
+
+def report_diagnostic(value: ErrorDiagnostic) -> int:
+    """Render a known non-exception outcome through the same persistent boundary."""
+    return report_error(LambdaForgeError(value))
+
+
+def validation_diagnostic(
+    source: str | Path,
+    errors: Sequence[str],
+    *,
+    kind: str,
+) -> ErrorDiagnostic:
+    """Turn an existing validation report into actionable human/JSON semantics."""
+    context = current_diagnostic_context()
+    path = str(Path(source).expanduser().resolve())
+    return diagnostic(
+        ErrorCategory.VALIDATION,
+        f"Invalid {kind} configuration.",
+        str(errors[0]) if errors else "The configuration is invalid.",
+        reason="The file was parsed, but it does not satisfy the selected LambdaForge contract.",
+        impact=("No job was submitted and no scientific computation started.",),
+        fixes=("Correct the reported field/value and validate the file again.",),
+        commands=(("Validate again", f"lf validate {shlex.quote(path)}"),),
+        context={"file": path, "kind": kind, "errors": list(errors)},
+        operation=context.operation,
+    )
 
 
 def keyring_reference(name: str, user: str | None, host: str | None) -> str:

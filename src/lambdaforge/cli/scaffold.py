@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 from lambdaforge.tasks.TaskSchemaCatalog import TaskSchemaCatalog
@@ -20,7 +19,7 @@ build-backend = "setuptools.build_meta"
 name = "my-ai-project"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["lambdaforge>=0.7,<0.8"]
+dependencies = ["lambdaforge>=0.8,<0.9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -210,8 +209,7 @@ lambdaforge run {entry}
 """
     collisions = [directory / relative for relative in files if (directory / relative).exists()]
     if collisions and not force:
-        print(f"ERROR: refusing to overwrite {collisions[0]}; use --force.", file=sys.stderr)
-        return 1
+        raise ValueError(f"Refusing to overwrite {collisions[0]}; use --force if intentional.")
     for relative, content in files.items():
         path = directory / relative
         path.parent.mkdir(parents=True, exist_ok=True)

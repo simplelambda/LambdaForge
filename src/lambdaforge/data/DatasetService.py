@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,7 @@ from lambdaforge.data.errors import (
     UnsafeDatasetOperationError,
 )
 from lambdaforge.data.recipe_config import DatasetRecipeConfig
+from lambdaforge.diagnostics import ErrorCategory, LambdaForgeError, diagnostic
 
 
 class DatasetService:
@@ -498,7 +500,52 @@ class DatasetService:
         target = self.clusters.get(destination)
         assert target.storage is not None
         if target.storage.dataset_root is None:
-            raise RuntimeError("Target cluster must configure storage.dataset_root.")
+            raise LambdaForgeError(
+                diagnostic(
+                    ErrorCategory.CONFIGURATION,
+                    f"Cannot replicate {record.key!r} to {destination!r}.",
+                    "The target cluster has no permanent dataset storage location.",
+                    reason=(
+                        "Dataset placements are immutable scientific data and cannot be "
+                        "published into the reconstructible cache or transient job workspace."
+                    ),
+                    impact=("No dataset bytes were copied and no placement was registered.",),
+                    fixes=(
+                        "Configure storage.dataset_root as a persistent, writable cluster path.",
+                    ),
+                    commands=(
+                        (
+                            "Configure dataset storage",
+                            "lf clusters set "
+                            f"{shlex.quote(destination)} storage.dataset_root "
+                            "/persistent/path/to/datasets",
+                        ),
+                        (
+                            "Retry after configuring",
+                            shlex.join(
+                                (
+                                    "lf",
+                                    "datasets",
+                                    "replicate",
+                                    record.key,
+                                    "--from",
+                                    source.cluster,
+                                    "--to",
+                                    destination,
+                                    "--apply",
+                                )
+                            ),
+                        ),
+                    ),
+                    context={
+                        "dataset": record.key,
+                        "source_cluster": source.cluster,
+                        "target_cluster": destination,
+                        "storage.dataset_root": "not configured",
+                    },
+                    operation="dataset replication preflight",
+                )
+            )
         target_root = str(
             PurePosixPath(target.storage.dataset_root)
             / record.name
@@ -515,7 +562,7 @@ class DatasetService:
             if destination_path.exists():
                 verification = DatasetOperations.verify(destination_path, record.dataset_id)
                 if not verification["valid"]:
-                    raise RuntimeError("Existing target placement has invalid/different bytes.")
+                    raise self._immutable_target_error(record, destination, target_root)
             else:
                 staging = destination_path.with_name(f".{destination_path.name}.{uuid4().hex}.tmp")
                 destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -534,7 +581,7 @@ class DatasetService:
             if exists.returncode == 0:
                 verified = self._operation(destination, "verify", target_root, record.dataset_id)
                 if not verified.get("valid"):
-                    raise RuntimeError("Existing target placement has invalid/different bytes.")
+                    raise self._immutable_target_error(record, destination, target_root)
             else:
                 remote_staging = f"{target_root}.tmp-{uuid4().hex}"
                 created = transport.run(("mkdir", "-p", str(PurePosixPath(remote_staging).parent)))
@@ -595,6 +642,41 @@ class DatasetService:
         )
         self.registry.register(updated)
         self._publish_remote(updated, destination)
+
+    @staticmethod
+    def _immutable_target_error(
+        record: DatasetRecord, destination: str, target_root: str
+    ) -> LambdaForgeError:
+        return LambdaForgeError(
+            diagnostic(
+                ErrorCategory.OPERATION_REFUSED,
+                f"Refusing to overwrite dataset {record.key!r}.",
+                "The target path already contains different or invalid bytes.",
+                reason=(
+                    "A published dataset version is immutable; replacing its bytes would make "
+                    "past experiments ambiguous and break its content identity."
+                ),
+                impact=("The existing target and the registered dataset were left unchanged.",),
+                fixes=(
+                    "Verify the existing placement and publish changed content as a new version.",
+                ),
+                commands=(
+                    (
+                        "Verify registered placement",
+                        f"lf datasets verify {shlex.quote(record.key)} --on "
+                        f"{shlex.quote(destination)}",
+                    ),
+                    ("Inspect version", f"lf datasets show {shlex.quote(record.key)}"),
+                ),
+                context={
+                    "dataset": record.key,
+                    "target_cluster": destination,
+                    "target_path": target_root,
+                    "expected_dataset_id": record.dataset_id,
+                },
+                operation="dataset replication publish",
+            )
+        )
 
     def _remote_records(self, cluster: str) -> tuple[DatasetRecord, ...]:
         profile = self.clusters.get(cluster)

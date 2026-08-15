@@ -31,6 +31,12 @@ required. Do not include real credentials or private datasets.
   values are never CLI arguments, serialized state, bundles, fingerprints or logs. OpenSSH remains
   preferred; optional Paramiko password transport rejects unknown host keys and uses bounded
   timeouts. Environment-backed secrets inherit the exposure risks of the calling process/CI.
+- CLI failures write a local diagnostic record containing the full traceback and sanitized command.
+  Before terminal, JSON or file output, LambdaForge redacts explicit secret fields, common
+  password/token/API-key assignments, bearer headers, credential URLs and private-key blocks.
+  Records are stored below the user state directory with owner-only permissions where supported;
+  users must still review records before sharing them because project exceptions can contain
+  arbitrary scientific data that no generic redactor can recognize.
 - Scheduler command/resource placeholders are allowlisted and rendered to argv. Profile
   prologue/epilogue lines are trusted shell code and must not interpolate secrets or accept
   unreviewed experiment values.

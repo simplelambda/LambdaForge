@@ -213,4 +213,18 @@ class ExperimentExecutor:
         try:
             callback(config, result)
         except Exception as error:
-            print(f"WARNING: post-run callback failed for {name}: {error}", flush=True)
+            from lambdaforge.diagnostics import DiagnosticRenderer, ErrorCategory, diagnostic
+
+            warning = diagnostic(
+                ErrorCategory.WARNING,
+                f"The result observer callback for {name!r} failed.",
+                str(error) or "The callback raised without an error message.",
+                reason=(
+                    "The optional controller callback rejected the already-produced run result."
+                ),
+                impact=("The scientific run result remains recorded and execution will continue.",),
+                fixes=("Inspect the callback implementation and the surrounding job log.",),
+                context={"run": name},
+                operation="post-run result notification",
+            )
+            print(DiagnosticRenderer().human(warning), end="", flush=True)

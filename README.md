@@ -16,7 +16,7 @@ datasets, experiments, adaptive hyperparameter searches and durable local, SSH o
 Your project keeps ownership of its models and data; LambdaForge supplies the execution,
 provenance, reuse, result-management and safety machinery around them.
 
-> **Status:** `0.7.2` (pre-1.0). Current YAML and documented public imports are supported, but minor
+> **Status:** `0.8.0` (pre-1.0). Current YAML and documented public imports are supported, but minor
 > releases may deliberately simplify APIs before 1.0. The repository currently has no licence
 > file, so redistribution terms have not yet been granted.
 
@@ -67,7 +67,7 @@ For a reproducible installation, build and install a versioned wheel instead of 
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.7.2-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.8.0-py3-none-any.whl
 ```
 
 The consumer project should select a PyTorch wheel compatible with its target hardware. Optional
@@ -124,6 +124,7 @@ so paths such as `my_project.preprocessing.normalize_record` resolve normally.
 | Build and inspect an immutable dataset | `lf datasets plan NAME`; `lf datasets build NAME` |
 | Reconnect to work | `lf jobs list`; `lf jobs show latest`; `lf jobs logs JOB --follow` |
 | Inspect cluster readiness | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
+| Diagnose a failed command | rerun with `--debug`; use `--json` for automation |
 | Audit and compare results | `lf results list`; `lf results compare A B --metric METRIC` |
 | Inspect or plot evidence | `lf artifact inspect PATH`; `lf plot learning RUN --metric METRIC` |
 | Preview safe cache collection | `lf storage gc --on CLUSTER` |
@@ -131,6 +132,28 @@ so paths such as `my_project.preprocessing.normalize_record` resolve normally.
 
 `lf` and `lambdaforge` are identical entry points. Commands that can remove data or collect cache
 are preview-first and require an explicit `--apply` after review.
+
+## Errors are diagnostics
+
+LambdaForge does not expose a bare `RuntimeError` for normal CLI failures. A failed command states
+what happened, why, what did or did not run, how to fix it, the exact next command and where the
+full diagnostic was saved. The heading distinguishes configuration, validation, environment,
+connection/authentication, data, storage/resource, execution, deliberate safety refusal and a
+probable internal framework bug.
+
+This distinction matters operationally: a configuration error says that no job was submitted;
+`EXECUTION FAILED` means code actually started, names the job/stage when known and points to
+`lf jobs logs JOB --tail 300`. Workflow and dataset failures show one root `FAILED` stage and mark
+dependent stages as `BLOCKED`, while retaining verified reusable work.
+
+Human output goes to stderr. Add `--json` anywhere in a command for the equivalent stable error
+envelope (`category`, `code`, `exit_code`, `retryable`, context and commands). Add `--debug` for the
+underlying exception and traceback; `--verbose` only requests more operational detail and is not a
+synonym for debug. Every boundary failure also writes a redacted diagnostic record under
+`$XDG_STATE_HOME/lambdaforge/logs/errors` (normally
+`~/.local/state/lambdaforge/logs/errors`). Start cluster diagnosis with `lf doctor --on CLUSTER`.
+The complete categories and exit-code contract are in
+[Understanding errors and diagnostics](docs/MANUAL.md#understanding-errors-and-diagnostics).
 
 ## Datasets, clusters and jobs
 
@@ -193,8 +216,8 @@ results = experiment.run()
 
 Extension contracts and domain APIs live in documented namespaces such as `lambdaforge.tasks`,
 `lambdaforge.preprocessing`, `lambdaforge.data`, `lambdaforge.training`, `lambdaforge.metrics`,
-`lambdaforge.nn`, `lambdaforge.hpo`, `lambdaforge.controlplane` and `lambdaforge.artifacts`. Import
-from those namespaces, not private implementation modules.
+`lambdaforge.nn`, `lambdaforge.hpo`, `lambdaforge.controlplane`, `lambdaforge.diagnostics` and
+`lambdaforge.artifacts`. Import from those namespaces, not private implementation modules.
 
 ## Documentation
 

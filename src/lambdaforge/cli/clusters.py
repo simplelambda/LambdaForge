@@ -228,7 +228,7 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
             if arguments.json
             else cluster_report.summary()
         )
-        return 0 if cluster_report.ok else 1
+        return cluster_report.exit_code
     bootstrapped = ClusterService(cluster_catalog).bootstrap(
         cluster_profile.name,
         wheelhouse=arguments.wheelhouse,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import NoReturn
 
 from lambdaforge.artifacts.ArtifactPluginRegistry import ArtifactPluginRegistry
 from lambdaforge.controlplane.jobs import JobState
@@ -13,9 +14,16 @@ from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 from lambdaforge.plugins.PluginKind import PluginKind
 
 
+class _LambdaForgeArgumentParser(argparse.ArgumentParser):
+    """Route usage failures through the normal diagnostic boundary."""
+
+    def error(self, message: str) -> NoReturn:
+        raise ValueError(f"Invalid command line: {message}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the complete CLI grammar without importing command services."""
-    parser = argparse.ArgumentParser(
+    parser = _LambdaForgeArgumentParser(
         prog="lambdaforge",
         description="Configure and run reproducible ML experiments and generic tasks.",
     )
@@ -23,6 +31,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version=f"%(prog)s {LambdaForgeVersion.CURRENT}",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Include exception type and traceback in errors (accepted anywhere).",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show additional operational detail when a command supports it.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Render errors as a stable JSON envelope (accepted anywhere).",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     completion = subparsers.add_parser(

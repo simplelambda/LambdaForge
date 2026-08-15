@@ -8,6 +8,33 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-15
+
+### Added
+
+- One structured diagnostic model and central human/JSON/debug renderer covering configuration,
+  validation, environment, execution, resource, connection, authentication, data, storage,
+  deliberate refusal, warning, cancellation and unexpected internal failures.
+- Atomic owner-readable diagnostic records with full tracebacks, invocation/job context,
+  remediation and recursive secret redaction under the user state directory.
+- Root-cause-first dataset/workflow job diagnostics, coherent category exit codes and global
+  `--debug`, `--verbose` and error `--json` handling.
+
+### Changed
+
+- CLI and control-plane boundaries now explain what ran, what was preserved, why an operation
+  stopped and the exact supported next command instead of exposing raw exception headings.
+- `doctor` checks expose category, reason, fix and command fields, and warn when legacy scalar
+  Python configuration unexpectedly disables managed-runtime fallback.
+- Dataset-root preflight, placement, immutable-content conflicts, cache-GC refusals, Python runtime
+  resolution, failed jobs and preprocessing debug failures now use actionable domain context.
+
+### Security
+
+- Terminal, JSON and persistent diagnostics redact password/token/API-key assignments, credential
+  URLs, bearer headers, private keys and structured secret fields; diagnostic files use restrictive
+  permissions where supported.
+
 ## [0.7.2] - 2026-08-14
 
 ### Added
@@ -413,7 +440,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/simplelambda/LambdaForge/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/simplelambda/LambdaForge/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/simplelambda/LambdaForge/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/simplelambda/LambdaForge/compare/v0.6.0...v0.7.0

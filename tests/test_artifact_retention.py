@@ -1109,13 +1109,16 @@ class TestArtifactRetention:
         source = tmp_path / "invalid-retention.yaml"
         source.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-        assert CommandLineInterface.main(["retain", str(source), "--json"]) == 1
+        assert CommandLineInterface.main(["retain", str(source), "--json"]) == 2
         captured = capsys.readouterr()
         payload = json.loads(captured.out)
 
         assert payload["status"] == "error"
-        assert payload["error_type"]
+        assert payload["category"] == "configuration"
+        assert payload["code"] == "LF-CONFIG"
+        assert payload["exit_code"] == 2
         assert payload["message"]
+        assert payload["commands"]
         assert captured.err == ""
 
     def test_automatic_apply_runs_only_after_final_aggregation(self, tmp_path: Path) -> None:

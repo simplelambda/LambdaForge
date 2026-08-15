@@ -9,13 +9,23 @@ import json
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from lambdaforge.cli.clusters import run_cluster_command
-from lambdaforge.cli.common import guarded, print_resources, print_storage
+from lambdaforge.cli.common import (
+    current_diagnostic_context,
+    diagnostic_context,
+    guarded,
+    print_resources,
+    print_storage,
+    report_diagnostic,
+    report_error,
+    validation_diagnostic,
+)
 from lambdaforge.cli.DatasetCommands import DatasetCommands
 from lambdaforge.cli.evidence import run_evidence_command
 from lambdaforge.cli.jobs import run_job_command
@@ -41,6 +51,14 @@ from lambdaforge.data.DataService import DataService
 from lambdaforge.data.DatasetBuildService import DatasetBuildService
 from lambdaforge.data.DatasetRecipe import DatasetRecipe
 from lambdaforge.data.DatasetRegistry import DatasetRegistry
+from lambdaforge.diagnostics import (
+    DiagnosticContext,
+    ErrorCategory,
+    RetryDisposition,
+    diagnostic,
+    execution_failure_diagnostic,
+    job_failure_diagnostic,
+)
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.experiments.Experiment import Experiment
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
@@ -78,6 +96,56 @@ class CommandLineInterface:
     @classmethod
     def main(cls, argv: Sequence[str] | None = None) -> int:
         """Run the CLI and return a process exit code."""
+        supplied = list(argv) if argv is not None else sys.argv[1:]
+        context = DiagnosticContext.from_argv(supplied)
+        parent = current_diagnostic_context()
+        if parent.arguments:
+            context = replace(
+                context,
+                json_output=context.json_output or parent.json_output,
+                debug=context.debug or parent.debug,
+                verbose=context.verbose or parent.verbose,
+            )
+        # Operational verbosity and internal tracebacks are global UX concerns. Accept
+        # them before or after any subcommand without duplicating argparse options.
+        parsed = [value for value in supplied if value not in {"--debug", "--verbose", "--json"}]
+        with diagnostic_context(context):
+            try:
+                return cls._dispatch(parsed)
+            except KeyboardInterrupt:
+                interrupted_job = next(
+                    (value for value in context.arguments if value.startswith("job-")), None
+                )
+                commands = (
+                    [("Inspect remote job", f"lf jobs show {interrupted_job}")]
+                    if interrupted_job
+                    else [("Inspect jobs", "lf jobs list --all")]
+                )
+                if context.cluster:
+                    commands.append(("Inspect cluster", f"lf doctor --on {context.cluster}"))
+                return report_diagnostic(
+                    diagnostic(
+                        ErrorCategory.CANCELLED,
+                        "Operation cancelled by the user.",
+                        "The local LambdaForge command received an interrupt.",
+                        reason="KeyboardInterrupt was requested from the terminal.",
+                        impact=(
+                            "A previously submitted remote job may still be running; closing "
+                            "the client does not implicitly cancel it.",
+                        ),
+                        fixes=("Inspect persistent jobs before submitting replacement work.",),
+                        commands=commands,
+                        context={"cluster": context.cluster, "job": interrupted_job},
+                        retryable=RetryDisposition.AFTER_FIX,
+                        operation=context.operation,
+                    )
+                )
+            except Exception as error:
+                return report_error(error)
+
+    @classmethod
+    def _dispatch(cls, argv: Sequence[str] | None = None) -> int:
+        """Parse and execute one already-scoped CLI invocation."""
         parser = cls._parser()
         supplied_arguments = list(argv) if argv is not None else sys.argv[1:]
         default_cluster, default_source = cls._default_cluster()
@@ -95,13 +163,17 @@ class CommandLineInterface:
         ):
             raw_arguments.insert(1, "audit")
         arguments = parser.parse_args(raw_arguments)
+        invocation = current_diagnostic_context()
+        arguments.debug = invocation.debug
+        arguments.json = getattr(arguments, "json", False) or invocation.json_output
+        # The outer context removed the flag so commands need no duplicated parser option.
+        arguments.verbose = getattr(arguments, "verbose", False) or invocation.verbose
         arguments.default_cluster_source = default_source if implicit_default else None
         if arguments.command in {"run", "validate", "inspect"} and not arguments.config.exists():
             try:
                 arguments.config = ProjectConfigService().resolve(arguments.config)
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "init":
             return cls._initialize(
                 arguments.directory, force=arguments.force, template=arguments.template
@@ -118,8 +190,7 @@ class CommandLineInterface:
                     print(python_inspect.getdoc(symbol))
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "explain":
             try:
                 if arguments.kind == "changes":
@@ -147,8 +218,7 @@ class CommandLineInterface:
                 print(json.dumps(node, indent=2))
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "doctor":
             try:
                 doctor_report = Doctor(ClusterCatalog.load(arguments.clusters)).check(
@@ -159,10 +229,9 @@ class CommandLineInterface:
                     if arguments.json
                     else doctor_report.summary()
                 )
-                return 0 if doctor_report.ok else 1
+                return doctor_report.exit_code
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command in {"overview", "top"}:
             try:
                 while True:
@@ -176,11 +245,8 @@ class CommandLineInterface:
                     if arguments.command != "top" or not arguments.follow:
                         return 0
                     time.sleep(arguments.interval)
-            except KeyboardInterrupt:
-                return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "resources":
             try:
                 resource_service = ResourceService(ClusterCatalog.load(arguments.clusters))
@@ -196,8 +262,7 @@ class CommandLineInterface:
                     print_resources(resource_payload)
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "storage":
             try:
                 storage_service = StorageService(ClusterCatalog.load(arguments.clusters))
@@ -208,17 +273,69 @@ class CommandLineInterface:
                         else (storage_service.status(arguments.on),)
                     )
                     storage_payload = [value.to_dict() for value in reports]
+                    offline = tuple(value for value in reports if not value.online)
+                    if offline:
+                        return report_diagnostic(
+                            diagnostic(
+                                ErrorCategory.CONNECTION,
+                                "Storage status is unavailable for one or more clusters.",
+                                "; ".join(
+                                    f"{value.cluster}: {value.error or 'unavailable'}"
+                                    for value in offline
+                                ),
+                                reason=(
+                                    "LambdaForge could not query those filesystems through their "
+                                    "configured transport."
+                                ),
+                                impact=(
+                                    "No storage was changed; successful cluster reports remain "
+                                    "valid.",
+                                ),
+                                fixes=("Diagnose each unavailable cluster before running GC.",),
+                                commands=tuple(
+                                    ("Diagnose cluster", f"lf doctor --on {value.cluster}")
+                                    for value in offline
+                                ),
+                                context={
+                                    "offline_clusters": [value.cluster for value in offline],
+                                    "reports": storage_payload,
+                                },
+                                operation="storage status",
+                            )
+                        )
                     if arguments.json:
                         print(json.dumps(storage_payload, indent=2))
                     else:
                         print_storage(storage_payload)
-                    return 0 if all(value.online for value in reports) else 1
+                    return 0
                 plan = storage_service.gc(arguments.on, apply=arguments.apply)
+                if arguments.apply and plan.blocked_reason:
+                    return report_diagnostic(
+                        diagnostic(
+                            ErrorCategory.OPERATION_REFUSED,
+                            "LambdaForge intentionally refused cache collection.",
+                            plan.blocked_reason,
+                            reason=(
+                                "Active references protect reconstructible cache entries from "
+                                "being removed while they may still be in use."
+                            ),
+                            impact=("No cache entry or scientific artifact was deleted.",),
+                            fixes=("Wait for or inspect the active work holding the reference.",),
+                            commands=(
+                                ("Inspect jobs", f"lf jobs list --cluster {arguments.on}"),
+                                ("Preview again", f"lf storage gc --on {arguments.on}"),
+                            ),
+                            context={
+                                "cluster": arguments.on,
+                                "reclaimable_bytes": plan.reclaimable_bytes,
+                            },
+                            operation="storage gc",
+                        )
+                    )
                 print(json.dumps(plan.to_dict(), indent=2))
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "environments":
             try:
                 environment_service = StorageService(ClusterCatalog.load(arguments.clusters))
@@ -242,8 +359,7 @@ class CommandLineInterface:
                 print(json.dumps(values, indent=2))
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "project":
             try:
                 configs = ProjectConfigService(arguments.root)
@@ -269,14 +385,12 @@ class CommandLineInterface:
                     print(f"Dataset registry: {payload['dataset_registry']}")
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "datasets":
             try:
                 return DatasetCommands.run(arguments)
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command in {"configs", "experiments", "tasks"}:
             try:
                 kind = (
@@ -316,8 +430,7 @@ class CommandLineInterface:
                     command.append("--independent-hpo")
                 return cls.main(command)
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "clusters":
             return guarded(lambda: run_cluster_command(arguments))
         if arguments.command == "jobs":
@@ -381,13 +494,39 @@ class CommandLineInterface:
                         destination_environment=arguments.destination,
                         dry_run=not arguments.apply,
                     ).to_dict()
-                print(json.dumps(data_payload, indent=2))
                 if isinstance(data_payload, dict) and data_payload.get("returncode", 0) != 0:
-                    return 1
+                    return report_diagnostic(
+                        diagnostic(
+                            ErrorCategory.DATA,
+                            f"Dataset transfer {arguments.dataset!r} did not complete.",
+                            str(data_payload.get("message") or "Transfer process failed."),
+                            reason=(
+                                "The explicit transfer provider returned a non-zero status; "
+                                "LambdaForge did not register an unverified copy."
+                            ),
+                            impact=("No successful destination placement was published.",),
+                            fixes=("Inspect source/destination access and retry after fixing it.",),
+                            commands=(
+                                (
+                                    "Retry transfer",
+                                    f"lf data --catalog {arguments.catalog} replicate "
+                                    f"{arguments.dataset} --from {arguments.source} "
+                                    f"--to {arguments.destination} --apply",
+                                ),
+                            ),
+                            context={
+                                "dataset": arguments.dataset,
+                                "source": arguments.source,
+                                "destination": arguments.destination,
+                                "returncode": data_payload.get("returncode"),
+                            },
+                            operation="external dataset replication",
+                        )
+                    )
+                print(json.dumps(data_payload, indent=2))
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "compose":
             try:
                 resolved = ConfigurationComposer().resolve(arguments.config)
@@ -403,8 +542,7 @@ class CommandLineInterface:
                 )
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "diff":
             try:
                 composer = ConfigurationComposer()
@@ -413,8 +551,7 @@ class CommandLineInterface:
                 print(json.dumps(ConfigurationDiff().compare(left, right), indent=2))
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "registry":
             try:
                 registry = ExperimentRegistry(arguments.root)
@@ -424,15 +561,13 @@ class CommandLineInterface:
                     print(json.dumps(registry.query(), indent=2, default=str))
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "dashboard":
             try:
                 print(LocalDashboard().build(arguments.root, arguments.output))
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "plugins":
             descriptors = PluginRegistry.default().discover(arguments.kind)
             plugin_payload = [descriptor.to_dict() for descriptor in descriptors]
@@ -455,6 +590,12 @@ class CommandLineInterface:
                 report = DatasetRecipe.from_yaml(arguments.config).validate(
                     check_imports=not arguments.no_imports
                 )
+                if not report.is_valid:
+                    return report_diagnostic(
+                        validation_diagnostic(
+                            arguments.config, report.errors, kind="dataset recipe"
+                        )
+                    )
                 print(
                     json.dumps({"valid": report.is_valid, "errors": list(report.errors)}, indent=2)
                     if arguments.json
@@ -465,6 +606,12 @@ class CommandLineInterface:
                 workflow_report = WorkflowValidator().validate_file(
                     arguments.config, check_imports=not arguments.no_imports
                 )
+                if not workflow_report.is_valid:
+                    return report_diagnostic(
+                        validation_diagnostic(
+                            arguments.config, workflow_report.errors, kind="workflow"
+                        )
+                    )
                 print(
                     json.dumps(workflow_report.to_dict(), indent=2)
                     if arguments.json
@@ -479,6 +626,14 @@ class CommandLineInterface:
             validation_report = validator.validate_file(
                 arguments.config, check_imports=not arguments.no_imports
             )
+            if not validation_report.is_valid:
+                return report_diagnostic(
+                    validation_diagnostic(
+                        arguments.config,
+                        validation_report.errors,
+                        kind="task" if isinstance(validator, TaskValidator) else "experiment",
+                    )
+                )
             print(
                 json.dumps(validation_report.to_dict(), indent=2)
                 if arguments.json
@@ -487,11 +642,9 @@ class CommandLineInterface:
             return 0 if validation_report.is_valid else 1
         if arguments.command == "migrate":
             if arguments.force and arguments.output is None:
-                print("ERROR: --force requires --output.", file=sys.stderr)
-                return 1
+                raise ValueError("--force requires --output; no file was modified.")
             if arguments.check and arguments.output is not None:
-                print("ERROR: --check cannot be combined with --output.", file=sys.stderr)
-                return 1
+                raise ValueError("--check cannot be combined with --output; no file was modified.")
             try:
                 result = ExperimentConfigMigrator.default().preview_file(
                     arguments.config,
@@ -512,8 +665,7 @@ class CommandLineInterface:
                     print(f"Wrote migrated YAML: {arguments.output}", file=sys.stderr)
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "retain":
             try:
                 experiment = Experiment.from_yaml(arguments.config)
@@ -522,31 +674,46 @@ class CommandLineInterface:
                     if arguments.apply
                     else experiment.preview_retention()
                 )
+                successful = {"applied", "already_applied"} if arguments.apply else {"preview"}
+                if retention_result.status.value not in successful:
+                    retention_errors = tuple(getattr(retention_result, "errors", ()))
+                    retention_reason = getattr(retention_result, "reason", None)
+                    reclaimed_bytes = int(getattr(retention_result, "reclaimed_bytes", 0))
+                    category = (
+                        ErrorCategory.OPERATION_REFUSED
+                        if retention_result.status.value in {"disabled", "not_ready", "conflict"}
+                        else ErrorCategory.EXECUTION
+                    )
+                    return report_diagnostic(
+                        diagnostic(
+                            category,
+                            "Artifact retention did not complete successfully.",
+                            "; ".join(retention_errors)
+                            or str(retention_reason or "")
+                            or f"Retention ended as {retention_result.status.value}.",
+                            reason=(
+                                "The retention transaction protected artifacts instead of "
+                                "assuming an unsafe partial result."
+                            ),
+                            impact=(
+                                f"Retention status: {retention_result.status.value}.",
+                                f"Reclaimed bytes: {reclaimed_bytes}.",
+                            ),
+                            fixes=("Review the retention result and its reported conflicts.",),
+                            commands=(("Preview safely", f"lf retain {arguments.config}"),),
+                            context={"config": str(arguments.config)},
+                            operation="artifact retention",
+                            details=retention_errors,
+                        )
+                    )
                 print(
                     json.dumps(retention_result.to_dict(), indent=2)
                     if arguments.json
                     else retention_result.summary()
                 )
-                successful = {"applied", "already_applied"} if arguments.apply else {"preview"}
-                return 0 if retention_result.status.value in successful else 1
+                return 0
             except Exception as error:
-                if arguments.json:
-                    print(
-                        json.dumps(
-                            {
-                                "status": "error",
-                                "error_type": error.__class__.__name__,
-                                "message": str(error),
-                            },
-                            indent=2,
-                        )
-                    )
-                else:
-                    print(
-                        f"ERROR: {error.__class__.__name__}: {error}",
-                        file=sys.stderr,
-                    )
-                return 1
+                return report_error(error)
         if arguments.command in {"results", "plot", "artifact"}:
             return guarded(lambda: run_evidence_command(arguments))
         if arguments.command == "debug":
@@ -556,11 +723,23 @@ class CommandLineInterface:
                     records=arguments.records,
                     intermediates=arguments.intermediates,
                 )
+                if not debug_report.ok:
+                    failed_record = next(
+                        record for record in debug_report.records if record.get("exception")
+                    )
+                    return report_diagnostic(
+                        execution_failure_diagnostic(
+                            kind="preprocessing debug",
+                            name=str(failed_record.get("source_key", "sample")),
+                            source=arguments.config,
+                            error=failed_record.get("exception"),
+                            run_dir=arguments.intermediates,
+                        )
+                    )
                 print(json.dumps(debug_report.to_dict(), indent=2))
-                return 0 if debug_report.ok else 1
+                return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "run" and (
             arguments.on is not None or arguments.profile is not None
         ):
@@ -598,12 +777,21 @@ class CommandLineInterface:
                         "cluster": cluster,
                         "source": arguments.default_cluster_source or "explicit",
                     },
+                    "next": {
+                        "status": f"lf jobs show {handle.job_id}",
+                        "logs": f"lf jobs logs {handle.job_id} --tail 300",
+                    },
                 }
+                if handle.state is JobState.FAILED:
+                    service = JobService(run_catalog)
+                    record = service.get(handle.job_id, refresh=False)
+                    return report_diagnostic(
+                        job_failure_diagnostic(record, service.logs(handle.job_id, tail=300))
+                    )
                 print(json.dumps(submission_payload, indent=2))
-                return 0 if handle.state is not JobState.FAILED else 1
+                return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         if arguments.command == "inspect" and arguments.resolved:
             try:
                 print(
@@ -614,8 +802,7 @@ class CommandLineInterface:
                 )
                 return 0
             except Exception as error:
-                print(f"ERROR: {error.__class__.__name__}: {error}", file=sys.stderr)
-                return 1
+                return report_error(error)
         materialized_kind = AuthoringConfig.from_yaml(arguments.config).materialize().kind
         if materialized_kind is ConfigurationKind.DATASET:
             recipe = DatasetRecipe.from_yaml(arguments.config)
@@ -627,22 +814,26 @@ class CommandLineInterface:
             return 0
         if cls._is_workflow(arguments.config):
             if arguments.command == "aggregate":
-                print("ERROR: aggregate applies only to training experiment YAML.", file=sys.stderr)
-                return 1
+                raise ValueError("aggregate applies only to training experiment YAML.")
             workflow = Workflow.from_yaml(arguments.config)
             workflow_outcome = workflow.run(
                 dry_run=arguments.command == "inspect" or arguments.dry_run
             )
-            print(json.dumps(workflow_outcome.to_dict(), indent=2, default=str))
-            return (
-                0
-                if isinstance(workflow_outcome, WorkflowPlan) or workflow_outcome.status == "ok"
-                else 1
+            if isinstance(workflow_outcome, WorkflowPlan) or workflow_outcome.status == "ok":
+                print(json.dumps(workflow_outcome.to_dict(), indent=2, default=str))
+                return 0
+            return report_diagnostic(
+                execution_failure_diagnostic(
+                    kind="workflow",
+                    name=workflow_outcome.name,
+                    source=arguments.config,
+                    nodes=workflow_outcome.nodes,
+                    run_dir=workflow_outcome.run_dir,
+                )
             )
         if TaskConfig.is_task_file(arguments.config):
             if arguments.command == "aggregate":
-                print("ERROR: aggregate applies only to training experiment YAML.", file=sys.stderr)
-                return 1
+                raise ValueError("aggregate applies only to training experiment YAML.")
             task = TaskRun.from_yaml(arguments.config)
             if arguments.command == "inspect":
                 print(json.dumps(task.inspect().to_dict(), indent=2))
@@ -655,11 +846,9 @@ class CommandLineInterface:
                 arguments.grace_seconds,
             )
             if any(value is not None for value in task_overrides):
-                print(
-                    "ERROR: experiment GPU overrides do not apply to kind: task.",
-                    file=sys.stderr,
+                raise ValueError(
+                    "Experiment GPU overrides do not apply to kind: task; use task resources."
                 )
-                return 1
             task.config = task.config.with_execution_policy(
                 force=arguments.force,
                 restart=arguments.restart,
@@ -669,12 +858,21 @@ class CommandLineInterface:
             if isinstance(task_outcome, TaskExecutionPlan):
                 print(json.dumps(task_outcome.to_dict(), indent=2))
                 return 0
-            print(
-                f"LambdaForge task {task_outcome.name!r} finished "
-                f"with status={task_outcome.status.value}; "
-                f"artifacts={len(task_outcome.artifacts)}."
+            if task_outcome.status is TaskStatus.OK:
+                print(
+                    f"LambdaForge task {task_outcome.name!r} finished successfully; "
+                    f"artifacts={len(task_outcome.artifacts)}."
+                )
+                return 0
+            return report_diagnostic(
+                execution_failure_diagnostic(
+                    kind="task",
+                    name=task_outcome.name,
+                    source=arguments.config,
+                    error=task_outcome.error,
+                    run_dir=task_outcome.run_dir,
+                )
             )
-            return 0 if task_outcome.status is TaskStatus.OK else 1
 
         experiment = Experiment.from_yaml(arguments.config)
         if arguments.command == "inspect":
@@ -708,13 +906,38 @@ class CommandLineInterface:
             execution_overrides=experiment_overrides,
             aggregate_plots=not arguments.no_plots,
         )
+        experiment_name = str(
+            ExperimentConfig.get_value(
+                experiment.config.as_dict(), "experiment.name", arguments.config.stem
+            )
+        )
         if hasattr(results, "to_dict"):
-            print(json.dumps(results.to_dict(), indent=2, default=str))
             summary = getattr(results, "summary", {})
-            return 1 if summary.get("status") == "failed" else 0
-        failed = sum(result.get("status") == "failed" for result in results)
-        print(f"LambdaForge finished {len(results)} run(s); failed={failed}.")
-        return 1 if failed else 0
+            if summary.get("status") == "failed":
+                return report_diagnostic(
+                    execution_failure_diagnostic(
+                        kind="adaptive experiment",
+                        name=experiment_name,
+                        source=arguments.config,
+                        error=str(summary.get("error") or "Adaptive optimization failed."),
+                    )
+                )
+            print(json.dumps(results.to_dict(), indent=2, default=str))
+            return 0
+        failed_results = [result for result in results if result.get("status") == "failed"]
+        if failed_results:
+            first = failed_results[0]
+            return report_diagnostic(
+                execution_failure_diagnostic(
+                    kind="experiment",
+                    name=str(first.get("name", experiment_name)),
+                    source=arguments.config,
+                    error=str(first.get("error") or "Training run failed."),
+                    run_dir=first.get("run_dir"),
+                )
+            )
+        print(f"LambdaForge finished {len(results)} run(s); failed=0.")
+        return 0
 
     @staticmethod
     def _is_workflow(path: str | Path) -> bool:

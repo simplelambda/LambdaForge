@@ -735,7 +735,7 @@ execution:
         destination = tmp_path / "existing.yaml"
         destination.write_text("occupied\n", encoding="utf-8")
 
-        assert CommandLineInterface.main(["migrate", str(source), "--force"]) == 1
+        assert CommandLineInterface.main(["migrate", str(source), "--force"]) == 2
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "--force requires --output" in captured.err
@@ -744,19 +744,19 @@ execution:
             CommandLineInterface.main(
                 ["migrate", str(source), "--check", "--output", str(destination)]
             )
-            == 1
+            == 2
         )
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "--check cannot be combined with --output" in captured.err
 
-        assert CommandLineInterface.main(["migrate", str(source), "--target-version", "2.0"]) == 1
+        assert CommandLineInterface.main(["migrate", str(source), "--target-version", "2.0"]) == 2
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "No packaged JSON Schema" in captured.err
 
         assert (
-            CommandLineInterface.main(["migrate", str(source), "--output", str(destination)]) == 1
+            CommandLineInterface.main(["migrate", str(source), "--output", str(destination)]) == 2
         )
         captured = capsys.readouterr()
         assert captured.out.startswith("--- ")
@@ -765,7 +765,7 @@ execution:
         original = source.read_text(encoding="utf-8")
         assert (
             CommandLineInterface.main(["migrate", str(source), "--output", str(source), "--force"])
-            == 1
+            == 2
         )
         captured = capsys.readouterr()
         assert captured.out.startswith("--- ")
@@ -783,7 +783,7 @@ execution:
             encoding="utf-8",
         )
 
-        assert CommandLineInterface.main(["migrate", str(source)]) == 1
+        assert CommandLineInterface.main(["migrate", str(source)]) == 2
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "schema_version must be a quoted 'MAJOR.MINOR' string" in captured.err

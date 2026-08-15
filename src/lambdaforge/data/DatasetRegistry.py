@@ -82,7 +82,9 @@ class DatasetRegistry:
                 existing = DatasetRecord.from_mapping(previous)
                 if existing.dataset_id != record.dataset_id:
                     raise InvalidDatasetBuildError(
-                        f"Dataset {record.key} already has a different immutable identity."
+                        f"Dataset {record.key} already has a different immutable identity. "
+                        f"Existing content: {existing.dataset_id}. "
+                        f"New content: {record.dataset_id}."
                     )
                 by_cluster = {item.cluster: item for item in existing.placements}
                 by_cluster.update({item.cluster: item for item in record.placements})

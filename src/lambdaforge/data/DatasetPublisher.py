@@ -94,7 +94,8 @@ class DatasetPublisher:
             if existing.dataset_id != artifact.dataset_id:
                 raise InvalidDatasetBuildError(
                     f"Dataset {recipe.selector} already has a different immutable identity. "
-                    "Choose another version/tag."
+                    f"Existing content: {existing.dataset_id}. "
+                    f"New content: {artifact.dataset_id}. Choose another version/tag."
                 )
             matching = next(
                 (placement for placement in existing.placements if placement.cluster == cluster),

@@ -16,7 +16,7 @@ generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine be
 Python package, so a research project can focus on its data and science instead of rebuilding
 pipelines, training loops, provenance, result management and process scheduling.
 
-> **Status:** `0.7.2`, usable but pre-1.0. The public namespaces documented below are the intended
+> **Status:** `0.8.0`, usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
 > contain a licence file, so redistribution terms still need to be chosen by SimpleLambda.
 
@@ -36,15 +36,16 @@ pipelines, training loops, provenance, result management and process scheduling.
 12. [Results, plots and artifacts](#14-artifact-stores-registry-and-reports)
 13. [Observability and reproducibility](#15-observability-and-reproducibility)
 14. [CLI reference](#16-cli-reference)
-15. [Python API](#17-public-api)
-16. [Conceptual execution model](#18-conceptual-execution-model)
-17. [Architecture for maintainers](#19-architecture)
-18. [Complete experiment YAML reference](#20-yaml-experiment-reference)
-19. [Migrations, process safety and outputs](#21-configuration-migrations)
-20. [Retention and built-in components](#24-artifact-retention)
-21. [Extension contracts](#26-extension-contracts)
-22. [Security model](#27-security-model)
-23. [Current limitations](#28-current-limitations)
+15. [Understanding errors and diagnostics](#understanding-errors-and-diagnostics)
+16. [Python API](#17-public-api)
+17. [Conceptual execution model](#18-conceptual-execution-model)
+18. [Architecture for maintainers](#19-architecture)
+19. [Complete experiment YAML reference](#20-yaml-experiment-reference)
+20. [Migrations, process safety and outputs](#21-configuration-migrations)
+21. [Retention and built-in components](#24-artifact-retention)
+22. [Extension contracts](#26-extension-contracts)
+23. [Security model](#27-security-model)
+24. [Current limitations](#28-current-limitations)
 
 ## 1. What LambdaForge provides
 
@@ -167,7 +168,7 @@ immutable artifact instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.7.2-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.8.0-py3-none-any.whl
 ```
 
 Let the consumer project's lock file or constraints select a PyTorch build compatible with its
@@ -1350,6 +1351,85 @@ project `lambdaforge.yaml`/`lambdaforge.clusters.yaml`, or the XDG user cluster 
 `--on` only when the user omitted it; explicit `--on` always wins. Human and JSON output identify
 whether the target was explicit, a project default or a user default.
 
+### Understanding errors and diagnostics
+
+An error is part of the operational interface, not just an exception string. The same immutable
+diagnostic supplies terminal output, JSON and the persistent record. A normal failure answers:
+
+1. **What:** the operation and concise problem;
+2. **Why:** the cause LambdaForge can establish without guessing;
+3. **Impact:** whether a job started and which work was retained or blocked;
+4. **Fix:** a safe remediation;
+5. **Next action:** a command that exists in the current CLI;
+6. **Diagnostics:** the job log or redacted local record containing the full traceback.
+
+The stable categories and process exit policy are:
+
+| Human heading | JSON `category` | Exit | Meaning |
+|---|---|---:|---|
+| `CONFIGURATION ERROR` | `configuration` | 2 | A selector, path, option or required setting is missing/incompatible before execution. |
+| `VALIDATION ERROR` | `validation` | 2 | Parsed YAML/configuration violates its schema or contract. |
+| `ENVIRONMENT ERROR` | `environment` | 3 | Python, packages, managed environments, PyTorch or CUDA preparation failed. |
+| `CONNECTION ERROR` / `AUTHENTICATION ERROR` | `connection` / `authentication` | 3 | The cluster is unreachable or rejected its credential/host policy. |
+| `EXECUTION FAILED` | `execution` | 4 | A process, project task, stage or training run actually started and failed. |
+| `DATA ERROR` | `data` | 4 | Dataset identity, location, integrity or scientific record constraints failed. |
+| `RESOURCE ERROR` / `STORAGE ERROR` | `resource` / `storage` | 5 | Allocation, quota, capacity, permissions or filesystem cannot satisfy the request. |
+| `OPERATION REFUSED` | `operation_refused` | 2 | Expected safety behavior prevented an unsafe overwrite/delete/GC action. |
+| `INTERNAL ERROR` | `internal` | 10 | An unclassified invariant or probable LambdaForge bug occurred. |
+| `WARNING` | `warning` | 0 | Execution can continue, but a legacy/surprising condition deserves attention. |
+| `CANCELLED` | `cancelled` | 130 | The user/provider interrupted work; this is not a framework error. |
+
+For example, a remote dataset build without permanent dataset storage is a configuration error. It
+states that no job, remote computation, environment or bundle was created and proposes real
+commands:
+
+```bash
+lf clusters set atlas storage.dataset_root /persistent/path/to/datasets
+lf datasets build dataset-recipe --on atlas
+```
+
+In contrast, a terminal dataset-build job is an execution failure. `lf jobs show JOB` reads the
+durable record and, when stage evidence exists, displays the root `FAILED` stage first, dependent
+`BLOCKED` stages separately and completed reusable stages as preserved. Use:
+
+```bash
+lf jobs logs JOB --tail 300
+lf jobs show JOB --json
+lf jobs retry JOB                 # only after correcting the stated cause
+```
+
+LambdaForge does not claim that exit code 137 proves OOM or that an unknown third-party exception
+is a user mistake. If evidence is insufficient, it says so and directs the user to logs. A rejected
+immutable dataset overwrite is `OPERATION REFUSED`, not an internal/fatal error.
+
+#### Human, JSON, verbose and debug modes
+
+Human diagnostics are compact, have no ANSI dependency and go to stderr. Operational commands can
+add `--verbose` for more planning/progress information. Add `--debug` anywhere to include the
+underlying Python exception and full traceback; this is deliberately separate from verbose mode.
+Known errors omit implementation paths and exception-class headings by default.
+
+Add `--json` anywhere for one machine-readable object on stdout. It contains `status`, `category`,
+stable category-level `code`, `exit_code`, `message`, `reason`, `impact`, `fixes`, structured
+commands/context, `retryable`, optional `job_id` and `diagnostic_record`. Debug fields appear only
+when `--debug` is also supplied. The meaning and exit code are identical to human output.
+
+#### Persistent records and secrets
+
+Failures at the CLI boundary are atomically recorded under
+`$XDG_STATE_HOME/lambdaforge/logs/errors`, defaulting to
+`~/.local/state/lambdaforge/logs/errors`. Directories use owner-only permissions where supported;
+records include timestamp, sanitized command/operation, cluster/job, LambdaForge version,
+exception chain, full traceback, displayed diagnostic and remediation. Job execution additionally
+keeps durable stdout/stderr, so `lf jobs logs` remains usable for `FAILED` jobs and for the
+`latest`/unambiguous selectors already supported by the job service.
+
+Passwords, tokens, API keys, bearer headers, private-key blocks, credential URLs and secret-named
+structured fields are redacted before terminal/JSON rendering or persistence. Do not attach raw
+private project data when reporting a bug. For an internal error, retry once with `--debug` and
+include the diagnostic record plus `lf doctor --on CLUSTER`; closing the CLI does not implicitly
+cancel an already submitted remote job.
+
 ## 17. Public API
 
 The supported entry points are deliberately narrow:
@@ -1372,6 +1452,7 @@ The supported entry points are deliberately narrow:
 | `lambdaforge.preprocessing` | Composable record preprocessing and dataset manifests. |
 | `lambdaforge.configuration` | Authoring-to-IR compilation, includes, safe interpolation, redaction, provenance and diff. |
 | `lambdaforge.controlplane` | Cluster/transport/scheduler providers, bundles, doctor and persistent job services. |
+| `lambdaforge.diagnostics` | Stable categories/model plus human/JSON rendering for application boundaries. |
 | `lambdaforge.results` | Human selectors, normalized metric series, comparison/export and remote sync. |
 | `lambdaforge.visualization` | Renderer-neutral plot specifications and atomic rendering. |
 | `lambdaforge.artifacts` | Inspector/visualizer/schema/validator contracts and local/remote services. |
@@ -1553,6 +1634,7 @@ LambdaForge/
 │   ├── configuration/            # authoring IR, composition, secrets, provenance and diff
 │   ├── controlplane/             # clusters, transports, schedulers, jobs, bundles and doctor
 │   ├── data/                     # logical identity/catalog/transfer, adapters and bounded caches
+│   ├── diagnostics/              # categories, classification, rendering and redacted records
 │   ├── execution/                # resource plans, backends and retry policies
 │   ├── experiments/              # YAML, sweeps, execution, aggregation, retention
 │   ├── integrations/             # third-party compatibility adapters

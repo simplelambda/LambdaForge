@@ -295,22 +295,19 @@ def follow_plot(
     if not job_id.startswith("job-"):
         raise ValueError("--follow requires a persistent JOB selector.")
     remote = RemoteResultService()
-    try:
-        while True:
-            synced = remote.sync(job_id)
-            spec = visualization.learning(
-                synced.destination,
-                metrics=arguments.metric,
-                aggregate=arguments.aggregate,
-                uncertainty=arguments.uncertainty,
-            )
-            visualization.render(spec, output)
-            if remote.jobs.get(job_id).state.terminal:
-                print(output)
-                return 0
-            time.sleep(arguments.interval)
-    except KeyboardInterrupt:
-        return 130
+    while True:
+        synced = remote.sync(job_id)
+        spec = visualization.learning(
+            synced.destination,
+            metrics=arguments.metric,
+            aggregate=arguments.aggregate,
+            uncertainty=arguments.uncertainty,
+        )
+        visualization.render(spec, output)
+        if remote.jobs.get(job_id).state.terminal:
+            print(output)
+            return 0
+        time.sleep(arguments.interval)
 
 
 def artifact_shapes(values: Sequence[str]) -> dict[str, tuple[int | None, ...]]:

@@ -16,6 +16,23 @@ from packaging.version import Version
 class NoCompatiblePythonRuntimeError(RuntimeError):
     """Report that no permitted Python runtime satisfies all declared constraints."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        cluster: str | None = None,
+        strategy: str | None = None,
+        requirements: Sequence[str] = (),
+        candidates: Sequence[str] = (),
+        detected: Sequence[str] = (),
+    ) -> None:
+        self.cluster = cluster
+        self.strategy = strategy
+        self.requirements = tuple(requirements)
+        self.candidates = tuple(candidates)
+        self.detected = tuple(detected)
+        super().__init__(message)
+
 
 @dataclass(frozen=True, slots=True)
 class PythonRuntimePolicy:

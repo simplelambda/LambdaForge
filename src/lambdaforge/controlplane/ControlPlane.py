@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -24,6 +25,7 @@ from lambdaforge.controlplane.python_runtime import (
     PythonRuntimeRequirements,
 )
 from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
+from lambdaforge.diagnostics import ErrorCategory, LambdaForgeError, diagnostic
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
 
@@ -60,6 +62,59 @@ class ControlPlane:
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
         storage = profile.storage
+        materialized_kind = AuthoringConfig.from_yaml(config_path).materialize().kind
+        if (
+            cluster != "local"
+            and materialized_kind.value == "dataset"
+            and storage.dataset_root is None
+        ):
+            dataset = self._configuration_name(config_path)
+            raise LambdaForgeError(
+                diagnostic(
+                    ErrorCategory.CONFIGURATION,
+                    f"Cannot build dataset {dataset!r} on {cluster!r}.",
+                    "No permanent dataset storage location is configured.",
+                    reason=(
+                        "Dataset builds publish immutable DatasetVersions. LambdaForge needs a "
+                        "persistent target directory instead of placing scientific data in cache."
+                    ),
+                    impact=(
+                        "No job was submitted and no remote computation started.",
+                        "No dataset, environment or bundle was created by this submission attempt.",
+                    ),
+                    fixes=(
+                        "Configure storage.dataset_root as a persistent, writable cluster path.",
+                    ),
+                    commands=(
+                        (
+                            "Configure dataset storage",
+                            "lf clusters set "
+                            f"{shlex.quote(cluster)} storage.dataset_root "
+                            "/persistent/path/to/datasets",
+                        ),
+                        (
+                            "Retry after configuring",
+                            shlex.join(
+                                (
+                                    "lf",
+                                    "datasets",
+                                    "build",
+                                    str(Path(config_path)),
+                                    "--on",
+                                    cluster,
+                                )
+                            ),
+                        ),
+                    ),
+                    context={
+                        "cluster": cluster,
+                        "dataset": dataset,
+                        "storage.dataset_root": "not configured",
+                        "config": str(Path(config_path).resolve()),
+                    },
+                    operation="dataset build preflight",
+                )
+            )
         transport = self.factory.transport(profile) if cluster != "local" else None
         runtime: PythonRuntime | None = None
         effective_profile = profile
@@ -118,7 +173,6 @@ class ControlPlane:
             ),
         )
         request = resources or ResourceRequest()
-        materialized_kind = AuthoringConfig.from_yaml(config_path).materialize().kind
         reserved_job_id: str | None = None
         work_dir: str | Path
         if cluster == "local":
@@ -180,10 +234,7 @@ class ControlPlane:
                 config = str(PurePosixPath(str(work_dir)) / "config.yaml")
             environment_prefix: tuple[str, ...] = ()
             if materialized_kind.value == "dataset":
-                if storage.dataset_root is None:
-                    raise RuntimeError(
-                        f"Cluster {cluster!r} must configure storage.dataset_root for builds."
-                    )
+                assert storage.dataset_root is not None
                 environment_prefix = (
                     "env",
                     "LAMBDAFORGE_DATASET_REGISTRY="
@@ -262,6 +313,10 @@ class ControlPlane:
         experiment = values.get("experiment", {})
         if isinstance(experiment, dict) and experiment.get("name"):
             return str(experiment["name"])
+        dataset = values.get("dataset", {})
+        if isinstance(dataset, dict) and dataset.get("name"):
+            version = dataset.get("version")
+            return f"{dataset['name']}@{version}" if version is not None else str(dataset["name"])
         return str(values.get("name", Path(config_path).stem))
 
     @staticmethod

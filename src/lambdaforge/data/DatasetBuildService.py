@@ -155,19 +155,39 @@ class DatasetBuildService:
         if not hasattr(workflow_result, "nodes"):
             raise RuntimeError("Dataset build unexpectedly returned a workflow plan.")
         nodes = workflow_result.nodes
-        required_failures = [
+        required_incomplete = [
             stage.name
             for stage in recipe.stages
             if stage.required and nodes.get(stage.name, {}).get("status") != "ok"
         ]
         provisional_id = self._build_id(recipe, nodes)
-        if required_failures:
+        if required_incomplete:
+            failed = [
+                stage.name
+                for stage in recipe.stages
+                if nodes.get(stage.name, {}).get("status") == "failed"
+            ]
+            blocked = [
+                stage.name
+                for stage in recipe.stages
+                if nodes.get(stage.name, {}).get("status") == "blocked"
+            ]
+            root = failed[0] if failed else required_incomplete[0]
+            stage_error = nodes.get(root, {}).get("error", {})
+            cause = (
+                str(stage_error.get("message", "stage failed"))
+                if isinstance(stage_error, Mapping)
+                else str(stage_error or "stage failed")
+            )
+            error = f"Dataset stage {root!r} failed: {cause}"
+            if blocked:
+                error += f" Downstream blocked: {', '.join(blocked)}."
             result = DatasetBuildResult(
                 provisional_id,
                 recipe.selector,
                 "failed",
                 nodes,
-                error="Required dataset stage(s) failed: " + ", ".join(required_failures),
+                error=error,
             )
             self._write_result(recipe, result)
             return result

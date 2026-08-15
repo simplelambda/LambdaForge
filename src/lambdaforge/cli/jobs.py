@@ -9,7 +9,9 @@ import time
 from lambdaforge.cli.common import age, job_resources
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.JobGroupStore import JobGroupStore
+from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.JobService import JobService
+from lambdaforge.diagnostics import LambdaForgeError, job_failure_diagnostic
 
 
 def run_job_command(arguments: argparse.Namespace) -> int:
@@ -46,6 +48,12 @@ def run_job_command(arguments: argparse.Namespace) -> int:
     )
     if arguments.job_command in {"status", "show"}:
         job_record = jobs.get(selected_job_id)
+        if job_record.state in {JobState.FAILED, JobState.TIMEOUT, JobState.CANCELLED}:
+            try:
+                job_logs = jobs.logs(selected_job_id, tail=300)
+            except Exception:
+                job_logs = job_record.stdout + job_record.stderr
+            raise LambdaForgeError(job_failure_diagnostic(job_record, job_logs))
         print(
             json.dumps(job_record.to_dict(), indent=2)
             if arguments.json
@@ -95,15 +103,15 @@ def run_job_command(arguments: argparse.Namespace) -> int:
 def follow_job_logs(jobs: JobService, job_id: str, *, tail: int | None) -> int:
     """Stream scheduler logs by reconnecting through the persistent job record."""
     previous = ""
-    try:
-        while True:
-            current = jobs.logs(job_id, tail=tail)
-            delta = current[len(previous) :] if current.startswith(previous) else current
-            if delta:
-                print(delta, end="" if delta.endswith("\n") else "\n", flush=True)
-            previous = current
-            if jobs.get(job_id).state.terminal:
-                return 0
-            time.sleep(2.0)
-    except KeyboardInterrupt:
-        return 130
+    while True:
+        current = jobs.logs(job_id, tail=tail)
+        delta = current[len(previous) :] if current.startswith(previous) else current
+        if delta:
+            print(delta, end="" if delta.endswith("\n") else "\n", flush=True)
+        previous = current
+        record = jobs.get(job_id)
+        if record.state.terminal:
+            if record.state in {JobState.FAILED, JobState.TIMEOUT, JobState.CANCELLED}:
+                raise LambdaForgeError(job_failure_diagnostic(record, current))
+            return 0
+        time.sleep(2.0)

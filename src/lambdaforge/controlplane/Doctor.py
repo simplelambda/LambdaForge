@@ -24,10 +24,42 @@ class DoctorCheck:
     ok: bool
     message: str
     fix: str | None = None
+    category: str | None = None
+    reason: str | None = None
+    command: str | None = None
+    warning: bool = False
 
-    def to_dict(self) -> dict[str, str | bool | None]:
+    @property
+    def effective_category(self) -> str:
+        """Return a stable category while preserving source-compatible check construction."""
+        if self.warning:
+            return "warning"
+        if self.ok:
+            return "ok"
+        if self.name in {"connection"}:
+            return "connection"
+        if self.name in {"authentication"}:
+            return "authentication"
+        if self.name.startswith("dataset"):
+            return "data"
+        if self.name in {"workspace", "bundle-cache"}:
+            return "storage"
+        if self.name.startswith("scheduler"):
+            return "resource"
+        return "environment"
+
+    def to_dict(self) -> dict[str, object]:
         """Return a machine-readable check."""
-        return {"name": self.name, "ok": self.ok, "message": self.message, "fix": self.fix}
+        return {
+            "name": self.name,
+            "ok": self.ok,
+            "status": "warning" if self.warning else "ok" if self.ok else "error",
+            "category": self.effective_category,
+            "message": self.message,
+            "reason": self.reason,
+            "fix": self.fix,
+            "command": self.command,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,11 +74,26 @@ class DoctorReport:
         """Return whether all required checks passed."""
         return all(check.ok for check in self.checks)
 
+    @property
+    def exit_code(self) -> int:
+        """Return the documented category exit code for the first failed check class."""
+        if self.ok:
+            return 0
+        categories = {check.effective_category for check in self.checks if not check.ok}
+        if categories & {"connection", "authentication", "environment"}:
+            return 3
+        if categories & {"resource", "storage"}:
+            return 5
+        if "data" in categories:
+            return 4
+        return 2
+
     def to_dict(self) -> dict[str, object]:
         """Return the stable report envelope."""
         return {
             "cluster": self.cluster,
             "ok": self.ok,
+            "exit_code": self.exit_code,
             "checks": [check.to_dict() for check in self.checks],
         }
 
@@ -54,9 +101,13 @@ class DoctorReport:
         """Render actionable terminal output."""
         lines = [f"LambdaForge doctor ({self.cluster}): {'OK' if self.ok else 'ISSUES'}"]
         for check in self.checks:
-            lines.append(f"[{'ok' if check.ok else '!!'}] {check.name}: {check.message}")
-            if not check.ok and check.fix:
+            lines.append(f"[{check.effective_category}] {check.name}: {check.message}")
+            if (not check.ok or check.warning) and check.reason:
+                lines.append(f"     why: {check.reason}")
+            if (not check.ok or check.warning) and check.fix:
                 lines.append(f"     fix: {check.fix}")
+            if (not check.ok or check.warning) and check.command:
+                lines.append(f"     next: {check.command}")
         return "\n".join(lines)
 
 
@@ -93,6 +144,9 @@ class Doctor:
                             "Verify the credential reference, SSH host key, network and timeout; "
                             "OpenSSH profiles should verify ssh config/agent/ProxyJump."
                         ),
+                        category="connection",
+                        reason="The transport probe could not reach or authenticate to the host.",
+                        command=f"lf doctor --on {cluster} --debug",
                     ),
                 ),
             )
@@ -102,14 +156,19 @@ class Doctor:
                 connection.returncode == 0,
                 connection.stderr.strip() or "Transport connection is available.",
                 "Verify SSH config, agent, host key and network connectivity.",
+                category="connection",
+                reason="The transport probe returned a non-zero status.",
+                command=f"lf doctor --on {cluster} --debug",
             )
         )
         checks.append(
             DoctorCheck(
                 "authentication",
-                True,
+                connection.returncode == 0,
                 (
-                    "Authentication is delegated to OpenSSH configuration/agent."
+                    "Authentication could not be confirmed because the connection probe failed."
+                    if connection.returncode != 0
+                    else "Authentication is delegated to OpenSSH configuration/agent."
                     if profile.auth.mode == "openssh"
                     else (
                         f"Password authentication succeeded using {profile.auth.credential!r}."
@@ -117,7 +176,20 @@ class Doctor:
                         else "Interactive password authentication succeeded."
                     )
                 ),
-                None,
+                "Verify the configured credential reference and host-key policy.",
+                category="authentication",
+                reason=(
+                    "The transport did not reach an authenticated command session."
+                    if connection.returncode != 0
+                    else None
+                ),
+                command=(
+                    f"lf clusters credentials set {cluster}"
+                    if connection.returncode != 0 and profile.auth.mode == "password"
+                    else f"lf doctor --on {cluster} --debug"
+                    if connection.returncode != 0
+                    else None
+                ),
             )
         )
         selected_python = profile.python
@@ -136,7 +208,10 @@ class Doctor:
                     "managed-environment",
                     active.returncode == 0 and bool(active.stdout.strip()),
                     active.stdout.strip() or "No active managed environment is recorded.",
-                    f"Run 'lambdaforge clusters bootstrap {cluster}'.",
+                    "Bootstrap the cluster's managed environment.",
+                    category="environment",
+                    reason="No verified active-environment pointer is available.",
+                    command=f"lf clusters bootstrap {cluster}",
                 )
             )
         workspace = transport.run(("test", "-d", profile.workspace))
@@ -145,7 +220,10 @@ class Doctor:
                 "workspace",
                 workspace.returncode == 0,
                 profile.workspace if workspace.returncode == 0 else "Workspace is missing.",
-                f"Run 'lambdaforge clusters bootstrap {cluster}'.",
+                "Create the configured workspace through the safe bootstrap workflow.",
+                category="storage",
+                reason="The configured workspace directory is not accessible.",
+                command=f"lf clusters bootstrap {cluster}",
             )
         )
         requirement = PythonRuntimeRequirements.framework()
@@ -158,31 +236,80 @@ class Doctor:
             system_match
             and PythonRuntimeRequirements.compatible(system_match.group(1), (requirement,))
         )
+        legacy_python = profile.environment == "managed" and profile.python_runtime is None
+        replaceable_runtime = profile.runtime_policy.strategy in {"auto", "managed"}
+        system_found = system_python.returncode == 0 and system_match is not None
+        system_warning = bool(
+            profile.environment == "managed"
+            and system_found
+            and (not system_compatible or legacy_python)
+        )
+        system_ok = bool(
+            system_found and (system_compatible or replaceable_runtime or legacy_python)
+        )
         checks.append(
             DoctorCheck(
                 "system-python" if profile.environment == "managed" else "python",
-                system_python.returncode == 0 and system_match is not None,
+                system_ok,
                 f"{system_message} ({'compatible' if system_compatible else 'incompatible'} "
                 f"with {requirement})",
                 (
-                    f"Set clusters.{cluster}.python.executable to a working Python."
-                    if system_python.returncode
+                    "Use an explicit runtime policy; auto can provision a compatible user-space "
+                    "Python without changing the system interpreter."
+                    if system_warning
+                    else f"Set clusters.{cluster}.python.executable to a working Python."
+                    if not system_found
+                    else "Select a Python version satisfying Requires-Python."
+                ),
+                category="warning" if system_warning else "environment",
+                reason=(
+                    "The legacy scalar python setting means strategy=existing and cannot express "
+                    "managed fallback clearly."
+                    if legacy_python
+                    else "The discovered interpreter does not meet Requires-Python."
+                    if not system_compatible
                     else None
                 ),
+                command=(
+                    f"lf clusters set {cluster} python.strategy auto"
+                    if system_warning
+                    else f"lf doctor --on {cluster} --debug"
+                    if not system_ok
+                    else None
+                ),
+                warning=system_warning,
             )
         )
         if profile.environment == "managed":
             runtime = PythonRuntimeResolver().active(profile, transport)
             if runtime is None:
+                legacy_warning = profile.python_runtime is None
                 checks.append(
                     DoctorCheck(
                         "python-runtime",
                         True,
                         (
                             "No managed runtime is active yet; "
-                            f"python.strategy={profile.runtime_policy.strategy} can resolve one "
+                            f"python.strategy={profile.runtime_policy.strategy} will be applied "
                             "during bootstrap."
                         ),
+                        (
+                            "Set an explicit auto policy to permit a user-space fallback."
+                            if legacy_warning
+                            else None
+                        ),
+                        category="warning" if legacy_warning else "environment",
+                        reason=(
+                            "This profile still uses the legacy scalar python form."
+                            if legacy_warning
+                            else None
+                        ),
+                        command=(
+                            f"lf clusters set {cluster} python.strategy auto"
+                            if legacy_warning
+                            else None
+                        ),
+                        warning=legacy_warning,
                     )
                 )
             else:
@@ -394,7 +521,10 @@ class Doctor:
                 "bundle-cache",
                 bundle_cache.returncode == 0,
                 "Bundle cache is ready." if bundle_cache.returncode == 0 else "Cache is missing.",
-                f"Run 'lambdaforge clusters bootstrap {cluster}'.",
+                "Create the verified cache through cluster bootstrap.",
+                category="storage",
+                reason="The configured bundle-cache directory does not exist.",
+                command=f"lf clusters bootstrap {cluster}",
             )
         )
         if config_path is not None:
