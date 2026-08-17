@@ -191,7 +191,18 @@ class ProcessScheduler(Scheduler):
         return result.stdout.strip()
 
     def _control_python(self, command: Sequence[str]) -> str:
-        index = len(self.profile.command_prefix)
-        if index < len(command) and command[index]:
-            return str(command[index])
+        # ControlPlane may wrap the scientific command in ``env NAME=value ...``
+        # (notably for dataset builds), after an optional site command prefix.  The
+        # interpreter is therefore not at a fixed offset.  Prefer the exact Python
+        # that owns the LambdaForge ``-m`` entry point so retries keep using the
+        # environment recorded in their original command.
+        for index in range(1, len(command) - 1):
+            if command[index] != "-m":
+                continue
+            module = str(command[index + 1])
+            candidate = str(command[index - 1])
+            if (module == "lambdaforge" or module.startswith("lambdaforge.")) and not (
+                candidate.startswith("-")
+            ):
+                return candidate
         return self._active_python()

@@ -16,7 +16,7 @@ datasets, experiments, adaptive hyperparameter searches and durable local, SSH o
 Your project keeps ownership of its models and data; LambdaForge supplies the execution,
 provenance, reuse, result-management and safety machinery around them.
 
-> **Status:** `0.8.0` (pre-1.0). Current YAML and documented public imports are supported, but minor
+> **Status:** `0.8.1` (pre-1.0). Current YAML and documented public imports are supported, but minor
 > releases may deliberately simplify APIs before 1.0. The repository currently has no licence
 > file, so redistribution terms have not yet been granted.
 
@@ -67,7 +67,7 @@ For a reproducible installation, build and install a versioned wheel instead of 
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.8.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.8.1-py3-none-any.whl
 ```
 
 The consumer project should select a PyTorch wheel compatible with its target hardware. Optional

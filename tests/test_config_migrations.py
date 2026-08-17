@@ -913,7 +913,7 @@ execution:
             "import sys; import lambdaforge; "
             "assert 'ruamel.yaml' not in sys.modules; "
             "assert 'jsonschema' not in sys.modules; "
-            "assert lambdaforge.__version__ == '0.7.2'"
+            f"assert lambdaforge.__version__ == {LambdaForge.VERSION!r}"
         )
 
         completed = subprocess.run(

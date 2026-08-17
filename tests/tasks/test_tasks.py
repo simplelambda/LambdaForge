@@ -212,4 +212,4 @@ class TestGenericTasks:
         assert CommandLineInterface.main(["run", str(path), "--dry-run"]) == 0
         assert json.loads(capsys.readouterr().out)["kind"] == "task"
         assert CommandLineInterface.main(["run", str(path)]) == 0
-        assert "status=ok" in capsys.readouterr().out
+        assert "finished successfully" in capsys.readouterr().out

@@ -130,5 +130,5 @@ class TestResultManagement:
     ) -> None:
         exit_code = CommandLineInterface.main(["results", str(tmp_path / "missing.yaml")])
 
-        assert exit_code == 1
-        assert "ERROR: FileNotFoundError" in capsys.readouterr().err
+        assert exit_code == 2
+        assert "CONFIGURATION ERROR" in capsys.readouterr().err

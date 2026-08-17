@@ -66,6 +66,48 @@ def test_submit_returns_and_reconnects_to_durable_state(tmp_path: Path) -> None:
     assert reconnected.inventory()[0]["request"]["job_id"] == job_id
 
 
+def test_dataset_environment_wrapper_preserves_supervisor_python(tmp_path: Path) -> None:
+    """Dataset env assignments must not be mistaken for the control interpreter."""
+    profile = ClusterProfile(
+        "local",
+        python=sys.executable,
+        workspace=str(tmp_path),
+        command_prefix=("env", "LAMBDAFORGE_SITE=testing"),
+        storage={
+            "state_root": str(tmp_path / "state"),
+            "cache_root": str(tmp_path / "cache"),
+            "run_root": str(tmp_path / "jobs"),
+        },
+    )
+    value = ProcessScheduler(LocalTransport(), profile)
+    scientific = (
+        *profile.command_prefix,
+        "env",
+        "LAMBDAFORGE_DATASET_ROOT=/datasets",
+        sys.executable,
+        "-m",
+        "lambdaforge.data.DatasetBuildWorker",
+        "config.yaml",
+    )
+
+    submission = value.submit(
+        scientific,
+        ResourceRequest(),
+        work_dir=tmp_path,
+        job_id="job-dataset-env-wrapper",
+        dry_run=True,
+    )
+
+    assert submission.command == (
+        *profile.command_prefix,
+        sys.executable,
+        "-m",
+        "lambdaforge.controlplane.ProcessSupervisor",
+        "launch",
+        str(tmp_path / "jobs/job-dataset-env-wrapper/request.json"),
+    )
+
+
 def test_pause_resume_cancel_and_runtime_timeout(tmp_path: Path) -> None:
     value = scheduler(tmp_path)
     paused_id = "job-060-pause"

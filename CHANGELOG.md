@@ -8,6 +8,15 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-17
+
+### Fixed
+
+- Direct remote dataset builds now launch their detached supervisor with the exact LambdaForge
+  Python interpreter even when the scientific command is wrapped by dataset environment variables
+  and a site `command_prefix`. This prevents GNU `env` from receiving Python's `-m` option and also
+  makes durable retries preserve the interpreter recorded in the original command.
+
 ## [0.8.0] - 2026-08-15
 
 ### Added
@@ -440,7 +449,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/simplelambda/LambdaForge/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/simplelambda/LambdaForge/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/simplelambda/LambdaForge/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/simplelambda/LambdaForge/compare/v0.7.0...v0.7.1
