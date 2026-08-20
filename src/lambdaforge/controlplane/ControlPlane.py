@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shlex
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
@@ -25,6 +25,7 @@ from lambdaforge.controlplane.python_runtime import (
     PythonRuntimeRequirements,
 )
 from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
+from lambdaforge.controlplane.TlsTrust import TlsTrust
 from lambdaforge.diagnostics import ErrorCategory, LambdaForgeError, diagnostic
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
@@ -57,8 +58,12 @@ class ControlPlane:
         dry_run: bool = False,
         run_arguments: Sequence[str] = (),
         group_id: str | None = None,
+        reserved_job_id: str | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> tuple[JobHandle, ExecutionBundle]:
         """Build/cache a bundle, stage it and submit the normal remote run command."""
+        notify = progress or (lambda _phase: None)
+        notify("validation")
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
         storage = profile.storage
@@ -120,6 +125,7 @@ class ControlPlane:
         effective_profile = profile
         torch_plan = None
         if transport is not None and profile.environment == "managed":
+            notify("runtime")
             project = self._project_root(Path(config_path).resolve().parent)
             requirement = PythonRuntimeRequirements.project(project)
             rejected: list[str] = []
@@ -160,6 +166,7 @@ class ControlPlane:
                 python=runtime.executable,
                 python_runtime=PythonRuntimePolicy("existing", runtime.executable),
             )
+        notify("bundle")
         bundle = self.bundles.build(
             config_path,
             effective_profile,
@@ -173,7 +180,6 @@ class ControlPlane:
             ),
         )
         request = resources or ResourceRequest()
-        reserved_job_id: str | None = None
         work_dir: str | Path
         if cluster == "local":
             work_dir = Path(config_path).resolve().parent
@@ -186,6 +192,7 @@ class ControlPlane:
             )
             config = str(Path(config_path).resolve())
         else:
+            notify("staging")
             storage = profile.storage
             assert storage is not None
             remote_dir = str(PurePosixPath(storage.bundle_root) / bundle.bundle_id)
@@ -211,6 +218,7 @@ class ControlPlane:
                     else profile.python
                 )
             else:
+                notify("environment")
                 prepared = self.factory.environment_provider(effective_profile).prepare(
                     effective_profile,
                     transport,
@@ -223,7 +231,7 @@ class ControlPlane:
             work_dir = remote_dir
             config = str(PurePosixPath(remote_dir) / "config.yaml")
             if profile.scheduler == "slurm" and not dry_run:
-                reserved_job_id = JobService.new_id()
+                reserved_job_id = reserved_job_id or JobService.new_id()
                 work_dir = str(PurePosixPath(storage.job_root) / reserved_job_id / "work")
                 staged = transport.run(("mkdir", "-p", str(work_dir)))
                 if staged.returncode:
@@ -232,11 +240,14 @@ class ControlPlane:
                 if copied.returncode:
                     raise RuntimeError(f"Could not stage SLURM job workspace: {copied.stderr}")
                 config = str(PurePosixPath(str(work_dir)) / "config.yaml")
-            environment_prefix: tuple[str, ...] = ()
+            environment_assignments: list[str] = []
+            trust = runtime.tls_trust if runtime is not None else None
+            if isinstance(trust, TlsTrust):
+                environment_assignments.extend(trust.assignments())
             if materialized_kind.value == "dataset":
                 assert storage.dataset_root is not None
-                environment_prefix = (
-                    "env",
+                environment_assignments.extend(
+                    (
                     "LAMBDAFORGE_DATASET_REGISTRY="
                     f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
                     f"LAMBDAFORGE_DATASET_ROOT={storage.dataset_root}",
@@ -245,7 +256,11 @@ class ControlPlane:
                     "LAMBDAFORGE_STAGE_CACHE_ROOT="
                     f"{PurePosixPath(storage.cache_root) / 'dataset-stages'}",
                     f"LAMBDAFORGE_CLUSTER={cluster}",
+                    )
                 )
+            environment_prefix = (
+                ("env", *environment_assignments) if environment_assignments else ()
+            )
             command = self._command(
                 (*profile.command_prefix, *environment_prefix),
                 remote_python,
@@ -253,6 +268,7 @@ class ControlPlane:
                 materialized_kind.value,
                 run_arguments,
             )
+        notify("scheduler")
         handle = self.jobs.submit(
             command,
             cluster=cluster,

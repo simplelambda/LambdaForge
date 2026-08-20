@@ -6,6 +6,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
 import yaml
 
 from lambdaforge.controlplane import (
@@ -22,7 +23,9 @@ from lambdaforge.controlplane import (
     SchedulerSubmission,
     Transport,
 )
+from lambdaforge.data import DatasetRecipeConfig
 from lambdaforge.execution import ResourceRequest
+from lambdaforge.tasks import TaskConfig
 
 
 class FakeTransport(Transport):
@@ -179,6 +182,96 @@ class TestControlPlane:
         strict = yaml.safe_load(first_bundle.config_path.read_text(encoding="utf-8"))
         assert strict["inputs"][0]["path"].startswith("inputs/")
         assert (first_bundle.directory / strict["inputs"][0]["path"]).is_file()
+
+    def test_remote_bundle_stages_inputs_from_embedded_dataset_tasks(self, tmp_path: Path) -> None:
+        """Embedded recipe tasks receive the same bounded relocation as task files."""
+        source = tmp_path / "public-sources.json"
+        source.write_text('{"release": "pinned"}\n', encoding="utf-8")
+        recipe = tmp_path / "dataset.yaml"
+        recipe.write_text(
+            yaml.safe_dump(
+                {
+                    "kind": "dataset",
+                    "schema_version": "1.0",
+                    "dataset": {"name": "records", "version": "1"},
+                    "stages": {
+                        "curate": {
+                            "task": {
+                                "kind": "task",
+                                "schema_version": "1.0",
+                                "name": "curate",
+                                "inputs": {"public_sources": "public-sources.json"},
+                                "task": {"target": "builtins.dict"},
+                            }
+                        }
+                    },
+                    "publish": {"from": "curate", "index": "members.jsonl"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        profile = ClusterProfile(
+            "remote",
+            transport="ssh",
+            host="remote",
+            workspace="/remote/lambdaforge",
+        )
+
+        bundle = ExecutionBundleBuilder(tmp_path / "bundles").build(recipe, profile)
+
+        remote = yaml.safe_load(bundle.config_path.read_text(encoding="utf-8"))
+        embedded = remote["stages"]["curate"]["task"]
+        relative = embedded["inputs"]["public_sources"]
+        assert relative.startswith("stage-data/curate/inputs/")
+        assert (bundle.directory / relative).read_bytes() == source.read_bytes()
+        relocated = DatasetRecipeConfig.from_yaml(bundle.config_path)
+        stage = relocated.stages[0]
+        assert isinstance(stage.task, dict)
+        task = TaskConfig(
+            stage.task,
+            source=bundle.directory / ".lambdaforge-embedded-dataset-stage.yaml",
+        )
+        assert Path(task.resolved_inputs[0].resolved_path) == bundle.directory / relative
+
+    def test_remote_bundle_refuses_large_embedded_dataset_input_before_submission(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "large.zip"
+        source.write_bytes(b"0123456789")
+        recipe = tmp_path / "dataset.yaml"
+        recipe.write_text(
+            yaml.safe_dump(
+                {
+                    "kind": "dataset",
+                    "schema_version": "1.0",
+                    "dataset": {"name": "records", "version": "1"},
+                    "stages": {
+                        "prepare": {
+                            "task": {
+                                "kind": "task",
+                                "schema_version": "1.0",
+                                "name": "prepare",
+                                "inputs": {"archive": "large.zip"},
+                                "task": {"target": "builtins.dict"},
+                            }
+                        }
+                    },
+                    "publish": {"from": "prepare", "index": "members.jsonl"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        profile = ClusterProfile(
+            "remote",
+            transport="ssh",
+            host="remote",
+            workspace="/remote/lambdaforge",
+        )
+
+        with pytest.raises(ValueError, match="managed DatasetVersion"):
+            ExecutionBundleBuilder(tmp_path / "bundles", max_inline_bytes=9).build(recipe, profile)
 
     def test_data_environment_alias_resolves_one_cluster(self) -> None:
         """A physical data environment need not duplicate the cluster profile name."""

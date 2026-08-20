@@ -60,7 +60,18 @@ class JobService:
         job_id = job_id or self.new_id()
         if not job_id.startswith("job-"):
             raise ValueError("LambdaForge job ids must start with 'job-'.")
-        record_metadata = dict(metadata or {})
+        try:
+            reserved = self.store.get(job_id)
+        except FileNotFoundError:
+            reserved = None
+        if reserved is not None and reserved.state is JobState.CANCELLED:
+            raise RuntimeError(
+                f"Submission {job_id} was cancelled before scheduler acknowledgement."
+            )
+        record_metadata = {
+            **(dict(reserved.metadata) if reserved is not None else {}),
+            **dict(metadata or {}),
+        }
         record = JobRecord(
             job_id=job_id,
             cluster=cluster,
@@ -70,7 +81,7 @@ class JobService:
             command=tuple(command),
             work_dir=str(work_dir),
             resources=resources.to_dict(),
-            created_at_utc=now,
+            created_at_utc=reserved.created_at_utc if reserved is not None else now,
             updated_at_utc=now,
             bundle_id=bundle_id,
             config_path=config_path,
@@ -148,6 +159,75 @@ class JobService:
             record.scheduler_id,
             submission.to_dict() if dry_run else None,
         )
+
+    def reserve(
+        self,
+        *,
+        cluster: str,
+        resources: ResourceRequest,
+        config_path: str | Path,
+        metadata: Mapping[str, Any] | None = None,
+        job_type: str = "command",
+        group_id: str | None = None,
+        retry_of: str | None = None,
+    ) -> JobHandle:
+        """Persist a controller-side submission before slow preparation begins."""
+        profile = self.catalog.get(cluster)
+        now = datetime.now(timezone.utc).isoformat()
+        job_id = self.new_id()
+        record = JobRecord(
+            job_id=job_id,
+            cluster=cluster,
+            scheduler=profile.scheduler,
+            scheduler_id=None,
+            state=JobState.PREPARING,
+            command=(),
+            work_dir=str(Path(config_path).resolve().parent),
+            resources=resources.to_dict(),
+            created_at_utc=now,
+            updated_at_utc=now,
+            config_path=str(Path(config_path).resolve()),
+            retry_of=retry_of,
+            metadata=dict(metadata or {}),
+            job_type=job_type,
+            group_id=group_id,
+        )
+        self.store.write(record)
+        return JobHandle(job_id, cluster, JobState.PREPARING)
+
+    def update_preparation(self, job_id: str, phase: str) -> JobRecord:
+        """Advance one reserved submission without inventing scheduler acknowledgement."""
+        record = self.store.get(job_id)
+        if record.state is JobState.CANCELLED:
+            raise RuntimeError(f"Submission {job_id} was cancelled.")
+        metadata = {**dict(record.metadata), "submission_phase": phase}
+        updated = record.with_updates(
+            state=JobState.STAGING if phase == "staging" else JobState.PREPARING,
+            metadata=metadata,
+            updated_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+        self.store.write(updated)
+        return updated
+
+    def fail_preparation(self, job_id: str, error: BaseException) -> JobRecord:
+        """Persist an asynchronous pre-scheduler failure for ordinary job diagnostics."""
+        record = self.store.get(job_id)
+        if record.state is JobState.CANCELLED:
+            return record
+        context = DiagnosticContext((), "asynchronous job preparation", record.cluster)
+        classified = DiagnosticClassifier().classify(error, context)
+        updated = record.with_updates(
+            state=JobState.FAILED,
+            stderr=f"{error.__class__.__name__}: {error}\n",
+            metadata={
+                **dict(record.metadata),
+                "failure_phase": "preparation",
+                "failure_category": classified.category.value,
+            },
+            updated_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+        self.store.write(updated)
+        return updated
 
     def resolve_selector(self, selector: str) -> str:
         """Resolve an exact ID, ``latest`` or one unambiguous job name."""
@@ -255,6 +335,12 @@ class JobService:
         record = self.get(job_id, refresh=False)
         if record.scheduler_id is None:
             value = record.stdout + record.stderr
+            controller_log = self.store.root / "submissions" / job_id / "controller.log"
+            if controller_log.is_file() and not controller_log.is_symlink():
+                try:
+                    value += controller_log.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    pass
             return "\n".join(value.splitlines()[-tail:]) if tail else value
         profile = self.catalog.get(record.cluster)
         scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
@@ -263,7 +349,15 @@ class JobService:
     def cancel(self, job_id: str) -> JobRecord:
         """Cancel through the provider and persist the transition."""
         record = self.get(job_id)
-        if record.state.terminal or record.scheduler_id is None:
+        if record.state.terminal:
+            return record
+        if record.scheduler_id is None:
+            record = record.with_updates(
+                state=JobState.CANCELLED,
+                metadata={**dict(record.metadata), "cancelled_before_scheduler": True},
+                updated_at_utc=datetime.now(timezone.utc).isoformat(),
+            )
+            self.store.write(record)
             return record
         profile = self.catalog.get(record.cluster)
         scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
@@ -387,6 +481,38 @@ class JobService:
         retry_metadata = dict(previous.metadata)
         retry_metadata.pop("failure_phase", None)
         retry_metadata.pop("failure_category", None)
+        if previous.metadata.get("submission_mode") == "asynchronous":
+            if previous.config_path is None:
+                raise ValueError("The asynchronous submission has no source configuration path.")
+            arguments = previous.metadata.get("run_arguments", ())
+            if not isinstance(arguments, Sequence) or isinstance(
+                arguments, (str, bytes, bytearray)
+            ):
+                raise TypeError("Persisted asynchronous run_arguments are invalid.")
+            request = ResourceRequest.from_mapping(previous.resources)
+            run_arguments = tuple(str(item) for item in arguments)
+            if dry_run:
+                from lambdaforge.controlplane.ControlPlane import ControlPlane
+
+                handle, _ = ControlPlane(self.catalog, jobs=self).submit(
+                    previous.config_path,
+                    cluster=previous.cluster,
+                    resources=request,
+                    dry_run=True,
+                    run_arguments=run_arguments,
+                    group_id=previous.group_id,
+                )
+                return handle
+            from lambdaforge.controlplane.SubmissionService import SubmissionService
+
+            return SubmissionService(self.catalog, self).enqueue(
+                previous.config_path,
+                cluster=previous.cluster,
+                resources=request,
+                run_arguments=run_arguments,
+                group_id=previous.group_id,
+                retry_of=previous.job_id,
+            )
         return self.submit(
             previous.command,
             cluster=previous.cluster,

@@ -13,6 +13,7 @@ from lambdaforge.controlplane.CommandResult import CommandResult
 from lambdaforge.controlplane.EnvironmentProvider import EnvironmentProvider
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
 from lambdaforge.controlplane.PreparedEnvironment import PreparedEnvironment
+from lambdaforge.controlplane.TlsTrust import TlsTrust
 from lambdaforge.controlplane.TorchInstallationPlan import TorchInstallationPlan
 from lambdaforge.controlplane.Transport import Transport
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
@@ -83,9 +84,12 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         plan = (
             TorchInstallationPlan.from_mapping(raw_plan) if isinstance(raw_plan, Mapping) else None
         )
+        raw_runtime = policy.get("python_runtime")
+        raw_trust = raw_runtime.get("tls_trust") if isinstance(raw_runtime, Mapping) else None
+        trust = TlsTrust.from_mapping(raw_trust if isinstance(raw_trust, Mapping) else None)
         cached = transport.run(("test", "-f", str(marker)))
         if cached.returncode == 0:
-            verified = self._verify(transport, str(python), plan)
+            verified = self._verify(transport, str(python), plan, trust)
             if verified.returncode == 0:
                 self._activate(profile, transport, str(python))
                 return PreparedEnvironment(bundle.environment_id, str(python), True)
@@ -99,7 +103,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         legacy_marker = legacy_environment / ".lambdaforge-environment.json"
         legacy = transport.run(("test", "-f", str(legacy_marker)))
         if legacy.returncode == 0:
-            verified = self._verify(transport, str(legacy_python), plan)
+            verified = self._verify(transport, str(legacy_python), plan, trust)
             if verified.returncode == 0:
                 self._activate(profile, transport, str(legacy_python))
                 return PreparedEnvironment(bundle.environment_id, str(legacy_python), True)
@@ -110,7 +114,14 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         if created_root.returncode:
             raise RuntimeError(f"Could not create environment cache: {created_root.stderr.strip()}")
         created = transport.run(
-            (*profile.command_prefix, profile.python, "-m", "venv", str(temporary))
+            (
+                *profile.command_prefix,
+                *(() if trust is None else trust.prefix()),
+                profile.python,
+                "-m",
+                "venv",
+                str(temporary),
+            )
         )
         if created.returncode:
             self._cleanup(transport, temporary)
@@ -129,6 +140,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
                 raise ValueError("Online managed environments require an exact PyTorch plan.")
             torch_install = transport.run(
                 (
+                    *(() if trust is None else trust.prefix()),
                     str(temporary_python),
                     "-m",
                     "pip",
@@ -149,6 +161,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
             constraint = remote / "torch-constraint.txt"
             written = transport.run(
                 (
+                    *(() if trust is None else trust.prefix()),
                     str(temporary_python),
                     "-c",
                     "from pathlib import Path; import sys; "
@@ -163,6 +176,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
                     f"Could not write the managed PyTorch constraint: {written.stderr.strip()}"
                 )
         install = [
+            *(() if trust is None else trust.prefix()),
             str(temporary_python),
             "-m",
             "pip",
@@ -186,7 +200,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
                 else "Dependency installation failed; inspect pip output and cluster connectivity."
             )
             raise RuntimeError(f"{hint} {installed.stderr.strip()}")
-        verified = self._verify(transport, str(temporary_python), plan)
+        verified = self._verify(transport, str(temporary_python), plan, trust)
         if verified.returncode:
             self._cleanup(transport, temporary)
             raise RuntimeError(
@@ -202,6 +216,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         )
         marked = transport.run(
             (
+                *(() if trust is None else trust.prefix()),
                 str(temporary_python),
                 "-c",
                 "from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2])",
@@ -230,7 +245,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         if published.returncode:
             self._cleanup(transport, temporary)
             # Another bootstrap may have won the race; accept it only after verification.
-            verified = self._verify(transport, str(python), plan)
+            verified = self._verify(transport, str(python), plan, trust)
             if verified.returncode:
                 raise RuntimeError(
                     f"Could not atomically publish managed environment: {published.stderr.strip()}"
@@ -240,15 +255,19 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
 
     @staticmethod
     def _verify(
-        transport: Transport, python: str, plan: TorchInstallationPlan | None
+        transport: Transport,
+        python: str,
+        plan: TorchInstallationPlan | None,
+        trust: TlsTrust | None = None,
     ) -> CommandResult:
         """Verify exact framework import and required CUDA initialization."""
         require_cuda = bool(plan and plan.require_cuda)
         expected_torch = plan.version if plan is not None else None
         code = (
-            "import lambdaforge,sys,torch\n"
+            "import lambdaforge,ssl,sys,torch\n"
             f"assert lambdaforge.__version__ == {LambdaForgeVersion.CURRENT!r}\n"
             f"assert {expected_torch!r} is None or torch.__version__ == {expected_torch!r}\n"
+            "assert ssl.create_default_context().get_ca_certs(), 'no trusted TLS CAs'\n"
             f"required={require_cuda!r}\n"
             "available=torch.cuda.is_available()\n"
             "if required and not available: sys.exit(3)\n"
@@ -259,7 +278,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
             "   assert probe.item() == 2\n"
             "print(lambdaforge.__version__, torch.__version__, torch.version.cuda, available)\n"
         )
-        return transport.run((python, "-c", code))
+        return transport.run((*(() if trust is None else trust.prefix()), python, "-c", code))
 
     @staticmethod
     def _activate(profile: ClusterProfile, transport: Transport, python: str) -> None:

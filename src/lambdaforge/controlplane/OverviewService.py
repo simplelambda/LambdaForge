@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
@@ -29,10 +30,13 @@ class OverviewService:
             resource_values = resource_future.result()
             dataset_values = dataset_future.result()
         return {
+            "snapshot_version": 1,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "clusters": [value.to_dict() for value in resource_values],
             "jobs": {
                 "active": sum(
-                    value.state.value in {"staging", "queued", "running", "paused"}
+                    value.state.value
+                    in {"preparing", "staging", "queued", "running", "paused"}
                     for value in job_values
                 ),
                 "total": len(job_values),
@@ -40,6 +44,7 @@ class OverviewService:
                     state: sum(value.state.value == state for value in job_values)
                     for state in sorted({value.state.value for value in job_values})
                 },
+                "items": [value.to_dict() for value in job_values],
             },
             "datasets": {
                 "versions": len(dataset_values),
@@ -52,4 +57,4 @@ class OverviewService:
     def _jobs(service: JobService) -> tuple[Any, ...]:
         """Reconcile every reachable provider before composing the global view."""
         service.reconcile(all_clusters=True)
-        return service.list()
+        return service.list(refresh=False)

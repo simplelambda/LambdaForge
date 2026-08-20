@@ -16,7 +16,7 @@ datasets, experiments, adaptive hyperparameter searches and durable local, SSH o
 Your project keeps ownership of its models and data; LambdaForge supplies the execution,
 provenance, reuse, result-management and safety machinery around them.
 
-> **Status:** `0.8.1` (pre-1.0). Current YAML and documented public imports are supported, but minor
+> **Status:** `0.9.0` (pre-1.0). Current YAML and documented public imports are supported, but minor
 > releases may deliberately simplify APIs before 1.0. The repository currently has no licence
 > file, so redistribution terms have not yet been granted.
 
@@ -67,7 +67,7 @@ For a reproducible installation, build and install a versioned wheel instead of 
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.8.1-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.9.0-py3-none-any.whl
 ```
 
 The consumer project should select a PyTorch wheel compatible with its target hardware. Optional
@@ -123,6 +123,7 @@ so paths such as `my_project.preprocessing.normalize_record` resolve normally.
 | Discover project configurations | `lf configs list` |
 | Build and inspect an immutable dataset | `lf datasets plan NAME`; `lf datasets build NAME` |
 | Reconnect to work | `lf jobs list`; `lf jobs show latest`; `lf jobs logs JOB --follow` |
+| Watch all live work interactively | `lf top` (or `lf overview --json` for software) |
 | Inspect cluster readiness | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Diagnose a failed command | rerun with `--debug`; use `--json` for automation |
 | Audit and compare results | `lf results list`; `lf results compare A B --metric METRIC` |
@@ -168,6 +169,13 @@ Recipe stages use the ordinary Workflow DAG, can reuse verified content-addresse
 publish only after the final index and assets pass validation. The Registry owns managed
 placements; a DataCatalog remains available for external or institutionally managed data.
 
+Explicit local inputs of at most 10 MiB are content-hashed and copied automatically into the
+execution bundle, including inputs declared inside an embedded dataset-recipe stage. Users never
+copy them into hashed job directories. Larger inputs are refused before submission: register a
+location for the target cluster in a DataCatalog, materialize a managed DatasetVersion, or perform
+an explicit preview-first/institutional transfer instead of hiding hundreds of gigabytes in a
+control bundle.
+
 Remote execution is explicit. Register a cluster, diagnose it, preview the submission, then run:
 
 ```bash
@@ -177,8 +185,22 @@ lf clusters bootstrap atlas --dry-run
 lf clusters bootstrap atlas
 lf run experiment.yaml --on atlas --dry-run
 lf run experiment.yaml --on atlas
+lf top
 lf jobs logs latest --follow
 ```
+
+A normal remote `run` or `datasets build` returns a durable job ID after a quick local hand-off; it
+does not hold the terminal while LambdaForge builds wheels, hashes/copies bounded inputs, prepares
+the remote environment and contacts the scheduler. The job is honestly reported as `preparing`
+until the provider acknowledges it. Inspect `metadata.submission_phase` with `lf jobs show JOB
+--json`, or use `lf top` to follow every cluster and job. Use `--wait-for-submit` only when a script
+or diagnosis must synchronously wait for remote staging and scheduler acknowledgement.
+
+`lf top` is an interactive terminal view on a TTY: arrow keys or `j`/`k` select jobs, `l` shows the
+selected log, `x` requests confirmed cancellation, `r` refreshes and `q` exits. It has no private
+data source: `lf overview --json`, `lf jobs list --json` and `lf resources --all --json` expose the
+same versioned records for scripts, desktop applications and other wrappers. In a pipe, `lf top`
+prints one snapshot; `lf top --json --follow` emits newline-delimited JSON snapshots.
 
 OpenSSH is the default and reuses a private `ControlMaster` socket for a bounded idle period, so
 ordinary CLI use does not create an authentication storm. Managed environments are immutable
@@ -187,6 +209,11 @@ user-space virtual environments built from exact project/framework wheels. With 
 then an existing Conda/Mamba/Micromamba, and finally a pinned, checksum-verified micromamba staged
 from the controller. The resulting Python runtime and package environment live below the configured
 cluster cache; LambdaForge never changes system Python, shell startup files, GPU drivers or CUDA.
+For a LambdaForge-provisioned runtime it also discovers a readable CA bundle already trusted by
+the host Python, validates it without contacting an external site, records that path and propagates
+it to runtime creation, pip/Requests and scientific jobs. It never disables certificate checking,
+downloads arbitrary roots or modifies `/etc`; `lf doctor` reports system and managed TLS trust
+separately.
 Use `python.strategy: existing` when institutional policy requires an administrator-provided Python.
 Older profiles whose YAML contains the scalar `python: python3` deliberately keep that strict
 behavior. Opt one into automatic user-space provisioning, review the plan and apply it with:

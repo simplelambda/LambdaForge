@@ -11,6 +11,7 @@ from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlane import ControlPlane
 from lambdaforge.controlplane.JobGroupStore import JobGroupStore
 from lambdaforge.controlplane.jobs import JobGroup
+from lambdaforge.controlplane.SubmissionService import SubmissionService
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
 
@@ -35,6 +36,7 @@ class MultiClusterSubmissionService:
         resources: ResourceRequest | None = None,
         dry_run: bool = False,
         independent_hpo: bool = False,
+        wait_for_submit: bool = True,
     ) -> JobGroup:
         if len(set(clusters)) != len(clusters) or not clusters:
             raise ValueError("Multi-cluster submission requires unique cluster names.")
@@ -60,13 +62,21 @@ class MultiClusterSubmissionService:
             self.groups.put(group)
         handles = []
         for cluster in clusters:
-            handle, _ = self.control.submit(
-                config,
-                cluster=cluster,
-                resources=resources,
-                dry_run=dry_run,
-                group_id=group_id,
-            )
+            if not dry_run and not wait_for_submit:
+                handle = SubmissionService(self.catalog).enqueue(
+                    config,
+                    cluster=cluster,
+                    resources=resources,
+                    group_id=group_id,
+                )
+            else:
+                handle, _ = self.control.submit(
+                    config,
+                    cluster=cluster,
+                    resources=resources,
+                    dry_run=dry_run,
+                    group_id=group_id,
+                )
             handles.append(handle)
             group = JobGroup(
                 group_id,

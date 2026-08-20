@@ -61,11 +61,14 @@ _NAMES = (
     "StorageGcPlan",
     "StorageReport",
     "StorageService",
+    "SubmissionService",
     "SystemKeyringCredentialProvider",
     "TorchInstallationPlan",
     "TorchInstallationPolicy",
     "Transport",
 )
+
+_TLS_NAMES = ("TlsTrust", "TlsTrustResolver")
 
 LazyExports.install(
     __name__,
@@ -84,6 +87,7 @@ LazyExports.install(
             "lambdaforge.controlplane.PythonRuntimeResolver",
             "PythonRuntimeResolver",
         ),
+        **{name: ("lambdaforge.controlplane.TlsTrust", name) for name in _TLS_NAMES},
         **{name: (f"lambdaforge.controlplane.{name}", name) for name in _NAMES},
     },
 )
@@ -94,5 +98,6 @@ __all__ = [
     "MicromambaArtifactStore",
     "PythonRuntimeResolver",
     *_PYTHON_RUNTIME_NAMES,
+    *_TLS_NAMES,
     *_NAMES,
 ]

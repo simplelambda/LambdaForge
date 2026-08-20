@@ -16,7 +16,7 @@ generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine be
 Python package, so a research project can focus on its data and science instead of rebuilding
 pipelines, training loops, provenance, result management and process scheduling.
 
-> **Status:** `0.8.1`, usable but pre-1.0. The public namespaces documented below are the intended
+> **Status:** `0.9.0`, usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
 > contain a licence file, so redistribution terms still need to be chosen by SimpleLambda.
 
@@ -168,7 +168,7 @@ immutable artifact instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.8.1-py3-none-any.whl
+python -m pip install dist/lambdaforge-0.9.0-py3-none-any.whl
 ```
 
 Let the consumer project's lock file or constraints select a PyTorch build compatible with its
@@ -605,9 +605,11 @@ Python equivalents are `ConfigurationComposer.resolve()` and `ConfigurationDiff.
 
 ## 10. Local and multi-cluster control plane
 
-The terminal is a unified, serverless control plane. A command returns after a
-durable scheduler acknowledgement; direct-host work is owned by a detached per-job supervisor and
-SLURM work remains owned by SLURM. `lambdaforge status`, `resources --all`, `top`, `configs`,
+The terminal is a unified, serverless control plane. A normal remote execution command first
+persists a local submission record, starts one detached controller worker and returns its job ID;
+that worker performs potentially slow bundle construction, input hashing/transfer, environment
+preparation and scheduler submission. Direct-host scientific work is then owned by a detached
+per-job supervisor and SLURM work remains owned by SLURM. `lambdaforge status`, `resources --all`, `top`, `configs`,
 `datasets` and `storage` query the same application services. Read the
 [control-plane architecture](#19-architecture) before changing provider boundaries.
 
@@ -691,7 +693,26 @@ lambdaforge clusters bootstrap atlas
 lambdaforge run experiment.yaml --on atlas --dry-run
 lambdaforge run experiment.yaml --on atlas --cpus 8 --memory 32GiB --resource-gpus 1 --time 4h
 lambdaforge run experiment.yaml --profile one-gpu
+lambdaforge top
 ```
+
+Remote `run` and `datasets build` use asynchronous hand-off by default. The returned state is
+`preparing`, not a false scheduler acknowledgement. The durable `metadata.submission_phase` moves
+through `validation`, `runtime`, `bundle`, `staging`, `environment` and `scheduler`; after provider
+acceptance the same job ID receives its real scheduler ID and `queued`/`staging` state. Preparation
+failures and controller logs remain available through ordinary `jobs show` and `jobs logs`. A
+pre-scheduler cancellation marks the request cancelled and the worker refuses the next phase. Use
+`--wait-for-submit` for compatibility with a script that genuinely needs to wait for staging and
+provider acknowledgement. Dry-runs remain synchronous and read-only so they can return the complete
+plan.
+
+`lf top` opens the interactive live view when stdin/stdout are a TTY. Use arrows or `j`/`k` to
+select, `l` for recent logs, `x` plus confirmation to cancel, `r` to refresh and `q` to leave. It
+shows host CPU/RAM/GPU facts separately from job declarations and scheduler state; login-node usage
+is not presented as SLURM partition capacity. No TUI-only backend exists: the versioned snapshot
+from `lf overview --json`, job rows from `lf jobs list --json` and resource rows from `lf resources
+--all --json` are the machine interface for a GUI or wrapper. Non-TTY `lf top` prints once;
+`lf top --json --follow` is an NDJSON stream and `lf top --once` forces one human snapshot.
 
 ### Managed Python runtime
 
@@ -724,7 +745,8 @@ this order:
 
 ```text
 transport/platform -> Python constraints -> runtime -> PyTorch/CUDA wheel
-                   -> environment identity -> venv/packages -> verification -> active pointers
+                   -> host CA trust -> environment identity -> venv/packages
+                   -> TLS/CUDA/framework verification -> active pointers
 ```
 
 LambdaForge reads its own `Requires-Python` from installed release metadata and the nearest
@@ -741,6 +763,16 @@ AArch64 or ppc64le, transfers the single executable and verifies the checksum ag
 `conda activate`, `conda init`, edits `.bashrc`, uses sudo or changes system Python/CUDA/drivers.
 Micromamba supplies only the reusable CPython runtime; ordinary pip policy still installs the exact
 framework/project/PyTorch packages into the content-addressed `venv`.
+
+Before LambdaForge accepts a runtime it asks the configured host Python for its OpenSSL default CA
+locations, selects a readable PEM bundle that can construct a non-empty verified context and records
+only its absolute path. Managed Conda/Micromamba creation uses that trust, as do online pip/Torch
+installation and the final task, experiment or dataset process through `SSL_CERT_FILE`,
+`REQUESTS_CA_BUNDLE`, `PIP_CERT` and `CURL_CA_BUNDLE`. This deliberately reuses institutional roots
+that already make system Python work. Installing `truststore` alone or Conda's public
+`ca-certificates` cannot guarantee those local roots; disabling verification would be insecure.
+Existing administrator-owned Python is not rewritten or given a managed trust policy. If no valid
+host PEM bundle exists, provisioning fails closed and asks for the host trust to be repaired.
 
 Runtimes, managers, Conda packages and environments are separate cache categories:
 
@@ -765,7 +797,9 @@ environment or an active/queued job.
 `doctor` reports the system/default Python separately from the active resolved runtime and managed
 environment Python. Thus Python 3.9 can be a healthy system probe while bootstrap is still able to
 provide Python 3.13; under `strategy: existing`, the same incompatibility remains an actionable
-failure.
+failure. `system-python-tls` and `managed-python-tls` also validate local trust-context construction
+without depending on Zenodo or another external service. An old managed runtime with no recorded
+host CA policy is reported as repairable by rerunning bootstrap.
 
 The portable `ResourceRequest` normalizes CPU cores, RAM, GPUs, GPU memory, duration, storage and
 process count. One validated per-cluster translation layer emits standard `gpus`, generic/typed
@@ -838,6 +872,13 @@ to Python applications and a
 future GUI. CLI JSON output is a direct serialization of the same `JobRecord`, `JobHandle`, doctor,
 bundle and data service objects; there is no second GUI-only business layer.
 
+`preparing` means the local detached controller owns pre-scheduler work; `staging` means bundle or
+direct-host supervisor staging; `queued` means the scheduler has accepted the job. These states are
+not interchangeable. `overview --json` has `snapshot_version`, `generated_at_utc`, cluster resource
+records, aggregate counts and the complete `jobs.items` records used by `top`. `top --json --follow`
+emits one compact snapshot per line for stream consumers. Ordinary one-shot services remain the
+recommended application API; a wrapper never needs to scrape terminal escape sequences.
+
 Records also keep scientific/execution identities, exact environment and remote paths. A later
 process refreshes non-terminal scheduler states, so a SLURM job survives the local CLI exiting.
 Synchronize only small evidence or explicitly fetch one heavy artifact:
@@ -904,10 +945,44 @@ data_catalog: ../data-catalog.yaml
 inputs: {raw: dataset:raw-corpus}
 ```
 
-The target profile's `data_environment` selects an external physical location. If it is missing, submission
-fails before scheduling and tells the user to register or replicate the data. Ordinary local path
-inputs up to 10 MiB are copied into the small execution bundle; larger implicit transfers are
-refused. Data movement is a separate preview-first command:
+The target profile's `data_environment` selects an external physical location. If it is missing,
+submission fails before scheduling and tells the user to register or replicate the data. Ordinary
+local path inputs up to 10 MiB are content-hashed and copied into the small execution bundle. This
+applies equally to a standalone Task YAML, a task YAML referenced by a dataset recipe and a task
+mapping embedded directly under `stages.NAME.task`. LambdaForge rewrites the staged configuration
+to a bundle-relative path, then the process scheduler copies the complete bundle into the durable
+job workspace. The user never has to discover or populate a hashed bundle/job directory.
+
+For example, this small manifest is transferred automatically when the recipe is submitted to a
+remote cluster:
+
+```yaml
+stages:
+  curate:
+    task:
+      kind: task
+      schema_version: "1.0"
+      name: curate
+      inputs: {public_sources: ../data/public-sources.json}
+      task: {target: my_project.tasks.CurateSources}
+```
+
+The 10 MiB limit covers each declared file or complete directory input. It is intentionally not a
+transparent large-data transport: a ZIP or directory above the limit causes a configuration error
+before bundle upload or scheduler submission. For hundreds of gigabytes, give the bytes a logical
+identity and an explicit target placement, then reference that identity from the stage:
+
+```yaml
+data_catalog: ../data-catalog.yaml
+inputs: {archive: dataset:raw-archive}
+```
+
+The catalogue can point `local` and `atlas` at different physical paths while the task fingerprint
+retains one logical identity. If the target placement does not exist yet, create it through the
+preview-first replication command below, `datasets materialize` for a managed DatasetVersion, an
+object-store/transfer plugin, or the institution's supported data mover. The researcher chooses and
+audits that placement/transfer policy; LambdaForge refuses to guess it or silently copy a massive
+input. Data movement is a separate preview-first command:
 
 ```bash
 lambdaforge data --catalog data-catalog.yaml list
@@ -917,9 +992,10 @@ lambdaforge data --catalog data-catalog.yaml replicate raw-corpus --from local -
 lambdaforge data --catalog data-catalog.yaml replicate raw-corpus --from local --to atlas --apply
 ```
 
-The built-in replication provider uses `rsync` and requires both locations to exist in the catalog;
-it does not guess destinations or rewrite the catalog. Object-store and institutional transfer
-systems implement the `DataTransferProvider` boundary.
+The built-in replication provider uses `rsync`, requires both source and destination locations to
+be declared in the catalog and currently copies from a local source to a local or SSH destination.
+It does not guess paths or rewrite the catalog. Object-store and institutional transfer systems
+implement the `DataTransferProvider` boundary.
 
 Training experiments use the same catalogue. A direct split such as
 `data.train: dataset:raw-corpus/train` requires the entry to declare a dataset `loader` ObjectSpec
@@ -1310,9 +1386,9 @@ snapshot without changing the environment.
 | `plan CONFIG [--on CLUSTER]` | Uniform shortcut for the best available dry-run/preflight. | no |
 | `run CONFIG` | Execute experiment, task or workflow. | yes |
 | `run CONFIG --force|--restart|--no-resume` | Explicitly control success reuse and partial continuation. | yes |
-| `run CONFIG --on CLUSTER|--profile PROFILE` | Cache a small bundle and submit through the control plane. | job metadata; remote only without dry-run |
+| `run CONFIG --on CLUSTER|--profile PROFILE` | Persist an ID immediately, then prepare/cache/submit remotely in a detached controller. `--wait-for-submit` waits for provider acknowledgement. | job metadata; remote only without dry-run |
 | `clusters add|list|show|inspect|set|unset|remove|export|credentials|test|bootstrap|resources|storage` | Manage profiles and inspect their environment, resources and storage. | profile/credential/bootstrap mutations |
-| `status`, `overview`, `top` | Global cluster/job/dataset view; `top --follow` refreshes. | no |
+| `status`, `overview`, `top` | Global cluster/job/dataset view; `top` is interactive on a TTY, `top --once` is one-shot and `top --json --follow` is NDJSON. | no |
 | `jobs list [--all]|show|logs|pause|resume|cancel|retry|delete|reconcile`, `jobs group list|show` | Reconnect and safely control persistent work/groups. | lifecycle commands only |
 | `resources [--on C|--all] [--processes]` | Separate observed host facts, scheduler view and declared job requests. | no |
 | `configs|experiments|tasks list|show|validate|plan|run`; `experiments status|history|results` | Discover project YAML and operate it by unambiguous name. | only run |
@@ -1658,21 +1734,19 @@ LambdaForge/
 └── pyproject.toml                # package and tool configuration
 ```
 
-The implementation follows the project's Java-influenced object philosophy:
+The implementation uses objects where they own state or a replaceable policy and small functions
+where they are an entry point or pure transformation. A module is cohesive rather than forced to
+contain exactly one class: `JobService` owns durable lifecycle transitions, `SubmissionService`
+owns controller-side hand-off, `Transport` and `Scheduler` are provider boundaries,
+`OverviewService` composes existing sources of truth, and `LiveJobMonitor` only handles terminal
+interaction/rendering. The private `SubmissionWorker` is deliberately an internal process entry
+point, not another public execution engine. This separation lets a future GUI call the same service
+objects or JSON commands without importing a TUI.
 
-- each implementation `.py` contains one class;
-- reusable behaviour lives on objects, class methods or static methods rather than module-level
-  utility functions;
-- `__init__.py` and `__main__.py` are packaging entry points and are the intentional exceptions;
-- enums replace closed sets of internal magic strings;
-- YAML keys and fully qualified import paths remain strings because they are external protocol
-  boundaries;
-- responsibilities stay separated even when that means several small files.
-
-PEP 8 normally favours short lowercase module names; matching class and module names is therefore an
-intentional LambdaForge convention, enforced for consistency rather than presented as universal
-Python style. Stable lowercase package namespaces and public re-exports keep that choice out of most
-consumer imports.
+Enums and typed immutable records replace closed magic-string/dictionary state. YAML keys, error
+categories and fully qualified import paths remain strings where they are external protocol
+boundaries. Public imports are re-exported from stable lowercase package namespaces, so physical
+module layout and the existing matching class/module filenames do not become consumer contracts.
 
 Subpackages are introduced for stable conceptual boundaries, not merely after an arbitrary file
 count. Classification is divided into `binary` and `multiclass`, while training separates

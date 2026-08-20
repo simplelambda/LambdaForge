@@ -43,6 +43,10 @@ required. Do not include real credentials or private datasets.
 - Managed Python provisioning is unprivileged and confined to the configured cache root. The pinned
   micromamba fallback is downloaded over HTTPS on the controller and SHA-256 verified before and
   after transfer; bootstrap never edits shell profiles, system Python, drivers or system CUDA.
+- A LambdaForge-managed runtime reuses only a readable CA bundle already selected and locally
+  validated through the host Python trust configuration. Its path is propagated to provisioning,
+  pip/Requests and scientific jobs. LambdaForge never disables TLS verification, downloads
+  arbitrary trust roots, writes `/etc` or modifies the system trust store.
 - Tracking and S3-compatible providers expand the trust boundary to their SDK, credentials, network
   and service. They are optional and loaded only when configured.
 

@@ -44,6 +44,7 @@ class DatasetCommands:
                     force=arguments.force,
                     force_stages=arguments.force_stage,
                     dry_run=arguments.dry_run,
+                    wait_for_submit=getattr(arguments, "wait_for_submit", False),
                 )
                 payload = handle.to_dict()
         elif operation == "list":

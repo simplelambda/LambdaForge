@@ -246,6 +246,7 @@ class DatasetBuildService:
         force: bool = False,
         force_stages: Sequence[str] = (),
         dry_run: bool = False,
+        wait_for_submit: bool = True,
     ) -> JobHandle:
         """Submit a durable dataset-build unit; the worker reuses the same service locally."""
         if recipe.source is None:
@@ -255,6 +256,16 @@ class DatasetBuildService:
             arguments.append("--force")
         for stage in force_stages:
             arguments.extend(("--force-stage", stage))
+        if cluster != "local" and not dry_run and not wait_for_submit:
+            from lambdaforge.controlplane.SubmissionService import SubmissionService
+
+            return SubmissionService(self.jobs.catalog, self.jobs).enqueue(
+                recipe.source,
+                cluster=cluster,
+                resources=ResourceRequest(),
+                run_arguments=arguments,
+            )
+
         from lambdaforge.controlplane.ControlPlane import ControlPlane
 
         handle, _ = ControlPlane(self.jobs.catalog, jobs=self.jobs).submit(

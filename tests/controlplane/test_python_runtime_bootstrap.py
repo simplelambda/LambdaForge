@@ -141,6 +141,17 @@ class RuntimeResolutionTransport(Transport):
                 ),
             )
         executable = next((value for value in values if value in self.pythons), None)
+        if executable is not None and "get_default_verify_paths" in " ".join(values):
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "ca_file": "/etc/ssl/certs/ca-certificates.crt",
+                        "candidates": ["/etc/ssl/certs/ca-certificates.crt"],
+                    }
+                )
+                + "\n",
+            )
         if executable is not None and "Path(sys.argv[1]).write_text" in " ".join(values):
             self.files[values[-2]] = values[-1]
             return CommandResult(0)
@@ -157,6 +168,7 @@ class RuntimeResolutionTransport(Transport):
                         "executable": executable,
                         "pip": True,
                         "venv": True,
+                        "tls_ca_count": 141,
                     }
                 )
                 + "\n",

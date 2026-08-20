@@ -8,6 +8,44 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-20
+
+### Added
+
+- Durable asynchronous remote submission: CLI `run` and `datasets build` persist a `preparing` job
+  immediately, then detach bundle construction, bounded-input hashing/transfer, environment setup
+  and scheduler submission while preserving the same job ID and actionable pre-scheduler failures.
+- A dependency-light interactive `lf top` view with cluster CPU/RAM/GPU summaries, selectable live
+  jobs, recent logs and confirmed cancellation. `overview --json` now exposes the versioned snapshot
+  and complete job rows; `top --json --follow` provides an NDJSON stream for wrappers.
+- Deterministic host CA-bundle discovery and validation for LambdaForge-managed Python runtimes,
+  with explicit propagation through Conda/Micromamba, pip/Requests and scientific job commands.
+  Doctor now reports system and managed Python TLS trust separately.
+
+### Changed
+
+- Remote CLI submission no longer holds the user's terminal through slow preparation. Use the new
+  `--wait-for-submit` escape hatch when synchronous provider acknowledgement is required; dry-runs
+  remain synchronous and read-only.
+- Global overview reconciliation avoids a duplicate scheduler refresh and includes honest
+  `preparing`, `staging`, `queued` and provider states from the same services used by the TUI and
+  programmatic interfaces.
+
+### Fixed
+
+- Remote execution bundles now discover, hash, copy and rewrite bounded local inputs declared in
+  embedded dataset-recipe tasks, matching standalone and referenced task YAML behavior. Large
+  embedded inputs fail during preflight with explicit DataCatalog/DatasetVersion guidance instead
+  of becoming missing paths inside a hashed remote job workspace.
+- Managed Conda/Micromamba Python no longer passes bootstrap while using an incomplete CA store that
+  fails ordinary HTTPS on institutional clusters whose system Python succeeds.
+
+### Security
+
+- Managed trust inherits only a host-selected, readable and locally validated PEM CA bundle.
+  Certificate verification remains enabled; LambdaForge neither downloads arbitrary CA roots nor
+  modifies system trust, `/etc` or shell startup files.
+
 ## [0.8.1] - 2026-08-17
 
 ### Fixed
@@ -449,7 +487,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/simplelambda/LambdaForge/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/simplelambda/LambdaForge/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/simplelambda/LambdaForge/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/simplelambda/LambdaForge/compare/v0.7.1...v0.7.2

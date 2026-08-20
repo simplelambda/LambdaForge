@@ -99,6 +99,9 @@ def build_parser() -> argparse.ArgumentParser:
     top.add_argument("--clusters", type=Path)
     top.add_argument("--follow", action="store_true")
     top.add_argument("--interval", type=float, default=5.0)
+    top.add_argument(
+        "--once", action="store_true", help="Print one snapshot even in an interactive terminal."
+    )
     top.add_argument("--json", action="store_true")
     resources = subparsers.add_parser("resources", help="Observe cluster CPU, RAM, GPU and jobs.")
     resources.add_argument("--on")
@@ -333,6 +336,11 @@ def build_parser() -> argparse.ArgumentParser:
         dataset_build.add_argument("--json", action="store_true")
         if build_operation == "build":
             dataset_build.add_argument("--dry-run", action="store_true")
+            dataset_build.add_argument(
+                "--wait-for-submit",
+                action="store_true",
+                help="Wait for remote staging and scheduler acknowledgement.",
+            )
     dataset_add = dataset_commands.add_parser("add")
     dataset_add.add_argument("manifest", type=Path)
     dataset_add.add_argument("--on", default="local")
@@ -434,6 +442,11 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="Execute an experiment, task or workflow YAML file.")
     run.add_argument("config", type=Path)
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument(
+        "--wait-for-submit",
+        action="store_true",
+        help="Wait for remote staging and scheduler acknowledgement.",
+    )
     run.add_argument("--no-plots", action="store_true")
     run.add_argument("--mode", choices=("sequential", "parallel", "ddp"))
     run.add_argument("--gpus", help="Comma-separated logical GPU indices.")

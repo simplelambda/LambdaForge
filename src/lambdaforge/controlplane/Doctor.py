@@ -12,6 +12,7 @@ from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.python_runtime import PythonRuntimeRequirements
 from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
+from lambdaforge.controlplane.TlsTrust import TlsTrustResolver
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 
@@ -280,6 +281,30 @@ class Doctor:
                 warning=system_warning,
             )
         )
+        if system_found:
+            system_tls = transport.run(
+                (
+                    *profile.command_prefix,
+                    *TlsTrustResolver.probe_command(profile.python),
+                )
+            )
+            checks.append(
+                DoctorCheck(
+                    "system-python-tls",
+                    system_tls.returncode == 0,
+                    system_tls.stdout.strip()
+                    or system_tls.stderr.strip()
+                    or "System Python has no usable certificate authorities.",
+                    "Repair the host Python/system CA configuration with the cluster operator.",
+                    category="environment",
+                    reason=(
+                        "System Python could not construct a verified TLS trust context."
+                        if system_tls.returncode != 0
+                        else None
+                    ),
+                )
+            )
+        runtime = None
         if profile.environment == "managed":
             runtime = PythonRuntimeResolver().active(profile, transport)
             if runtime is None:
@@ -351,6 +376,48 @@ class Doctor:
                         ),
                         f"{managed_message}; {selected_python}",
                         f"Rerun 'lf clusters bootstrap {cluster}'.",
+                    )
+                )
+                trust_missing = bool(
+                    runtime is not None and runtime.managed and runtime.tls_trust is None
+                )
+                managed_tls = (
+                    transport.run(
+                        (
+                            *profile.command_prefix,
+                            *TlsTrustResolver.probe_command(
+                                selected_python,
+                                runtime.tls_trust if runtime is not None else None,
+                            ),
+                        )
+                    )
+                    if not trust_missing
+                    else None
+                )
+                tls_ok = managed_tls is not None and managed_tls.returncode == 0
+                message = "Managed runtime has no recorded host CA trust policy."
+                if managed_tls is not None:
+                    message = (
+                        managed_tls.stdout.strip()
+                        or managed_tls.stderr.strip()
+                        or "Managed Python has no usable certificate authorities."
+                    )
+                checks.append(
+                    DoctorCheck(
+                        "managed-python-tls",
+                        tls_ok,
+                        message,
+                        f"Rerun 'lf clusters bootstrap {cluster}' to repair TLS trust.",
+                        category="environment",
+                        reason=(
+                            "The managed runtime is not using a validated host CA bundle."
+                            if trust_missing
+                            else "The managed environment could not construct a verified TLS "
+                            "trust context."
+                            if not tls_ok
+                            else None
+                        ),
+                        command=f"lf clusters bootstrap {cluster}" if not tls_ok else None,
                     )
                 )
         if profile.project_module:

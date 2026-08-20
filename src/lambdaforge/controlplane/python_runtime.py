@@ -12,6 +12,8 @@ from typing import Any
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import Version
 
+from lambdaforge.controlplane.TlsTrust import TlsTrust
+
 
 class NoCompatiblePythonRuntimeError(RuntimeError):
     """Report that no permitted Python runtime satisfies all declared constraints."""
@@ -98,6 +100,7 @@ class PythonRuntime:
     ready: bool
     action: str
     package_fingerprint: str | None = None
+    tls_trust: TlsTrust | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return identity-safe runtime evidence."""
@@ -114,6 +117,7 @@ class PythonRuntime:
             "ready": self.ready,
             "action": self.action,
             "package_fingerprint": self.package_fingerprint,
+            "tls_trust": self.tls_trust.to_dict() if self.tls_trust is not None else None,
         }
 
     @classmethod
@@ -135,6 +139,9 @@ class PythonRuntime:
             action=str(value.get("action", "reuse")),
             package_fingerprint=(
                 str(value["package_fingerprint"]) if value.get("package_fingerprint") else None
+            ),
+            tls_trust=TlsTrust.from_mapping(
+                value.get("tls_trust") if isinstance(value.get("tls_trust"), Mapping) else None
             ),
         )
 

@@ -20,6 +20,7 @@ from lambdaforge.controlplane.python_runtime import (
     PythonRuntimePolicy,
     PythonRuntimeRequirements,
 )
+from lambdaforge.controlplane.TlsTrust import TlsTrust, TlsTrustResolver
 from lambdaforge.controlplane.Transport import Transport
 
 if TYPE_CHECKING:
@@ -38,9 +39,11 @@ class PythonRuntimeResolver:
         artifacts: MicromambaArtifactStore | None = None,
         *,
         lock_timeout: float = 30.0,
+        tls: TlsTrustResolver | None = None,
     ) -> None:
         self.artifacts = artifacts or MicromambaArtifactStore()
         self.lock_timeout = lock_timeout
+        self.tls = tls or TlsTrustResolver()
 
     def resolve(
         self,
@@ -57,6 +60,7 @@ class PythonRuntimeResolver:
             (PythonRuntimeRequirements.framework(), *requirements)
         )
         detected: list[str] = []
+        host_trust_python: str | None = None
         excluded = set(excluded_runtime_ids)
         active = self.active(profile, transport)
         if (
@@ -64,16 +68,19 @@ class PythonRuntimeResolver:
             and active.runtime_id not in excluded
             and (policy.strategy != "managed" or active.managed)
         ):
-            probed = self._probe(profile, transport, active.executable)
+            trust = self.tls.resolve(profile, transport) if active.managed else None
+            probed = self._probe(profile, transport, active.executable, trust=trust)
             self._record_probe(detected, active.executable, probed)
             if probed is not None and self._acceptable(probed, policy, required):
-                return self._with_action(probed, active, "reuse")
+                return self._with_action(probed, active, "reuse", trust=trust)
 
         if policy.strategy != "managed":
             names = self._existing_candidates(policy)
             for executable in names:
                 runtime = self._probe(profile, transport, executable)
                 self._record_probe(detected, executable, runtime)
+                if runtime is not None and host_trust_python is None:
+                    host_trust_python = runtime.executable
                 if (
                     runtime is not None
                     and runtime.runtime_id not in excluded
@@ -93,6 +100,7 @@ class PythonRuntimeResolver:
             )
 
         system, architecture = self._platform(transport)
+        trust = self.tls.resolve(profile, transport, host_python=host_trust_python)
         platform_tag = self.platform_tag(system, architecture)
         manager = self._manager(profile, transport)
         provider = manager[0] if manager is not None else "micromamba"
@@ -112,10 +120,10 @@ class PythonRuntimeResolver:
                 and cached.runtime_id not in excluded
                 and (policy.strategy != "managed" or cached.managed)
             ):
-                probed = self._probe(profile, transport, cached.executable)
+                probed = self._probe(profile, transport, cached.executable, trust=trust)
                 self._record_probe(detected, cached.executable, probed)
                 if probed is not None and self._acceptable(probed, policy, required):
-                    return self._with_action(probed, cached, "reuse")
+                    return self._with_action(probed, cached, "reuse", trust=trust)
             planned_path = str(
                 PurePosixPath(self._runtime_root(profile)) / request_id / "bin" / "python"
             )
@@ -131,6 +139,7 @@ class PythonRuntimeResolver:
                 True,
                 False,
                 "install",
+                tls_trust=trust,
             )
             if request_id in excluded:
                 continue
@@ -148,6 +157,7 @@ class PythonRuntimeResolver:
                 architecture,
                 platform_tag,
                 request_id,
+                trust,
             )
         raise self._failure(
             profile,
@@ -198,6 +208,7 @@ class PythonRuntimeResolver:
         architecture: str,
         platform_tag: str,
         request_id: str,
+        trust: TlsTrust,
     ) -> PythonRuntime:
         assert profile.storage is not None
         provider, executable, provider_version = manager
@@ -215,9 +226,9 @@ class PythonRuntimeResolver:
             cached = self._request_cache(profile, transport, request_id)
             if (
                 cached is not None
-                and self._probe(profile, transport, cached.executable) is not None
+                and self._probe(profile, transport, cached.executable, trust=trust) is not None
             ):
-                return self._with_action(cached, cached, "reuse")
+                return self._with_action(cached, cached, "reuse", trust=trust)
             created_root = transport.run(("mkdir", "-p", str(runtime_root)))
             if created_root.returncode:
                 raise RuntimeError(
@@ -231,6 +242,7 @@ class PythonRuntimeResolver:
                 f"CONDA_PKGS_DIRS={packages}",
                 "CONDARC=/dev/null",
                 "MAMBARC=/dev/null",
+                *trust.assignments(),
                 executable,
                 "create",
                 "--yes",
@@ -259,6 +271,7 @@ class PythonRuntimeResolver:
                     f"CONDA_PKGS_DIRS={remote_packages}",
                     "CONDARC=/dev/null",
                     "MAMBARC=/dev/null",
+                    *trust.assignments(),
                     executable,
                     "create",
                     "--yes",
@@ -266,7 +279,7 @@ class PythonRuntimeResolver:
                     "--prefix",
                     str(temporary),
                 )
-            command = (*prefix, f"python={requested}", "pip")
+            command = (*prefix, f"python={requested}", "pip", "ca-certificates", "openssl")
             created = transport.run(command)
             if created.returncode:
                 self._cleanup(transport, temporary)
@@ -275,12 +288,20 @@ class PythonRuntimeResolver:
                     f"{created.stderr.strip()}"
                 )
             temporary_python = str(temporary / "bin" / "python")
-            probed = self._probe(profile, transport, temporary_python)
+            probed = self._probe(profile, transport, temporary_python, trust=trust)
             if probed is None:
                 self._cleanup(transport, temporary)
                 raise RuntimeError("Managed Python verification failed before publication.")
             packages_result = transport.run(
-                (*profile.command_prefix, executable, "list", "--json", "--prefix", str(temporary))
+                (
+                    *profile.command_prefix,
+                    *trust.prefix(),
+                    executable,
+                    "list",
+                    "--json",
+                    "--prefix",
+                    str(temporary),
+                )
             )
             if packages_result.returncode:
                 self._cleanup(transport, temporary)
@@ -335,6 +356,7 @@ class PythonRuntimeResolver:
                 True,
                 "install",
                 package_fingerprint,
+                trust,
             )
             marker = temporary / self.MARKER
             self._write_json(transport, temporary_python, marker, runtime.to_dict())
@@ -342,11 +364,13 @@ class PythonRuntimeResolver:
             if published.returncode:
                 self._cleanup(transport, temporary)
                 existing = self._read_runtime(transport, destination / self.MARKER)
-                if existing is None or self._probe(profile, transport, existing.executable) is None:
+                if existing is None or self._probe(
+                    profile, transport, existing.executable, trust=trust
+                ) is None:
                     raise RuntimeError(
                         f"Could not atomically publish managed runtime: {published.stderr.strip()}"
                     )
-                runtime = self._with_action(existing, existing, "reuse")
+                runtime = self._with_action(existing, existing, "reuse", trust=trust)
             self._publish_request(profile, transport, request_id, runtime)
             return runtime
         finally:
@@ -404,7 +428,12 @@ class PythonRuntimeResolver:
         return None
 
     def _probe(
-        self, profile: ClusterProfile, transport: Transport, executable: str
+        self,
+        profile: ClusterProfile,
+        transport: Transport,
+        executable: str,
+        *,
+        trust: TlsTrust | None = None,
     ) -> PythonRuntime | None:
         code = (
             "import importlib.util,json,platform,ssl,sys;"
@@ -412,16 +441,29 @@ class PythonRuntimeResolver:
             "'implementation':platform.python_implementation(),'system':platform.system(),"
             "'architecture':platform.machine(),'executable':sys.executable,"
             "'pip':importlib.util.find_spec('pip') is not None,"
-            "'venv':importlib.util.find_spec('venv') is not None}))"
+            "'venv':importlib.util.find_spec('venv') is not None,"
+            "'tls_ca_count':len(ssl.create_default_context().get_ca_certs())}))"
         )
-        result = transport.run((*profile.command_prefix, executable, "-c", code))
+        result = transport.run(
+            (
+                *profile.command_prefix,
+                *(() if trust is None else trust.prefix()),
+                executable,
+                "-c",
+                code,
+            )
+        )
         if result.returncode:
             return None
         try:
             value = json.loads(result.stdout.strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError):
             return None
-        if not value.get("pip") or not value.get("venv"):
+        if (
+            not value.get("pip")
+            or not value.get("venv")
+            or (trust is not None and int(value.get("tls_ca_count", 0)) <= 0)
+        ):
             return None
         runtime_id = self._runtime_id(
             str(value["version"]),
@@ -444,6 +486,7 @@ class PythonRuntimeResolver:
             False,
             True,
             "reuse",
+            tls_trust=trust,
         )
 
     @staticmethod
@@ -609,7 +652,12 @@ class PythonRuntimeResolver:
 
     @classmethod
     def _with_action(
-        cls, probed: PythonRuntime, source: PythonRuntime, action: str
+        cls,
+        probed: PythonRuntime,
+        source: PythonRuntime,
+        action: str,
+        *,
+        trust: TlsTrust | None = None,
     ) -> PythonRuntime:
         return PythonRuntime(
             source.runtime_id,
@@ -624,6 +672,7 @@ class PythonRuntimeResolver:
             True,
             action,
             source.package_fingerprint,
+            trust if trust is not None else source.tls_trust,
         )
 
     @staticmethod

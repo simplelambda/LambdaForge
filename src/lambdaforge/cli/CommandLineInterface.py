@@ -6,6 +6,7 @@ import argparse
 import importlib
 import inspect as python_inspect
 import json
+import os
 import sys
 import time
 from collections.abc import Sequence
@@ -29,6 +30,7 @@ from lambdaforge.cli.common import (
 from lambdaforge.cli.DatasetCommands import DatasetCommands
 from lambdaforge.cli.evidence import run_evidence_command
 from lambdaforge.cli.jobs import run_job_command
+from lambdaforge.cli.LiveJobMonitor import LiveJobMonitor
 from lambdaforge.cli.parser import build_parser
 from lambdaforge.cli.scaffold import initialize
 from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
@@ -46,6 +48,7 @@ from lambdaforge.controlplane.MultiClusterSubmissionService import MultiClusterS
 from lambdaforge.controlplane.OverviewService import OverviewService
 from lambdaforge.controlplane.ResourceService import ResourceService
 from lambdaforge.controlplane.StorageService import StorageService
+from lambdaforge.controlplane.SubmissionService import SubmissionService
 from lambdaforge.data.DataCatalog import DataCatalog
 from lambdaforge.data.DataService import DataService
 from lambdaforge.data.DatasetBuildService import DatasetBuildService
@@ -234,15 +237,42 @@ class CommandLineInterface:
                 return report_error(error)
         if arguments.command in {"overview", "top"}:
             try:
+                overview_catalog = ClusterCatalog.load(arguments.clusters)
+                overview_service = OverviewService(overview_catalog)
+                top_command = arguments.command == "top"
+                follow = bool(getattr(arguments, "follow", False))
+                once = bool(getattr(arguments, "once", False))
+                if (
+                    top_command
+                    and not arguments.json
+                    and not once
+                    and sys.stdin.isatty()
+                    and sys.stdout.isatty()
+                    and os.name == "posix"
+                ):
+                    return LiveJobMonitor(
+                        overview_service,
+                        JobService(overview_catalog),
+                        interval=arguments.interval,
+                    ).run()
                 while True:
-                    overview_payload = OverviewService(
-                        ClusterCatalog.load(arguments.clusters)
-                    ).snapshot()
+                    overview_payload = overview_service.snapshot()
                     if arguments.json:
-                        print(json.dumps(overview_payload, indent=2))
+                        print(
+                            json.dumps(
+                                overview_payload,
+                                separators=(",", ":") if follow else None,
+                                indent=None if follow else 2,
+                            ),
+                            flush=follow,
+                        )
                     else:
                         cls._print_overview(overview_payload)
-                    if arguments.command != "top" or not arguments.follow:
+                    if (
+                        not top_command
+                        or once
+                        or not follow
+                    ):
                         return 0
                     time.sleep(arguments.interval)
             except Exception as error:
@@ -753,6 +783,7 @@ class CommandLineInterface:
                         resources=cls._resource_request(arguments),
                         dry_run=arguments.dry_run,
                         independent_hpo=arguments.independent_hpo,
+                        wait_for_submit=arguments.wait_for_submit,
                     )
                     print(json.dumps(group.to_dict(), indent=2))
                     return 0
@@ -763,16 +794,34 @@ class CommandLineInterface:
                     cluster = execution_profile.cluster
                     base_resources = execution_profile.resources
                 request = cls._resource_request(arguments, base=base_resources)
-                handle, bundle = ControlPlane(run_catalog).submit(
-                    arguments.config,
-                    cluster=cluster,
-                    resources=request,
-                    dry_run=arguments.dry_run,
-                    run_arguments=cls._remote_run_arguments(arguments),
-                )
+                if not arguments.dry_run and not arguments.wait_for_submit:
+                    handle = SubmissionService(run_catalog).enqueue(
+                        arguments.config,
+                        cluster=cluster,
+                        resources=request,
+                        run_arguments=cls._remote_run_arguments(arguments),
+                    )
+                    bundle_payload = None
+                else:
+                    handle, bundle = ControlPlane(run_catalog).submit(
+                        arguments.config,
+                        cluster=cluster,
+                        resources=request,
+                        dry_run=arguments.dry_run,
+                        run_arguments=cls._remote_run_arguments(arguments),
+                    )
+                    bundle_payload = bundle.to_dict()
                 submission_payload = {
                     "job": handle.to_dict(),
-                    "bundle": bundle.to_dict(),
+                    "bundle": bundle_payload,
+                    "submission": {
+                        "mode": (
+                            "asynchronous"
+                            if handle.state is JobState.PREPARING
+                            else "scheduler-acknowledged"
+                        ),
+                        "phase": "queued-locally" if handle.state is JobState.PREPARING else None,
+                    },
                     "target": {
                         "cluster": cluster,
                         "source": arguments.default_cluster_source or "explicit",
@@ -1019,6 +1068,7 @@ class CommandLineInterface:
         print(
             f"LambdaForge: running={states.get('running', 0)} "
             f"queued={states.get('queued', 0)} staging={states.get('staging', 0)} "
+            f"preparing={states.get('preparing', 0)} "
             f"paused={states.get('paused', 0)} / {jobs['total']} jobs; "
             f"{datasets['versions']} dataset versions; "
             f"offline={len(payload['offline_clusters'])}"

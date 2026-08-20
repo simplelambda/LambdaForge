@@ -16,6 +16,7 @@ class JobState(str, Enum):
 
     CREATED = "created"
     PLANNED = "planned"
+    PREPARING = "preparing"
     STAGING = "staging"
     QUEUED = "queued"
     RUNNING = "running"

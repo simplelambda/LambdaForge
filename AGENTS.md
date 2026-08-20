@@ -33,7 +33,7 @@ or infer CUDA usability from `nvidia-smi` alone.
 | Diagnose a cluster | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Diagnose any failed command | read its next action; add `--debug`; use `--json` for tools |
 | Reconnect to work | `lf jobs list/status/logs/cancel/retry`; selectors accept ID, name, prefix, `latest` |
-| Global runtime view | `lf status`; `lf overview --json`; `lf top --follow` |
+| Global runtime view | `lf top` for humans; `lf overview --json`, `lf jobs list --json`, `lf resources --all --json` for tools |
 | Query or compare results | `lf results list/show/compare/export` |
 | Plot scientific evidence | `lf plot learning/sweep/seeds/hpo/resources` |
 | Inspect/fetch artifacts | `lf artifact inspect/list/fetch/validate/visualize` |
@@ -136,6 +136,12 @@ Recipe stages compile to the existing Workflow DAG. `required` expresses scienti
 stages. A successful build validates and atomically publishes the final root plus canonical JSONL
 `DatasetIndex`; incomplete stages never become a version.
 
+Remote bundles relocate every explicitly declared local Task input up to 10 MiB, including named
+inputs inside embedded recipe-stage tasks; never tell a user to copy data into a hashed bundle or
+job directory. Inputs above the bound must fail before submission. Represent them as a DataCatalog
+reference with an explicit target-cluster location, a materialized managed DatasetVersion, or an
+explicit transfer-provider workflow. LambdaForge must not guess or implicitly move large data.
+
 `DatasetMember` has a stable logical ID, arbitrary partitions/targets/metadata and named
 file/directory/record/URI assets with real checksums. Artifact v2 uses path-independent
 `content_id == dataset_id`; `build_id` describes recipe provenance. Never mutate a published alias.
@@ -197,8 +203,14 @@ duplicate the version floor in code. Runtime/package caches are reconstructible,
 runtimes referenced by active jobs, the active pointer or retained environments.
 Automatic Torch selection uses actual remote Python, driver and compute capability plus official
 wheel availability, and the installed environment must pass a CUDA tensor probe when required.
+LambdaForge-managed runtimes also record one locally validated host CA bundle and propagate it to
+runtime creation, pip/Requests and scientific commands. Never disable verification, download roots
+or modify the system trust store. `doctor` exposes `system-python-tls` and `managed-python-tls`.
 
-Direct jobs use one detached `ProcessSupervisor`; SLURM remains authoritative for scheduled work.
+Remote CLI runs first return a durable `preparing` job and detach bundle/runtime/transfer work;
+`--wait-for-submit` explicitly restores synchronous scheduler acknowledgement. `submission_phase`
+is machine-readable. Direct jobs then use one detached `ProcessSupervisor`; SLURM remains
+authoritative for scheduled work.
 State, heartbeats, logs and usage are durable. Provider outages report unknown plus last-known state,
 not fake scientific failure. Pause retains leases. Signals require matching PID, process group,
 creation time and command hash. Direct-host admission is cooperative affinity/visibility, not cgroup

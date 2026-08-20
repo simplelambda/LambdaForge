@@ -194,10 +194,25 @@ class ExecutionBundleBuilder:
         prefix: str = "",
     ) -> None:
         inputs = values.get("inputs", [])
-        if not isinstance(inputs, list):
+        mapped_inputs = inputs if isinstance(inputs, dict) else None
+        if isinstance(inputs, dict):
+            entries: list[tuple[int, str | None, dict[str, object], bool]] = []
+            for index, (name, configured) in enumerate(inputs.items()):
+                if isinstance(configured, str):
+                    key = "dataset" if configured.startswith("dataset:") else "path"
+                    entries.append((index, str(name), {"name": str(name), key: configured}, True))
+                elif isinstance(configured, dict):
+                    entries.append((index, str(name), {"name": str(name), **configured}, False))
+        elif isinstance(inputs, list):
+            entries = [
+                (index, None, raw, False)
+                for index, raw in enumerate(inputs)
+                if isinstance(raw, dict)
+            ]
+        else:
             return
         authoring = self._authoring(values)
-        catalog_path = authoring.get("data_catalog")
+        catalog_path = values.get("data_catalog", authoring.get("data_catalog"))
         catalog = None
         remote_datasets: dict[str, object] = {}
         remote_catalog: dict[str, object] = {"datasets": remote_datasets}
@@ -205,9 +220,7 @@ class ExecutionBundleBuilder:
             path = Path(str(catalog_path))
             path = path if path.is_absolute() else (source_dir / path).resolve()
             catalog = DataCatalog.from_yaml(path)
-        for index, raw in enumerate(inputs):
-            if not isinstance(raw, dict):
-                continue
+        for index, authored_name, raw, scalar in entries:
             if "dataset" in raw:
                 reference = DatasetReference.parse(str(raw["dataset"]))
                 environment = profile.data_environment or profile.name
@@ -236,10 +249,20 @@ class ExecutionBundleBuilder:
             if size > self.max_inline_bytes:
                 raise ValueError(
                     f"Input {local} is {size} bytes and will not be transferred implicitly. "
-                    "Register it in data_catalog with a location for the target cluster."
+                    f"The execution-bundle limit is {self.max_inline_bytes} bytes. Register the "
+                    "input in data_catalog with a location for the target cluster, or publish "
+                    "and materialize it as a managed DatasetVersion."
                 )
             relative = f"{prefix}inputs/{index}-{local.name}"
-            raw["path"] = relative
+            if authored_name is not None and mapped_inputs is not None:
+                if scalar:
+                    mapped_inputs[authored_name] = relative
+                else:
+                    configured = mapped_inputs[authored_name]
+                    if isinstance(configured, dict):
+                        configured["path"] = relative
+            else:
+                raw["path"] = relative
             staged.append((local, relative))
         if remote_catalog["datasets"]:
             relative = f"{prefix}data-catalog.yaml"
@@ -250,6 +273,8 @@ class ExecutionBundleBuilder:
             )
             staged.append((catalog_file, relative))
             authoring["data_catalog"] = relative
+            if "data_catalog" in values:
+                values["data_catalog"] = relative
 
     def _prepare_dataset_recipe(
         self,
@@ -263,14 +288,22 @@ class ExecutionBundleBuilder:
         if not isinstance(stages, dict):
             raise TypeError("Dataset recipe stages must be a mapping.")
         for name, descriptor in stages.items():
-            if not isinstance(descriptor, dict) or not isinstance(descriptor.get("task"), str):
+            if not isinstance(descriptor, dict):
                 continue
-            configured = Path(str(descriptor["task"]))
+            task = descriptor.get("task")
+            prefix = f"stage-data/{name}/"
+            if isinstance(task, dict):
+                # Keep the embedded authoring shape: dataset bindings address its named
+                # mapping paths before TaskConfig normalizes them to strict descriptors.
+                self._prepare_task_inputs(task, source.parent, profile, staged, prefix)
+                continue
+            if not isinstance(task, str):
+                continue
+            configured = Path(task)
             task_path = (
                 configured if configured.is_absolute() else (source.parent / configured).resolve()
             )
             stage_values = AuthoringConfig.from_yaml(task_path).materialize().to_dict()
-            prefix = f"stage-data/{name}/"
             self._prepare_task_inputs(stage_values, task_path.parent, profile, staged, prefix)
             temporary = self.root / f".dataset-stage-{name}-{uuid4().hex}.yaml"
             temporary.parent.mkdir(parents=True, exist_ok=True)
