@@ -101,6 +101,37 @@ class StorageService:
         result = transport.run((self._python(profile, transport), "-c", code, root), timeout=30.0)
         return tuple(json.loads(result.stdout or "[]")) if result.returncode == 0 else ()
 
+    def prune_environments(
+        self,
+        cluster: str,
+        *,
+        keep: tuple[str, ...],
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Prune superseded environment caches while retaining every live job reference."""
+        profile = self.catalog.get(cluster)
+        assert profile.storage is not None
+        active = tuple(
+            record
+            for record in self.jobs.list(cluster=cluster, refresh=False)
+            if not record.state.terminal
+        )
+        protected = {
+            *keep,
+            *(
+                str(record.metadata["environment_id"])
+                for record in active
+                if record.metadata.get("environment_id") not in {None, "existing"}
+            ),
+        }
+        return self._invoke(
+            cluster,
+            "prune-environments",
+            profile.storage.to_dict(),
+            references={"environments": sorted(protected)},
+            apply=apply,
+        )
+
     def _invoke(
         self,
         cluster: str,
@@ -113,6 +144,12 @@ class StorageService:
         if cluster == "local":
             if operation == "status":
                 return StorageOperations.status(descriptor)
+            if operation == "prune-environments":
+                return StorageOperations.prune_environments(
+                    descriptor,
+                    (references or {}).get("environments", ()),
+                    apply=apply,
+                )
             return StorageOperations.gc(descriptor, references or {}, apply=apply)
         profile = self.catalog.get(cluster)
         transport = self.factory.transport(profile)
@@ -123,7 +160,7 @@ class StorageService:
             operation,
             json.dumps(descriptor, separators=(",", ":")),
         ]
-        if operation == "gc":
+        if operation in {"gc", "prune-environments"}:
             arguments.extend(
                 (json.dumps(references or {}, separators=(",", ":")), str(apply).lower())
             )

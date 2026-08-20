@@ -16,7 +16,7 @@ datasets, experiments, adaptive hyperparameter searches and durable local, SSH o
 Your project keeps ownership of its models and data; LambdaForge supplies the execution,
 provenance, reuse, result-management and safety machinery around them.
 
-> **Status:** `0.9.0` (pre-1.0). Current YAML and documented public imports are supported, but minor
+> **Status:** pre-1.0. Current YAML and documented public imports are supported, but minor
 > releases may deliberately simplify APIs before 1.0. The repository currently has no licence
 > file, so redistribution terms have not yet been granted.
 
@@ -63,11 +63,18 @@ python -m pip check
 lf --version
 ```
 
+The consumer's `pyproject.toml` must allow the LambdaForge release being installed. For example,
+`lambdaforge[parquet]>=0.9,<0.10` accepts compatible 0.9 patch releases, whereas `<0.9` explicitly
+rejects them. Pip can finish an editable upgrade while warning that an already-installed consumer
+is now incompatible; that environment is not healthy. Update the consumer bound deliberately,
+reinstall it and require `python -m pip check` to succeed. Remote managed installation resolves both
+wheels from scratch and therefore refuses an incompatible pair rather than ignoring its metadata.
+
 For a reproducible installation, build and install a versioned wheel instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.9.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-*.whl
 ```
 
 The consumer project should select a PyTorch wheel compatible with its target hardware. Optional
@@ -198,7 +205,9 @@ or diagnosis must synchronously wait for remote staging and scheduler acknowledg
 
 `lf top` is an interactive terminal view on a TTY: arrow keys or `j`/`k` select jobs, `l` shows the
 selected log, `x` requests confirmed cancellation, `r` refreshes and `q` exits. It has no private
-data source: `lf overview --json`, `lf jobs list --json` and `lf resources --all --json` expose the
+data source. Slow SSH, scheduler and dataset probes run in a cancellable background snapshot
+process, so navigation and exit do not wait for a provider timeout. `lf overview --json`, `lf jobs
+list --json` and `lf resources --all --json` expose the
 same versioned records for scripts, desktop applications and other wrappers. In a pipe, `lf top`
 prints one snapshot; `lf top --json --follow` emits newline-delimited JSON snapshots.
 
@@ -214,6 +223,11 @@ the host Python, validates it without contacting an external site, records that 
 it to runtime creation, pip/Requests and scientific jobs. It never disables certificate checking,
 downloads arbitrary roots or modifies `/etc`; `lf doctor` reports system and managed TLS trust
 separately.
+After a successful bootstrap, LambdaForge first activates the verified environment and then removes
+superseded LambdaForge-owned environments. It retains the active environment, environments named by
+known non-terminal jobs and references found in durable direct-job state; concurrent construction
+defers cleanup. Scientific results, datasets, wheels, runtimes and user-managed environments are not
+part of this pruning operation.
 Use `python.strategy: existing` when institutional policy requires an administrator-provided Python.
 Older profiles whose YAML contains the scalar `python: python3` deliberately keep that strict
 behavior. Opt one into automatic user-space provisioning, review the plan and apply it with:
@@ -268,6 +282,9 @@ python -m pytest -q
 python -m build
 python -m twine check dist/*
 ```
+
+For a release, change the version only in `src/lambdaforge/_version.py`; setuptools reads that same
+constant for wheel/sdist metadata. Changelog headings remain historical release records.
 
 See the maintainer section of the [manual](docs/MANUAL.md#19-architecture) before changing identity,
 dataset publication, process control, storage deletion, transport or scheduler boundaries.

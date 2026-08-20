@@ -137,7 +137,13 @@ class ExecutionBundleBuilder:
         wheels = [builder.build_installed("lambdaforge", source_hint=framework_hint)]
         consumer = self._project_root(source.parent)
         if consumer is not None and consumer != framework_root:
-            wheels.append(builder.build(consumer))
+            consumer_wheel = builder.build(consumer)
+            builder.validate_framework_dependency(
+                consumer_wheel,
+                LambdaForgeVersion.CURRENT,
+                project_root=consumer,
+            )
+            wheels.append(consumer_wheel)
         descriptors = []
         for wheel in wheels:
             relative = f"packages/{wheel.name}"

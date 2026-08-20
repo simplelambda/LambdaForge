@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,17 +17,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_package_version_and_entry_points_are_consistent() -> None:
-    """Use runtime metadata as the source instead of hard-coding each future release."""
+    """Keep one source version consumed dynamically by package metadata and runtime code."""
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    version = re.search(r'^version = "([^"]+)"$', project, re.MULTILINE)
-    assert version is not None
-    assert version.group(1) == LambdaForgeVersion.CURRENT
+    source = (ROOT / "src" / "lambdaforge" / "_version.py").read_text(encoding="utf-8")
+    version = re.search(r'^VERSION = "([^"]+)"$', source, re.MULTILINE)
+    assert version is not None and version.group(1) == LambdaForgeVersion.CURRENT
+    toml = __import__("tomllib" if sys.version_info >= (3, 11) else "tomli")
+    metadata = toml.loads(project)
+    assert metadata["project"]["dynamic"] == ["version"]
+    assert "version" not in metadata["project"]
+    assert 'version = { attr = "lambdaforge._version.VERSION" }' in project
     scripts = dict(re.findall(r'^(lambdaforge|lf) = "([^"]+)"$', project, re.MULTILINE))
     assert scripts["lf"] == scripts["lambdaforge"]
-    assert f"`{LambdaForgeVersion.CURRENT}`" in (ROOT / "README.md").read_text(encoding="utf-8")
-    assert f"`{LambdaForgeVersion.CURRENT}`" in (ROOT / "docs" / "MANUAL.md").read_text(
-        encoding="utf-8"
-    )
 
 
 def test_cli_reports_the_runtime_version(capsys: pytest.CaptureFixture[str]) -> None:

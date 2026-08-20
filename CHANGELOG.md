@@ -8,6 +8,25 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-20
+
+### Changed
+
+- `lf top` now isolates slow provider snapshots from terminal input, keeps navigation responsive,
+  scrolls the selected row into view and cancels an outstanding refresh promptly on exit.
+- Successful managed bootstrap activates the verified environment before pruning superseded
+  LambdaForge-owned environments; the current environment and every known live-job reference are
+  retained, and concurrent environment construction defers cleanup.
+- Package and runtime metadata now consume one version constant from `lambdaforge._version`; user
+  documentation uses version-independent wheel commands instead of duplicating the release number.
+
+### Fixed
+
+- Managed online installation no longer passes a nonexistent empty wheelhouse to pip.
+- Consumer wheels whose declared LambdaForge requirement excludes the controller version now fail
+  locally with the exact dependency declaration and repair steps, before SSH transfer or remote
+  environment creation.
+
 ## [0.9.0] - 2026-08-20
 
 ### Added
@@ -487,7 +506,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/simplelambda/LambdaForge/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/simplelambda/LambdaForge/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/simplelambda/LambdaForge/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/simplelambda/LambdaForge/compare/v0.7.2...v0.8.0

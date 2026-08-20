@@ -59,8 +59,30 @@ class FakeInstalledDistribution:
 class BootstrapTransport(Transport):
     """Accept workspace operations while reporting an empty remote bootstrap cache."""
 
-    def run(self, command: Sequence[str], *, cwd: str | Path | None = None) -> CommandResult:
-        del cwd
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: str | Path | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
+        del cwd, timeout
+        if command and command[0] == "cat" and command[1].endswith("active-environment"):
+            return CommandResult(0, "/remote/env/bin/python\n")
+        if any(value.endswith(".StorageOperations") for value in command) and (
+            "prune-environments" in command
+        ):
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "candidates": [{"environment_id": "env-previous"}],
+                        "pruned": ["env-previous"],
+                        "applied": True,
+                        "blocked_reason": None,
+                    }
+                ),
+            )
         return CommandResult(1) if command[:2] == ("test", "-f") else CommandResult(0)
 
     def put(self, source: str | Path, destination: str | Path) -> None:
@@ -261,6 +283,7 @@ def test_cluster_bootstrap_requests_the_installed_framework_distribution(tmp_pat
     result = service.bootstrap("gpu")
 
     assert result.python == "/remote/env/bin/python"
+    assert result.pruned_environments == ("env-previous",)
     assert len(builder.calls) == 1
     assert builder.calls[0][0] == "lambdaforge"
 

@@ -19,6 +19,8 @@ class ClusterBootstrapResult:
     pytorch: Mapping[str, Any] | None = None
     runtime: Mapping[str, Any] | None = None
     planned: bool = False
+    pruned_environments: tuple[str, ...] = ()
+    cleanup_blocked_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.pytorch is not None:
@@ -36,4 +38,6 @@ class ClusterBootstrapResult:
             "pytorch": copy.deepcopy(self.pytorch),
             "runtime": copy.deepcopy(self.runtime),
             "planned": self.planned,
+            "pruned_environments": list(self.pruned_environments),
+            "cleanup_blocked_reason": self.cleanup_blocked_reason,
         }

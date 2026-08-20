@@ -186,8 +186,6 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         ]
         if bundle.offline:
             install.extend(("--no-index", "--find-links", str(remote / "wheelhouse")))
-        else:
-            install.extend(("--find-links", str(remote / "wheelhouse")))
         if constraint is not None:
             install.extend(("--constraint", str(constraint)))
         install.extend(str(wheel_dir / name) for name in wheel_names)

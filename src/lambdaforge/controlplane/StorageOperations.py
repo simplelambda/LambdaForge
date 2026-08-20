@@ -41,6 +41,70 @@ class StorageOperations:
             return cls._gc(descriptor, references, apply=apply)
 
     @classmethod
+    def prune_environments(
+        cls,
+        descriptor: Mapping[str, Any],
+        protected: Sequence[str],
+        *,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Remove only obsolete LambdaForge environments after a verified replacement exists."""
+        roots = cls._roots(descriptor)
+        cache_root = roots["environments"].parent
+        cache_root.mkdir(parents=True, exist_ok=True)
+        with CrossProcessFileLock(
+            cache_root / ".gc.lock",
+            shared=False,
+            timeout_seconds=30.0,
+            poll_interval_seconds=0.1,
+        ):
+            markers = tuple(cache_root.glob(".environment-build-*.lock"))
+            if markers:
+                return {
+                    "candidates": [],
+                    "pruned": [],
+                    "applied": False,
+                    "blocked_reason": "Another managed environment build is active.",
+                }
+            environment_root = roots["environments"]
+            keep = {str(value) for value in protected}
+            keep.update(cls._active_environment_references(roots))
+            candidates: list[dict[str, Any]] = []
+            if environment_root.is_dir() and not environment_root.is_symlink():
+                for child in sorted(environment_root.iterdir()):
+                    if (
+                        child.is_symlink()
+                        or not child.is_dir()
+                        or child.name in keep
+                        or not child.name.startswith(("env-", ".env-"))
+                    ):
+                        continue
+                    usage = cls._usage(child)
+                    candidates.append(
+                        {
+                            "environment_id": child.name,
+                            "path": str(child),
+                            "bytes": usage["bytes"],
+                            "files": usage["files"],
+                        }
+                    )
+            pruned: list[str] = []
+            if apply:
+                root = environment_root.resolve()
+                for item in candidates:
+                    path = Path(str(item["path"])).resolve()
+                    if path == root or not path.is_relative_to(root):
+                        raise RuntimeError(f"Environment cleanup target escaped its root: {path}")
+                    shutil.rmtree(path)
+                    pruned.append(str(item["environment_id"]))
+            return {
+                "candidates": candidates,
+                "pruned": pruned,
+                "applied": apply,
+                "blocked_reason": None,
+            }
+
+    @classmethod
     def _gc(
         cls,
         descriptor: Mapping[str, Any],
@@ -265,17 +329,70 @@ class StorageOperations:
         return protected
 
     @classmethod
+    def _active_environment_references(cls, roots: Mapping[str, Path]) -> set[str]:
+        """Protect the active pointer and direct jobs visible in durable remote state."""
+        environment_root = roots["environments"].resolve()
+        protected: set[str] = set()
+        pointer = roots["state"] / "active-environment"
+        candidates: list[str] = []
+        if pointer.is_file() and not pointer.is_symlink():
+            try:
+                candidates.append(pointer.read_text(encoding="utf-8").strip())
+            except OSError:
+                pass
+        job_root = roots["job_workspaces"]
+        terminal = {"succeeded", "failed", "cancelled", "timeout", "planned"}
+        if job_root.is_dir() and not job_root.is_symlink():
+            for child in job_root.iterdir():
+                if child.is_symlink() or not child.is_dir() or not child.name.startswith("job-"):
+                    continue
+                state = cls._read_json(child / "state.json")
+                request = cls._read_json(child / "request.json")
+                if not state or not request or str(state.get("state")) in terminal:
+                    continue
+                command = request.get("command", ())
+                if isinstance(command, list):
+                    candidates.extend(str(value) for value in command)
+        for candidate in candidates:
+            try:
+                path = Path(candidate).expanduser().resolve()
+                relative = path.relative_to(environment_root)
+            except (OSError, ValueError):
+                continue
+            if relative.parts:
+                protected.add(relative.parts[0])
+        return protected
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any] | None:
+        if not path.is_file() or path.is_symlink():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    @classmethod
     def main(cls, argv: Sequence[str] | None = None) -> int:
         values = tuple(argv if argv is not None else sys.argv[1:])
         if len(values) not in {2, 4}:
             raise SystemExit(
-                "Usage: StorageOperations status DESCRIPTOR | gc DESCRIPTOR REFS APPLY"
+                "Usage: StorageOperations status DESCRIPTOR | "
+                "gc DESCRIPTOR REFS APPLY | prune-environments DESCRIPTOR REFS APPLY"
             )
         descriptor = json.loads(values[1])
         if values[0] == "status":
             payload = cls.status(descriptor)
         elif values[0] == "gc" and len(values) == 4:
             payload = cls.gc(descriptor, json.loads(values[2]), apply=values[3] == "true")
+        elif values[0] == "prune-environments" and len(values) == 4:
+            references = json.loads(values[2])
+            payload = cls.prune_environments(
+                descriptor,
+                references.get("environments", ()) if isinstance(references, dict) else (),
+                apply=values[3] == "true",
+            )
         else:
             raise SystemExit("Unknown storage operation.")
         print(json.dumps(payload, sort_keys=True))

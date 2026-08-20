@@ -244,7 +244,13 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
             f"({bootstrap_action(bootstrapped.planned, bootstrapped.reused)}).\n"
             f"Python: {bootstrapped.python}\n"
             f"Runtime: {dict(bootstrapped.runtime or {})}\n"
-            f"PyTorch: {dict(bootstrapped.pytorch or {})}"
+            f"PyTorch: {dict(bootstrapped.pytorch or {})}\n"
+            f"Pruned environments: {bootstrapped.pruned_environments or 'none'}"
+            + (
+                f"\nCleanup deferred: {bootstrapped.cleanup_blocked_reason}"
+                if bootstrapped.cleanup_blocked_reason
+                else ""
+            )
         )
     )
     return 0

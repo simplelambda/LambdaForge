@@ -1,7 +1,9 @@
 """Single authority for the installed LambdaForge framework version."""
 
+from lambdaforge._version import VERSION
+
 
 class LambdaForgeVersion:
-    """Expose the package version without importing runtime subsystems."""
+    """Compatibility facade over the packaging-owned version constant."""
 
-    CURRENT = "0.9.0"
+    CURRENT = VERSION

@@ -34,6 +34,7 @@ from lambdaforge.controlplane.PreparedEnvironment import PreparedEnvironment
 from lambdaforge.controlplane.python_runtime import PythonRuntime
 from lambdaforge.controlplane.TorchInstallationPlan import TorchInstallationPlan
 from lambdaforge.execution import ResourceRequest
+from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 
 
 class TrustTransport(Transport):
@@ -176,7 +177,7 @@ def test_doctor_reports_legacy_managed_runtime_without_tls_trust() -> None:
             if "get_ca_certs" in source:
                 return CommandResult(0, '{"ca_count": 100}\n')
             if "import lambdaforge" in source:
-                return CommandResult(0, "0.9.0\n")
+                return CommandResult(0, f"{LambdaForgeVersion.CURRENT}\n")
             if "import torch" in source or "torch.cuda" in source:
                 return CommandResult(0, "2.7.0\n")
             return CommandResult(0)

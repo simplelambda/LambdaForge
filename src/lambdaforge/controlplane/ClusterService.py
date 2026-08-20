@@ -26,6 +26,7 @@ from lambdaforge.controlplane.python_runtime import (
     PythonRuntimeRequirements,
 )
 from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
+from lambdaforge.controlplane.StorageService import StorageService
 
 
 class ClusterService:
@@ -225,6 +226,11 @@ class ClusterService:
             effective_profile, transport, bundle, remote_bundle_dir=str(remote)
         )
         self.runtime_resolver.activate(profile, transport, runtime)
+        cleanup = StorageService(self.catalog, self.factory).prune_environments(
+            cluster,
+            keep=(prepared.environment_id,),
+            apply=True,
+        )
         return ClusterBootstrapResult(
             cluster,
             prepared.environment_id,
@@ -232,6 +238,9 @@ class ClusterService:
             prepared.reused,
             torch_plan.to_dict(),
             runtime.to_dict(),
+            False,
+            tuple(str(value) for value in cleanup.get("pruned", ())),
+            str(cleanup["blocked_reason"]) if cleanup.get("blocked_reason") else None,
         )
 
     @staticmethod

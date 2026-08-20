@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import os
 import select
 import shutil
 import sys
 import time
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
+from multiprocessing.connection import Connection
 from typing import Any, TextIO
 
 from lambdaforge.cli.common import age, job_resources
@@ -80,8 +83,11 @@ class MonitorRenderer:
                 "STATE       CLUSTER      AGE      RESOURCES",
             )
         )
-        visible = items[: max(1, shutil.get_terminal_size((width, 30)).lines - 16)]
-        for index, job in enumerate(visible):
+        capacity = max(1, shutil.get_terminal_size((width, 30)).lines - 16)
+        start = max(0, min(selected, len(items) - 1) - capacity + 1)
+        visible = items[start : start + capacity]
+        for offset, job in enumerate(visible):
+            index = start + offset
             metadata = job.get("metadata", {}) if isinstance(job, Mapping) else {}
             metadata = metadata if isinstance(metadata, Mapping) else {}
             marker = "▶" if index == selected else " "
@@ -95,7 +101,7 @@ class MonitorRenderer:
                 f"{job_resources(job.get('resources', {}))}"
             )
         if visible:
-            selected_job = visible[min(selected, len(visible) - 1)]
+            selected_job = items[min(selected, len(items) - 1)]
             metadata = selected_job.get("metadata", {})
             metadata = metadata if isinstance(metadata, Mapping) else {}
             lines.extend(
@@ -151,10 +157,88 @@ class _TerminalSession(AbstractContextManager["_TerminalSession"]):
         ready, _, _ = select.select([self.fd], [], [], timeout)
         if not ready:
             return None
-        value = sys.stdin.read(1)
-        if value == "\x1b" and select.select([self.fd], [], [], 0.01)[0]:
-            value += sys.stdin.read(2)
+        value = os.read(self.fd, 8).decode(errors="ignore")
+        if value == "\x1b":
+            deadline = time.monotonic() + 0.03
+            while len(value) < 3 and time.monotonic() < deadline:
+                if select.select([self.fd], [], [], max(0.0, deadline - time.monotonic()))[0]:
+                    value += os.read(self.fd, 3 - len(value)).decode(errors="ignore")
         return value
+
+
+def _collect_snapshot(overview: OverviewService, connection: Connection) -> None:
+    """Collect one potentially blocking provider snapshot outside the UI process."""
+    try:
+        connection.send((overview.snapshot(), None))
+    except BaseException as error:  # the parent must remain interactive for every provider failure
+        connection.send((None, f"{error.__class__.__name__}: {error}"))
+    finally:
+        connection.close()
+
+
+class SnapshotProcess:
+    """Own one cancellable snapshot child so slow SSH never blocks terminal input."""
+
+    def __init__(self, overview: OverviewService) -> None:
+        self.overview = overview
+        self.process: Any = None
+        self.connection: Connection | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.process is not None and self.process.is_alive()
+
+    def start(self) -> None:
+        """Start one isolated refresh; overlapping provider probes are never created."""
+        if self.running:
+            return
+        self.close()
+        context = multiprocessing.get_context("fork")
+        parent, child = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_collect_snapshot,
+            args=(self.overview, child),
+            daemon=True,
+            name="lambdaforge-top-snapshot",
+        )
+        process.start()
+        child.close()
+        self.connection = parent
+        self.process = process
+
+    def take(self) -> tuple[Mapping[str, Any] | None, str | None] | None:
+        """Return a completed refresh without waiting for it."""
+        if self.connection is None or not self.connection.poll():
+            return None
+        try:
+            payload, error = self.connection.recv()
+        except EOFError:
+            payload, error = None, "Snapshot worker exited without returning data."
+        self._release()
+        return payload, error
+
+    def close(self) -> None:
+        """Stop a blocked refresh promptly when the user quits."""
+        process = self.process
+        if process is not None and process.is_alive():
+            process.terminate()
+            process.join(timeout=0.2)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(timeout=0.2)
+        self._release()
+
+    def _release(self) -> None:
+        if self.connection is not None:
+            self.connection.close()
+        if self.process is not None:
+            self.process.join(timeout=0.1)
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(timeout=0.1)
+            self.process.close()
+        self.connection = None
+        self.process = None
 
 
 class LiveJobMonitor:
@@ -181,49 +265,72 @@ class LiveJobMonitor:
         logs = ""
         message = ""
         payload: Mapping[str, Any] = {}
-        refresh = True
-        with _TerminalSession(self.stream) as terminal:
-            while True:
-                if refresh:
-                    payload = self.overview.snapshot()
-                    refresh = False
-                items = payload.get("jobs", {}).get("items", [])
-                selected = min(selected, max(0, len(items) - 1))
-                width = shutil.get_terminal_size((120, 30)).columns
-                rendered = MonitorRenderer.render(
-                    payload,
-                    selected=selected,
-                    log_text=logs,
-                    message=message,
-                    width=width,
-                )
-                self.stream.write("\x1b[H\x1b[2J" + rendered)
-                self.stream.flush()
-                started = time.monotonic()
-                key = terminal.key(self.interval)
-                if key in {"q", "Q"}:
-                    return 0
-                if key in {"j", "\x1b[B"}:
-                    selected = min(max(0, len(items) - 1), selected + 1)
-                elif key in {"k", "\x1b[A"}:
-                    selected = max(0, selected - 1)
-                elif key == "r" or key is None:
-                    refresh = True
-                elif key == "l" and items:
-                    logs = self.jobs.logs(str(items[selected]["job_id"]), tail=12)
-                    message = ""
-                elif key == "x" and items:
-                    job_id = str(items[selected]["job_id"])
-                    message = f"Press y to cancel {job_id}; any other key aborts."
-                    self.stream.write("\x1b[H\x1b[2J" + MonitorRenderer.render(
-                        payload, selected=selected, log_text=logs, message=message, width=width
-                    ))
-                    self.stream.flush()
-                    if terminal.key(10.0) == "y":
-                        record = self.jobs.cancel(job_id)
-                        message = f"{record.job_id}: {record.state.value}"
-                        refresh = True
-                    else:
-                        message = "Cancellation aborted."
-                if time.monotonic() - started >= self.interval:
-                    refresh = True
+        dirty = True
+        poller = SnapshotProcess(self.overview)
+        poller.start()
+        next_refresh = time.monotonic() + self.interval
+        try:
+            with _TerminalSession(self.stream) as terminal:
+                while True:
+                    completed = poller.take()
+                    if completed is not None:
+                        updated, error = completed
+                        if updated is not None:
+                            payload = updated
+                            message = ""
+                        else:
+                            message = f"Refresh failed: {error}"
+                        next_refresh = time.monotonic() + self.interval
+                        dirty = True
+                    if time.monotonic() >= next_refresh and not poller.running:
+                        poller.start()
+                        next_refresh = time.monotonic() + self.interval
+                    items = payload.get("jobs", {}).get("items", [])
+                    selected = min(selected, max(0, len(items) - 1))
+                    width = shutil.get_terminal_size((120, 30)).columns
+                    if dirty:
+                        rendered = MonitorRenderer.render(
+                            payload,
+                            selected=selected,
+                            log_text=logs,
+                            message=message or ("Loading providers…" if not payload else ""),
+                            width=width,
+                        )
+                        self.stream.write("\x1b[H\x1b[2J" + rendered)
+                        self.stream.flush()
+                        dirty = False
+                    key = terminal.key(0.05)
+                    if key in {"q", "Q"}:
+                        return 0
+                    if key in {"j", "\x1b[B"}:
+                        selected = min(max(0, len(items) - 1), selected + 1)
+                        dirty = True
+                    elif key in {"k", "\x1b[A"}:
+                        selected = max(0, selected - 1)
+                        dirty = True
+                    elif key == "r":
+                        if not poller.running:
+                            poller.start()
+                        message = "Refreshing providers in the background…"
+                        dirty = True
+                    elif key == "l" and items:
+                        logs = self.jobs.logs(str(items[selected]["job_id"]), tail=12)
+                        message = ""
+                        dirty = True
+                    elif key == "x" and items:
+                        job_id = str(items[selected]["job_id"])
+                        message = f"Press y to cancel {job_id}; any other key aborts."
+                        self.stream.write("\x1b[H\x1b[2J" + MonitorRenderer.render(
+                            payload, selected=selected, log_text=logs, message=message, width=width
+                        ))
+                        self.stream.flush()
+                        if terminal.key(10.0) == "y":
+                            record = self.jobs.cancel(job_id)
+                            message = f"{record.job_id}: {record.state.value}"
+                            if not poller.running:
+                                poller.start()
+                        else:
+                            message = "Cancellation aborted."
+                        dirty = True
+        finally:
+            poller.close()

@@ -89,6 +89,25 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 
 Install only required extras: `hpo`, `adaptive-hpo`, `s3`, `parquet`, `onnx`, `viz`, `graph`,
 `viz3d`, tracking providers, `cluster-password` or `dev`.
+Treat the consumer's LambdaForge requirement as authoritative: an installed project declaring
+`<0.9` is incompatible with 0.9.x even if editable `pip install` ends with only a warning. Update
+that project deliberately, reinstall it and require `python -m pip check` to pass; never bypass the
+bound with `--no-deps`.
+
+## Complete CLI surface
+
+- Author/inspect: `init`, `target`, `validate`, `inspect`, `plan`, `run`, `compose`, `diff`,
+  `explain`, `migrate`, `debug`, `plugins`, `completion`, `project status`.
+- Discover: `configs|tasks list|show|validate|plan|run`; `experiments` adds
+  `status|history|results`.
+- Control: `doctor`, `overview`, `top`, `resources`, `status`, `logs`, `cancel`, `retry`.
+- Clusters: `clusters add|list|show|inspect|set|unset|remove|export|credentials set|delete|test|bootstrap|resources|storage`.
+- Jobs: `jobs list|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`; also
+  `jobs group list|show`.
+- Storage: `storage status|gc`; `environments list|show|gc`.
+- Data: `data list|locations|inspect|replicate`; `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|delete|materialize|replicate`.
+- Evidence: `aggregate`, `retain`, `registry`, `dashboard`; `results audit|list|show|compare|export|sync`;
+  `plot learning|sweep|seeds|hpo|resources`; `artifact inspect|export|validate|visualize|list|fetch|plugins`.
 
 ## Configuration and execution
 
@@ -201,6 +220,9 @@ wheel; never infer a source root from `lambdaforge.__file__` or require `pyproje
 consumer virtual environment. Read `Requires-Python` from release and consumer metadata; do not
 duplicate the version floor in code. Runtime/package caches are reconstructible, but GC must retain
 runtimes referenced by active jobs, the active pointer or retained environments.
+After successful bootstrap, obsolete LambdaForge environment directories are pruned only after the
+new pointer is active; the current environment and live-job references remain protected, and a
+concurrent build defers cleanup.
 Automatic Torch selection uses actual remote Python, driver and compute capability plus official
 wheel availability, and the installed environment must pass a CUDA tensor probe when required.
 LambdaForge-managed runtimes also record one locally validated host CA bundle and propagate it to
@@ -211,6 +233,9 @@ Remote CLI runs first return a durable `preparing` job and detach bundle/runtime
 `--wait-for-submit` explicitly restores synchronous scheduler acknowledgement. `submission_phase`
 is machine-readable. Direct jobs then use one detached `ProcessSupervisor`; SLURM remains
 authoritative for scheduled work.
+`lf top` isolates provider refresh in a cancellable process; never move SSH/resource polling back
+into its keyboard loop. GUI integrations consume `overview --json`, `jobs list --json` and
+`resources --all --json`, not terminal escape sequences.
 State, heartbeats, logs and usage are durable. Provider outages report unknown plus last-known state,
 not fake scientific failure. Pause retains leases. Signals require matching PID, process group,
 creation time and command hash. Direct-host admission is cooperative affinity/visibility, not cgroup
@@ -259,6 +284,7 @@ import or document private file paths.
    `CHANGELOG.md` for release history and `SECURITY.md` for threat-model changes.
 7. Run focused tests after each subsystem, then ruff, mypy, the relevant full suites, package build,
    installed-wheel/CLI smoke and example validation. Do not hide skipped CUDA tests.
+8. Change release identity only in `src/lambdaforge/_version.py`; packaging consumes it dynamically.
 
 ## Targeted manual routes
 

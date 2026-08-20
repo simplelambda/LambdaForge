@@ -16,7 +16,7 @@ generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine be
 Python package, so a research project can focus on its data and science instead of rebuilding
 pipelines, training loops, provenance, result management and process scheduling.
 
-> **Status:** `0.9.0`, usable but pre-1.0. The public namespaces documented below are the intended
+> **Status:** usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
 > contain a licence file, so redistribution terms still need to be chosen by SimpleLambda.
 
@@ -148,6 +148,15 @@ python -m pip check
 python -c "import lambdaforge; print(lambdaforge.__version__)"
 ```
 
+The consumer dependency range is an executable compatibility contract. A declaration such as
+`lambdaforge[adaptive-hpo,parquet]>=0.8,<0.9` excludes every 0.9 release. Pip may still replace an
+editable LambdaForge installation and only print a conflict warning because the consumer was
+already present; `python -m pip check` then reports the broken environment. A clean managed cluster
+solve sees both wheels together and refuses the contradiction. Do not work around it with
+`--no-deps`: review the new release, change the consumer range (for example to `>=0.9,<0.10`),
+reinstall the consumer and require `pip check` to pass. LambdaForge reads the built consumer wheel
+and reports this incompatibility locally before transferring a remote execution bundle.
+
 The final `pip install -e .` is important: it makes paths such as
 `my_project.models.ProjectModel` importable when LambdaForge resolves YAML. A normal consumer layout
 is:
@@ -168,7 +177,7 @@ immutable artifact instead of an editable path:
 
 ```bash
 python -m pip wheel /absolute/path/to/LambdaForge --no-deps --wheel-dir dist
-python -m pip install dist/lambdaforge-0.9.0-py3-none-any.whl
+python -m pip install dist/lambdaforge-*.whl
 ```
 
 Let the consumer project's lock file or constraints select a PyTorch build compatible with its
@@ -708,7 +717,9 @@ plan.
 
 `lf top` opens the interactive live view when stdin/stdout are a TTY. Use arrows or `j`/`k` to
 select, `l` for recent logs, `x` plus confirmation to cancel, `r` to refresh and `q` to leave. It
-shows host CPU/RAM/GPU facts separately from job declarations and scheduler state; login-node usage
+collects slow provider snapshots in an isolated cancellable child, while terminal input and drawing
+remain in the foreground; arrows and exit therefore do not wait for SSH/scheduler timeout. It shows
+host CPU/RAM/GPU facts separately from job declarations and scheduler state; login-node usage
 is not presented as SLURM partition capacity. No TUI-only backend exists: the versioned snapshot
 from `lf overview --json`, job rows from `lf jobs list --json` and resource rows from `lf resources
 --all --json` are the machine interface for a GUI or wrapper. Non-TTY `lf top` prints once;
@@ -793,6 +804,15 @@ A verified runtime may remain as reconstructible cache when later package instal
 no active pointer references an incomplete runtime/environment. `storage status` accounts for all
 categories and `storage gc` never selects a runtime referenced by the active pointer, a retained
 environment or an active/queued job.
+
+Once bootstrap has verified and activated the new environment, it prunes superseded directories
+whose names belong to LambdaForge's content-addressed environment namespace. Cleanup runs under the
+cache GC lock and retains the new environment, every environment referenced by a known non-terminal
+job and references discoverable in durable direct-job state. If another environment build is in
+progress, pruning is deferred and reported in human/JSON bootstrap output. This ordering guarantees
+that a failed bootstrap never destroys the previous working environment. It does not delete Python
+runtimes, package caches, datasets, results or administrator-owned environments; use preview-first
+`storage gc` for the wider reconstructible cache lifecycle.
 
 `doctor` reports the system/default Python separately from the active resolved runtime and managed
 environment Python. Thus Python 3.9 can be a healthy system probe while bootstrap is still able to
@@ -1389,7 +1409,8 @@ snapshot without changing the environment.
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Persist an ID immediately, then prepare/cache/submit remotely in a detached controller. `--wait-for-submit` waits for provider acknowledgement. | job metadata; remote only without dry-run |
 | `clusters add|list|show|inspect|set|unset|remove|export|credentials|test|bootstrap|resources|storage` | Manage profiles and inspect their environment, resources and storage. | profile/credential/bootstrap mutations |
 | `status`, `overview`, `top` | Global cluster/job/dataset view; `top` is interactive on a TTY, `top --once` is one-shot and `top --json --follow` is NDJSON. | no |
-| `jobs list [--all]|show|logs|pause|resume|cancel|retry|delete|reconcile`, `jobs group list|show` | Reconnect and safely control persistent work/groups. | lifecycle commands only |
+| `status|logs|cancel|retry` | Short aliases for the corresponding common persistent-job operations. | lifecycle commands only |
+| `jobs list [--all]|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`, `jobs group list|show` | Reconnect and safely control persistent work/groups. | lifecycle commands only |
 | `resources [--on C|--all] [--processes]` | Separate observed host facts, scheduler view and declared job requests. | no |
 | `configs|experiments|tasks list|show|validate|plan|run`; `experiments status|history|results` | Discover project YAML and operate it by unambiguous name. | only run |
 | `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|delete|materialize|replicate` | Recipe/build/version/placement lifecycle and inspection. | build/add/remove; delete/transfer only with `--apply` |
@@ -1402,7 +1423,7 @@ snapshot without changing the environment.
 | `target IMPORT.PATH` | Constructor signature and docstring. | no |
 | `migrate CONFIG` | Preview migration; `--output` is explicit. | no |
 | `plugins` | Entry-point metadata without provider import. | no |
-| `results SOURCE` / `results audit SOURCE` | Compatible identity/duplicate audit; index writing is explicit. | no unless `--write-index` |
+| `results audit SOURCE` | Compatible identity/duplicate audit; index writing is explicit. | no unless `--write-index` |
 | `results list|show|compare|export|sync` | Human selectors, statistics, tabular export and lightweight remote evidence. | export/sync |
 | `plot learning|sweep|seeds|hpo|resources` | Create `PlotSpec` JSON or atomic static/HTML figures. | only without `--json` |
 | `artifact inspect|export|validate|visualize|list|fetch|plugins` | Safe bounded inspection and explicit retrieval/geometry. | export/visualize/fetch |
@@ -1706,6 +1727,7 @@ LambdaForge/
 ├── src/lambdaforge/
 │   ├── EnvironmentManifest.py     # typed run provenance
 │   ├── LambdaForge.py            # single discoverable facade
+│   ├── _version.py               # sole package/runtime release-version constant
 │   ├── cli/                      # command-line object
 │   ├── configuration/            # authoring IR, composition, secrets, provenance and diff
 │   ├── controlplane/             # clusters, transports, schedulers, jobs, bundles and doctor
@@ -1742,6 +1764,11 @@ owns controller-side hand-off, `Transport` and `Scheduler` are provider boundari
 interaction/rendering. The private `SubmissionWorker` is deliberately an internal process entry
 point, not another public execution engine. This separation lets a future GUI call the same service
 objects or JSON commands without importing a TUI.
+
+Release identity has one writable source: `src/lambdaforge/_version.py`. Setuptools obtains dynamic
+wheel/sdist metadata from it and `LambdaForgeVersion` exposes the same constant to CLI, bundles and
+diagnostics. README installation commands intentionally use a wheel glob; changelog headings are
+historical records, not competing version authorities.
 
 Enums and typed immutable records replace closed magic-string/dictionary state. YAML keys, error
 categories and fully qualified import paths remain strings where they are external protocol

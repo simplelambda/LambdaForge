@@ -13,12 +13,17 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from email.parser import Parser
 from importlib.metadata import Distribution, distribution
 from importlib.util import find_spec
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 from uuid import uuid4
+
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 
@@ -93,6 +98,58 @@ class ProjectWheelBuilder:
                 f"Cannot locate one installed package directory for {distribution_name!r}."
             )
         return self._pack_installed(installed, Path(locations[0]))
+
+    @staticmethod
+    def validate_framework_dependency(
+        wheel: str | Path,
+        framework_version: str,
+        *,
+        project_root: str | Path | None = None,
+    ) -> None:
+        """Fail locally when a consumer wheel excludes the controller release.
+
+        Pip may only warn when an editable framework upgrade invalidates an already installed
+        consumer. A fresh managed environment resolves both wheels together and correctly refuses
+        that combination, so detect the same incompatibility before transferring a bundle.
+        """
+        source = Path(wheel).resolve()
+        with zipfile.ZipFile(source) as archive:
+            metadata_names = tuple(
+                name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+            )
+            if len(metadata_names) != 1:
+                raise RuntimeError(
+                    f"Expected one METADATA record in consumer wheel {source.name}, "
+                    f"found {len(metadata_names)}."
+                )
+            metadata = Parser().parsestr(
+                archive.read(metadata_names[0]).decode("utf-8", errors="strict")
+            )
+        for raw in metadata.get_all("Requires-Dist", ()):
+            try:
+                requirement = Requirement(raw)
+            except InvalidRequirement as error:
+                raise RuntimeError(
+                    f"Consumer wheel {source.name} contains invalid Requires-Dist metadata: {raw}"
+                ) from error
+            if canonicalize_name(requirement.name) != "lambdaforge":
+                continue
+            if requirement.marker is not None and not requirement.marker.evaluate():
+                continue
+            if Version(framework_version) in requirement.specifier:
+                continue
+            declaration = (
+                Path(project_root).resolve() / "pyproject.toml"
+                if project_root is not None
+                else source
+            )
+            raise ValueError(
+                f"Consumer project {metadata.get('Name', source.stem)!r} declares "
+                f"{raw!r}, which excludes LambdaForge {framework_version}. Update the "
+                f"project dependency in {declaration} only after verifying compatibility, "
+                "reinstall the consumer, and run 'python -m pip check'. LambdaForge will not "
+                "bypass a declared compatibility boundary."
+            )
 
     @classmethod
     def installed_project_root(
