@@ -197,18 +197,18 @@ class CommandLineInterface:
                 return report_error(error)
         if arguments.command == "explain":
             try:
-                if arguments.kind == "changes":
+                if arguments.subject == "changes":
                     current = cls._scientific_payload(arguments.path)
                     previous = (
                         cls._scientific_payload(arguments.against)
                         if arguments.against is not None
                         else None
                     )
-                    explanation = IdentityExplainer().compare(current, previous)
+                    identity_explanation = IdentityExplainer().compare(current, previous)
                     print(
-                        json.dumps(explanation.to_dict(), indent=2)
+                        json.dumps(identity_explanation.to_dict(), indent=2)
                         if arguments.json
-                        else explanation.summary()
+                        else identity_explanation.summary()
                     )
                     return 0
                 catalogs: dict[str, type[Any]] = {
@@ -217,9 +217,23 @@ class CommandLineInterface:
                     "experiment": ExperimentSchemaCatalog,
                     "workflow": WorkflowSchemaCatalog,
                 }
-                schema = catalogs[arguments.kind]().schema()
-                node = cls._schema_node(schema, arguments.path)
-                print(json.dumps(node, indent=2))
+                if arguments.subject in catalogs:
+                    schema = catalogs[arguments.subject]().schema()
+                    node = cls._schema_node(schema, arguments.path)
+                    print(json.dumps(node, indent=2))
+                    return 0
+                if arguments.path:
+                    raise ValueError(
+                        "Configuration explanation accepts one path. Schema explanation uses "
+                        "'lf explain KIND DOTTED_PATH'."
+                    )
+                from lambdaforge.configuration.explanation import explain_configuration
+
+                config_explanation = explain_configuration(arguments.subject)
+                if arguments.json:
+                    print(json.dumps(config_explanation, indent=2))
+                else:
+                    cls._print_configuration_explanation(config_explanation)
                 return 0
             except Exception as error:
                 return report_error(error)
@@ -426,24 +440,64 @@ class CommandLineInterface:
                 )
                 config_service = ProjectConfigService(arguments.root)
                 if arguments.entity_command == "list":
-                    print(
-                        json.dumps(
-                            [value.to_dict() for value in config_service.list(kind=kind)], indent=2
-                        )
-                    )
+                    records = [value.to_dict() for value in config_service.list(kind=kind)]
+                    if arguments.json or arguments.command != "experiments":
+                        print(json.dumps(records, indent=2))
+                    else:
+                        cls._print_experiment_list(records)
                     return 0
                 config_record = config_service.show(arguments.selector)
                 if kind is not None and config_record.kind != kind:
                     raise ValueError(f"{config_record.name!r} is {config_record.kind}, not {kind}.")
                 if arguments.entity_command == "show":
-                    print(json.dumps(config_record.to_dict(), indent=2))
+                    record_payload = config_record.to_dict()
+                    revision = getattr(arguments, "revision", None)
+                    if revision is not None:
+                        executions = [
+                            value
+                            for value in record_payload["executions"]
+                            if str(value.get("scientific_revision", "")).startswith(revision)
+                            or str(value.get("scientific_identity", "")).startswith(revision)
+                        ]
+                        if not executions and not str(
+                            record_payload.get("scientific_revision", "")
+                        ).startswith(revision):
+                            raise KeyError(
+                                f"Unknown revision {revision!r} for experiment "
+                                f"{config_record.name!r}."
+                            )
+                        record_payload["selected_revision"] = revision
+                        record_payload["executions"] = executions
+                    if arguments.json or arguments.command != "experiments":
+                        print(json.dumps(record_payload, indent=2))
+                    else:
+                        cls._print_experiment(record_payload)
                     return 0
                 if arguments.entity_command == "status":
-                    entity_jobs = JobService().list(name=config_record.name)
-                    print(json.dumps([value.to_dict() for value in entity_jobs], indent=2))
+                    status_payload = config_record.to_dict()
+                    if arguments.json:
+                        print(json.dumps(status_payload, indent=2))
+                    else:
+                        cls._print_experiment(status_payload)
                     return 0
-                if arguments.entity_command in {"history", "results"}:
-                    print(json.dumps(ResultService().show(config_record.path), indent=2))
+                if arguments.entity_command == "history":
+                    history_payload = config_record.to_dict()
+                    history = {
+                        "name": history_payload["name"],
+                        "current_revision": history_payload["scientific_revision"],
+                        "executions": history_payload["executions"],
+                    }
+                    print(json.dumps(history, indent=2))
+                    return 0
+                if arguments.entity_command in {"runs", "results"}:
+                    results = ResultService().show(config_record.path)
+                    if arguments.entity_command == "runs":
+                        results = {
+                            "experiment": config_record.name,
+                            "revision": config_record.scientific_revision,
+                            "runs": results["records"],
+                        }
+                    print(json.dumps(results, indent=2))
                     return 0
                 forwarded = (
                     "inspect" if arguments.entity_command == "plan" else arguments.entity_command
@@ -456,6 +510,8 @@ class CommandLineInterface:
                     command.append("--dry-run")
                 if getattr(arguments, "independent_hpo", False):
                     command.append("--independent-hpo")
+                if getattr(arguments, "allow_duplicate", False):
+                    command.append("--allow-duplicate")
                 return cls.main(command)
             except Exception as error:
                 return report_error(error)
@@ -782,6 +838,7 @@ class CommandLineInterface:
                         dry_run=arguments.dry_run,
                         independent_hpo=arguments.independent_hpo,
                         wait_for_submit=arguments.wait_for_submit,
+                        allow_duplicate=arguments.allow_duplicate,
                     )
                     print(json.dumps(group.to_dict(), indent=2))
                     return 0
@@ -798,6 +855,7 @@ class CommandLineInterface:
                         cluster=cluster,
                         resources=request,
                         run_arguments=cls._remote_run_arguments(arguments),
+                        allow_duplicate=arguments.allow_duplicate,
                     )
                     bundle_payload = None
                 else:
@@ -807,6 +865,7 @@ class CommandLineInterface:
                         resources=request,
                         dry_run=arguments.dry_run,
                         run_arguments=cls._remote_run_arguments(arguments),
+                        allow_duplicate=arguments.allow_duplicate,
                     )
                     bundle_payload = bundle.to_dict()
                 submission_payload = {
@@ -961,7 +1020,7 @@ class CommandLineInterface:
             "devices_per_job": arguments.devices_per_job,
             "grace_seconds": arguments.grace_seconds,
         }
-        results = experiment.run(
+        run_outcome: Any = experiment.run(
             dry_run=arguments.dry_run,
             execution_overrides=experiment_overrides,
             aggregate_plots=not arguments.no_plots,
@@ -971,8 +1030,8 @@ class CommandLineInterface:
                 experiment.config.as_dict(), "experiment.name", arguments.config.stem
             )
         )
-        if hasattr(results, "to_dict"):
-            summary = getattr(results, "summary", {})
+        if hasattr(run_outcome, "to_dict"):
+            summary = getattr(run_outcome, "summary", {})
             if summary.get("status") == "failed":
                 return report_diagnostic(
                     execution_failure_diagnostic(
@@ -982,9 +1041,11 @@ class CommandLineInterface:
                         error=str(summary.get("error") or "Adaptive optimization failed."),
                     )
                 )
-            print(json.dumps(results.to_dict(), indent=2, default=str))
+            print(json.dumps(run_outcome.to_dict(), indent=2, default=str))
             return 0
-        failed_results = [result for result in results if result.get("status") == "failed"]
+        failed_results = [
+            result for result in run_outcome if result.get("status") == "failed"
+        ]
         if failed_results:
             first = failed_results[0]
             return report_diagnostic(
@@ -996,7 +1057,7 @@ class CommandLineInterface:
                     run_dir=first.get("run_dir"),
                 )
             )
-        print(f"LambdaForge finished {len(results)} run(s); failed=0.")
+        print(f"LambdaForge finished {len(run_outcome)} run(s); failed=0.")
         return 0
 
     @staticmethod
@@ -1091,6 +1152,85 @@ class CommandLineInterface:
                 f"ram={observed.get('ram_available_bytes', 'unknown')} "
                 f"gpus={len(observed.get('gpus', []))}"
             )
+
+    @staticmethod
+    def _print_experiment_list(records: list[dict[str, Any]]) -> None:
+        """Render the project experiment catalog in research terms."""
+        print(
+            "EXPERIMENT                 REVISION      TARGETS              "
+            "STATE       RUNS  ATTEMPTS"
+        )
+        for record in records:
+            progress = record.get("progress", {})
+            progress = progress if isinstance(progress, dict) else {}
+            completed, total = progress.get("completed", 0), progress.get("total")
+            runs = f"{completed}/{total if total is not None else '?'}"
+            targets = ",".join(record.get("active_clusters", ())) or "-"
+            print(
+                f"{str(record.get('name', '-')):<26.26} "
+                f"{str(record.get('scientific_revision') or '-'):<13.13} "
+                f"{targets:<20.20} {str(record.get('state', '-')):<11.11} "
+                f"{runs:<5.5} {record.get('attempt_count', 0)}"
+            )
+
+    @staticmethod
+    def _print_experiment(payload: dict[str, Any]) -> None:
+        """Render one experiment with revision, progress and execution history."""
+        progress = payload.get("progress", {})
+        progress = progress if isinstance(progress, dict) else {}
+        total = progress.get("total")
+        completed = progress.get("completed", 0)
+        print(f"Experiment: {payload.get('name', '-')}")
+        print(f"Revision: {payload.get('scientific_revision') or 'unknown'}")
+        print(f"State: {payload.get('state', 'not_run')}")
+        print(
+            f"Progress: {completed}/{total if total is not None else '?'} "
+            f"{progress.get('unit', 'runs')}"
+        )
+        print(f"Datasets: {', '.join(payload.get('datasets', ())) or 'none'}")
+        print(f"Configuration: {payload.get('path', '-')}")
+        print("Executions:")
+        executions = payload.get("executions", ())
+        if not executions:
+            print("  none")
+            return
+        for execution in executions:
+            print(
+                f"  {execution.get('cluster', '-')}  {execution.get('state', '-')}  "
+                f"revision={execution.get('scientific_revision') or 'legacy'}  "
+                f"attempt={execution.get('attempt', 1)}  job={execution.get('job_id', '-')}"
+            )
+
+    @staticmethod
+    def _print_configuration_explanation(payload: dict[str, Any]) -> None:
+        """Render materialized scientific intent before operational identifiers."""
+        print(f"{str(payload.get('kind', 'configuration')).title()}: {payload.get('name', '-')}")
+        print(f"Revision: {payload.get('scientific_revision', 'unknown')}")
+        datasets = payload.get("datasets", ())
+        print(f"Datasets: {', '.join(datasets) if datasets else 'none'}")
+        planned = payload.get("planned_work", {})
+        if isinstance(planned, dict):
+            print(
+                f"Planned work: {planned.get('total', '?')} "
+                f"{planned.get('unit', 'units')}"
+            )
+        if payload.get("model"):
+            model = payload["model"]
+            print(f"Model: {model.get('target')}({model.get('params', {})})")
+        if payload.get("training"):
+            training = payload["training"]
+            print(f"Training: maximum {training.get('max_epochs', '?')} epochs")
+        if payload.get("seeds"):
+            print(f"Seeds: {', '.join(str(value) for value in payload['seeds'])}")
+        if payload.get("objective"):
+            print(f"Objective: {payload['objective']}")
+        nodes = payload.get("stages", payload.get("nodes", ()))
+        if nodes:
+            print("Stages:" if "stages" in payload else "Nodes:")
+            for node in nodes:
+                dependencies = ", ".join(node.get("depends_on", ())) or "start"
+                print(f"  {node.get('name')}  after: {dependencies}")
+        print(f"Resources: {payload.get('resources', {})}")
 
     @staticmethod
     def _initialize(directory: Path, *, force: bool, template: str = "minimal") -> int:

@@ -51,6 +51,7 @@ def serve(request_path: str | Path) -> int:
             run_arguments=tuple(str(item) for item in arguments),
             group_id=str(value["group_id"]) if value.get("group_id") else None,
             reserved_job_id=job_id,
+            allow_duplicate=bool(value.get("allow_duplicate", False)),
             progress=progress,
         )
         return 0

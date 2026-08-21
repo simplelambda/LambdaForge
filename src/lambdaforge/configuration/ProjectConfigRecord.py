@@ -22,6 +22,14 @@ class ProjectConfigRecord:
     active_jobs: tuple[str, ...] = ()
     active_clusters: tuple[str, ...] = ()
     last_result: dict[str, Any] | None = None
+    scientific_identity: str | None = None
+    scientific_revision: str | None = None
+    state: str = "not_run"
+    planned_runs: int | None = None
+    completed_runs: int = 0
+    unit: str = "runs"
+    attempt_count: int = 0
+    executions: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,4 +44,14 @@ class ProjectConfigRecord:
             "active_jobs": list(self.active_jobs),
             "active_clusters": list(self.active_clusters),
             "last_result": dict(self.last_result) if self.last_result is not None else None,
+            "scientific_identity": self.scientific_identity,
+            "scientific_revision": self.scientific_revision,
+            "state": self.state,
+            "progress": {
+                "completed": self.completed_runs,
+                "total": self.planned_runs,
+                "unit": self.unit,
+            },
+            "attempt_count": self.attempt_count,
+            "executions": [dict(value) for value in self.executions],
         }

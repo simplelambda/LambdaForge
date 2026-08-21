@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
-from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
+from lambdaforge.configuration.ConfigurationDescriptor import ConfigurationDescriptor
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.CudaCompatibilityResolver import (
@@ -60,6 +60,7 @@ class ControlPlane:
         run_arguments: Sequence[str] = (),
         group_id: str | None = None,
         reserved_job_id: str | None = None,
+        allow_duplicate: bool = False,
         progress: Callable[[str], None] | None = None,
     ) -> tuple[JobHandle, ExecutionBundle]:
         """Build/cache a bundle, stage it and submit the normal remote run command."""
@@ -68,14 +69,23 @@ class ControlPlane:
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
         storage = profile.storage
-        materialized_kind = AuthoringConfig.from_yaml(config_path).materialize().kind
+        descriptor = ConfigurationDescriptor.from_path(config_path)
+        materialized_kind = descriptor.kind
         request = resources or ConfigurationResourceResolver.resolve(config_path)
+        if descriptor.job_type in {"experiment", "hpo"} and not dry_run and not allow_duplicate:
+            self.jobs.refuse_active_execution(
+                descriptor.scientific_identity,
+                cluster,
+                name=descriptor.name,
+                source=descriptor.source,
+                exclude_job_id=reserved_job_id,
+            )
         if (
             cluster != "local"
             and materialized_kind.value == "dataset"
             and storage.dataset_root is None
         ):
-            dataset = self._configuration_name(config_path)
+            dataset = descriptor.name
             raise LambdaForgeError(
                 diagnostic(
                     ErrorCategory.CONFIGURATION,
@@ -287,13 +297,11 @@ class ControlPlane:
             metadata={
                 "bundle_size_bytes": bundle.size_bytes,
                 "environment_id": bundle.environment_id or "existing",
-                "name": self._configuration_name(config_path),
-                "scientific_identity": self._scientific_identity(config_path),
+                **descriptor.metadata(),
                 "execution_identity": f"{cluster}:{bundle.bundle_id}",
                 "remote_config_path": config,
                 "pytorch": torch_plan.to_dict() if torch_plan is not None else None,
                 "python_runtime_id": runtime.runtime_id if runtime is not None else None,
-                "datasets": list(self._configuration_datasets(config_path)),
             },
             job_id=reserved_job_id,
             group_id=group_id,
@@ -314,52 +322,19 @@ class ControlPlane:
 
     @staticmethod
     def _scientific_identity(config_path: str | Path) -> str:
-        from lambdaforge.configuration.ConfigurationKind import ConfigurationKind
-        from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
-        from lambdaforge.experiments.results.RunFingerprint import RunFingerprint
-        from lambdaforge.tasks.TaskConfig import TaskConfig
-
-        materialized = AuthoringConfig.from_yaml(config_path).materialize()
-        if materialized.kind is ConfigurationKind.TASK:
-            return TaskConfig(materialized.values, source=config_path).fingerprint
-        if materialized.kind is ConfigurationKind.EXPERIMENT:
-            config = ExperimentConfig(materialized.values, source=config_path)
-            return RunFingerprint.digest(
-                {"runs": [RunFingerprint.payload(run) for run in config.expand()]}
-            )
-        return RunFingerprint.digest(materialized.to_dict())
+        return ConfigurationDescriptor.from_path(config_path).scientific_identity
 
     @staticmethod
     def _configuration_name(config_path: str | Path) -> str:
-        materialized = AuthoringConfig.from_yaml(config_path).materialize()
-        values = materialized.values
-        experiment = values.get("experiment", {})
-        if isinstance(experiment, dict) and experiment.get("name"):
-            return str(experiment["name"])
-        dataset = values.get("dataset", {})
-        if isinstance(dataset, dict) and dataset.get("name"):
-            version = dataset.get("version")
-            return f"{dataset['name']}@{version}" if version is not None else str(dataset["name"])
-        return str(values.get("name", Path(config_path).stem))
+        return ConfigurationDescriptor.from_path(config_path).name
 
     @staticmethod
     def _configuration_datasets(config_path: str | Path) -> tuple[str, ...]:
-        from lambdaforge.configuration.ProjectConfigService import ProjectConfigService
-
-        materialized = AuthoringConfig.from_yaml(config_path).materialize()
-        return ProjectConfigService.datasets(materialized.to_dict())
+        return ConfigurationDescriptor.from_path(config_path).datasets
 
     @staticmethod
     def _configuration_type(config_path: str | Path) -> str:
-        materialized = AuthoringConfig.from_yaml(config_path).materialize()
-        hpo = materialized.values.get("hpo", {})
-        if isinstance(hpo, dict) and hpo.get("enabled"):
-            return "hpo"
-        if materialized.kind.value == "dataset":
-            return "dataset-build"
-        if materialized.kind.value == "task" and "preprocess" in materialized.values:
-            return "preprocessing"
-        return materialized.kind.value
+        return ConfigurationDescriptor.from_path(config_path).job_type
 
     @staticmethod
     def _command(

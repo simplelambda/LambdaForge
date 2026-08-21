@@ -104,6 +104,50 @@ def test_renderer_scrolls_to_keep_keyboard_selection_visible(
     assert "Selected: job-4" in rendered
 
 
+def test_monitor_defaults_to_research_work_and_retains_advanced_jobs() -> None:
+    payload = {
+        "jobs": {
+            "items": [
+                {
+                    "job_id": "job-low-level",
+                    "metadata": {"name": "baseline"},
+                    "job_type": "experiment",
+                    "state": "running",
+                    "cluster": "atlas",
+                    "created_at_utc": "",
+                    "resources": {},
+                }
+            ],
+            "by_state": {"running": 1},
+            "total": 1,
+        },
+        "work": {
+            "items": [
+                {
+                    "work_id": "work-semantic",
+                    "name": "baseline",
+                    "kind": "experiment",
+                    "state": "running",
+                    "cluster": "atlas",
+                    "scientific_revision": "abc123",
+                    "progress": {"completed": 3, "total": 7, "unit": "runs"},
+                    "attempts": 1,
+                    "primary_job_id": "job-low-level",
+                    "created_at_utc": "",
+                }
+            ]
+        },
+    }
+
+    research = MonitorRenderer.render(payload, width=160)
+    advanced = MonitorRenderer.render(payload, width=160, view="jobs")
+
+    assert "LambdaForge research activity" in research
+    assert "baseline" in research and "3/7 runs" in research
+    assert "LambdaForge advanced jobs" in advanced
+    assert "job-low-level" in advanced
+
+
 def test_monitor_scrolls_clusters_without_always_showing_personal_usage() -> None:
     history = ResourceHistory(30)
     clusters = [

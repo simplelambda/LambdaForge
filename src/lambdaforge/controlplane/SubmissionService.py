@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from lambdaforge.configuration.ConfigurationDescriptor import ConfigurationDescriptor
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.jobs import JobHandle
 from lambdaforge.controlplane.JobService import JobService
@@ -38,6 +39,7 @@ class SubmissionService:
         run_arguments: Sequence[str] = (),
         group_id: str | None = None,
         retry_of: str | None = None,
+        allow_duplicate: bool = False,
     ) -> JobHandle:
         """Persist and launch a remote submission request without waiting for SSH preparation."""
         source = Path(config).expanduser().resolve()
@@ -52,10 +54,16 @@ class SubmissionService:
                 "reference or use OpenSSH authentication first."
             )
         # Parse first so authoring errors remain immediate and no doomed request is queued.
-        from lambdaforge.controlplane.ControlPlane import ControlPlane
-
-        name = ControlPlane._configuration_name(source)
-        job_type = ControlPlane._configuration_type(source)
+        # Tasks do not need active-experiment deduplication. Their complete input/code
+        # fingerprint is attached by the worker, keeping the foreground hand-off cheap.
+        descriptor = ConfigurationDescriptor.from_path(source, resolve_task_code_identity=False)
+        if descriptor.job_type in {"experiment", "hpo"} and not allow_duplicate:
+            self.jobs.refuse_active_execution(
+                descriptor.scientific_identity,
+                cluster,
+                name=descriptor.name,
+                source=source,
+            )
         request_resources = resources or ConfigurationResourceResolver.resolve(source)
         handle = self.jobs.reserve(
             cluster=cluster,
@@ -63,29 +71,30 @@ class SubmissionService:
             config_path=source,
             retry_of=retry_of,
             metadata={
-                "name": name,
+                **descriptor.metadata(),
                 "submission_phase": "queued-locally",
                 "submission_mode": "asynchronous",
                 "run_arguments": list(run_arguments),
             },
-            job_type=job_type,
+            job_type=descriptor.job_type,
             group_id=group_id,
         )
         directory = self.jobs.store.root / "submissions" / handle.job_id
         directory.mkdir(parents=True, mode=0o700, exist_ok=False)
         os.chmod(directory, 0o700)
         request_path = directory / "request.json"
-        descriptor = profile.to_dict()
-        descriptor.pop("name", None)
+        profile_descriptor = profile.to_dict()
+        profile_descriptor.pop("name", None)
         payload: dict[str, Any] = {
             "submission_request_version": 1,
             "job_id": handle.job_id,
             "cluster": cluster,
-            "profile": descriptor,
+            "profile": profile_descriptor,
             "config": str(source),
             "resources": request_resources.to_dict(),
             "run_arguments": list(run_arguments),
             "group_id": group_id,
+            "allow_duplicate": allow_duplicate,
             "job_store": str(self.jobs.store.root),
         }
         temporary = request_path.with_name(f".{request_path.name}.{uuid4().hex}.tmp")

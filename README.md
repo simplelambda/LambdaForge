@@ -64,8 +64,8 @@ lf --version
 ```
 
 The consumer's `pyproject.toml` must allow the LambdaForge release being installed. For example,
-`lambdaforge[parquet]>=0.9,<0.10` accepts compatible 0.9 patch releases, whereas `<0.9` explicitly
-rejects them. Pip can finish an editable upgrade while warning that an already-installed consumer
+`lambdaforge[parquet]>=0.10,<0.11` accepts compatible 0.10 releases, whereas `<0.10` rejects them.
+Pip can finish an editable upgrade while warning that an already-installed consumer
 is now incompatible; that environment is not healthy. Update the consumer bound deliberately,
 reinstall it and require `python -m pip check` to succeed. Remote managed installation resolves both
 wheels from scratch and therefore refuses an incompatible pair rather than ignoring its metadata.
@@ -133,6 +133,7 @@ so paths such as `my_project.preprocessing.normalize_record` resolve normally.
 | Preview resources, placement and actions | `lf plan CONFIG [--on CLUSTER]` |
 | Run any configuration, including a dataset recipe | `lf run CONFIG [--on CLUSTER]` |
 | Discover project configurations | `lf configs list` |
+| Inspect experiments, runs and results | `lf experiments list/show/runs/results` |
 | Inspect datasets or build by discovered name | `lf datasets list/show`; `lf datasets build NAME` |
 | Reconnect to work | `lf jobs list`; `lf jobs show latest`; `lf jobs logs JOB --follow` |
 | Watch all live work interactively | `lf top` (or `lf overview --json` for software) |
@@ -145,6 +146,12 @@ so paths such as `my_project.preprocessing.normalize_record` resolve normally.
 
 `lf` and `lambdaforge` are identical entry points. Commands that can remove data or collect cache
 are preview-first and require an explicit `--apply` after review.
+
+The normal hierarchy is `experiment → revision → execution → run → attempt → job`. Scientific
+changes create a revision; cluster placement does not. The same active revision on the same cluster
+is refused unless `--allow-duplicate` is explicit, while another cluster is allowed. `--rerun`
+repeats terminal science, `--restart` discards continuation state, the default resumes compatible
+state, and `jobs retry` creates an attempt only after failure, cancellation or timeout.
 
 ## Errors are diagnostics
 
@@ -169,6 +176,8 @@ DatasetRecipe → DatasetBuild → DatasetVersion → DatasetPlacement
 Recipe stages use the ordinary Workflow DAG, can reuse verified content-addressed outputs and
 publish only after the final index and assets pass validation. The Registry owns managed
 placements; a DataCatalog remains available for external or institutionally managed data.
+`datasets list` prints the copyable `name@version` selector accepted by `datasets show`; an
+unversioned name is accepted only when exactly one version exists.
 
 Explicit local inputs of at most 10 MiB are content-hashed and copied automatically into the
 execution bundle, including inputs declared inside an embedded dataset-recipe stage. Users never
@@ -205,9 +214,10 @@ that a model, download or transform is advancing. LambdaForge workflows emit nod
 and generic preprocessing emits periodic completed-record checkpoints. Domain code should still
 write bounded progress messages for a single long operation and flush them promptly.
 
-The main `lf top` screen deliberately shows compact whole-cluster values and the global job list.
-Clusters and jobs behave as one vertical sequence: pressing `↑` on the first job selects the last
-cluster, and pressing `↓` on the last cluster selects the first job. `Enter` opens the selected
+The main `lf top` screen shows compact whole-cluster values and research work grouped by name,
+revision and target; `v` switches to the advanced raw-job view. Clusters and work behave as one
+vertical sequence: pressing `↑` on the first item selects the last cluster, and pressing `↓` on the
+last cluster selects the first item. `Enter` opens the selected
 cluster. Its detail screen shows clearer time charts, requested and measured personal use, and only
 jobs on that cluster. `--history 120` controls the chart window. `l` opens the complete selected log
 (`PgUp`/`PgDn`, `Home`/`End`, then `b`, `Esc` or `q` to return). Press `x`, then `x` again, `y` or

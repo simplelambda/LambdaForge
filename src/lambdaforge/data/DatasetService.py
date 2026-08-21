@@ -413,9 +413,10 @@ class DatasetService:
         path = Path(raw)
         if path.is_file():
             return DatasetRecipeConfig.from_yaml(path)
-        name = raw.removeprefix("dataset:").split("@", 1)[0]
+        selector = raw.removeprefix("dataset:").split("/", 1)[0]
+        name = selector.split("@", 1)[0]
         try:
-            resolved = ProjectConfigService().resolve(name, kind="dataset")
+            resolved = ProjectConfigService().resolve(selector, kind="dataset")
         except (KeyError, ValueError) as error:
             known = tuple(
                 record.name

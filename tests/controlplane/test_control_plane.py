@@ -23,7 +23,9 @@ from lambdaforge.controlplane import (
     SchedulerSubmission,
     Transport,
 )
+from lambdaforge.controlplane.ResearchWork import aggregate_research_work
 from lambdaforge.data import DatasetRecipeConfig
+from lambdaforge.diagnostics import LambdaForgeError
 from lambdaforge.execution import ResourceRequest
 from lambdaforge.tasks import TaskConfig
 
@@ -124,6 +126,70 @@ class TestControlPlane:
         retried = reconnected.retry(handle.job_id)
         assert retried.job_id != handle.job_id
         assert store.get(retried.job_id).retry_of == handle.job_id
+        assert store.get(retried.job_id).metadata["attempt"] == 2
+
+    def test_legacy_job_record_remains_read_only_and_defaults_to_first_attempt(
+        self, tmp_path: Path
+    ) -> None:
+        fixture = Path(__file__).parents[1] / "fixtures" / "job-record-0.9.2.json"
+        destination = tmp_path / "jobs" / "job-20260820010101-09200000.json"
+        destination.parent.mkdir()
+        original = fixture.read_bytes()
+        destination.write_bytes(original)
+
+        record = JobStore(destination.parent).get("job-20260820010101-09200000")
+        work = aggregate_research_work((record,))[0]
+
+        assert record.metadata.get("attempt") is None
+        assert work.attempts == 1
+        assert work.primary_job_id == record.job_id
+        assert destination.read_bytes() == original
+
+    def test_active_experiment_is_deduplicated_per_scientific_revision_and_cluster(
+        self, tmp_path: Path
+    ) -> None:
+        config = tmp_path / "experiment.yaml"
+        config.write_text(
+            yaml.safe_dump(
+                {
+                    "schema_version": "1.1",
+                    "experiment": {"name": "baseline", "seeds": [7, 17]},
+                    "data": {},
+                    "model": {"target": "tests.fixtures.UserModel.UserModel"},
+                    "losses": [{"target": "tests.fixtures.UserLoss.UserLoss"}],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        catalog = ClusterCatalog(
+            {
+                "cluster-a": ClusterProfile("cluster-a", scheduler="slurm"),
+                "cluster-b": ClusterProfile("cluster-b", scheduler="slurm"),
+            }
+        )
+        factory = FakeFactory()
+        store = JobStore(tmp_path / "jobs")
+        jobs = JobService(catalog, store, factory)  # type: ignore[arg-type]
+        control = ControlPlane(
+            catalog,
+            jobs,
+            ExecutionBundleBuilder(tmp_path / "bundles"),
+            factory,  # type: ignore[arg-type]
+        )
+
+        first, _ = control.submit(config, cluster="cluster-a")
+        with pytest.raises(LambdaForgeError, match="No duplicate execution"):
+            control.submit(config, cluster="cluster-a")
+        other_cluster, _ = control.submit(config, cluster="cluster-b")
+        deliberate, _ = control.submit(config, cluster="cluster-a", allow_duplicate=True)
+
+        assert first.job_id != other_cluster.job_id != deliberate.job_id
+        records = store.records()
+        assert {record.metadata["scientific_revision"] for record in records} == {
+            records[0].metadata["scientific_revision"]
+        }
+        assert {record.metadata["planned_units"] for record in records} == {2}
 
     def test_job_logs_separate_framework_lifecycle_from_scientific_output(
         self, tmp_path: Path

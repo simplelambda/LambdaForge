@@ -16,7 +16,9 @@ class UnknownDatasetError(DatasetResolutionError):
         message = f"Dataset {selector!r} is not registered."
         if known:
             message += f"\nKnown datasets: {', '.join(known)}"
-        message += f"\nNext: lf datasets build {selector.split('@', 1)[0]} --on CLUSTER"
+        message += (
+            "\nNext: lf datasets list, then run the corresponding dataset recipe with lf run."
+        )
         super().__init__(message)
 
 
@@ -57,8 +59,7 @@ class MissingDatasetRecipeError(DatasetResolutionError):
         super().__init__(
             f"No DatasetRecipe is known for {selector!r}.\n"
             f"Known recipes: {rendered}\n"
-            f"Next: create/discover a kind: dataset recipe, then run "
-            f"lf datasets build {selector.split('@', 1)[0]}"
+            "Next: create/discover a kind: dataset recipe, then run lf run DATASET_CONFIG"
         )
 
 

@@ -151,6 +151,31 @@ class AuthoringConfigNormalizer:
                 raise ValueError("Use either trainer.epochs or trainer.max_epochs, not both.")
             trainer["max_epochs"] = trainer.pop("epochs")
             values["trainer"] = trainer
+        optimizer = values.get("optimizer")
+        if isinstance(optimizer, Mapping) and "type" in optimizer:
+            concise = copy.deepcopy(dict(optimizer))
+            selected = str(concise.pop("type")).strip()
+            if not selected:
+                raise ValueError("optimizer.type cannot be empty.")
+            if "ref" in concise or "target" in concise:
+                raise ValueError("Use optimizer.type or optimizer.ref, not both.")
+            aliases = {
+                "adam": "torch.optim.Adam",
+                "adamw": "torch.optim.AdamW",
+                "sgd": "torch.optim.SGD",
+            }
+            params = concise.pop("params", {})
+            if not isinstance(params, Mapping):
+                raise TypeError("optimizer.params must be a mapping.")
+            overlap = set(params) & set(concise)
+            if overlap:
+                raise ValueError(
+                    f"Optimizer parameters are declared twice: {tuple(sorted(overlap))}."
+                )
+            values["optimizer"] = {
+                "ref": aliases.get(selected.lower(), selected),
+                "params": {**copy.deepcopy(dict(params)), **concise},
+            }
         extensions = dict(values.get("extensions", {}))
         authoring = dict(self._authoring_extensions(values))
         for key in ("resources", "data_catalog", "environment"):

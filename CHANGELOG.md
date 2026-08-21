@@ -8,6 +8,35 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-21
+
+### Added
+
+- A research-oriented experiment read model derives revision, target, state, progress, attempts and
+  executions from project YAML, durable jobs and existing results without adding another database.
+- `experiments runs`, revision-aware experiment inspection, semantic `overview.work` snapshots and
+  the default research-centric `lf top` view; `v` retains direct access to raw jobs.
+- `lf explain CONFIG` summarizes materialized scientific intent without constructing consumer
+  targets, and common Adam/AdamW/SGD optimizer authoring compiles to the strict object form.
+- Frozen 0.9.2-shaped job and `wisdom-dna@1` registry fixtures protect legacy read models plus
+  dataset list/show/resolution/consumption and prove compatibility reads never mutate state.
+
+### Changed
+
+- Active experiment submissions are deduplicated by scientific identity and target before remote
+  preparation. Another cluster remains valid and `--allow-duplicate` is the explicit escape hatch.
+- Dataset selectors are exact and consistent: list output is accepted by show, and unversioned
+  selectors with multiple versions fail instead of choosing the most recent record.
+- `--rerun` names deliberate terminal repetition (`--force` remains compatible); retry is limited
+  to failed, cancelled or timed-out attempts and increments the durable attempt number.
+- Configuration name, kind, identity, datasets and planned units now come from one descriptor used
+  by submission, project discovery, diagnostics and research views.
+
+### Fixed
+
+- Async retry recovers the controller-side YAML from new metadata or the persisted 0.9.x submission
+  request instead of attempting to open the remote staged configuration path locally.
+
 ## [0.9.2] - 2026-08-21
 
 ### Added
@@ -542,7 +571,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/simplelambda/LambdaForge/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/simplelambda/LambdaForge/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/simplelambda/LambdaForge/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/simplelambda/LambdaForge/compare/v0.8.1...v0.9.0

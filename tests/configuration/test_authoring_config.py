@@ -63,6 +63,20 @@ class TestAuthoringConfig:
         assert materialized.kind is ConfigurationKind.EXPERIMENT
         assert materialized.values["model"] == {"target": "tests.fixtures.UserModel.UserModel"}
 
+    def test_common_optimizer_shorthand_compiles_to_the_strict_object_spec(self) -> None:
+        materialized = AuthoringConfig(
+            {
+                "experiment": {"name": "optimizer-short"},
+                "model": "tests.fixtures.UserModel.UserModel",
+                "optimizer": {"type": "adamw", "lr": 0.001, "weight_decay": 0.01},
+            }
+        ).materialize()
+
+        assert materialized.values["optimizer"] == {
+            "ref": "torch.optim.AdamW",
+            "params": {"lr": 0.001, "weight_decay": 0.01},
+        }
+
     def test_existing_strict_task_is_unchanged(self) -> None:
         """The authoring compiler must preserve the prior strict contract."""
         strict = {

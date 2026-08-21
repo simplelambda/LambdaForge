@@ -145,6 +145,12 @@ def _move_overview_selection(
     return focus, selected_job, selected_cluster
 
 
+def _selected_job_id(item: Mapping[str, Any]) -> str:
+    """Resolve a semantic work row or an advanced job row to its operational job."""
+    value = item.get("primary_job_id", item.get("job_id", ""))
+    return str(value)
+
+
 class MonitorRenderer:
     """Render immutable snapshots while leaving I/O and actions to the monitor."""
 
@@ -163,12 +169,19 @@ class MonitorRenderer:
         message: str = "",
         width: int = 120,
         height: int | None = None,
+        view: str = "research",
     ) -> str:
         del log_text  # compatibility with the original public renderer signature
         jobs = payload.get("jobs", {})
         jobs = jobs if isinstance(jobs, Mapping) else {}
-        items = jobs.get("items", ())
-        items = items if isinstance(items, list) else []
+        raw_items = jobs.get("items", ())
+        raw_items = raw_items if isinstance(raw_items, list) else []
+        work = payload.get("work", {})
+        work = work if isinstance(work, Mapping) else {}
+        work_items = work.get("items", ())
+        work_items = work_items if isinstance(work_items, list) else []
+        research_view = view == "research" and bool(work_items)
+        items = work_items if research_view else raw_items
         states = jobs.get("by_state", {})
         states = states if isinstance(states, Mapping) else {}
         clusters = [item for item in payload.get("clusters", ()) if isinstance(item, Mapping)]
@@ -177,7 +190,7 @@ class MonitorRenderer:
         cluster_start = max(0, min(selected_cluster, len(clusters) - 1) - cluster_capacity + 1)
         generated = str(payload.get("generated_at_utc", ""))
         lines = [
-            "LambdaForge live jobs",
+            "LambdaForge research activity" if research_view else "LambdaForge advanced jobs",
             (
                 f"updated {generated[11:19] or '-'}  "
                 f"preparing={states.get('preparing', 0)} "
@@ -213,18 +226,38 @@ class MonitorRenderer:
         if cluster_start or cluster_start + cluster_capacity < len(clusters):
             last_cluster = min(len(clusters), cluster_start + cluster_capacity)
             lines.append(f"  clusters {cluster_start + 1}-{last_cluster} of {len(clusters)}")
-        lines.extend(
-            (
-                "",
-                "  JOB                             NAME             TYPE           "
-                "STATE       CLUSTER      RUN      AGE      USED / REQUESTED",
-            )
+        lines.append("")
+        lines.append(
+            "  WORK                       KIND          STATE       TARGET             "
+            "PROGRESS       ATT  AGE"
+            if research_view
+            else "  JOB                             NAME             TYPE           "
+            "STATE       CLUSTER      RUN      AGE      USED / REQUESTED"
         )
         capacity = max(1, terminal_height - len(lines) - 4)
         start = max(0, min(selected, len(items) - 1) - capacity + 1)
         visible = items[start : start + capacity]
         for offset, job in enumerate(visible):
             index = start + offset
+            marker = "▶" if focus == "jobs" and index == selected else " "
+            if research_view:
+                progress = job.get("progress", {}) if isinstance(job, Mapping) else {}
+                progress = progress if isinstance(progress, Mapping) else {}
+                complete = progress.get("completed")
+                total = progress.get("total")
+                progress_text = (
+                    f"{complete if complete is not None else '?'}/"
+                    f"{total if total is not None else '?'} {progress.get('unit', 'units')}"
+                )
+                lines.append(
+                    f"{marker} {str(job.get('name', '-')):<26.26} "
+                    f"{str(job.get('kind', '-')):<13.13} "
+                    f"{str(job.get('state', '-')):<11.11} "
+                    f"{str(job.get('cluster', '-')):<18.18} "
+                    f"{progress_text:<14.14} {str(job.get('attempts', 0)):<4.4} "
+                    f"{age(str(job.get('created_at_utc', ''))):<8}"
+                )
+                continue
             metadata = job.get("metadata", {}) if isinstance(job, Mapping) else {}
             metadata = metadata if isinstance(metadata, Mapping) else {}
             timing = job.get("timing", {}) if isinstance(job, Mapping) else {}
@@ -235,7 +268,6 @@ class MonitorRenderer:
                 if runtime is None and job.get("state") in {"preparing", "staging", "queued"}
                 else _seconds(runtime if runtime is not None else timing.get("elapsed_seconds"))
             )
-            marker = "▶" if focus == "jobs" and index == selected else " "
             lines.append(
                 f"{marker} {str(job.get('job_id', '-')):<32.32} "
                 f"{str(metadata.get('name', '-')):<16.16} "
@@ -246,21 +278,31 @@ class MonitorRenderer:
             )
         if visible:
             job = items[min(selected, len(items) - 1)]
-            metadata = job.get("metadata", {})
-            metadata = metadata if isinstance(metadata, Mapping) else {}
-            lines.extend(
-                (
-                    "",
-                    f"Selected: {job.get('job_id')}  "
-                    f"scheduler={job.get('scheduler_id') or 'not acknowledged'}  "
-                    f"phase={metadata.get('submission_phase', '-')}",
+            if research_view:
+                lines.extend(
+                    (
+                        "",
+                        f"Selected: {job.get('name')}  "
+                        f"revision={job.get('scientific_revision') or 'legacy'}  "
+                        f"job={job.get('primary_job_id')}",
+                    )
                 )
-            )
+            else:
+                metadata = job.get("metadata", {})
+                metadata = metadata if isinstance(metadata, Mapping) else {}
+                lines.extend(
+                    (
+                        "",
+                        f"Selected: {job.get('job_id')}  "
+                        f"scheduler={job.get('scheduler_id') or 'not acknowledged'}  "
+                        f"phase={metadata.get('submission_phase', '-')}",
+                    )
+                )
         lines.extend(
             (
                 "",
                 message
-                or "↑/↓ select clusters and jobs · Enter cluster detail · l logs · "
+                or "↑/↓ select · Enter cluster detail · v research/jobs · l logs · "
                 "x cancel · r refresh · q quit",
             )
         )
@@ -642,6 +684,7 @@ class LiveJobMonitor:
     def run(self) -> int:
         selected = selected_cluster = detail_selected = log_scroll = 0
         focus, mode, log_job, log_text, message = "jobs", "jobs", "", "", ""
+        view = "research"
         pending_cancel: str | None = None
         return_mode = "jobs"
         payload: Mapping[str, Any] = {}
@@ -679,7 +722,9 @@ class LiveJobMonitor:
                     if time.monotonic() >= next_refresh and not poller.running:
                         poller.start()
                         next_refresh = time.monotonic() + self.interval
-                    items = payload.get("jobs", {}).get("items", [])
+                    raw_items = payload.get("jobs", {}).get("items", [])
+                    work_items = payload.get("work", {}).get("items", [])
+                    items = work_items if view == "research" and work_items else raw_items
                     clusters = payload.get("clusters", [])
                     if focus == "jobs" and not items and clusters:
                         focus = "clusters"
@@ -720,6 +765,7 @@ class LiveJobMonitor:
                                 message=message or ("Loading providers…" if not payload else ""),
                                 width=size.columns,
                                 height=size.lines,
+                                view=view,
                             )
                         self.stream.write("\x1b[H\x1b[2J" + rendered)
                         self.stream.flush()
@@ -802,7 +848,10 @@ class LiveJobMonitor:
                         continue
                     if key in {"q", "Q"}:
                         return 0
-                    if key == "\t":
+                    if key in {"v", "V"}:
+                        view = "jobs" if view == "research" else "research"
+                        selected, message, dirty = 0, f"View: {view}", True
+                    elif key == "\t":
                         if focus == "jobs" and clusters:
                             focus, dirty = "clusters", True
                         elif focus == "clusters" and items:
@@ -837,7 +886,7 @@ class LiveJobMonitor:
                     elif key == "l" and items:
                         return_mode = "jobs"
                         log_job, log_text, log_scroll, message, mode = (
-                            str(items[selected]["job_id"]),
+                            _selected_job_id(items[selected]),
                             "",
                             0,
                             "",
@@ -847,7 +896,7 @@ class LiveJobMonitor:
                         log_poller.start()
                         dirty = True
                     elif key in {"x", "X"} and items:
-                        pending_cancel = str(items[selected]["job_id"])
+                        pending_cancel = _selected_job_id(items[selected])
                         message = (
                             f"Cancel {pending_cancel}? Press x again, y or Enter to confirm; "
                             "n/Esc keeps it running."

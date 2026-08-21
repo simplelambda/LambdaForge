@@ -9,6 +9,7 @@ from typing import Any
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.JobObservation import JobObservation
 from lambdaforge.controlplane.JobService import JobService
+from lambdaforge.controlplane.ResearchWork import aggregate_research_work
 from lambdaforge.controlplane.ResourceService import ResourceService
 from lambdaforge.data.DatasetService import DatasetService
 
@@ -47,6 +48,9 @@ class OverviewService:
                 "items": [
                     {**value.to_dict(), **JobObservation.describe(value)} for value in job_values
                 ],
+            },
+            "work": {
+                "items": [value.to_dict() for value in aggregate_research_work(job_values)],
             },
             "datasets": {
                 "versions": len(dataset_values),

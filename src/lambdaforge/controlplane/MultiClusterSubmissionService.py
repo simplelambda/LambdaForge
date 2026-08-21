@@ -37,6 +37,7 @@ class MultiClusterSubmissionService:
         dry_run: bool = False,
         independent_hpo: bool = False,
         wait_for_submit: bool = True,
+        allow_duplicate: bool = False,
     ) -> JobGroup:
         if len(set(clusters)) != len(clusters) or not clusters:
             raise ValueError("Multi-cluster submission requires unique cluster names.")
@@ -68,6 +69,7 @@ class MultiClusterSubmissionService:
                     cluster=cluster,
                     resources=resources,
                     group_id=group_id,
+                    allow_duplicate=allow_duplicate,
                 )
             else:
                 handle, _ = self.control.submit(
@@ -76,6 +78,7 @@ class MultiClusterSubmissionService:
                     resources=resources,
                     dry_run=dry_run,
                     group_id=group_id,
+                    allow_duplicate=allow_duplicate,
                 )
             handles.append(handle)
             group = JobGroup(

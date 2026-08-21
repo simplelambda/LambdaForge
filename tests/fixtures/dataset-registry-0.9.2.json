@@ -1,0 +1,62 @@
+{
+  "dataset_registry_version": 1,
+  "datasets": {
+    "wisdom-dna@1": {
+      "dataset_record_version": 2,
+      "name": "wisdom-dna",
+      "version": "1",
+      "dataset_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "content_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "build_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sample_count": 42,
+      "splits": {
+        "all": 42
+      },
+      "created_at_utc": "2026-08-20T12:00:00+00:00",
+      "placements": [
+        {
+          "cluster": "citius-ctgpgpu12",
+          "root": "/persistent/lambdaforge/datasets/wisdom-dna/1/aaaaaaaaaaaaaaaa",
+          "registered_at_utc": "2026-08-20T12:01:00+00:00",
+          "size_bytes": 4096,
+          "file_count": 3,
+          "verified": true
+        }
+      ],
+      "producer": {
+        "config": "experiments/dna_preprocess.yaml",
+        "lambdaforge_version": "0.9.2"
+      },
+      "lineage": [
+        "public-protein-sources@2026-08"
+      ],
+      "metadata": {
+        "domain": "protein-research"
+      },
+      "index": {
+        "format": "jsonl",
+        "path": "members.jsonl"
+      },
+      "partitions": {
+        "split": {
+          "train": 34,
+          "validation": 8
+        }
+      },
+      "target_schema": {
+        "label": "string"
+      },
+      "global_assets": {
+        "metadata": {
+          "kind": "file",
+          "path": "metadata.json"
+        }
+      },
+      "lineage_graph": {
+        "inputs": [
+          "public-protein-sources@2026-08"
+        ]
+      }
+    }
+  }
+}

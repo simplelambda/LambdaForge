@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from lambdaforge.data.DatasetPlacement import DatasetPlacement
 from lambdaforge.data.DatasetRecord import DatasetRecord
-from lambdaforge.data.errors import InvalidDatasetBuildError
+from lambdaforge.data.errors import AmbiguousDatasetVersionError, InvalidDatasetBuildError
 from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 
@@ -62,7 +62,11 @@ class DatasetRegistry:
             raise KeyError(f"Unknown dataset {selector!r}.")
         if separator:
             return matches[0]
-        return sorted(matches, key=lambda value: value.created_at_utc, reverse=True)[0]
+        if len(matches) > 1:
+            raise AmbiguousDatasetVersionError(
+                name, tuple(sorted(record.version for record in matches))
+            )
+        return matches[0]
 
     def register(self, record: DatasetRecord) -> DatasetRecord:
         """Atomically merge placements for the same immutable identity."""

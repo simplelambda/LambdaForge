@@ -173,9 +173,22 @@ class DatasetCommands:
             print(f"Dataset: {payload['name']}@{payload['version']}")
             print(f"Content: {payload['dataset_id']}")
             print(f"Build: {payload.get('build_id') or 'unknown'}")
+            print(f"Published: {payload.get('created_at_utc') or 'unknown'}")
             print(f"Members: {payload['sample_count']}")
             print(f"Partitions: {payload.get('partitions', {})}")
-            print(f"Placements: {', '.join(p['cluster'] for p in payload['placements']) or 'none'}")
+            print(f"Target schema: {payload.get('target_schema') or {}}")
+            print(f"Global assets: {', '.join(payload.get('global_assets', {})) or 'none'}")
+            print(f"Producer: {payload.get('producer') or {}}")
+            print(f"Lineage: {', '.join(payload.get('lineage', ())) or 'none'}")
+            print("Placements:")
+            if not payload["placements"]:
+                print("  none")
+            for placement in payload["placements"]:
+                availability = (
+                    "AVAILABLE" if placement.get("verified") is not False else "UNVERIFIED"
+                )
+                print(f"  {placement['cluster']}  {availability}")
+                print(f"    {placement['root']}")
             return
         if operation == "build":
             source = f" ({default_source})" if default_source else ""

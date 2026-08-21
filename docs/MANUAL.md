@@ -149,11 +149,11 @@ python -c "import lambdaforge; print(lambdaforge.__version__)"
 ```
 
 The consumer dependency range is an executable compatibility contract. A declaration such as
-`lambdaforge[adaptive-hpo,parquet]>=0.8,<0.9` excludes every 0.9 release. Pip may still replace an
+`lambdaforge[adaptive-hpo,parquet]>=0.9,<0.10` excludes every 0.10 release. Pip may still replace an
 editable LambdaForge installation and only print a conflict warning because the consumer was
 already present; `python -m pip check` then reports the broken environment. A clean managed cluster
 solve sees both wheels together and refuses the contradiction. Do not work around it with
-`--no-deps`: review the new release, change the consumer range (for example to `>=0.9,<0.10`),
+`--no-deps`: review the new release, change the consumer range (for example to `>=0.10,<0.11`),
 reinstall the consumer and require `pip check` to pass. LambdaForge reads the built consumer wheel
 and reports this incompatibility locally before transferring a remote execution bundle.
 
@@ -759,10 +759,11 @@ not used, so job code cannot mutate cached bundle bytes through a shared inode.
 
 `lf top --history SECONDS` opens the interactive live view when stdin/stdout are a TTY; the default
 history window is 60 seconds. Its first screen keeps monitoring scannable: one current
-whole-cluster CPU/RAM/GPU row per cluster plus the global job list, without permanently duplicating
-each cluster with personal charts. Clusters followed by jobs form one vertical selection sequence:
-`↑`/`k` from the first job enters the cluster list and `↓`/`j` from its final row returns to the first
-job. `Tab` remains an optional shortcut, but no horizontal navigation is required. Press `Enter` on
+whole-cluster CPU/RAM/GPU row per cluster plus research work grouped by scientific identity, target
+and name. This is a read model over jobs, never another state store. Press `v` to switch to the raw
+advanced job view. Clusters followed by work form one vertical selection sequence: `↑`/`k` from the
+first item enters the cluster list and `↓`/`j` from its final row returns to the first item. `Tab`
+remains an optional shortcut, but no horizontal navigation is required. Press `Enter` on
 a cluster to open its detail screen: paired vertical time charts (`█` cluster, `▓` current user), a
 larger requested/measured personal summary and only jobs placed on that cluster. `b`, `Esc` or `q`
 returns from detail to the global screen.
@@ -1023,6 +1024,12 @@ DatasetRegistry is the placement authority for managed versions, so a consumer c
 version/content and records the selected placement outside scientific identity. DataCatalog remains
 compatible for aliases, external/unmanaged data, loaders, explicit pins and institutional
 overrides. For example, an external dataset can still use:
+
+`lf datasets list` prints `name@version`; that exact text is guaranteed to work with `datasets
+show`. `show` reports identity, build, members, partitions, target schema, global assets, producer,
+lineage, publication time and every placement/root. An unversioned name is accepted only when one
+version exists. Multiple versions produce an ambiguity diagnostic listing the exact choices; the
+Registry, Resolver and CLI never select the newest version implicitly.
 
 ```yaml
 datasets:
@@ -1480,20 +1487,22 @@ snapshot without changing the environment.
 | `run CONFIG --dry-run` | Exact execution plan. | no |
 | `plan CONFIG [--on CLUSTER]` | Uniform shortcut for the best available dry-run/preflight. | no |
 | `run CONFIG` | Execute experiment, task or workflow. | yes |
-| `run CONFIG --force|--restart|--no-resume` | Explicitly control success reuse and partial continuation. | yes |
+| `run CONFIG --rerun|--restart|--no-resume` | Explicitly control terminal repetition and partial continuation; `--force` remains the compatibility spelling of `--rerun`. | yes |
+| `run CONFIG --allow-duplicate` | Intentionally permit an already-active experiment revision on the same target. | yes |
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Persist an ID immediately, then prepare/cache/submit remotely in a detached controller. `--wait-for-submit` waits for provider acknowledgement. | job metadata; remote only without dry-run |
 | `clusters add|list|show|inspect|set|unset|remove|export|credentials|test|bootstrap|resources|storage` | Manage profiles and inspect their environment, resources and storage. | profile/credential/bootstrap mutations |
 | `status`, `overview`, `top [--history SECONDS]` | Global cluster/job/dataset view; `top` is interactive on a TTY, `top --once` is one-shot and `top --json --follow` is NDJSON. | no |
 | `status|logs|cancel|retry` | Short aliases for the corresponding common persistent-job operations. | lifecycle commands only |
 | `jobs list [--all]|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`, `jobs group list|show` | Reconnect and safely control persistent work/groups. | lifecycle commands only |
 | `resources [--on C|--all] [--processes]` | Separate observed host facts, scheduler view and declared job requests. | no |
-| `configs|experiments|tasks list|show|validate|plan|run`; `experiments status|history|results` | Discover project YAML and operate it by unambiguous name. | only run |
+| `configs|experiments|tasks list|show|validate|plan|run`; `experiments status|history|runs|results` | Discover project YAML; experiment views expose revision, target, progress, attempts and evidence. | only run |
 | `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|delete|materialize|replicate` | Recipe/build/version/placement lifecycle and inspection. | build/add/remove; delete/transfer only with `--apply` |
 | `storage status|gc`, `environments list|show|gc` | Inspect bytes/file counts and collect only reconstructible unreferenced cache. | GC only with `--apply` |
 | `data --catalog FILE list|locations|inspect|replicate` | Inspect logical datasets/manifests; replication needs `--apply`. | only replicate `--apply` |
 | `compose CONFIG` | Redacted materialization plus provenance. | no |
 | `diff LEFT RIGHT` | Semantic configuration differences. | no |
 | `explain authoring|experiment|task|workflow PATH` | JSON Schema fragment for a dotted property. | no |
+| `explain CONFIG [--json]` | Explain materialized research intent, planned work and resources without constructing project targets. | no |
 | `explain changes CONFIG [--against OLD]` | Scientific identity and exact changed paths. | no |
 | `target IMPORT.PATH` | Constructor signature and docstring. | no |
 | `migrate CONFIG` | Preview migration; `--output` is explicit. | no |
@@ -1693,6 +1702,32 @@ lambdaforge plugins --kind metric --json
 LambdaForge separates **scientific intent**, **operational scheduling** and **terminal evidence**.
 This is the small mental model behind experiments, workflows and adaptive optimization.
 
+For research-facing navigation, the hierarchy is:
+
+```text
+Project
+├── Dataset → Version → Build → Stage → Attempt → Job
+│                     └──────────────→ Placements
+└── Experiment → Scientific revision → Execution → Run/trial/seed → Attempt → Job
+                                              └──────────────────→ Results
+```
+
+These boxes are meanings, not separate databases or necessarily separate Python classes:
+
+- An **experiment** is the named study definition, such as `baseline`.
+- A **scientific revision** is its immutable scientific fingerprint. Model, logical dataset, loss,
+  optimizer, scientific hyperparameters and seed policy contribute; placement does not.
+- An **execution** requests that revision in one context, such as `baseline` on `atlas`.
+- A **run** is one concrete variant/seed or HPO trial.
+- An **attempt** is one try at completing that same run.
+- A **job** is the scheduler/process object implementing an attempt. It remains fully visible for
+  operations but is not the primary research identity.
+
+`experiments list/show/status/history/runs/results` derives this view from project YAML, durable
+jobs and immutable result artifacts. It never writes an experiment database. Likewise,
+`overview --json` adds `work.items` derived from `jobs.items`; both remain available to graphical
+clients, and `lf top` uses the research view by default with `v` for raw jobs.
+
 Let `c` be a fully composed scientific configuration, `d` the logical dataset identities, `k` the
 code identity and `o` its operational controls, such as output paths, placement, concurrency or
 retention. Its identities are conceptually:
@@ -1706,6 +1741,22 @@ Operational changes in `o` do not silently create a different scientific claim. 
 data, optimizer, loss, sampled hyperparameters or seed does. A run is skipped or resumed only when
 this identity and the required artifacts/checkpoint contract still match; otherwise LambdaForge
 creates another attempt and preserves the previous terminal result.
+
+Before remote preparation, LambdaForge compares `(scientific identity, target)` with locally known
+active executions. A match is refused without creating another job. Another cluster is a different
+execution context and is allowed; an intentional duplicate on the same cluster requires
+`--allow-duplicate`. This is conservative durable-state protection, not a distributed lock across
+independent controllers.
+
+Lifecycle verbs are not synonyms:
+
+- default `run` resumes compatible partial state and reuses verified success;
+- `--rerun` (legacy spelling `--force`) deliberately executes terminal science again;
+- `--restart` starts the same intention without continuation/checkpoint state;
+- `--no-resume` disables partial continuation without forcing a completed run;
+- `jobs retry` accepts only failed, cancelled or timed-out attempts, keeps scientific identity,
+  increments the attempt number and creates a new job;
+- scheduler `jobs resume` continues a paused allocation and is distinct from scientific resume.
 
 For an ordinary experiment, expansion produces a finite set of jobs:
 
@@ -1840,9 +1891,19 @@ interaction/rendering. The private `SubmissionWorker` is deliberately an interna
 point, not another public execution engine. This separation lets a future GUI call the same service
 objects or JSON commands without importing a TUI.
 
+`ConfigurationDescriptor` is the single pure interpretation used by submission and project views
+for document kind, research name, scientific identity, referenced datasets, job type and planned
+units. It does not replace `Task`, `Experiment`, `Workflow` or `DatasetRecipe`; those retain their
+domain behavior. `lf run` selects them after one materialization path, while `datasets build` is a
+selector-oriented adapter over `DatasetBuildService`.
+
 `JobObservation` derives presentation-only timing and usage from `JobRecord` plus authoritative
 provider state; it does not mutate identity or create a competing store. `ResourceService`
 aggregates the same observed values for the current user's active LambdaForge jobs.
+`ResearchWork` similarly groups immutable `JobRecord` snapshots by scientific identity and target
+for display. `ProjectConfigService` combines configuration discovery with those jobs and local or
+synchronized `ResultCatalog` evidence to produce experiment status/history. Neither read model
+persists facts, so YAML, `JobStore`, `DatasetRegistry` and result artifacts remain the authorities.
 `ResourceHistory` is deliberately TUI-local and bounded by `--history`: services expose timestamped
 snapshots, while each consumer decides how much display history to retain.
 
@@ -1923,6 +1984,19 @@ optimizer:
   ref: torch.optim.AdamW
   params: {lr: 0.001}
 ```
+
+The common built-ins Adam, AdamW and SGD also have a concise authoring form. It compiles to the
+same strict `ref`/`params` representation; it is not a second optimizer implementation:
+
+```yaml
+optimizer:
+  type: adamw
+  lr: 0.001
+  weight_decay: 0.01
+```
+
+Use an import path as `type` or the strict `ref` form for anything else. LambdaForge deliberately
+does not maintain aliases for arbitrary third-party libraries.
 
 `plugin` resolves a named class published by an installed distribution. The explicit `kind` avoids
 context-dependent magic strings and lets LambdaForge validate the class contract before creating a
@@ -2613,8 +2687,11 @@ secret redaction, process identity, host verification, dataset integrity or stor
   Offline sites need a compatible wheelhouse and a Linux controller for automatic Python-package
   prefetch. Existing environments remain user-owned.
   Built-in replication is local/SSH rsync over predeclared locations.
-- Cluster selection is explicit. Profiles observe resources but cannot derive optimal
-  placement from incomplete capacity, queue-delay or monetary-cost information. `DataCatalog` resolves
+- Cluster selection is explicit; `--on auto` is not implemented because observed capacity, queue
+  delay, dataset locality and monetary cost are incomplete. A high-level `lf reproduce` command is
+  also deferred: existing config/identity/environment evidence can build a manual plan, but the
+  framework does not yet have enough portable guarantees to promise bitwise reproduction across
+  hardware. `DataCatalog` resolves
   direct experiment splits and nested typed markers; arbitrary untyped strings stay project-owned.
 - Remote result sync is allowlisted and per-file bounded, not a remote filesystem mirror. Heavy
   artifacts require explicit logical fetch. Live plotting polls small files; it is not a streaming

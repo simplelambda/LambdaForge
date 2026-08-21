@@ -73,9 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     target.add_argument("path")
     explain = subparsers.add_parser(
-        "explain", help="Explain one dotted experiment/task Schema property."
+        "explain", help="Explain a configuration or one dotted Schema property."
     )
-    explain.add_argument("kind", choices=("authoring", "experiment", "task", "workflow", "changes"))
+    explain.add_argument(
+        "subject",
+        help="CONFIG, changes, or a Schema kind: authoring, experiment, task, workflow.",
+    )
     explain.add_argument("path", nargs="?", default="")
     explain.add_argument("--against", type=Path, help="Previous YAML for explain changes.")
     explain.add_argument("--json", action="store_true")
@@ -246,7 +249,19 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_storage = cluster_commands.add_parser("storage")
     cluster_storage.add_argument("name")
     cluster_storage.add_argument("--json", action="store_true")
-    jobs = subparsers.add_parser("jobs", help="List and control persistent jobs.")
+    jobs = subparsers.add_parser(
+        "jobs",
+        help="Inspect and control low-level execution attempts.",
+        description="Advanced operational access to scheduler/process jobs and their logs.",
+        epilog=(
+            "Examples:\n"
+            "  lf jobs list --all\n"
+            "  lf jobs show latest --json\n"
+            "  lf jobs logs latest --follow\n"
+            "  lf jobs retry latest"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     jobs.add_argument("--clusters", type=Path, help="Cluster catalogue YAML.")
     job_commands = jobs.add_subparsers(dest="job_command", required=True)
     jobs_list = job_commands.add_parser("list")
@@ -322,7 +337,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply", action="store_true", help="Transfer bytes; omission is preview-only."
     )
     datasets = subparsers.add_parser(
-        "datasets", help="Discover and safely manage registered dataset versions."
+        "datasets",
+        help="Discover and safely manage immutable dataset versions.",
+        description=(
+            "Lifecycle: list/show registered versions, inspect or verify content, then "
+            "materialize, replicate or remove explicit placements. Run recipe YAML with lf run."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  lf datasets list\n"
+            "  lf datasets show wisdom-dna@1\n"
+            "  lf run datasets/dna.yaml --on citius\n"
+            "  lf datasets verify wisdom-dna@1 --on citius"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     datasets.add_argument("--clusters", type=Path)
     dataset_commands = datasets.add_subparsers(dest="dataset_command", required=True)
@@ -406,8 +434,20 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_replicate.add_argument("--apply", action="store_true")
     dataset_replicate.add_argument("--json", action="store_true")
     for entity in ("configs", "experiments", "tasks"):
+        entity_epilog = (
+            "Examples:\n"
+            "  lf experiments list\n"
+            "  lf experiments show baseline\n"
+            "  lf experiments runs baseline --json\n"
+            "  lf experiments results baseline --json"
+            if entity == "experiments"
+            else None
+        )
         entity_parser = subparsers.add_parser(
-            entity, help=f"Discover and operate project {entity} by name."
+            entity,
+            help=f"Discover and operate project {entity} by name.",
+            epilog=entity_epilog,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
         )
         entity_parser.add_argument("--root", type=Path)
         entity_commands = entity_parser.add_subparsers(dest="entity_command", required=True)
@@ -416,6 +456,8 @@ def build_parser() -> argparse.ArgumentParser:
         entity_show = entity_commands.add_parser("show")
         entity_show.add_argument("selector")
         entity_show.add_argument("--json", action="store_true")
+        if entity == "experiments":
+            entity_show.add_argument("--revision")
         for operation in ("validate", "plan"):
             operation_parser = entity_commands.add_parser(operation)
             operation_parser.add_argument("selector")
@@ -424,8 +466,13 @@ def build_parser() -> argparse.ArgumentParser:
         entity_run.add_argument("--on", action="append")
         entity_run.add_argument("--dry-run", action="store_true")
         entity_run.add_argument("--independent-hpo", action="store_true")
+        entity_run.add_argument(
+            "--allow-duplicate",
+            action="store_true",
+            help="Intentionally allow the same experiment revision on the same target.",
+        )
         if entity == "experiments":
-            for operation in ("status", "history", "results"):
+            for operation in ("status", "history", "runs", "results"):
                 entity_query = entity_commands.add_parser(operation)
                 entity_query.add_argument("selector")
                 entity_query.add_argument("--json", action="store_true")
@@ -474,9 +521,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow repeated --on to create separate, uncoordinated HPO studies.",
     )
+    run.add_argument(
+        "--allow-duplicate",
+        action="store_true",
+        help="Intentionally allow the same experiment revision on the same target.",
+    )
     run.add_argument("--clusters", type=Path, help="Cluster catalogue YAML.")
     lifecycle = run.add_mutually_exclusive_group()
-    lifecycle.add_argument("--force", action="store_true", help="Run even after success.")
+    lifecycle.add_argument(
+        "--rerun",
+        "--force",
+        dest="force",
+        action="store_true",
+        help="Deliberately create a new execution after scientific success.",
+    )
     lifecycle.add_argument(
         "--restart", action="store_true", help="Run from scratch without partial state."
     )
@@ -566,7 +624,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply the transaction; omission is always read-only.",
     )
     retain.add_argument("--json", action="store_true", help="Print a machine-readable result.")
-    results = subparsers.add_parser("results", help="Query, compare, export or sync results.")
+    results = subparsers.add_parser(
+        "results",
+        help="Query, compare, export or synchronize scientific evidence.",
+        description="Inspect immutable run evidence without selecting a scientific winner.",
+        epilog=(
+            "Examples:\n"
+            "  lf results list --json\n"
+            "  lf results show baseline\n"
+            "  lf results compare baseline candidate --metric val_loss --direction minimize"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     result_commands = results.add_subparsers(dest="results_command", required=True)
     result_audit = result_commands.add_parser(
         "audit", help="Audit attempts by scientific configuration identity."

@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
+from lambdaforge.configuration.ConfigurationDescriptor import ConfigurationDescriptor
 from lambdaforge.configuration.ProjectConfigRecord import ProjectConfigRecord
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.JobService import JobService
@@ -38,29 +38,46 @@ class ProjectConfigService:
         self.jobs = jobs or JobService(ClusterCatalog.load())
 
     def list(self, *, kind: str | None = None) -> tuple[ProjectConfigRecord, ...]:
-        active = tuple(
-            record for record in self.jobs.list(refresh=False) if not record.state.terminal
-        )
+        jobs = self.jobs.list(refresh=False)
         values = []
         for path in self._paths():
             if not self._looks_runnable(path):
                 continue
             try:
-                materialized = AuthoringConfig.from_yaml(path).materialize()
-                payload = materialized.to_dict()
-                name = self._name(payload, path)
-                current_kind = materialized.kind.value
+                descriptor = ConfigurationDescriptor.from_path(path)
+                payload = descriptor.materialized
+                name = descriptor.name
+                current_kind = descriptor.kind.value
                 if kind is not None and current_kind != kind:
                     continue
-                related = tuple(
-                    job.job_id
-                    for job in active
+                named_history = tuple(
+                    job
+                    for job in jobs
                     if job.metadata.get("name") == name
                     or Path(str(job.config_path)).name == path.name
                 )
+                history = tuple(
+                    job
+                    for job in named_history
+                    if job.metadata.get("scientific_identity")
+                    == descriptor.scientific_identity
+                    or not job.metadata.get("scientific_identity")
+                    )
+                active = tuple(job for job in history if not job.state.terminal)
+                related = tuple(job.job_id for job in active)
                 related_clusters = tuple(
-                    sorted({job.cluster for job in active if job.job_id in related})
+                    sorted({job.cluster for job in active})
                 )
+                results = self._results(path)
+                completed = len(
+                    {
+                        record.config_fingerprint or record.attempt_id
+                        for record in results
+                        if record.status == "ok"
+                    }
+                )
+                last_result = self._last_result_from(results)
+                state = self._state(active, results)
                 values.append(
                     ProjectConfigRecord(
                         name,
@@ -71,7 +88,15 @@ class ProjectConfigService:
                         hpo_enabled=self._hpo(payload),
                         active_jobs=related,
                         active_clusters=related_clusters,
-                        last_result=self._last_result(payload, path, name),
+                        last_result=last_result,
+                        scientific_identity=descriptor.scientific_identity,
+                        scientific_revision=descriptor.revision,
+                        state=state,
+                        planned_runs=descriptor.planned_units,
+                        completed_runs=completed,
+                        unit=descriptor.unit,
+                        attempt_count=max(len(named_history), len(results)),
+                        executions=tuple(self._execution(job) for job in named_history),
                     )
                 )
             except Exception as error:
@@ -95,7 +120,15 @@ class ProjectConfigService:
         matches = tuple(
             record
             for record in self.list(kind=kind)
-            if record.valid and (record.name == str(selector) or record.path.stem == str(selector))
+            if record.valid
+            and (
+                record.name == str(selector)
+                or record.path.stem == str(selector)
+                or (
+                    record.kind == "dataset"
+                    and record.name.partition("@")[0] == str(selector)
+                )
+            )
         )
         if not matches:
             available = tuple(record.name for record in self.list(kind=kind) if record.valid)
@@ -128,36 +161,70 @@ class ProjectConfigService:
         )
 
     @staticmethod
-    def _name(payload: Mapping[str, Any], path: Path) -> str:
-        experiment = payload.get("experiment")
-        if isinstance(experiment, Mapping) and experiment.get("name"):
-            return str(experiment["name"])
-        dataset = payload.get("dataset")
-        if isinstance(dataset, Mapping) and dataset.get("name"):
-            return str(dataset["name"])
-        return str(payload.get("name", path.stem))
-
-    @classmethod
-    def datasets(cls, value: object) -> tuple[str, ...]:
+    def datasets(value: object) -> tuple[str, ...]:
         """Return logical dataset names referenced by a materialized document."""
-        found: set[str] = set()
+        return (
+            ConfigurationDescriptor.dataset_references(value)
+            if isinstance(value, Mapping)
+            else ()
+        )
 
-        def visit(item: object) -> None:
-            if isinstance(item, str) and item.startswith("dataset:"):
-                found.add(item.removeprefix("dataset:").split("/", 1)[0])
-            elif isinstance(item, Mapping):
-                if set(item).issubset({"dataset", "version", "content_id", "subpath"}) and item.get(
-                    "dataset"
-                ):
-                    found.add(str(item["dataset"]))
-                for nested in item.values():
-                    visit(nested)
-            elif isinstance(item, (list, tuple)):
-                for nested in item:
-                    visit(nested)
+    @staticmethod
+    def _execution(job: Any) -> dict[str, Any]:
+        identity = job.metadata.get("scientific_identity")
+        return {
+            "execution_id": job.job_id,
+            "job_id": job.job_id,
+            "cluster": job.cluster,
+            "state": job.state.value,
+            "attempt": int(job.metadata.get("attempt", 1)),
+            "retry_of": job.retry_of,
+            "created_at_utc": job.created_at_utc,
+            "updated_at_utc": job.updated_at_utc,
+            "scheduler_id": job.scheduler_id,
+            "scientific_identity": identity,
+            "scientific_revision": (
+                str(identity).removeprefix("sha256:")[:12] if identity else None
+            ),
+            "resources": dict(job.resources),
+        }
 
-        visit(value)
-        return tuple(sorted(found))
+    @staticmethod
+    def _results(source: Path) -> tuple[Any, ...]:
+        try:
+            return ResultService().resolve(source)
+        except Exception:
+            return ()
+
+    @staticmethod
+    def _last_result_from(records: tuple[Any, ...]) -> dict[str, Any] | None:
+        if not records:
+            return None
+        latest = max(
+            records,
+            key=lambda record: (
+                record.result.finished_at_utc
+                or record.result.started_at_utc
+                or record.attempt_id
+            ),
+        )
+        return latest.to_dict()
+
+    @staticmethod
+    def _state(active: tuple[Any, ...], results: tuple[Any, ...]) -> str:
+        priorities = ("running", "queued", "staging", "preparing", "paused", "unknown")
+        active_states = {job.state.value for job in active}
+        for state in priorities:
+            if state in active_states:
+                return state
+        statuses = {record.status for record in results}
+        if "ok" in statuses:
+            return "succeeded"
+        if "failed" in statuses:
+            return "failed"
+        if "interrupted" in statuses:
+            return "interrupted"
+        return "not_run"
 
     @staticmethod
     def _resources(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -168,35 +235,6 @@ class ProjectConfigService:
     def _hpo(payload: Mapping[str, Any]) -> bool:
         value = payload.get("hpo", {})
         return isinstance(value, Mapping) and bool(value.get("enabled", False))
-
-    @staticmethod
-    def _last_result(payload: Mapping[str, Any], source: Path, name: str) -> dict[str, Any] | None:
-        experiment = payload.get("experiment", {})
-        configured = (
-            experiment.get("output_root")
-            if isinstance(experiment, Mapping)
-            else payload.get("output_root")
-        )
-        root = Path(str(configured or "runs"))
-        if not root.is_absolute():
-            root = source.parent / root
-        try:
-            matches = tuple(
-                record
-                for record in ResultService((root,)).records()
-                if record.result.name == name or record.result.name.startswith(f"{name}__")
-            )
-        except Exception:
-            return None
-        if not matches:
-            return None
-        latest = max(
-            matches,
-            key=lambda record: (
-                record.result.finished_at_utc or record.result.started_at_utc or record.attempt_id
-            ),
-        )
-        return latest.to_dict()
 
     @staticmethod
     def _looks_like_lambdaforge(path: Path) -> bool:

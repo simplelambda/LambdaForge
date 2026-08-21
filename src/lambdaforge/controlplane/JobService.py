@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+import shlex
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
@@ -18,7 +20,10 @@ from lambdaforge.controlplane.JobStore import JobStore
 from lambdaforge.diagnostics import (
     DiagnosticClassifier,
     DiagnosticContext,
+    ErrorCategory,
     LambdaForgeError,
+    RetryDisposition,
+    diagnostic,
 )
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
@@ -72,6 +77,7 @@ class JobService:
             **(dict(reserved.metadata) if reserved is not None else {}),
             **dict(metadata or {}),
         }
+        record_metadata.setdefault("attempt", self._attempt_number(retry_of))
         record = JobRecord(
             job_id=job_id,
             cluster=cluster,
@@ -198,6 +204,8 @@ class JobService:
         profile = self.catalog.get(cluster)
         now = datetime.now(timezone.utc).isoformat()
         job_id = self.new_id()
+        record_metadata = dict(metadata or {})
+        record_metadata.setdefault("attempt", self._attempt_number(retry_of))
         record = JobRecord(
             job_id=job_id,
             cluster=cluster,
@@ -211,7 +219,7 @@ class JobService:
             updated_at_utc=now,
             config_path=str(Path(config_path).resolve()),
             retry_of=retry_of,
-            metadata=dict(metadata or {}),
+            metadata=record_metadata,
             job_type=job_type,
             group_id=group_id,
         )
@@ -223,6 +231,89 @@ class JobService:
             message="Submission accepted locally; background preparation started.",
         )
         return JobHandle(job_id, cluster, JobState.PREPARING)
+
+    def active_execution(
+        self,
+        scientific_identity: str,
+        cluster: str,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> tuple[JobRecord, ...]:
+        """Return locally known active attempts for one scientific revision and target."""
+        return tuple(
+            record
+            for record in self.store.records()
+            if record.job_id != exclude_job_id
+            and record.cluster == cluster
+            and not record.state.terminal
+            and record.metadata.get("scientific_identity") == scientific_identity
+        )
+
+    def refuse_active_execution(
+        self,
+        scientific_identity: str,
+        cluster: str,
+        *,
+        name: str,
+        source: str | Path | None = None,
+        exclude_job_id: str | None = None,
+    ) -> None:
+        """Reject an accidental duplicate while retaining an explicit escape hatch."""
+        active = self.active_execution(
+            scientific_identity, cluster, exclude_job_id=exclude_job_id
+        )
+        if not active:
+            return
+        selected = active[0]
+        revision = scientific_identity.removeprefix("sha256:")[:12]
+        rerun = (
+            shlex.join(("lf", "run", str(source), "--on", cluster, "--allow-duplicate"))
+            if source is not None
+            else "lf run CONFIG --on " + shlex.quote(cluster) + " --allow-duplicate"
+        )
+        raise LambdaForgeError(
+            diagnostic(
+                ErrorCategory.OPERATION_REFUSED,
+                f"Experiment {name!r} is already active on {cluster!r}.",
+                "No duplicate execution was submitted.",
+                reason=(
+                    f"Scientific revision {revision} already has active job {selected.job_id} "
+                    f"in state {selected.state.value}."
+                ),
+                impact=("Existing scientific work continues unchanged.",),
+                fixes=(
+                    "Watch or inspect the existing execution.",
+                    "Use --allow-duplicate only when concurrent duplicate work is intentional.",
+                ),
+                commands=(
+                    ("Experiment status", f"lf experiments status {shlex.quote(name)}"),
+                    ("Existing job", f"lf jobs show {selected.job_id}"),
+                    ("Intentional duplicate", rerun),
+                ),
+                context={
+                    "experiment": name,
+                    "scientific_identity": scientific_identity,
+                    "scientific_revision": revision,
+                    "cluster": cluster,
+                    "active_job_id": selected.job_id,
+                },
+                retryable=RetryDisposition.NO,
+                operation="experiment submission",
+                job_id=selected.job_id,
+            )
+        )
+
+    def _attempt_number(self, retry_of: str | None) -> int:
+        if retry_of is None:
+            return 1
+        try:
+            previous = self.store.get(retry_of)
+        except (FileNotFoundError, KeyError, ValueError):
+            return 2
+        try:
+            return int(previous.metadata.get("attempt", 1)) + 1
+        except (TypeError, ValueError):
+            return 2
 
     def update_preparation(self, job_id: str, phase: str) -> JobRecord:
         """Advance one reserved submission without inventing scheduler acknowledgement."""
@@ -644,13 +735,18 @@ class JobService:
     def retry(self, job_id: str, *, dry_run: bool = False) -> JobHandle:
         """Create a new auditable job from one terminal job's exact request."""
         previous = self.get(job_id)
-        if not previous.state.terminal:
-            raise ValueError("Only terminal jobs can be retried.")
+        if previous.state not in {JobState.FAILED, JobState.CANCELLED, JobState.TIMEOUT}:
+            raise ValueError(
+                "Retry applies only to failed, cancelled or timed-out attempts. "
+                "Use 'lf run CONFIG --rerun' for deliberate repetition after success."
+            )
         retry_metadata = dict(previous.metadata)
         retry_metadata.pop("failure_phase", None)
         retry_metadata.pop("failure_category", None)
+        retry_metadata["attempt"] = self._attempt_number(previous.job_id)
         if previous.metadata.get("submission_mode") == "asynchronous":
-            if previous.config_path is None:
+            source_config = self._retry_source_config(previous)
+            if source_config is None:
                 raise ValueError("The asynchronous submission has no source configuration path.")
             arguments = previous.metadata.get("run_arguments", ())
             if not isinstance(arguments, Sequence) or isinstance(
@@ -663,7 +759,7 @@ class JobService:
                 from lambdaforge.controlplane.ControlPlane import ControlPlane
 
                 handle, _ = ControlPlane(self.catalog, jobs=self).submit(
-                    previous.config_path,
+                    str(source_config),
                     cluster=previous.cluster,
                     resources=request,
                     dry_run=True,
@@ -674,7 +770,7 @@ class JobService:
             from lambdaforge.controlplane.SubmissionService import SubmissionService
 
             return SubmissionService(self.catalog, self).enqueue(
-                previous.config_path,
+                str(source_config),
                 cluster=previous.cluster,
                 resources=request,
                 run_arguments=run_arguments,
@@ -694,3 +790,18 @@ class JobService:
             job_type=previous.job_type,
             group_id=previous.group_id,
         )
+
+    def _retry_source_config(self, previous: JobRecord) -> str | None:
+        """Recover the controller-side config from current or 0.9.x async records."""
+        configured = previous.metadata.get("source_config_path")
+        if configured:
+            return str(configured)
+        request = self.store.root / "submissions" / previous.job_id / "request.json"
+        if request.is_file() and not request.is_symlink():
+            try:
+                payload = json.loads(request.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, Mapping) and payload.get("config"):
+                return str(payload["config"])
+        return previous.config_path

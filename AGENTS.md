@@ -1,16 +1,14 @@
 # LambdaForge agent operating guide
 
-This file is the low-token entry point for agents that use or modify LambdaForge. Do not crawl the
-repository or package READMEs. Start here, open [the canonical manual](docs/MANUAL.md) only for the
-section that owns the requested topic, then inspect the public signature/docstring or implementation
+This is the low-token entry point for LambdaForge agents. Do not crawl package READMEs. Open only
+the relevant [canonical manual](docs/MANUAL.md) section, then the public contract/implementation
 under change. Current code and behavioral tests override stale assumptions.
 
 ## Product model
 
-LambdaForge is an installable, task-agnostic Python >=3.10 PyTorch/Lightning framework. Consumers
-own domain code/data; it runs tasks, preprocessing, datasets, workflows, experiments and HPO while
-preserving identity, jobs, results and artifacts across local, SSH and SLURM execution. Use public
-imports only. Never copy the framework, share its `.venv`, patch `PYTHONPATH`, serialize secrets or
+LambdaForge is an installable Python >=3.10 PyTorch/Lightning research framework. Consumers own
+domain code/data; it runs tasks, datasets, workflows, experiments and HPO across local, SSH/SLURM.
+Use public imports only. Never copy it, share its `.venv`, patch `PYTHONPATH`, serialize secrets or
 infer CUDA usability from `nvidia-smi` alone.
 
 ## Fast routes
@@ -22,9 +20,9 @@ infer CUDA usability from `nvidia-smi` alone.
 | Read-only execution plan | `lf plan CONFIG [--on CLUSTER]` |
 | Run any supported config | `lf run CONFIG [--on CLUSTER]` |
 | Discover project configs | `lf configs list`; `lf experiments list`; `lf tasks list` |
+| Inspect research history | `lf experiments show/status/history/runs/results NAME` |
 | Create a consumer scaffold | `lf init DIRECTORY` |
 | Debug preprocessing samples | `lf debug CONFIG --records N` |
-| Run any config, including datasets | `lf run CONFIG [--on CLUSTER]` |
 | Dataset discovery/convenience alias | `lf datasets plan NAME`; `lf datasets build NAME` |
 | Inspect dataset content | `lf datasets show/members/member/diff/stats/verify ...` |
 | Place a dataset | `lf datasets materialize SELECTOR --on CLUSTER`; add `--apply` after review |
@@ -36,10 +34,10 @@ infer CUDA usability from `nvidia-smi` alone.
 | Plot scientific evidence | `lf plot learning/sweep/seeds/hpo/resources` |
 | Inspect/fetch artifacts | `lf artifact inspect/list/fetch/validate/visualize` |
 | Preview cache collection | `lf storage gc [--on CLUSTER]`; apply only after review |
-| Explain configuration/identity | `lf explain KIND PATH`; `lf explain changes CURRENT --against PREVIOUS` |
+| Explain configuration/identity | `lf explain CONFIG`; `lf explain KIND PATH`; `lf explain changes CURRENT --against PREVIOUS` |
 | Shell completion | `lf completion bash|zsh|fish` |
 
-`lf` equals `lambdaforge`; grammar is `lf <resource> <action> <object> [--on CONTEXT]` with documented aliases.
+`lf` equals `lambdaforge`; grammar is `lf <resource> <action> <object> [--on CONTEXT]`.
 
 ## Error and diagnostic contract
 
@@ -89,7 +87,7 @@ bound deliberately, reinstall, require `pip check`, and never bypass it with `--
 ## Complete CLI surface
 
 - Author/inspect: `init`, `target`, `validate`, `inspect`, `plan`, `run`, `compose`, `diff`, `explain`, `migrate`, `debug`, `plugins`, `completion`, `project status`.
-- Discover: `configs|tasks list|show|validate|plan|run`; `experiments` adds `status|history|results`.
+- Discover: `configs|tasks list|show|validate|plan|run`; `experiments` adds `status|history|runs|results`.
 - Control: `doctor`, `overview`, `top`, `resources`, `status`, `logs`, `cancel`, `retry`.
 - Clusters: `clusters add|list|show|inspect|set|unset|remove|export|credentials set|delete|test|bootstrap|resources|storage`.
 - Jobs: `jobs list|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`; `jobs group list|show`.
@@ -114,8 +112,9 @@ The supported document families are:
 Supported experiment migration inputs are unversioned and Schema 1.0. Preview with `lf migrate`;
 never rewrite source implicitly. Declare every scientific local input at the top level. Physical
 paths are resolved before execution but logical identity—not cluster placement—drives scientific
-reuse. Default run reuses verified success and resumes compatible partial state; `--force`,
-`--restart` and `--no-resume` have distinct documented semantics.
+reuse. Default run resumes compatible state; `--rerun`/legacy `--force` repeats terminal science,
+`--restart` discards continuation and `--no-resume` only disables continuation. Active identical
+experiment revision+cluster is refused unless `--allow-duplicate`; another cluster is allowed.
 
 Authored `resources` is the real scheduler request. CLI resource flags only override explicitly
 provided fields. A workflow/dataset top-level request is exact; otherwise LambdaForge derives the
@@ -173,8 +172,8 @@ contracts or importable project classes. Use a Lightning callback for batch/epoc
 `validation_step` exposes detached `model_outputs` and `loss`. Log exact `val_*` names for
 checkpointing and HPO.
 
-Use `PostRunAction` only for bounded same-allocation analysis after successful training. It receives
-an immutable `PostRunContext` and returns `PostRunResult` artifacts. Required failure prevents run
+Use `PostRunAction` for bounded same-allocation analysis after successful training. It receives an
+immutable `PostRunContext` and returns `PostRunResult` artifacts. Required failure prevents run
 success; optional failure is recorded. Action identity is separate from training identity, receipts
 are content-verified, and actions run rank-zero sequentially. Use a Task/Workflow for different
 resources, clusters or long dependent work.
@@ -229,9 +228,9 @@ Remote CLI runs first return a durable `preparing` job and detach bundle/runtime
 is machine-readable. Direct jobs then use one detached `ProcessSupervisor`; SLURM remains
 authoritative for scheduled work.
 `lf top` isolates provider refresh and full-log loading in cancellable processes; never move SSH/
-resource/log polling into its keyboard loop. Its global view contains whole-cluster values followed
-by jobs as one vertical selection sequence; crossing a list boundary changes the selected kind and
-`Enter` opens paired history, personal usage and cluster-filtered jobs. Cancellation must remain a
+resource/log polling into its keyboard loop. Its default lower list is research work derived from
+jobs by identity+target; `v` exposes raw jobs. Crossing the cluster/work boundary changes selection
+and `Enter` opens paired history, personal usage and cluster-filtered jobs. Cancellation remains a
 rendered, non-blocking confirmation. `--history SECONDS` controls only bounded TUI history.
 GUI integrations consume `overview --json` job `timing`/`usage`, `jobs list --json` and
 `resources --all --json` `personal` aggregates, not terminal escape sequences. Keep requested
@@ -245,6 +244,8 @@ State, heartbeats, logs and usage are durable. Provider outages report unknown p
 not fake scientific failure. Pause retains leases. Signals require matching PID, process group,
 creation time and command hash. Direct-host admission is cooperative affinity/visibility, not cgroup
 isolation. Mixed-cluster DAG coordination and shared multi-cluster HPO state are intentionally absent.
+`jobs retry` is only for failed/cancelled/timed-out attempts; it retains science, increments attempt
+and creates a job. Scheduler `jobs resume` only continues a paused allocation.
 
 ## Results and publication discipline
 
@@ -293,7 +294,6 @@ import or document private file paths.
 
 ## Targeted manual routes
 
-Open only the relevant heading in [docs/MANUAL.md](docs/MANUAL.md): configuration (6/20), tasks and
-preprocessing (7), identity (8), workflows (9), clusters (10), jobs/datasets (11), HPO (12), results
+Open only the relevant heading in [docs/MANUAL.md](docs/MANUAL.md): configuration (6/20), tasks and preprocessing (7), identity (8), workflows (9), clusters (10), jobs/datasets (11), HPO (12), results
 (14), CLI (16), public API (17), architecture (19), migrations (21), process safety (22), outputs
 (23), retention (24), components (25), extensions (26), or limitations (28).
