@@ -9,6 +9,8 @@ dataset:
     required: [category]
   metadata:
     description: Generic discover → normalize → label example
+max_parallel: 1
+# No top-level resources: the submitted allocation is derived from the stage task requests below.
 stages:
   discover:
     task: dataset-stage-roster.yaml
@@ -32,4 +34,3 @@ publish:
   from: label
   root: dataset
   index: members.jsonl
-

@@ -40,13 +40,14 @@ class SlurmClusterResourceProbe(ClusterResourceProbe):
             "note": "Login-node usage and schedulable partition capacity are distinct.",
         }
         return ResourceSnapshot(
-            direct.cluster,
-            direct.online,
-            direct.scheduler,
-            direct.observed,
-            direct.available,
-            scheduler_view,
-            direct.requested,
-            direct.observed_at_utc,
-            direct.error,
+            cluster=direct.cluster,
+            online=direct.online,
+            scheduler=direct.scheduler,
+            observed=direct.observed,
+            available=direct.available,
+            scheduler_view=scheduler_view,
+            requested=direct.requested,
+            observed_at_utc=direct.observed_at_utc,
+            error=direct.error,
+            personal=direct.personal,
         )

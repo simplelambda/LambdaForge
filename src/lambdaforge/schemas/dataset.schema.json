@@ -11,6 +11,7 @@
     "schema_version": {"const": "1.0"},
     "output_root": {"type": "string", "minLength": 1},
     "max_parallel": {"type": "integer", "minimum": 1},
+    "resources": {"$ref": "#/$defs/resources"},
     "metadata": {"type": "object"},
     "dataset": {
       "type": "object",
@@ -51,6 +52,30 @@
         "from": {"type": "string", "minLength": 1},
         "root": {"type": "string", "minLength": 1, "default": "."},
         "index": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "$defs": {
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {"type": "integer", "minimum": 1},
+        "cpus": {"type": "integer", "minimum": 1},
+        "cpu_cores": {"type": "integer", "minimum": 1},
+        "ram": {"type": ["integer", "string"]},
+        "memory": {"type": ["integer", "string"]},
+        "ram_bytes": {"type": ["integer", "string"]},
+        "gpu": {"type": "integer", "minimum": 0},
+        "gpus": {"type": "integer", "minimum": 0},
+        "gpu_count": {"type": "integer", "minimum": 0},
+        "gpu_memory": {"type": ["integer", "string"]},
+        "gpu_memory_bytes": {"type": ["integer", "string"]},
+        "time": {"type": ["number", "string"]},
+        "runtime_seconds": {"type": ["number", "string", "null"]},
+        "storage": {"type": ["integer", "string"]},
+        "storage_bytes": {"type": ["integer", "string"]},
+        "processes": {"type": "integer", "minimum": 1}
       }
     }
   }

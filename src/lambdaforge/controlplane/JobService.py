@@ -91,6 +91,13 @@ class JobService:
             group_id=group_id,
         )
         self.store.write(record)
+        if reserved is None:
+            self.store.append_event(
+                job_id,
+                state=record.state.value,
+                phase="scheduler",
+                message=f"Submission record created; contacting {profile.scheduler} scheduler.",
+            )
         try:
             parameters = inspect.signature(scheduler.submit).parameters
             kwargs: dict[str, Any] = {
@@ -118,6 +125,12 @@ class JobService:
                 updated_at_utc=datetime.now(timezone.utc).isoformat(),
             )
             self.store.write(failed)
+            self.store.append_event(
+                job_id,
+                state=failed.state.value,
+                phase="scheduler",
+                message="Scheduler submission failed; inspect the diagnostic and controller log.",
+            )
             commands = (
                 ("Job details", f"lf jobs show {job_id} --json"),
                 ("Submission record", f"lf jobs logs {job_id} --tail 300"),
@@ -152,6 +165,16 @@ class JobService:
             updated_at_utc=datetime.now(timezone.utc).isoformat(),
         )
         self.store.write(record)
+        self.store.append_event(
+            job_id,
+            state=record.state.value,
+            phase="scheduler",
+            message=(
+                "Read-only scheduler plan completed."
+                if dry_run
+                else f"Scheduler acknowledged the job as {record.state.value}."
+            ),
+        )
         return JobHandle(
             record.job_id,
             cluster,
@@ -193,6 +216,12 @@ class JobService:
             group_id=group_id,
         )
         self.store.write(record)
+        self.store.append_event(
+            job_id,
+            state=record.state.value,
+            phase="queued-locally",
+            message="Submission accepted locally; background preparation started.",
+        )
         return JobHandle(job_id, cluster, JobState.PREPARING)
 
     def update_preparation(self, job_id: str, phase: str) -> JobRecord:
@@ -207,6 +236,13 @@ class JobService:
             updated_at_utc=datetime.now(timezone.utc).isoformat(),
         )
         self.store.write(updated)
+        if record.metadata.get("submission_phase") != phase:
+            self.store.append_event(
+                job_id,
+                state=updated.state.value,
+                phase=phase,
+                message=self._phase_message(phase),
+            )
         return updated
 
     def fail_preparation(self, job_id: str, error: BaseException) -> JobRecord:
@@ -227,6 +263,12 @@ class JobService:
             updated_at_utc=datetime.now(timezone.utc).isoformat(),
         )
         self.store.write(updated)
+        self.store.append_event(
+            job_id,
+            state=updated.state.value,
+            phase=str(updated.metadata.get("failure_phase", "preparation")),
+            message=("Background preparation failed; inspect the diagnostic and controller log."),
+        )
         return updated
 
     def resolve_selector(self, selector: str) -> str:
@@ -269,10 +311,15 @@ class JobService:
         try:
             state = scheduler.state(record.scheduler_id)
         except Exception as error:
+            previous_state = record.state
             metadata = dict(record.metadata)
             metadata.update(
                 {
-                    "last_known_state": record.state.value,
+                    "last_known_state": (
+                        metadata.get("last_known_state", JobState.UNKNOWN.value)
+                        if record.state is JobState.UNKNOWN
+                        else record.state.value
+                    ),
                     "unreachable_error": f"{error.__class__.__name__}: {error}",
                     "last_refresh_at_utc": datetime.now(timezone.utc).isoformat(),
                 }
@@ -283,12 +330,28 @@ class JobService:
                 updated_at_utc=datetime.now(timezone.utc).isoformat(),
             )
             self.store.write(record)
+            if previous_state is not JobState.UNKNOWN:
+                self.store.append_event(
+                    job_id,
+                    state=record.state.value,
+                    message=(
+                        "The scheduler could not be reached; the last known state was preserved."
+                    ),
+                    source="scheduler",
+                )
             return record
         if state is not record.state:
+            previous_state = record.state
             record = record.with_updates(
                 state=state, updated_at_utc=datetime.now(timezone.utc).isoformat()
             )
             self.store.write(record)
+            self.store.append_event(
+                job_id,
+                state=state.value,
+                message=f"Scheduler state changed from {previous_state.value} to {state.value}.",
+                source="scheduler",
+            )
         return record
 
     def list(
@@ -330,21 +393,68 @@ class JobService:
             )
         )
 
-    def logs(self, job_id: str, *, tail: int | None = None) -> str:
-        """Return captured local output or reconnect to scheduler logs."""
+    def events(self, job_id: str) -> tuple[dict[str, Any], ...]:
+        """Return the append-only framework/scheduler lifecycle facts for one job."""
+        return self.store.events(job_id)
+
+    def scientific_logs(self, job_id: str, *, tail: int | None = None) -> str:
+        """Return only consumer/scientific output, without lifecycle annotations."""
         record = self.get(job_id, refresh=False)
         if record.scheduler_id is None:
             value = record.stdout + record.stderr
-            controller_log = self.store.root / "submissions" / job_id / "controller.log"
-            if controller_log.is_file() and not controller_log.is_symlink():
-                try:
-                    value += controller_log.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    pass
             return "\n".join(value.splitlines()[-tail:]) if tail else value
         profile = self.catalog.get(record.cluster)
         scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
         return scheduler.logs(record.scheduler_id, tail=tail)
+
+    def logs(self, job_id: str, *, tail: int | None = None) -> str:
+        """Return lifecycle, preparation and scientific logs as clearly labelled streams."""
+        record = self.get(job_id)
+        lifecycle = [self._format_event(value) for value in self.events(job_id)]
+        remote = record.metadata.get("remote_state", {})
+        remote = remote if isinstance(remote, Mapping) else {}
+        heartbeat = remote.get("heartbeat_at_utc")
+        if heartbeat:
+            lifecycle.append(
+                f"[{heartbeat}] [runtime] {record.state.value}: supervisor heartbeat observed."
+            )
+        observed = datetime.now(timezone.utc).isoformat()
+        lifecycle.append(
+            f"[{observed}] [observation] {record.state.value}: "
+            + (
+                "current provider observation completed; scientific progress requires "
+                "application output or artifacts."
+                if record.scheduler_id is not None
+                else "local controller record is available; the scheduler has not acknowledged "
+                "this job yet."
+            )
+        )
+        parts = ["== LambdaForge lifecycle ==", *(lifecycle or ["No lifecycle events recorded."])]
+        controller_log = self.store.root / "submissions" / job_id / "controller.log"
+        controller = ""
+        if controller_log.is_file() and not controller_log.is_symlink():
+            try:
+                controller = controller_log.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                controller = ""
+        if controller.strip():
+            controller_lines = controller.splitlines()
+            parts.extend(
+                (
+                    "",
+                    "== LambdaForge submission worker ==",
+                    *(controller_lines[-tail:] if tail else controller_lines),
+                )
+            )
+        scientific = self.scientific_logs(job_id, tail=tail)
+        parts.extend(
+            (
+                "",
+                "== Scientific output (consumer code) ==",
+                scientific.rstrip() or "No scientific output has been emitted yet.",
+            )
+        )
+        return "\n".join(parts).rstrip() + "\n"
 
     def cancel(self, job_id: str) -> JobRecord:
         """Cancel through the provider and persist the transition."""
@@ -358,6 +468,12 @@ class JobService:
                 updated_at_utc=datetime.now(timezone.utc).isoformat(),
             )
             self.store.write(record)
+            self.store.append_event(
+                job_id,
+                state=record.state.value,
+                phase=str(record.metadata.get("submission_phase", "preparation")),
+                message="Job cancelled before scheduler acknowledgement.",
+            )
             return record
         profile = self.catalog.get(record.cluster)
         scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
@@ -367,6 +483,12 @@ class JobService:
             updated_at_utc=datetime.now(timezone.utc).isoformat(),
         )
         self.store.write(record)
+        self.store.append_event(
+            job_id,
+            state=record.state.value,
+            message="Scheduler cancellation requested.",
+            source="scheduler",
+        )
         return record
 
     def pause(self, job_id: str) -> JobRecord:
@@ -417,7 +539,15 @@ class JobService:
                 now = datetime.now(timezone.utc).isoformat()
                 state = JobState(str(state_value.get("state", JobState.UNKNOWN.value)))
                 record = (
-                    previous.with_updates(state=state, updated_at_utc=now)
+                    previous.with_updates(
+                        state=state,
+                        metadata={
+                            **dict(previous.metadata),
+                            "remote_state": dict(state_value),
+                            "last_refresh_at_utc": now,
+                        },
+                        updated_at_utc=now,
+                    )
                     if previous is not None
                     else JobRecord(
                         job_id=job_id,
@@ -435,6 +565,20 @@ class JobService:
                     )
                 )
                 self.store.write(record)
+                if previous is None or previous.state is not state:
+                    self.store.append_event(
+                        job_id,
+                        state=state.value,
+                        message=(
+                            "Durable supervisor state discovered during reconciliation."
+                            if previous is None
+                            else (
+                                "Provider state changed from "
+                                f"{previous.state.value} to {state.value}."
+                            )
+                        ),
+                        source="provider",
+                    )
                 discovered.append(record)
         return tuple(discovered)
 
@@ -471,7 +615,31 @@ class JobService:
             updated_at_utc=datetime.now(timezone.utc).isoformat(),
         )
         self.store.write(record)
+        self.store.append_event(
+            job_id,
+            state=record.state.value,
+            message=f"Job {operation} requested through the scheduler.",
+            source="scheduler",
+        )
         return record
+
+    @staticmethod
+    def _phase_message(phase: str) -> str:
+        return {
+            "validation": "Configuration validated; resolving the execution context.",
+            "runtime": "Resolving a compatible remote Python and PyTorch/CUDA plan.",
+            "bundle": "Building or reusing the content-addressed execution bundle.",
+            "staging": "Staging the execution bundle and declared bounded inputs.",
+            "environment": "Preparing or verifying the immutable remote environment.",
+            "scheduler": "Environment ready; handing the job to the scheduler.",
+        }.get(phase, f"Preparation entered phase {phase}.")
+
+    @staticmethod
+    def _format_event(value: Mapping[str, Any]) -> str:
+        timestamp = str(value.get("timestamp_utc", "-"))
+        phase = str(value.get("phase") or value.get("source") or "lifecycle")
+        state = str(value.get("state", "unknown"))
+        return f"[{timestamp}] [{phase}] {state}: {value.get('message', '')}"
 
     def retry(self, job_id: str, *, dry_run: bool = False) -> JobHandle:
         """Create a new auditable job from one terminal job's exact request."""

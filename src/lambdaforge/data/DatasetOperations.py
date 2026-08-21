@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from lambdaforge.data.index import DatasetIndex
+from lambdaforge.data.index import DatasetAsset, DatasetIndex
 from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
 from lambdaforge.tasks.artifacts import TaskArtifact
 
@@ -106,8 +106,12 @@ class DatasetOperations:
                 errors.append(f"Missing or unsafe global asset: {name}")
                 continue
             if asset.sha256 is not None:
-                digest, size = TaskArtifact.fingerprint_path(candidate)
-                if f"sha256:{digest}" != asset.sha256 or (
+                digest, size = DatasetAsset.fingerprint_path(candidate)
+                checksum_matches = f"sha256:{digest}" == asset.sha256
+                if not checksum_matches and candidate.is_file():
+                    legacy_digest, _ = TaskArtifact.fingerprint_path(candidate)
+                    checksum_matches = f"sha256:{legacy_digest}" == asset.sha256
+                if not checksum_matches or (
                     asset.size_bytes is not None and size != asset.size_bytes
                 ):
                     errors.append(f"Global asset bytes differ: {name}")

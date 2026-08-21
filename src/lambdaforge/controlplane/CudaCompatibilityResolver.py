@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
+from pathlib import PurePosixPath
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.python_runtime import PythonRuntimeRequirements
@@ -115,6 +117,17 @@ class CudaCompatibilityResolver:
         else:
             assert driver is not None
             candidates = self._automatic_channels(driver, capabilities)
+        active = self._active_verified_plan(
+            profile,
+            transport,
+            python=python,
+            driver=driver,
+            capabilities=capabilities,
+            candidates=candidates,
+            require_cuda=require_cuda,
+        )
+        if active is not None:
+            return active
         failures: list[str] = []
         for channel in candidates:
             index = f"{self.INDEX_ROOT}/{channel}"
@@ -140,6 +153,49 @@ class CudaCompatibilityResolver:
             "Python (older clusters commonly need Python 3.10-3.12), set an explicit supported "
             "pytorch.channel, or provide a reviewed target-compatible wheelhouse."
         )
+
+    @staticmethod
+    def _active_verified_plan(
+        profile: ClusterProfile,
+        transport: Transport,
+        *,
+        python: tuple[str, str],
+        driver: str | None,
+        capabilities: tuple[str, ...],
+        candidates: tuple[str, ...],
+        require_cuda: bool,
+    ) -> TorchInstallationPlan | None:
+        """Reuse a verified immutable environment receipt when all host facts still match."""
+        if profile.environment != "managed" or profile.storage is None:
+            return None
+        pointer = PurePosixPath(profile.storage.state_root) / "active-environment"
+        active = transport.run(("cat", str(pointer)))
+        if active.returncode or not active.stdout.strip():
+            return None
+        executable = PurePosixPath(active.stdout.strip())
+        marker = executable.parent.parent / ".lambdaforge-environment.json"
+        receipt = transport.run(("cat", str(marker)))
+        if receipt.returncode:
+            return None
+        try:
+            value = json.loads(receipt.stdout)
+            policy = value.get("environment_policy", {})
+            raw_plan = policy.get("pytorch", {}) if isinstance(policy, dict) else {}
+            plan = TorchInstallationPlan.from_mapping(raw_plan)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return None
+        if (
+            plan.channel not in candidates
+            or plan.version is None
+            or plan.index_url is None
+            or plan.python_version != python[0]
+            or plan.architecture != python[1]
+            or plan.driver_version != driver
+            or tuple(plan.compute_capabilities) != capabilities
+            or plan.require_cuda != require_cuda
+        ):
+            return None
+        return plan
 
     @staticmethod
     def _python(profile: ClusterProfile, transport: Transport, executable: str) -> tuple[str, str]:

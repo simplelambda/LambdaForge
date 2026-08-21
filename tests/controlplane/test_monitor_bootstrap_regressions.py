@@ -7,12 +7,22 @@ import os
 import time
 import zipfile
 from collections.abc import Sequence
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
-from lambdaforge.cli.LiveJobMonitor import MonitorRenderer, SnapshotProcess
+from lambdaforge.cli.LiveJobMonitor import (
+    ClusterDetailRenderer,
+    LiveJobMonitor,
+    LogViewerRenderer,
+    MonitorRenderer,
+    ResourceHistory,
+    SnapshotProcess,
+    _move_overview_selection,
+)
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.CommandResult import CommandResult
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
@@ -94,6 +104,216 @@ def test_renderer_scrolls_to_keep_keyboard_selection_visible(
     assert "Selected: job-4" in rendered
 
 
+def test_monitor_scrolls_clusters_without_always_showing_personal_usage() -> None:
+    history = ResourceHistory(30)
+    clusters = [
+        {
+            "cluster": f"gpu-{index}",
+            "online": True,
+            "observed": {
+                "cpu_total": 8,
+                "cpu_load": index * 10,
+                "ram_total_bytes": 100,
+                "ram_available_bytes": 50,
+                "gpus": [
+                    {
+                        "utilization_percent": 25,
+                        "memory_total_bytes": 100,
+                    }
+                ],
+            },
+            "personal": {
+                "observed": {
+                    "cpu_percent": 100,
+                    "rss_bytes": 10,
+                    "gpu_memory_bytes": 20,
+                    "job_count": 1,
+                },
+                "requested": {"cpu_cores": 2, "ram_bytes": 20, "gpu_count": 1},
+            },
+        }
+        for index in range(6)
+    ]
+    payload = {"clusters": clusters, "jobs": {"items": [], "by_state": {}, "total": 0}}
+    history.record(payload)
+
+    rendered = MonitorRenderer.render(
+        payload,
+        selected_cluster=5,
+        focus="clusters",
+        history=history,
+        width=180,
+        height=18,
+    )
+
+    assert "▶ gpu-5" in rendered
+    assert "↳ me" not in rendered
+    assert "mine requested" not in rendered
+    assert "clusters 3-6 of 6" in rendered
+
+
+def test_vertical_navigation_crosses_between_jobs_and_clusters() -> None:
+    focus, job, cluster = _move_overview_selection(
+        "jobs", 0, 0, direction=-1, job_count=3, cluster_count=2
+    )
+    assert (focus, job, cluster) == ("clusters", 0, 1)
+
+    focus, job, cluster = _move_overview_selection(
+        focus, job, cluster, direction=1, job_count=3, cluster_count=2
+    )
+    assert (focus, job, cluster) == ("jobs", 0, 1)
+
+    focus, job, cluster = _move_overview_selection(
+        focus, job, cluster, direction=1, job_count=3, cluster_count=2
+    )
+    assert (focus, job, cluster) == ("jobs", 1, 1)
+
+
+def test_monitor_renders_confirmation_before_cancelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "clusters": [],
+        "jobs": {
+            "items": [
+                {
+                    "job_id": "job-1",
+                    "cluster": "local",
+                    "state": "running",
+                    "created_at_utc": "",
+                    "metadata": {},
+                }
+            ],
+            "by_state": {"running": 1},
+            "total": 1,
+        },
+    }
+
+    class ImmediateSnapshots:
+        def __init__(self, overview: Any) -> None:
+            del overview
+            self.pending = False
+
+        @property
+        def running(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.pending = True
+
+        def take(self) -> tuple[dict[str, Any], None] | None:
+            if not self.pending:
+                return None
+            self.pending = False
+            return payload, None
+
+        def close(self) -> None:
+            pass
+
+    class ScriptedTerminal:
+        def __init__(self, stream: Any) -> None:
+            del stream
+            self.keys = iter(("x", "y", "q"))
+
+        def __enter__(self) -> ScriptedTerminal:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def key(self, timeout: float) -> str:
+            del timeout
+            return next(self.keys)
+
+    class RecordingJobs:
+        cancelled: list[str] = []
+
+        def cancel(self, job_id: str) -> Any:
+            self.cancelled.append(job_id)
+            return SimpleNamespace(job_id=job_id, state=SimpleNamespace(value="cancelled"))
+
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor.SnapshotProcess", ImmediateSnapshots)
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor._TerminalSession", ScriptedTerminal)
+    output = StringIO()
+    jobs = RecordingJobs()
+
+    result = LiveJobMonitor(cast(Any, object()), cast(Any, jobs), interval=1, stream=output).run()
+
+    assert result == 0
+    assert jobs.cancelled == ["job-1"]
+    assert "Cancel job-1? Press x again, y or Enter to confirm" in output.getvalue()
+
+
+def test_cluster_detail_renders_history_personal_usage_and_only_cluster_jobs() -> None:
+    history = ResourceHistory(30)
+    clusters = [
+        {
+            "cluster": "gpu-a",
+            "online": True,
+            "observed": {
+                "cpu_total": 8,
+                "cpu_load": 75,
+                "ram_total_bytes": 100,
+                "ram_available_bytes": 25,
+                "gpus": [{"utilization_percent": 50, "memory_total_bytes": 100}],
+            },
+            "personal": {
+                "observed": {
+                    "cpu_percent": 200,
+                    "rss_bytes": 20,
+                    "gpu_memory_bytes": 25,
+                    "job_count": 1,
+                },
+                "requested": {"cpu_cores": 2, "ram_bytes": 20, "gpu_count": 1},
+            },
+        },
+        {"cluster": "gpu-b", "online": True, "observed": {}, "personal": {}},
+    ]
+    jobs = [
+        {
+            "job_id": "job-on-a",
+            "cluster": "gpu-a",
+            "state": "running",
+            "created_at_utc": "",
+            "timing": {"runtime_seconds": 10},
+        },
+        {
+            "job_id": "job-on-b",
+            "cluster": "gpu-b",
+            "state": "running",
+            "created_at_utc": "",
+        },
+    ]
+    payload = {"clusters": clusters, "jobs": {"items": jobs}}
+    history.record(payload)
+
+    rendered = ClusterDetailRenderer.render(
+        payload,
+        0,
+        selected_job=0,
+        history=history,
+        message="",
+        width=160,
+        height=36,
+    )
+
+    assert "mine requested: C2" in rendered
+    assert "mine observed: C2.0 cores" in rendered
+    assert "█ cluster  ▓ mine" in rendered
+    assert "job-on-a" in rendered
+    assert "job-on-b" not in rendered
+
+
+def test_complete_log_viewer_pages_over_the_same_document() -> None:
+    text = "\n".join(f"line-{index}" for index in range(20))
+
+    rendered = LogViewerRenderer.render("job-1", text, scroll=10, message="", width=80, height=8)
+
+    assert "lines 11-14 of 20" in rendered
+    assert "line-10" in rendered
+    assert "line-14" not in rendered
+
+
 def _consumer_wheel(path: Path, requirement: str) -> Path:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(
@@ -113,9 +333,7 @@ def test_consumer_lambdaforge_bound_is_checked_before_remote_install(tmp_path: P
     )
 
     with pytest.raises(ValueError, match=r"excludes LambdaForge 0\.9\.1"):
-        ProjectWheelBuilder.validate_framework_dependency(
-            wheel, "0.9.1", project_root=tmp_path
-        )
+        ProjectWheelBuilder.validate_framework_dependency(wheel, "0.9.1", project_root=tmp_path)
 
     compatible = _consumer_wheel(
         tmp_path / "compatible.whl",
@@ -168,9 +386,7 @@ def test_online_pip_install_does_not_reference_an_absent_wheelhouse(tmp_path: Pa
     )
 
     pip = next(
-        command
-        for command in transport.commands
-        if command[1:4] == ("-m", "pip", "install")
+        command for command in transport.commands if command[1:4] == ("-m", "pip", "install")
     )
     assert "--find-links" not in pip
 
@@ -201,9 +417,7 @@ def test_environment_pruning_retains_active_and_running_job_references(tmp_path:
         "run_root": str(jobs),
     }
 
-    result = StorageOperations.prune_environments(
-        descriptor, ("env-current",), apply=True
-    )
+    result = StorageOperations.prune_environments(descriptor, ("env-current",), apply=True)
 
     assert result["pruned"] == ["env-old"]
     assert (environments / "env-current").is_dir()

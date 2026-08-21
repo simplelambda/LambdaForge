@@ -63,13 +63,17 @@ class TestPreprocessing:
         path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
         return path
 
-    def test_pipeline_writes_records_progress_and_dataset_artifact(self, tmp_path: Path) -> None:
+    def test_pipeline_writes_records_progress_and_dataset_artifact(
+        self, tmp_path: Path, capsys: Any
+    ) -> None:
         """The built-in pipeline should produce inspectable content-addressed outputs."""
         self.write_jsonl(
             tmp_path / "records.jsonl",
             [{"id": "a", "text": "alpha"}, {"id": "b", "text": "beta"}],
         )
-        path = self.write_config(tmp_path / "preprocess.yaml", self.config(tmp_path))
+        config = self.config(tmp_path)
+        config["task"]["params"]["progress_interval_seconds"] = 0
+        path = self.write_config(tmp_path / "preprocess.yaml", config)
         report = TaskValidator().validate_file(path)
         assert report.is_valid, report.summary()
         result = TaskRun.from_yaml(path).run()
@@ -99,6 +103,9 @@ class TestPreprocessing:
             f"{dataset.name}@{dataset.version}"
         )
         assert registered.dataset_id == dataset.dataset_id
+        progress = capsys.readouterr().err
+        assert "[LambdaForge preprocessing] started" in progress
+        assert "complete records=2 ok=2 failed=0" in progress
 
     def test_failed_attempt_resumes_only_verified_record_outputs(self, tmp_path: Path) -> None:
         """A new attempt should skip successful records and retry the failed key."""

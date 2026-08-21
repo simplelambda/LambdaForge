@@ -115,6 +115,11 @@ preprocess:
 resources: {cpus: 4, memory: 8GiB, time: 30m}
 ```
 
+`resources` is the scheduler request, so duplicate CLI flags are unnecessary; explicit flags are
+optional per-field overrides. A workflow/dataset top-level mapping is exact. Without one,
+LambdaForge derives safe CPU/RAM/GPU concurrency and total time from stage/node requests, DAG levels
+and `max_parallel` because the complete DAG runs inside one fixed allocation.
+
 YAML is trusted input: `target` constructs an importable Python object, `ref` imports a callable or
 value, and `params` contains constructor arguments. Install the consumer package before validation
 so paths such as `my_project.preprocessing.normalize_record` resolve normally.
@@ -126,9 +131,9 @@ so paths such as `my_project.preprocessing.normalize_record` resolve normally.
 | Validate without execution | `lf validate CONFIG` |
 | See the strict materialized definition | `lf inspect CONFIG --resolved` |
 | Preview resources, placement and actions | `lf plan CONFIG [--on CLUSTER]` |
-| Run a task, workflow, dataset recipe or experiment | `lf run CONFIG [--on CLUSTER]` |
+| Run any configuration, including a dataset recipe | `lf run CONFIG [--on CLUSTER]` |
 | Discover project configurations | `lf configs list` |
-| Build and inspect an immutable dataset | `lf datasets plan NAME`; `lf datasets build NAME` |
+| Inspect datasets or build by discovered name | `lf datasets list/show`; `lf datasets build NAME` |
 | Reconnect to work | `lf jobs list`; `lf jobs show latest`; `lf jobs logs JOB --follow` |
 | Watch all live work interactively | `lf top` (or `lf overview --json` for software) |
 | Inspect cluster readiness | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
@@ -143,24 +148,13 @@ are preview-first and require an explicit `--apply` after review.
 
 ## Errors are diagnostics
 
-LambdaForge does not expose a bare `RuntimeError` for normal CLI failures. A failed command states
-what happened, why, what did or did not run, how to fix it, the exact next command and where the
-full diagnostic was saved. The heading distinguishes configuration, validation, environment,
-connection/authentication, data, storage/resource, execution, deliberate safety refusal and a
-probable internal framework bug.
+Normal CLI failures explain what happened, why, impact, repair, next command and saved diagnostics.
+A preflight error means no job was submitted; `EXECUTION FAILED` means code started. Dataset and
+workflow reports distinguish one root `FAILED` stage from dependent `BLOCKED` stages.
 
-This distinction matters operationally: a configuration error says that no job was submitted;
-`EXECUTION FAILED` means code actually started, names the job/stage when known and points to
-`lf jobs logs JOB --tail 300`. Workflow and dataset failures show one root `FAILED` stage and mark
-dependent stages as `BLOCKED`, while retaining verified reusable work.
-
-Human output goes to stderr. Add `--json` anywhere in a command for the equivalent stable error
-envelope (`category`, `code`, `exit_code`, `retryable`, context and commands). Add `--debug` for the
-underlying exception and traceback; `--verbose` only requests more operational detail and is not a
-synonym for debug. Every boundary failure also writes a redacted diagnostic record under
-`$XDG_STATE_HOME/lambdaforge/logs/errors` (normally
-`~/.local/state/lambdaforge/logs/errors`). Start cluster diagnosis with `lf doctor --on CLUSTER`.
-The complete categories and exit-code contract are in
+Human diagnostics use stderr. Add `--json` for the stable category/exit/retry/context envelope and
+`--debug` for internals; `--verbose` is operational detail. Redacted boundary records live below
+`$XDG_STATE_HOME/lambdaforge/logs/errors`. See
 [Understanding errors and diagnostics](docs/MANUAL.md#understanding-errors-and-diagnostics).
 
 ## Datasets, clusters and jobs
@@ -203,34 +197,40 @@ until the provider acknowledges it. Inspect `metadata.submission_phase` with `lf
 --json`, or use `lf top` to follow every cluster and job. Use `--wait-for-submit` only when a script
 or diagnosis must synchronously wait for remote staging and scheduler acknowledgement.
 
-`lf top` is an interactive terminal view on a TTY: arrow keys or `j`/`k` select jobs, `l` shows the
-selected log, `x` requests confirmed cancellation, `r` refreshes and `q` exits. It has no private
-data source. Slow SSH, scheduler and dataset probes run in a cancellable background snapshot
-process, so navigation and exit do not wait for a provider timeout. `lf overview --json`, `lf jobs
-list --json` and `lf resources --all --json` expose the
-same versioned records for scripts, desktop applications and other wrappers. In a pipe, `lf top`
-prints one snapshot; `lf top --json --follow` emits newline-delimited JSON snapshots.
+`lf jobs logs JOB` labels three different kinds of evidence: LambdaForge lifecycle events,
+submission-worker diagnostics and scientific output from the consumer. With `--follow`, durable
+phase/state changes appear immediately and a quiet status observation appears every 30 seconds.
+That observation proves that the controller/provider can still see the job; it does **not** prove
+that a model, download or transform is advancing. LambdaForge workflows emit node start/end events
+and generic preprocessing emits periodic completed-record checkpoints. Domain code should still
+write bounded progress messages for a single long operation and flush them promptly.
 
-OpenSSH is the default and reuses a private `ControlMaster` socket for a bounded idle period, so
-ordinary CLI use does not create an authentication storm. Managed environments are immutable
-user-space virtual environments built from exact project/framework wheels. With the default
-`python.strategy: auto`, bootstrap first tries the configured and other bounded Python executables,
-then an existing Conda/Mamba/Micromamba, and finally a pinned, checksum-verified micromamba staged
-from the controller. The resulting Python runtime and package environment live below the configured
-cluster cache; LambdaForge never changes system Python, shell startup files, GPU drivers or CUDA.
-For a LambdaForge-provisioned runtime it also discovers a readable CA bundle already trusted by
-the host Python, validates it without contacting an external site, records that path and propagates
-it to runtime creation, pip/Requests and scientific jobs. It never disables certificate checking,
-downloads arbitrary roots or modifies `/etc`; `lf doctor` reports system and managed TLS trust
-separately.
-After a successful bootstrap, LambdaForge first activates the verified environment and then removes
-superseded LambdaForge-owned environments. It retains the active environment, environments named by
-known non-terminal jobs and references found in durable direct-job state; concurrent construction
-defers cleanup. Scientific results, datasets, wheels, runtimes and user-managed environments are not
-part of this pruning operation.
-Use `python.strategy: existing` when institutional policy requires an administrator-provided Python.
-Older profiles whose YAML contains the scalar `python: python3` deliberately keep that strict
-behavior. Opt one into automatic user-space provisioning, review the plan and apply it with:
+The main `lf top` screen deliberately shows compact whole-cluster values and the global job list.
+Clusters and jobs behave as one vertical sequence: pressing `↑` on the first job selects the last
+cluster, and pressing `↓` on the last cluster selects the first job. `Enter` opens the selected
+cluster. Its detail screen shows clearer time charts, requested and measured personal use, and only
+jobs on that cluster. `--history 120` controls the chart window. `l` opens the complete selected log
+(`PgUp`/`PgDn`, `Home`/`End`, then `b`, `Esc` or `q` to return). Press `x`, then `x` again, `y` or
+`Enter`, to cancel; the confirmation remains visible and does not block input. `r` refreshes and
+`q` exits. Slow provider/log calls run in cancellable background processes, so navigation and exit
+do not wait for a timeout.
+
+The TUI has no private data source. `lf overview --json` includes per-job `timing` and requested
+versus observed `usage`; `lf resources --all --json` includes each cluster's `personal` aggregate.
+Direct jobs measure process-tree CPU/RAM/GPU memory; unsupported scheduler accounting remains
+unavailable. These plus `lf jobs list --json` support wrappers. In a pipe, `lf top` prints once and
+`lf top --json --follow` emits newline-delimited JSON snapshots.
+
+Repeated submissions reuse a verified Python/CUDA/PyTorch receipt only while all host facts and
+policy still match; otherwise compatibility is resolved again. SLURM first tries a safe copy-on-write
+bundle clone, then a portable copy, reducing latency without sharing a mutable workspace.
+
+OpenSSH reuses a private `ControlMaster`, avoiding authentication storms. Managed environments are
+immutable user-space installations from exact wheels. `python.strategy: auto` tries compatible
+Python/Conda-family runtimes, then verified micromamba; it never changes system Python, shell files,
+drivers, CUDA or trust roots. Host CA trust is propagated with verification intact. Bootstrap
+activates the verified environment before safely pruning only unreferenced LambdaForge environments.
+Use `existing` for administrator runtimes. Migrate a legacy scalar profile with:
 
 ```bash
 lf clusters set atlas python.strategy auto

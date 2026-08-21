@@ -7,14 +7,11 @@ under change. Current code and behavioral tests override stale assumptions.
 
 ## Product model
 
-LambdaForge is an installable, task-agnostic PyTorch/Lightning framework. A consumer project owns
-domain models and data; LambdaForge validates YAML, constructs trusted Python objects, runs tasks,
-preprocessing, dataset recipes, workflows, experiments and HPO, and preserves identity, jobs,
-results and artifacts across local, SSH and SLURM execution. Python >=3.10 is supported.
-
-Use only public imports from `lambdaforge` or its documented domain namespaces. Never copy the
-framework into a consumer, share this repository's `.venv`, patch `PYTHONPATH`, serialize secrets,
-or infer CUDA usability from `nvidia-smi` alone.
+LambdaForge is an installable, task-agnostic Python >=3.10 PyTorch/Lightning framework. Consumers
+own domain code/data; it runs tasks, preprocessing, datasets, workflows, experiments and HPO while
+preserving identity, jobs, results and artifacts across local, SSH and SLURM execution. Use public
+imports only. Never copy the framework, share its `.venv`, patch `PYTHONPATH`, serialize secrets or
+infer CUDA usability from `nvidia-smi` alone.
 
 ## Fast routes
 
@@ -27,13 +24,14 @@ or infer CUDA usability from `nvidia-smi` alone.
 | Discover project configs | `lf configs list`; `lf experiments list`; `lf tasks list` |
 | Create a consumer scaffold | `lf init DIRECTORY` |
 | Debug preprocessing samples | `lf debug CONFIG --records N` |
-| Plan/build a dataset | `lf datasets plan NAME`; `lf datasets build NAME` |
+| Run any config, including datasets | `lf run CONFIG [--on CLUSTER]` |
+| Dataset discovery/convenience alias | `lf datasets plan NAME`; `lf datasets build NAME` |
 | Inspect dataset content | `lf datasets show/members/member/diff/stats/verify ...` |
 | Place a dataset | `lf datasets materialize SELECTOR --on CLUSTER`; add `--apply` after review |
 | Diagnose a cluster | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Diagnose any failed command | read its next action; add `--debug`; use `--json` for tools |
 | Reconnect to work | `lf jobs list/status/logs/cancel/retry`; selectors accept ID, name, prefix, `latest` |
-| Global runtime view | `lf top` for humans; `lf overview --json`, `lf jobs list --json`, `lf resources --all --json` for tools |
+| Global runtime view | `lf top --history 120` for humans; `lf overview --json`, `lf jobs list --json`, `lf resources --all --json` for tools |
 | Query or compare results | `lf results list/show/compare/export` |
 | Plot scientific evidence | `lf plot learning/sweep/seeds/hpo/resources` |
 | Inspect/fetch artifacts | `lf artifact inspect/list/fetch/validate/visualize` |
@@ -41,8 +39,7 @@ or infer CUDA usability from `nvidia-smi` alone.
 | Explain configuration/identity | `lf explain KIND PATH`; `lf explain changes CURRENT --against PREVIOUS` |
 | Shell completion | `lf completion bash|zsh|fish` |
 
-`lf` and `lambdaforge` are identical entry points. CLI grammar is generally
-`lf <resource> <action> <object> [--on CONTEXT]`; `ds`, `exp`, `env` and `ls` are documented aliases.
+`lf` equals `lambdaforge`; grammar is `lf <resource> <action> <object> [--on CONTEXT]` with documented aliases.
 
 ## Error and diagnostic contract
 
@@ -80,40 +77,30 @@ python -m pip check
 python -c "import lambdaforge; print(lambdaforge.__version__)"
 ```
 
-Prefer an immutable wheel for released or offline work. Let the consumer lock the correct PyTorch
-build and verify it with:
+Prefer an immutable wheel for released/offline work. Let the consumer lock and verify PyTorch:
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
 ```
 
-Install only required extras: `hpo`, `adaptive-hpo`, `s3`, `parquet`, `onnx`, `viz`, `graph`,
-`viz3d`, tracking providers, `cluster-password` or `dev`.
-Treat the consumer's LambdaForge requirement as authoritative: an installed project declaring
-`<0.9` is incompatible with 0.9.x even if editable `pip install` ends with only a warning. Update
-that project deliberately, reinstall it and require `python -m pip check` to pass; never bypass the
-bound with `--no-deps`.
+Install only needed extras. Consumer version bounds are authoritative: update an incompatible
+bound deliberately, reinstall, require `pip check`, and never bypass it with `--no-deps`.
 
 ## Complete CLI surface
 
-- Author/inspect: `init`, `target`, `validate`, `inspect`, `plan`, `run`, `compose`, `diff`,
-  `explain`, `migrate`, `debug`, `plugins`, `completion`, `project status`.
-- Discover: `configs|tasks list|show|validate|plan|run`; `experiments` adds
-  `status|history|results`.
+- Author/inspect: `init`, `target`, `validate`, `inspect`, `plan`, `run`, `compose`, `diff`, `explain`, `migrate`, `debug`, `plugins`, `completion`, `project status`.
+- Discover: `configs|tasks list|show|validate|plan|run`; `experiments` adds `status|history|results`.
 - Control: `doctor`, `overview`, `top`, `resources`, `status`, `logs`, `cancel`, `retry`.
 - Clusters: `clusters add|list|show|inspect|set|unset|remove|export|credentials set|delete|test|bootstrap|resources|storage`.
-- Jobs: `jobs list|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`; also
-  `jobs group list|show`.
+- Jobs: `jobs list|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`; `jobs group list|show`.
 - Storage: `storage status|gc`; `environments list|show|gc`.
 - Data: `data list|locations|inspect|replicate`; `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|delete|materialize|replicate`.
-- Evidence: `aggregate`, `retain`, `registry`, `dashboard`; `results audit|list|show|compare|export|sync`;
-  `plot learning|sweep|seeds|hpo|resources`; `artifact inspect|export|validate|visualize|list|fetch|plugins`.
+- Evidence: `aggregate`, `retain`, `registry`, `dashboard`; `results audit|list|show|compare|export|sync`; `plot learning|sweep|seeds|hpo|resources`; `artifact inspect|export|validate|visualize|list|fetch|plugins`.
 
 ## Configuration and execution
 
-Friendly authoring compiles to one strict `MaterializedConfig`; it is not a second runner. YAML is
-trusted code: `target` imports and constructs an object, `ref` imports without construction, and
-`params` supplies keyword arguments. Project targets must belong to the installed consumer package.
+Friendly authoring compiles to one strict `MaterializedConfig`. Trusted YAML `target` constructs,
+`ref` imports and `params` supplies kwargs. Targets must belong to the installed consumer package.
 Use `inspect --resolved` before editing advanced YAML.
 
 The supported document families are:
@@ -129,6 +116,12 @@ never rewrite source implicitly. Declare every scientific local input at the top
 paths are resolved before execution but logical identity—not cluster placement—drives scientific
 reuse. Default run reuses verified success and resumes compatible partial state; `--force`,
 `--restart` and `--no-resume` have distinct documented semantics.
+
+Authored `resources` is the real scheduler request. CLI resource flags only override explicitly
+provided fields. A workflow/dataset top-level request is exact; otherwise LambdaForge derives the
+fixed outer allocation from node/stage resources, topological levels and `max_parallel`. Do not ask
+users to repeat YAML resources on the command line. `lf run` is canonical for dataset recipes;
+`datasets build` is only a compatible selector-oriented alias.
 
 ## Task and preprocessing contracts
 
@@ -164,6 +157,8 @@ explicit transfer-provider workflow. LambdaForge must not guess or implicitly mo
 `DatasetMember` has a stable logical ID, arbitrary partitions/targets/metadata and named
 file/directory/record/URI assets with real checksums. Artifact v2 uses path-independent
 `content_id == dataset_id`; `build_id` describes recipe provenance. Never mutate a published alias.
+`DatasetAsset.sha256` is the file-byte SHA-256; directories use the documented tree fingerprint.
+Legacy filename-prefixed file hashes are read-only compatibility, not an authoring contract.
 
 For managed data, `DatasetRegistry` owns exact versions and placements and `DatasetResolver` is
 Registry-first. `DataCatalog` remains for external data, aliases, loaders, pins and overrides. Prefer
@@ -233,9 +228,19 @@ Remote CLI runs first return a durable `preparing` job and detach bundle/runtime
 `--wait-for-submit` explicitly restores synchronous scheduler acknowledgement. `submission_phase`
 is machine-readable. Direct jobs then use one detached `ProcessSupervisor`; SLURM remains
 authoritative for scheduled work.
-`lf top` isolates provider refresh in a cancellable process; never move SSH/resource polling back
-into its keyboard loop. GUI integrations consume `overview --json`, `jobs list --json` and
-`resources --all --json`, not terminal escape sequences.
+`lf top` isolates provider refresh and full-log loading in cancellable processes; never move SSH/
+resource/log polling into its keyboard loop. Its global view contains whole-cluster values followed
+by jobs as one vertical selection sequence; crossing a list boundary changes the selected kind and
+`Enter` opens paired history, personal usage and cluster-filtered jobs. Cancellation must remain a
+rendered, non-blocking confirmation. `--history SECONDS` controls only bounded TUI history.
+GUI integrations consume `overview --json` job `timing`/`usage`, `jobs list --json` and
+`resources --all --json` `personal` aggregates, not terminal escape sequences. Keep requested
+allocations separate from observed use and leave unsupported scheduler accounting unknown.
+Job logs have separate lifecycle, submission-worker and scientific streams. Use
+`JobService.events` for durable framework/provider transitions and `scientific_logs` for raw
+consumer output; scheduler reachability or a supervisor heartbeat is liveness, not proof of
+scientific progress. Workflow nodes and preprocessing checkpoints provide generic progress, but a
+long opaque consumer operation must emit its own bounded flushed messages.
 State, heartbeats, logs and usage are durable. Provider outages report unknown plus last-known state,
 not fake scientific failure. Pause retains leases. Signals require matching PID, process group,
 creation time and command hash. Direct-host admission is cooperative affinity/visibility, not cgroup

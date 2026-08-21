@@ -62,6 +62,7 @@ from lambdaforge.diagnostics import (
     execution_failure_diagnostic,
     job_failure_diagnostic,
 )
+from lambdaforge.execution.ConfigurationResourceResolver import ConfigurationResourceResolver
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.experiments.Experiment import Experiment
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
@@ -254,6 +255,7 @@ class CommandLineInterface:
                         overview_service,
                         JobService(overview_catalog),
                         interval=arguments.interval,
+                        history_seconds=arguments.history,
                     ).run()
                 while True:
                     overview_payload = overview_service.snapshot()
@@ -268,11 +270,7 @@ class CommandLineInterface:
                         )
                     else:
                         cls._print_overview(overview_payload)
-                    if (
-                        not top_command
-                        or once
-                        or not follow
-                    ):
+                    if not top_command or once or not follow:
                         return 0
                     time.sleep(arguments.interval)
             except Exception as error:
@@ -856,9 +854,22 @@ class CommandLineInterface:
         if materialized_kind is ConfigurationKind.DATASET:
             recipe = DatasetRecipe.from_yaml(arguments.config)
             if arguments.command == "inspect" or arguments.dry_run:
-                print(json.dumps(recipe.inspect().to_dict(), indent=2))
+                print(
+                    json.dumps(
+                        recipe.inspect(
+                            force=getattr(arguments, "force", False),
+                            force_stages=getattr(arguments, "force_stage", ()),
+                        ).to_dict(),
+                        indent=2,
+                    )
+                )
                 return 0
-            handle = DatasetBuildService().submit(recipe.config, cluster="local")
+            handle = DatasetBuildService().submit(
+                recipe.config,
+                cluster="local",
+                force=arguments.force,
+                force_stages=arguments.force_stage,
+            )
             print(json.dumps(handle.to_dict(), indent=2))
             return 0
         if cls._is_workflow(arguments.config):
@@ -1017,15 +1028,11 @@ class CommandLineInterface:
         arguments: argparse.Namespace, *, base: ResourceRequest | None = None
     ) -> ResourceRequest:
         """Merge portable YAML resources with explicit CLI overrides."""
-        values: dict[str, object] = base.to_dict() if base is not None else {}
-        if base is None:
-            kind = AuthoringConfig.from_yaml(arguments.config).materialize().kind
-            if kind is ConfigurationKind.DATASET:
-                values.update({})
-            elif TaskConfig.is_task_file(arguments.config):
-                values.update(TaskConfig.from_yaml(arguments.config).resources.to_dict())
-            elif not CommandLineInterface._is_workflow(arguments.config):
-                values.update(ExperimentConfig.from_yaml(arguments.config).resources.to_dict())
+        values: dict[str, object] = (
+            base.to_dict()
+            if base is not None
+            else ConfigurationResourceResolver.resolve(arguments.config).to_dict()
+        )
         overrides = {
             "cpus": arguments.cpus,
             "memory": arguments.memory,
@@ -1049,6 +1056,8 @@ class CommandLineInterface:
         ):
             if enabled:
                 values.append(flag)
+        for stage in arguments.force_stage:
+            values.extend(("--force-stage", stage))
         for value, flag in (
             (arguments.mode, "--mode"),
             (arguments.gpus, "--gpus"),

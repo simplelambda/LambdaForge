@@ -7,7 +7,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from packaging.version import Version
+
 from lambdaforge import LambdaForge
+from lambdaforge._version import VERSION
 from lambdaforge.cli import CommandLineInterface
 
 
@@ -52,7 +55,12 @@ def test_init_creates_complete_non_overwriting_consumer(tmp_path: Path, capsys: 
     capsys.readouterr()
     assert (project / "src/my_project/tasks.py").is_file()
     assert (project / "schemas/lambdaforge-task.schema.json").is_file()
-    assert "lambdaforge>=0.8,<0.9" in (project / "pyproject.toml").read_text(encoding="utf-8")
+    current = Version(VERSION)
+    requirement = (
+        f"lambdaforge>={current.major}.{current.minor},"
+        f"<{current.major}.{current.minor + 1}"
+    )
+    assert requirement in (project / "pyproject.toml").read_text(encoding="utf-8")
     assert json.loads((project / ".vscode/settings.json").read_text(encoding="utf-8"))
     ignored = (project / ".gitignore").read_text(encoding="utf-8")
     assert ".lambdaforge/" in ignored

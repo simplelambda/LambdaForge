@@ -100,6 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
     top.add_argument("--follow", action="store_true")
     top.add_argument("--interval", type=float, default=5.0)
     top.add_argument(
+        "--history",
+        type=float,
+        default=60.0,
+        metavar="SECONDS",
+        help="Keep this many seconds of CPU/RAM/GPU history in the interactive view.",
+    )
+    top.add_argument(
         "--once", action="store_true", help="Print one snapshot even in an interactive terminal."
     )
     top.add_argument("--json", action="store_true")
@@ -439,7 +446,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dashboard.add_argument("root", type=Path)
     dashboard.add_argument("--output", type=Path, default=Path("lambdaforge-dashboard.html"))
-    run = subparsers.add_parser("run", help="Execute an experiment, task or workflow YAML file.")
+    run = subparsers.add_parser(
+        "run", help="Execute a dataset recipe, experiment, task or workflow YAML file."
+    )
     run.add_argument("config", type=Path)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument(
@@ -470,6 +479,12 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle.add_argument("--force", action="store_true", help="Run even after success.")
     lifecycle.add_argument(
         "--restart", action="store_true", help="Run from scratch without partial state."
+    )
+    run.add_argument(
+        "--force-stage",
+        action="append",
+        default=[],
+        help="Force one dataset stage and its downstream dependants; repeat as needed.",
     )
     run.add_argument("--no-resume", action="store_true", help="Do not resume partial state.")
     run.add_argument("--cpus", type=int, help="Portable CPU-core request for --on.")

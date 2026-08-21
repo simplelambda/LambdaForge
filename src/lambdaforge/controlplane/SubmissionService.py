@@ -14,6 +14,7 @@ from uuid import uuid4
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.jobs import JobHandle
 from lambdaforge.controlplane.JobService import JobService
+from lambdaforge.execution.ConfigurationResourceResolver import ConfigurationResourceResolver
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
 
@@ -55,7 +56,7 @@ class SubmissionService:
 
         name = ControlPlane._configuration_name(source)
         job_type = ControlPlane._configuration_type(source)
-        request_resources = resources or ResourceRequest()
+        request_resources = resources or ConfigurationResourceResolver.resolve(source)
         handle = self.jobs.reserve(
             cluster=cluster,
             resources=request_resources,

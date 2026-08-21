@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import multiprocessing
+import sys
+import time
 import traceback
 from collections.abc import Mapping, Sequence
 from concurrent.futures import (
@@ -49,6 +51,7 @@ class PreprocessingTask(Task):
         shard_index: int = 0,
         on_error: PreprocessingErrorPolicy | str = PreprocessingErrorPolicy.FAIL,
         checkpoint_interval: int = 1,
+        progress_interval_seconds: float = 10.0,
         workers: int = 1,
         workload: PreprocessingWorkload | str = PreprocessingWorkload.AUTO,
         publish_dataset: bool = False,
@@ -64,6 +67,8 @@ class PreprocessingTask(Task):
             raise ValueError("Preprocessing shard_index must be within [0, shard_count).")
         if isinstance(checkpoint_interval, bool) or int(checkpoint_interval) < 1:
             raise ValueError("Preprocessing checkpoint_interval must be at least 1.")
+        if isinstance(progress_interval_seconds, bool) or float(progress_interval_seconds) < 0:
+            raise ValueError("Preprocessing progress_interval_seconds cannot be negative.")
         if isinstance(workers, bool) or int(workers) < 1:
             raise ValueError("Preprocessing workers must be at least 1.")
         if not callable(getattr(source, "records", None)):
@@ -82,6 +87,7 @@ class PreprocessingTask(Task):
         self.shard_index = int(shard_index)
         self.on_error = PreprocessingErrorPolicy(on_error)
         self.checkpoint_interval = int(checkpoint_interval)
+        self.progress_interval_seconds = float(progress_interval_seconds)
         self.workers = int(workers)
         self.workload = PreprocessingWorkload(workload)
         if not isinstance(publish_dataset, bool):
@@ -100,6 +106,13 @@ class PreprocessingTask(Task):
 
     def run(self, context: TaskContext) -> TaskOutput:
         """Process the selected shard and return manifests as task artifacts."""
+        self._last_progress_at = time.monotonic()
+        print(
+            f"[LambdaForge preprocessing] started shard={self.shard_index + 1}/"
+            f"{self.shard_count} workers={self.workers} workload={self.workload.value}",
+            file=sys.stderr,
+            flush=True,
+        )
         manifest_path = context.output_path("preprocessing-manifest.json", create_parent=True)
         started = datetime.now(timezone.utc).isoformat()
         records: dict[str, Mapping[str, Any]] = {}
@@ -356,6 +369,21 @@ class PreprocessingTask(Task):
             complete=complete,
             records=records,
         ).write_json(path)
+        now = time.monotonic()
+        if (
+            complete
+            or self.progress_interval_seconds == 0
+            or now - self._last_progress_at >= self.progress_interval_seconds
+        ):
+            successful = sum(value.get("status") == "ok" for value in records.values())
+            failed = sum(value.get("status") == "failed" for value in records.values())
+            print(
+                f"[LambdaForge preprocessing] {'complete' if complete else 'checkpoint'} "
+                f"records={len(records)} ok={successful} failed={failed}",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._last_progress_at = now
 
     def _belongs_to_shard(self, key: str) -> bool:
         digest = hashlib.sha256(key.encode("utf-8")).digest()

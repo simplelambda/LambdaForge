@@ -6,6 +6,7 @@ import json
 import multiprocessing as mp
 import os
 import re
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -81,8 +82,22 @@ class WorkflowRunner:
                 ]
                 if failed and not node.continue_on_failure:
                     outcomes[name] = {"status": "blocked", "blocked_by": failed}
+                    print(
+                        f"[LambdaForge workflow] node={name} status=blocked "
+                        f"blocked_by={','.join(failed)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 else:
                     runnable.append(node)
+            for node in runnable:
+                dependencies = ",".join(node.needs) or "none"
+                print(
+                    f"[LambdaForge workflow] node={node.name} status=starting "
+                    f"dependencies={dependencies}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             with ProcessPoolExecutor(
                 max_workers=min(config.max_parallel, len(runnable) or 1),
                 mp_context=mp.get_context("spawn"),
@@ -106,6 +121,11 @@ class WorkflowRunner:
                             "status": "failed",
                             "error": {"type": type(error).__name__, "message": str(error)},
                         }
+                    print(
+                        f"[LambdaForge workflow] node={name} status={outcomes[name]['status']}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
         status = (
             "ok"
             if outcomes and all(value["status"] == "ok" for value in outcomes.values())

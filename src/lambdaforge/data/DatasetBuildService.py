@@ -18,6 +18,7 @@ from lambdaforge.data.build_models import DatasetBuildPlan, DatasetBuildResult, 
 from lambdaforge.data.DatasetPublisher import DatasetPublisher
 from lambdaforge.data.DatasetRegistry import DatasetRegistry
 from lambdaforge.data.recipe_config import DatasetRecipeConfig
+from lambdaforge.execution.ConfigurationResourceResolver import ConfigurationResourceResolver
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
 from lambdaforge.tasks.TaskConfig import TaskConfig
@@ -125,6 +126,7 @@ class DatasetBuildService:
             tuple(decisions),
             publish_action,
             publish_reason,
+            resources=ConfigurationResourceResolver.resolve_dataset(recipe).to_dict(),
         )
 
     def build(
@@ -247,6 +249,7 @@ class DatasetBuildService:
         force_stages: Sequence[str] = (),
         dry_run: bool = False,
         wait_for_submit: bool = True,
+        resources: ResourceRequest | None = None,
     ) -> JobHandle:
         """Submit a durable dataset-build unit; the worker reuses the same service locally."""
         if recipe.source is None:
@@ -256,13 +259,14 @@ class DatasetBuildService:
             arguments.append("--force")
         for stage in force_stages:
             arguments.extend(("--force-stage", stage))
+        request = resources or ConfigurationResourceResolver.resolve_dataset(recipe)
         if cluster != "local" and not dry_run and not wait_for_submit:
             from lambdaforge.controlplane.SubmissionService import SubmissionService
 
             return SubmissionService(self.jobs.catalog, self.jobs).enqueue(
                 recipe.source,
                 cluster=cluster,
-                resources=ResourceRequest(),
+                resources=request,
                 run_arguments=arguments,
             )
 
@@ -271,7 +275,7 @@ class DatasetBuildService:
         handle, _ = ControlPlane(self.jobs.catalog, jobs=self.jobs).submit(
             recipe.source,
             cluster=cluster,
-            resources=ResourceRequest(),
+            resources=request,
             dry_run=dry_run,
             run_arguments=arguments,
         )

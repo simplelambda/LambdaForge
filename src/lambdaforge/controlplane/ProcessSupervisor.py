@@ -300,19 +300,48 @@ class ProcessSupervisor:
         now = cls._now()
         (job_dir / "heartbeat").touch()
         usage: dict[str, Any] = {"timestamp_utc": now, "pid": identity.pid}
+        state = cls._read_json(job_dir / "state.json") or {}
         try:
             import psutil
 
             process = psutil.Process(identity.pid)
-            with process.oneshot():
-                usage.update(
-                    {
-                        "cpu_percent": process.cpu_percent(),
-                        "rss_bytes": process.memory_info().rss,
-                        "threads": process.num_threads(),
-                    }
-                )
-            descendants = {identity.pid, *(child.pid for child in process.children(recursive=True))}
+            processes = (process, *process.children(recursive=True))
+            cpu_time = 0.0
+            rss_bytes = 0
+            threads = 0
+            descendants: set[int] = set()
+            for child in processes:
+                try:
+                    with child.oneshot():
+                        times = child.cpu_times()
+                        cpu_time += float(times.user + times.system)
+                        rss_bytes += int(child.memory_info().rss)
+                        threads += int(child.num_threads())
+                        descendants.add(child.pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            previous = state.get("observed_usage", {})
+            previous = previous if isinstance(previous, Mapping) else {}
+            previous_time = previous.get("cpu_time_seconds")
+            previous_at = previous.get("timestamp_utc")
+            cpu_percent: float | None = None
+            if isinstance(previous_time, (int, float)) and isinstance(previous_at, str):
+                try:
+                    elapsed = (
+                        datetime.fromisoformat(now) - datetime.fromisoformat(previous_at)
+                    ).total_seconds()
+                except ValueError:
+                    elapsed = 0.0
+                if elapsed > 0:
+                    cpu_percent = max(0.0, 100.0 * (cpu_time - float(previous_time)) / elapsed)
+            usage.update(
+                {
+                    "cpu_percent": cpu_percent,
+                    "cpu_time_seconds": cpu_time,
+                    "rss_bytes": rss_bytes,
+                    "threads": threads,
+                }
+            )
             gpu = subprocess.run(
                 (
                     "nvidia-smi",
@@ -335,7 +364,6 @@ class ProcessSupervisor:
             usage["process_observation"] = "unavailable"
         with (job_dir / "usage.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(usage, sort_keys=True) + "\n")
-        state = cls._read_json(job_dir / "state.json") or {}
         cls._update_state(
             job_dir,
             {

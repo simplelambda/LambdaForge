@@ -27,6 +27,7 @@ from lambdaforge.controlplane.python_runtime import (
 from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
 from lambdaforge.controlplane.TlsTrust import TlsTrust
 from lambdaforge.diagnostics import ErrorCategory, LambdaForgeError, diagnostic
+from lambdaforge.execution.ConfigurationResourceResolver import ConfigurationResourceResolver
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
 
@@ -68,6 +69,7 @@ class ControlPlane:
         assert profile.storage is not None
         storage = profile.storage
         materialized_kind = AuthoringConfig.from_yaml(config_path).materialize().kind
+        request = resources or ConfigurationResourceResolver.resolve(config_path)
         if (
             cluster != "local"
             and materialized_kind.value == "dataset"
@@ -102,8 +104,7 @@ class ControlPlane:
                             shlex.join(
                                 (
                                     "lf",
-                                    "datasets",
-                                    "build",
+                                    "run",
                                     str(Path(config_path)),
                                     "--on",
                                     cluster,
@@ -179,7 +180,6 @@ class ControlPlane:
                 else None
             ),
         )
-        request = resources or ResourceRequest()
         work_dir: str | Path
         if cluster == "local":
             work_dir = Path(config_path).resolve().parent
@@ -236,7 +236,14 @@ class ControlPlane:
                 staged = transport.run(("mkdir", "-p", str(work_dir)))
                 if staged.returncode:
                     raise RuntimeError(f"Could not create SLURM job workspace: {staged.stderr}")
-                copied = transport.run(("cp", "-a", f"{remote_dir}/.", str(work_dir)))
+                # Copy-on-write is safe for mutable job workspaces and avoids physically
+                # copying an unchanged cached bundle on filesystems that support reflinks.
+                # Portable clusters fall back to the established recursive copy.
+                copied = transport.run(
+                    ("cp", "-a", "--reflink=auto", f"{remote_dir}/.", str(work_dir))
+                )
+                if copied.returncode:
+                    copied = transport.run(("cp", "-a", f"{remote_dir}/.", str(work_dir)))
                 if copied.returncode:
                     raise RuntimeError(f"Could not stage SLURM job workspace: {copied.stderr}")
                 config = str(PurePosixPath(str(work_dir)) / "config.yaml")
@@ -248,14 +255,14 @@ class ControlPlane:
                 assert storage.dataset_root is not None
                 environment_assignments.extend(
                     (
-                    "LAMBDAFORGE_DATASET_REGISTRY="
-                    f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
-                    f"LAMBDAFORGE_DATASET_ROOT={storage.dataset_root}",
-                    "LAMBDAFORGE_DATASET_BUILD_ROOT="
-                    f"{PurePosixPath(storage.run_root) / 'dataset-builds'}",
-                    "LAMBDAFORGE_STAGE_CACHE_ROOT="
-                    f"{PurePosixPath(storage.cache_root) / 'dataset-stages'}",
-                    f"LAMBDAFORGE_CLUSTER={cluster}",
+                        "LAMBDAFORGE_DATASET_REGISTRY="
+                        f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
+                        f"LAMBDAFORGE_DATASET_ROOT={storage.dataset_root}",
+                        "LAMBDAFORGE_DATASET_BUILD_ROOT="
+                        f"{PurePosixPath(storage.run_root) / 'dataset-builds'}",
+                        "LAMBDAFORGE_STAGE_CACHE_ROOT="
+                        f"{PurePosixPath(storage.cache_root) / 'dataset-stages'}",
+                        f"LAMBDAFORGE_CLUSTER={cluster}",
                     )
                 )
             environment_prefix = (

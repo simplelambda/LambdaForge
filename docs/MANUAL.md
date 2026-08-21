@@ -403,6 +403,11 @@ resources:
   time: 30m
 ```
 
+This is an executable scheduler request. Running remotely reserves four CPU cores, 8 GiB and 30
+minutes; repeating those values with CLI flags is unnecessary. `--cpus`, `--memory`,
+`--resource-gpus`, `--processes` and `--time` exist only as deliberate per-field overrides for a
+particular invocation. A named execution profile is an explicit replacement preset.
+
 `raw` and `processed` are logical names. The compiled source calls `context.input("raw")`; the sink
 calls `context.output("processed")`. Physical paths remain provenance, not the task's programming
 interface. `output_path`, `input_path` and `declared_input_path` remain compatible for strict older
@@ -479,9 +484,14 @@ Every top-level input is resolved relative to the YAML and uses strict content h
 Changing raw bytes selects a new fingerprinted run directory instead of silently reusing stale output. Each
 terminal attempt records configuration, environment/plugins, logs, structured errors, scalar
 metrics and SHA-256 artifacts. `PreprocessingTask` additionally checkpoints stable record keys for
-safe retry and supports deterministic explicit shards. It publishes `dataset-artifact.json` only
-when `publish_dataset: true` or legacy `dataset_name` is explicit; new multi-stage publication uses
-the DatasetRecipe lifecycle in section 11.
+safe retry and supports deterministic explicit shards. It prints a start message and compact
+completed-record progress to stderr (and therefore to the task/job log) without requiring domain
+code. `progress_interval_seconds` defaults to 10 seconds and throttles those messages at checkpoint
+boundaries; set it to `0` to report every `checkpoint_interval`. It cannot measure progress inside
+one opaque transform, so a transform that downloads or computes for a long time should emit its own
+bounded, flushed progress. `PreprocessingTask` publishes `dataset-artifact.json` only when
+`publish_dataset: true` or legacy `dataset_name` is explicit; new multi-stage publication uses the
+DatasetRecipe lifecycle in section 11.
 
 Project-specific logic remains in the installed consumer package. Use a `CallableTransform` for a
 small function or implement the public `PreprocessingSource`, `PreprocessingTransform` and
@@ -715,15 +725,63 @@ pre-scheduler cancellation marks the request cancelled and the worker refuses th
 provider acknowledgement. Dry-runs remain synchronous and read-only so they can return the complete
 plan.
 
-`lf top` opens the interactive live view when stdin/stdout are a TTY. Use arrows or `j`/`k` to
-select, `l` for recent logs, `x` plus confirmation to cancel, `r` to refresh and `q` to leave. It
-collects slow provider snapshots in an isolated cancellable child, while terminal input and drawing
-remain in the foreground; arrows and exit therefore do not wait for SSH/scheduler timeout. It shows
-host CPU/RAM/GPU facts separately from job declarations and scheduler state; login-node usage
-is not presented as SLURM partition capacity. No TUI-only backend exists: the versioned snapshot
-from `lf overview --json`, job rows from `lf jobs list --json` and resource rows from `lf resources
---all --json` are the machine interface for a GUI or wrapper. Non-TTY `lf top` prints once;
-`lf top --json --follow` is an NDJSON stream and `lf top --once` forces one human snapshot.
+`lf run CONFIG` is the canonical execution command for experiments, tasks, workflows and dataset
+recipes. A dataset YAML is detected automatically and still receives staged-input relocation,
+stage reuse, atomic publication and dataset diagnostics. `lf datasets build NAME` remains a
+compatibility/convenience alias when project discovery selects the recipe; it does not invoke a
+second runner. Both routes resolve the same resources and create the same `dataset-build` job.
+`run --force-stage STAGE` exposes selective downstream rebuilding without requiring the alias.
+
+For one task or experiment, authored `resources` becomes the scheduler request directly. Workflows
+and dataset recipes use one fixed outer allocation. A top-level `resources` mapping is therefore
+an explicit exact override. If absent, LambdaForge derives a safe request: for every topological
+level it sums up to `max_parallel` largest concurrent CPU/RAM/GPU/process requests, takes the
+largest level capacity, and sums all declared node times because later levels reuse the allocation
+sequentially. If any stage omits time, outer time remains unspecified rather than inventing a
+limit. `datasets plan` and `run DATASET --dry-run` expose the resolved reservation.
+
+Each transition is also appended to a durable lifecycle stream. `jobs logs` presents that stream,
+submission-worker output and consumer/scientific output under separate headings instead of hiding
+framework preparation after scheduler acknowledgement. `jobs logs --follow` reports new lifecycle
+facts and scientific lines independently; when both remain quiet it prints a provider observation
+every 30 seconds. A reachable scheduler, a direct-runtime heartbeat and an application progress
+message are different evidence: the first two show liveness, while only application output or a new
+artifact can demonstrate scientific advancement.
+
+Preparation remains correctness-first but avoids repeat work. Once an immutable managed
+environment has passed its import/TLS/CUDA tensor verification, its receipt contains the exact
+Torch plan. A later submission may skip repeated official-index discovery only when the current
+Python version, architecture, NVIDIA driver, compute capabilities, selected channel and CUDA
+requirement all equal that receipt; any mismatch performs the full resolver path. For SLURM, the
+per-job mutable workspace is cloned from the immutable bundle cache with `cp --reflink=auto` where
+the filesystem supports copy-on-write, then retried with portable `cp -a` otherwise. Hard links are
+not used, so job code cannot mutate cached bundle bytes through a shared inode.
+
+`lf top --history SECONDS` opens the interactive live view when stdin/stdout are a TTY; the default
+history window is 60 seconds. Its first screen keeps monitoring scannable: one current
+whole-cluster CPU/RAM/GPU row per cluster plus the global job list, without permanently duplicating
+each cluster with personal charts. Clusters followed by jobs form one vertical selection sequence:
+`↑`/`k` from the first job enters the cluster list and `↓`/`j` from its final row returns to the first
+job. `Tab` remains an optional shortcut, but no horizontal navigation is required. Press `Enter` on
+a cluster to open its detail screen: paired vertical time charts (`█` cluster, `▓` current user), a
+larger requested/measured personal summary and only jobs placed on that cluster. `b`, `Esc` or `q`
+returns from detail to the global screen.
+
+“Requested” is the declared allocation; “observed” is measured process-tree CPU, resident RAM and
+GPU memory when the direct supervisor provides it. SLURM or another scheduler may expose only
+allocations, in which case observed remains `unknown`: login-node load is never presented as the
+user's compute allocation or as partition capacity. Job rows separate `RUN` (scientific runtime
+when known, otherwise honest end-to-end elapsed time) from `AGE` (time since creation). In either
+job list, `l` loads the complete selected log in another cancellable worker and opens a viewer with
+line/page/home/end navigation. Cancellation is a non-blocking two-step action: `x` displays the
+exact job, then a second `x`, `y` or `Enter` confirms; `n` or `Esc` keeps it running. `r` refreshes.
+
+No TUI-only backend exists. `lf overview --json` carries per-job `timing` and `usage`; `lf resources
+--all --json` carries `personal` requested/observed aggregates; ordinary job records remain in
+`lf jobs list --json`. A GUI can collect the same versioned snapshots and maintain its own history
+without parsing terminal text. Non-TTY `lf top` prints once; `lf top --json --follow` is an NDJSON
+stream and `lf top --once` forces one human snapshot. Slow snapshots and full-log reads are isolated
+from terminal input, so navigation and exit do not wait for an SSH/scheduler timeout.
 
 ### Managed Python runtime
 
@@ -892,6 +950,15 @@ to Python applications and a
 future GUI. CLI JSON output is a direct serialization of the same `JobRecord`, `JobHandle`, doctor,
 bundle and data service objects; there is no second GUI-only business layer.
 
+`JobService.events(job_id)` returns append-only framework/provider lifecycle facts;
+`JobService.scientific_logs(job_id)` returns only consumer output; `JobService.logs(job_id)` renders
+the combined labelled human view. This split prevents a GUI or agent from mistaking “scheduler is
+running” for “scientific records are advancing”. A workflow automatically logs node start,
+completion and blocking; generic preprocessing logs completed-record checkpoints. LambdaForge
+cannot infer progress inside arbitrary consumer Python. For that interval the consumer owns
+meaningful progress logging (normally Python `logging` or flushed stderr), while the scheduler or
+direct supervisor owns liveness.
+
 `preparing` means the local detached controller owns pre-scheduler work; `staging` means bundle or
 direct-host supervisor staging; `queued` means the scheduler has accepted the job. These states are
 not interchangeable. `overview --json` has `snapshot_version`, `generated_at_utc`, cluster resource
@@ -926,10 +993,18 @@ one immutable logical collection. `DatasetMember` and streaming `DatasetIndex` d
 arbitrary partitions/targets/metadata and any file/directory/record/URI asset layout. Artifact v2
 keeps path-independent `content_id` separate from provenance `build_id`; v1 remains readable.
 
+For a file `DatasetAsset`, `sha256` is the conventional SHA-256 of the file byte stream and
+`size_bytes` is its byte length. Directory assets use LambdaForge's deterministic relative-path
+tree hash because a directory has no single byte stream. Verification still reads the early v2
+filename-prefixed file hash for backward compatibility, but every new auto-generated descriptor
+uses the conventional byte digest. Producers may therefore use ordinary streaming `hashlib.sha256`
+or standard checksum tools; they must not reproduce an internal TaskArtifact fingerprint.
+
 ```bash
 lf datasets plan example-records --on atlas
 lf datasets plan example-records --on atlas --verbose
-lf datasets build example-records --on atlas
+lf run examples/dataset-recipe.yaml --on atlas
+# Equivalent selector-oriented alias: lf datasets build example-records --on atlas
 lf datasets members example-records@1 --partition split=train --limit 50
 lf datasets diff example-records@1 example-records@2
 lf datasets materialize example-records@1 --on atlas --apply
@@ -1408,7 +1483,7 @@ snapshot without changing the environment.
 | `run CONFIG --force|--restart|--no-resume` | Explicitly control success reuse and partial continuation. | yes |
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Persist an ID immediately, then prepare/cache/submit remotely in a detached controller. `--wait-for-submit` waits for provider acknowledgement. | job metadata; remote only without dry-run |
 | `clusters add|list|show|inspect|set|unset|remove|export|credentials|test|bootstrap|resources|storage` | Manage profiles and inspect their environment, resources and storage. | profile/credential/bootstrap mutations |
-| `status`, `overview`, `top` | Global cluster/job/dataset view; `top` is interactive on a TTY, `top --once` is one-shot and `top --json --follow` is NDJSON. | no |
+| `status`, `overview`, `top [--history SECONDS]` | Global cluster/job/dataset view; `top` is interactive on a TTY, `top --once` is one-shot and `top --json --follow` is NDJSON. | no |
 | `status|logs|cancel|retry` | Short aliases for the corresponding common persistent-job operations. | lifecycle commands only |
 | `jobs list [--all]|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`, `jobs group list|show` | Reconnect and safely control persistent work/groups. | lifecycle commands only |
 | `resources [--on C|--all] [--processes]` | Separate observed host facts, scheduler view and declared job requests. | no |
@@ -1482,7 +1557,7 @@ commands:
 
 ```bash
 lf clusters set atlas storage.dataset_root /persistent/path/to/datasets
-lf datasets build dataset-recipe --on atlas
+lf run dataset-recipe.yaml --on atlas
 ```
 
 In contrast, a terminal dataset-build job is an execution failure. `lf jobs show JOB` reads the
@@ -1764,6 +1839,12 @@ owns controller-side hand-off, `Transport` and `Scheduler` are provider boundari
 interaction/rendering. The private `SubmissionWorker` is deliberately an internal process entry
 point, not another public execution engine. This separation lets a future GUI call the same service
 objects or JSON commands without importing a TUI.
+
+`JobObservation` derives presentation-only timing and usage from `JobRecord` plus authoritative
+provider state; it does not mutate identity or create a competing store. `ResourceService`
+aggregates the same observed values for the current user's active LambdaForge jobs.
+`ResourceHistory` is deliberately TUI-local and bounded by `--history`: services expose timestamped
+snapshots, while each consumer decides how much display history to retain.
 
 Release identity has one writable source: `src/lambdaforge/_version.py`. Setuptools obtains dynamic
 wheel/sdist metadata from it and `LambdaForgeVersion` exposes the same constant to CLI, bundles and

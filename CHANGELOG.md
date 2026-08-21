@@ -8,6 +8,42 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-21
+
+### Added
+
+- Durable append-only job lifecycle events now preserve preparation phases, scheduler transitions
+  and liveness separately from scientific output; `jobs logs --follow` reports quiet provider
+  observations instead of appearing frozen.
+- Workflow node start/end/blocking messages and throttled generic preprocessing checkpoints provide
+  useful progress even when consumer code has no logger.
+- `lf top --history SECONDS` now has a compact whole-cluster overview and an Enter-driven cluster
+  detail with paired vertical history charts, prominent personal usage, cluster-filtered jobs,
+  separate job runtime/age and a complete non-blocking scrollable log viewer.
+- Machine snapshots expose per-job timing/usage and per-cluster current-user LambdaForge resource
+  aggregates for GUI and automation consumers.
+
+### Changed
+
+- `lf run` is now the documented canonical entry point for dataset recipes as well as tasks,
+  workflows and experiments; `datasets build` remains a selector-oriented compatibility alias.
+- Workflow and dataset YAML resources now determine the real fixed scheduler reservation. An
+  explicit top-level request is exact; otherwise concurrent stage/node requests are safely
+  aggregated, and CLI flags remain optional explicit overrides.
+- `lf top` navigation now crosses directly between the cluster and job lists with vertical keys;
+  job cancellation uses a visible non-blocking confirmation instead of reading a hidden prompt.
+- Repeated managed submissions reuse an immutable, previously verified Torch plan when current
+  Python, architecture, driver, compute capability and CUDA policy still match; SLURM staging uses
+  copy-on-write bundle clones where supported with a portable copy fallback.
+- Direct supervisors measure CPU from process-time deltas and aggregate RAM/thread use over the
+  complete job process tree.
+
+### Fixed
+
+- Dataset file assets now use the conventional SHA-256 of file bytes during publication and
+  verification, matching producer contracts such as WISDOM; early v2 filename-prefixed checksums
+  remain readable for compatibility.
+
 ## [0.9.1] - 2026-08-20
 
 ### Changed
@@ -506,7 +542,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/simplelambda/LambdaForge/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/simplelambda/LambdaForge/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/simplelambda/LambdaForge/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/simplelambda/LambdaForge/compare/v0.8.0...v0.8.1

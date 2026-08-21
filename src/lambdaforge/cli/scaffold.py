@@ -5,13 +5,24 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from packaging.version import Version
+
+from lambdaforge._version import VERSION
 from lambdaforge.tasks.TaskSchemaCatalog import TaskSchemaCatalog
+
+
+def _framework_requirement() -> str:
+    """Return the compatible minor release range for generated consumers."""
+    release = Version(VERSION).release
+    major = release[0]
+    minor = release[1] if len(release) > 1 else 0
+    return f"lambdaforge>={major}.{minor},<{major}.{minor + 1}"
 
 
 def initialize(directory: Path, *, force: bool, template: str = "minimal") -> int:
     """Create a minimal installable consumer project without overwriting by default."""
     files = {
-        "pyproject.toml": """[build-system]
+        "pyproject.toml": f"""[build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
@@ -19,7 +30,7 @@ build-backend = "setuptools.build_meta"
 name = "my-ai-project"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["lambdaforge>=0.8,<0.9"]
+dependencies = ["{_framework_requirement()}"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

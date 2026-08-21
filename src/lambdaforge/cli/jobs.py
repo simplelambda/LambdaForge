@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections.abc import Mapping
+from datetime import datetime, timezone
 
 from lambdaforge.cli.common import age, job_resources
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
@@ -101,15 +103,61 @@ def run_job_command(arguments: argparse.Namespace) -> int:
 
 
 def follow_job_logs(jobs: JobService, job_id: str, *, tail: int | None) -> int:
-    """Stream scheduler logs by reconnecting through the persistent job record."""
-    previous = ""
+    """Stream lifecycle and science independently, including quiet-job health observations."""
+    previous_scientific = ""
+    seen_events = 0
+    last_activity = time.monotonic()
+    last_status = last_activity
+    last_heartbeat: object = None
     while True:
-        current = jobs.logs(job_id, tail=tail)
-        delta = current[len(previous) :] if current.startswith(previous) else current
+        record = jobs.get(job_id)
+        events = jobs.events(job_id)
+        for event in events[seen_events:]:
+            print(
+                f"[{event.get('timestamp_utc', '-')}] "
+                f"[{event.get('phase') or event.get('source') or 'lifecycle'}] "
+                f"{event.get('state', 'unknown')}: {event.get('message', '')}",
+                flush=True,
+            )
+        if len(events) > seen_events:
+            seen_events = len(events)
+            last_activity = time.monotonic()
+        current = jobs.scientific_logs(job_id, tail=tail)
+        delta = (
+            current[len(previous_scientific) :]
+            if current.startswith(previous_scientific)
+            else current
+        )
         if delta:
             print(delta, end="" if delta.endswith("\n") else "\n", flush=True)
-        previous = current
-        record = jobs.get(job_id)
+            last_activity = time.monotonic()
+        previous_scientific = current
+        remote = record.metadata.get("remote_state", {})
+        remote = remote if isinstance(remote, Mapping) else {}
+        heartbeat = remote.get("heartbeat_at_utc")
+        now = time.monotonic()
+        if heartbeat and heartbeat != last_heartbeat:
+            print(
+                f"[{heartbeat}] [runtime] {record.state.value}: supervisor heartbeat observed; "
+                "scientific output may remain quiet.",
+                flush=True,
+            )
+            last_heartbeat = heartbeat
+            last_status = now
+        elif now - last_status >= 30 and now - last_activity >= 30:
+            silent = int(now - last_activity)
+            observed = datetime.now(timezone.utc).isoformat()
+            provider = (
+                "provider status remains unavailable"
+                if record.state is JobState.UNKNOWN
+                else "provider remains reachable"
+            )
+            print(
+                f"[{observed}] [scheduler] {record.state.value}: {provider}; "
+                f"no new lifecycle/scientific output for {silent}s.",
+                flush=True,
+            )
+            last_status = now
         if record.state.terminal:
             if record.state in {JobState.FAILED, JobState.TIMEOUT, JobState.CANCELLED}:
                 raise LambdaForgeError(job_failure_diagnostic(record, current))

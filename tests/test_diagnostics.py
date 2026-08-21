@@ -121,7 +121,7 @@ def test_missing_remote_dataset_root_is_a_preflight_configuration_error() -> Non
     assert commands["Configure dataset storage"] == (
         "lf clusters set atlas storage.dataset_root /persistent/path/to/datasets"
     )
-    assert "lf datasets build" in commands["Retry after configuring"]
+    assert "lf run" in commands["Retry after configuring"]
 
 
 def test_failed_dataset_job_reports_one_root_and_derived_blocking() -> None:

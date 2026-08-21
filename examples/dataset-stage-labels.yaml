@@ -2,9 +2,9 @@ kind: task
 schema_version: "1.0"
 name: label-and-index-records
 required_artifacts: [dataset, dataset/members.jsonl]
+resources: {cpus: 2, memory: 4GiB, time: 30m}
 task:
   # This final project task writes DatasetIndex JSONL plus every declared asset.
   target: my_project.dataset_tasks.LabelAndIndexTask
   params:
     records: null
-

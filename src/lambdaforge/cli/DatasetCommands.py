@@ -145,6 +145,13 @@ class DatasetCommands:
         if operation == "plan":
             source = f" ({default_source})" if default_source else ""
             print(f"Dataset: {payload['dataset']}  Target: {payload['target_cluster']}{source}")
+            resources = payload["resources"]
+            print(
+                "Reservation: "
+                f"CPU={resources['cpu_cores']} RAM={resources['ram_bytes']} "
+                f"GPU={resources['gpu_count']} processes={resources['processes']} "
+                f"time={resources['runtime_seconds']}s"
+            )
             print("STAGE  ACTION" + ("  REASON" if verbose else ""))
             for stage in payload["stages"]:
                 suffix = f"  {stage['reason']}" if verbose else ""

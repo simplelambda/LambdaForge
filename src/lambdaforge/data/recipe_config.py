@@ -114,6 +114,12 @@ class DatasetRecipeConfig:
         self.dataset = copy.deepcopy(dict(descriptor))
         self.publish = copy.deepcopy(dict(publish))
         self.max_parallel = int(data.get("max_parallel", 1))
+        raw_resources = data.get("resources")
+        if raw_resources is not None and not isinstance(raw_resources, Mapping):
+            raise TypeError("Dataset recipe resources must be a mapping.")
+        self.resource_override = (
+            copy.deepcopy(dict(raw_resources)) if isinstance(raw_resources, Mapping) else None
+        )
         configured_root = os.environ.get("LAMBDAFORGE_DATASET_BUILD_ROOT") or data.get(
             "output_root", "runs/datasets"
         )

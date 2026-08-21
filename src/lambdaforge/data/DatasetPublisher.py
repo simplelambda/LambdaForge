@@ -16,7 +16,6 @@ from lambdaforge.data.errors import InvalidDatasetBuildError
 from lambdaforge.data.index import DatasetAsset, DatasetIndex
 from lambdaforge.data.recipe_config import DatasetRecipeConfig
 from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
-from lambdaforge.tasks.artifacts import TaskArtifact
 
 
 class DatasetPublisher:
@@ -161,7 +160,7 @@ class DatasetPublisher:
             )
             if asset.sha256 is None and "://" not in asset.path:
                 path = (source_root / asset.path).resolve(strict=False)
-                digest, size = TaskArtifact.fingerprint_path(path)
+                digest, size = DatasetAsset.fingerprint_path(path)
                 asset = DatasetAsset(
                     asset.path,
                     asset.kind,

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
+from lambdaforge.controlplane.JobObservation import JobObservation
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.ResourceService import ResourceService
 from lambdaforge.data.DatasetService import DatasetService
@@ -35,8 +36,7 @@ class OverviewService:
             "clusters": [value.to_dict() for value in resource_values],
             "jobs": {
                 "active": sum(
-                    value.state.value
-                    in {"preparing", "staging", "queued", "running", "paused"}
+                    value.state.value in {"preparing", "staging", "queued", "running", "paused"}
                     for value in job_values
                 ),
                 "total": len(job_values),
@@ -44,7 +44,9 @@ class OverviewService:
                     state: sum(value.state.value == state for value in job_values)
                     for state in sorted({value.state.value for value in job_values})
                 },
-                "items": [value.to_dict() for value in job_values],
+                "items": [
+                    {**value.to_dict(), **JobObservation.describe(value)} for value in job_values
+                ],
             },
             "datasets": {
                 "versions": len(dataset_values),

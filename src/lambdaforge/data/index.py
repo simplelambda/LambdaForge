@@ -93,6 +93,25 @@ class DatasetAsset:
             "metadata": copy.deepcopy(self.metadata),
         }
 
+    @staticmethod
+    def fingerprint_path(path: str | Path) -> tuple[str, int]:
+        """Return the canonical checksum and byte size for one local dataset asset.
+
+        Files use the conventional SHA-256 of their bytes. Directories retain the
+        deterministic relative-path tree hash used by task artifacts because a
+        directory has no standalone byte stream.
+        """
+        resolved = Path(path)
+        if not resolved.is_file():
+            return TaskArtifact.fingerprint_path(resolved)
+        digest = hashlib.sha256()
+        size = 0
+        with resolved.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+        return digest.hexdigest(), size
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetMember:
@@ -263,6 +282,7 @@ class DatasetIndex:
         dataset_root = Path(root).resolve() if root is not None else None
         seen: set[str] = set()
         errors: list[str] = []
+        warnings: list[str] = []
         count = 0
         for member in self:
             count += 1
@@ -299,12 +319,29 @@ class DatasetIndex:
                     errors.append(f"{member.member_id}.{name}: local asset has no checksum")
                     continue
                 if asset.sha256 is not None:
-                    digest, size = TaskArtifact.fingerprint_path(resolved)
-                    if f"sha256:{digest}" != asset.sha256 or (
+                    digest, size = DatasetAsset.fingerprint_path(resolved)
+                    checksum_matches = f"sha256:{digest}" == asset.sha256
+                    if not checksum_matches and resolved.is_file():
+                        # DatasetArtifact v2 was initially validated with the task
+                        # artifact tree hash, which prefixes a file's basename.
+                        # Read it for compatibility; all new descriptors use the
+                        # ordinary byte checksum above.
+                        legacy_digest, _ = TaskArtifact.fingerprint_path(resolved)
+                        checksum_matches = f"sha256:{legacy_digest}" == asset.sha256
+                        if checksum_matches:
+                            warnings.append(
+                                f"{member.member_id}.{name}: legacy file checksum accepted"
+                            )
+                    if not checksum_matches or (
                         asset.size_bytes is not None and size != asset.size_bytes
                     ):
                         errors.append(f"{member.member_id}.{name}: asset integrity differs")
-        return {"valid": not errors, "member_count": count, "errors": errors}
+        return {
+            "valid": not errors,
+            "member_count": count,
+            "errors": errors,
+            "warnings": warnings,
+        }
 
     def summary(self) -> dict[str, Any]:
         """Derive universal counts from logical members rather than manual split fields."""

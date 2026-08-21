@@ -24,6 +24,7 @@ class ResourceSnapshot:
     requested: tuple[Mapping[str, Any], ...] = ()
     observed_at_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     error: str | None = None
+    personal: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed", FrozenJsonMapping(self.observed))
@@ -32,6 +33,7 @@ class ResourceSnapshot:
         object.__setattr__(
             self, "requested", tuple(FrozenJsonMapping(value) for value in self.requested)
         )
+        object.__setattr__(self, "personal", FrozenJsonMapping(self.personal))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,6 +44,7 @@ class ResourceSnapshot:
             "available": copy.deepcopy(self.available),
             "scheduler_view": copy.deepcopy(self.scheduler_view),
             "requested": [copy.deepcopy(value) for value in self.requested],
+            "personal": copy.deepcopy(self.personal),
             "observed_at_utc": self.observed_at_utc,
             "error": self.error,
         }

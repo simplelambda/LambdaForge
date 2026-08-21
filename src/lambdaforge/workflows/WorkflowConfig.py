@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from collections.abc import Mapping
@@ -42,6 +43,12 @@ class WorkflowConfig:
         source_dir = self.source.parent if self.source else Path.cwd().resolve()
         self.name = name
         self.max_parallel = self._positive_int(data.get("max_parallel", 1), "max_parallel")
+        raw_resources = data.get("resources")
+        if raw_resources is not None and not isinstance(raw_resources, Mapping):
+            raise TypeError("Workflow resources must be a mapping.")
+        self.resource_override = (
+            copy.deepcopy(dict(raw_resources)) if isinstance(raw_resources, Mapping) else None
+        )
         output = Path(str(data.get("output_root", "runs/workflows")))
         self.output_root = (source_dir / output).resolve() if not output.is_absolute() else output
         self.nodes = tuple(

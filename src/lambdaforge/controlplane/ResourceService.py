@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,44 +44,86 @@ class ResourceService:
         try:
             probe = SlurmClusterResourceProbe() if profile.scheduler == "slurm" else self.probe
             snapshot = probe.probe(profile, self.factory.transport(profile))
+            records = tuple(
+                record
+                for record in JobService(self.catalog, factory=self.factory).list(
+                    cluster=cluster, refresh=False
+                )
+                if not record.state.terminal
+            )
             requested = tuple(
                 {
                     "job_id": record.job_id,
                     "state": record.state.value,
                     **record.resources,
                 }
-                for record in JobService(self.catalog, factory=self.factory).list(
-                    cluster=cluster, refresh=False
-                )
-                if not record.state.terminal
+                for record in records
             )
+            personal = self._personal(records, profile.scheduler)
             snapshot = ResourceSnapshot(
-                snapshot.cluster,
-                snapshot.online,
-                snapshot.scheduler,
-                snapshot.observed,
-                snapshot.available,
-                snapshot.scheduler_view,
-                requested,
-                snapshot.observed_at_utc,
+                cluster=snapshot.cluster,
+                online=snapshot.online,
+                scheduler=snapshot.scheduler,
+                observed=snapshot.observed,
+                available=snapshot.available,
+                scheduler_view=snapshot.scheduler_view,
+                requested=requested,
+                personal=personal,
+                observed_at_utc=snapshot.observed_at_utc,
             )
             self._cache(snapshot)
             return snapshot
         except Exception as error:
             previous = self._cached(cluster)
             return ResourceSnapshot(
-                cluster,
-                False,
-                profile.scheduler,
-                previous.get("observed", {}) if previous else {},
-                previous.get("available", {}) if previous else {},
-                previous.get("scheduler_view", {}) if previous else {},
-                tuple(previous.get("requested", ())) if previous else (),
-                str(previous.get("observed_at_utc", datetime.now(timezone.utc).isoformat()))
-                if previous
-                else datetime.now(timezone.utc).isoformat(),
-                f"{error.__class__.__name__}: {error}",
+                cluster=cluster,
+                online=False,
+                scheduler=profile.scheduler,
+                observed=previous.get("observed", {}) if previous else {},
+                available=previous.get("available", {}) if previous else {},
+                scheduler_view=previous.get("scheduler_view", {}) if previous else {},
+                requested=tuple(previous.get("requested", ())) if previous else (),
+                personal=previous.get("personal", {}) if previous else {},
+                observed_at_utc=(
+                    str(previous.get("observed_at_utc", datetime.now(timezone.utc).isoformat()))
+                    if previous
+                    else datetime.now(timezone.utc).isoformat()
+                ),
+                error=f"{error.__class__.__name__}: {error}",
             )
+
+    @staticmethod
+    def _personal(records: tuple[Any, ...], scheduler: str) -> dict[str, Any]:
+        requested = {
+            key: sum(int(record.resources.get(key, 0) or 0) for record in records)
+            for key in ("cpu_cores", "ram_bytes", "gpu_count", "gpu_memory_bytes")
+        }
+        observations = []
+        for record in records:
+            remote = record.metadata.get("remote_state", {})
+            remote = remote if isinstance(remote, Mapping) else {}
+            usage = remote.get("observed_usage", {})
+            if isinstance(usage, Mapping) and usage:
+                observations.append(usage)
+        return {
+            "scope": "lambdaforge-jobs",
+            "scheduler": scheduler,
+            "active_jobs": len(records),
+            "requested": requested,
+            "observed": {
+                "cpu_percent": sum(float(item.get("cpu_percent", 0) or 0) for item in observations),
+                "rss_bytes": sum(int(item.get("rss_bytes", 0) or 0) for item in observations),
+                "gpu_memory_bytes": sum(
+                    int(item.get("gpu_memory_bytes", 0) or 0) for item in observations
+                ),
+                "job_count": len(observations),
+            },
+            "note": (
+                "Observed values include current LambdaForge direct-process jobs only."
+                if scheduler != "slurm"
+                else "SLURM allocation requests are known; actual usage is provider-dependent."
+            ),
+        }
 
     def all(self) -> tuple[ResourceSnapshot, ...]:
         """Query configured clusters concurrently with a bounded worker count."""

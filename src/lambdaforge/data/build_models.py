@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from lambdaforge.data.DatasetRecord import DatasetRecord
@@ -41,6 +41,7 @@ class DatasetBuildPlan:
     stages: tuple[DatasetStagePlan, ...]
     publish_action: str
     publish_reason: str
+    resources: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         """Return the stable build-plan envelope."""
@@ -49,6 +50,7 @@ class DatasetBuildPlan:
             "dataset": self.dataset,
             "recipe_fingerprint": self.recipe_fingerprint,
             "target_cluster": self.target_cluster,
+            "resources": copy.deepcopy(dict(self.resources)),
             "stages": [stage.to_dict() for stage in self.stages],
             "publish": {"action": self.publish_action, "reason": self.publish_reason},
         }

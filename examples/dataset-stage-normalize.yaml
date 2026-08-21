@@ -2,9 +2,9 @@ kind: task
 schema_version: "1.0"
 name: normalize-records
 required_artifacts: [normalized]
+resources: {cpus: 4, memory: 8GiB, time: 1h}
 task:
   # The recipe binding injects the verified upstream roster path.
   target: my_project.dataset_tasks.NormalizeRecordsTask
   params:
     roster: null
-

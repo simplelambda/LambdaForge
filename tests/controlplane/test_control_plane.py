@@ -125,6 +125,50 @@ class TestControlPlane:
         assert retried.job_id != handle.job_id
         assert store.get(retried.job_id).retry_of == handle.job_id
 
+    def test_job_logs_separate_framework_lifecycle_from_scientific_output(
+        self, tmp_path: Path
+    ) -> None:
+        catalog = ClusterCatalog({"fake": ClusterProfile("fake", scheduler="slurm")})
+        store = JobStore(tmp_path / "jobs")
+        factory = FakeFactory()
+        service = JobService(catalog, store, factory)  # type: ignore[arg-type]
+
+        handle = service.submit(
+            ("python", "train.py"),
+            cluster="fake",
+            resources=ResourceRequest(),
+            work_dir=tmp_path,
+        )
+        factory.scheduler_instance.states[handle.scheduler_id or ""] = JobState.RUNNING
+        rendered = service.logs(handle.job_id)
+
+        assert "== LambdaForge lifecycle ==" in rendered
+        assert "Scheduler acknowledged the job as queued" in rendered
+        assert "Scheduler state changed from queued to running" in rendered
+        assert "current provider observation completed" in rendered
+        assert "== Scientific output (consumer code) ==" in rendered
+        assert "log 1" in rendered
+
+    def test_background_preparation_phases_are_durable_and_visible(self, tmp_path: Path) -> None:
+        catalog = ClusterCatalog({"fake": ClusterProfile("fake", scheduler="slurm")})
+        store = JobStore(tmp_path / "jobs")
+        service = JobService(catalog, store, FakeFactory())  # type: ignore[arg-type]
+
+        handle = service.reserve(
+            cluster="fake",
+            resources=ResourceRequest(),
+            config_path=tmp_path / "train.yaml",
+        )
+        service.update_preparation(handle.job_id, "runtime")
+        service.update_preparation(handle.job_id, "staging")
+        rendered = service.logs(handle.job_id)
+
+        assert "background preparation started" in rendered
+        assert "Resolving a compatible remote Python" in rendered
+        assert "Staging the execution bundle" in rendered
+        assert "No scientific output has been emitted yet" in rendered
+        assert len(JobStore(tmp_path / "jobs").events(handle.job_id)) == 3
+
     def test_resource_request_parses_portable_units(self) -> None:
         request = ResourceRequest.from_mapping(
             {"cpus": 8, "memory": "32GiB", "gpus": 2, "time": "4h", "processes": 2}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -175,6 +176,47 @@ def test_pascal_gpu_conservatively_selects_cu118() -> None:
 
     assert plan.channel == "cu118"
     assert plan.compute_capabilities == ("6.1",)
+
+
+def test_matching_active_environment_receipt_avoids_requerying_wheel_indexes() -> None:
+    plan = TorchInstallationPlan(
+        "cu121",
+        "2.5.1+cu121",
+        "https://download.pytorch.org/whl/cu121",
+        "cuda",
+        "535.183.01",
+        ("9.0",),
+        "3.13",
+        "x86_64",
+        "previously verified",
+        True,
+    )
+
+    class ReceiptTransport(ResolutionTransport):
+        def run(self, command: Sequence[str], *, cwd: str | Path | None = None) -> CommandResult:
+            values = tuple(command)
+            if values and values[0] == "cat":
+                if values[1].endswith("active-environment"):
+                    return CommandResult(0, "/cache/environments/env-1/bin/python\n")
+                return CommandResult(
+                    0,
+                    json.dumps({"environment_policy": {"pytorch": plan.to_dict()}}),
+                )
+            return super().run(command, cwd=cwd)
+
+    transport = ReceiptTransport(driver="535.183.01", capabilities=("9.0",))
+    profile = ClusterProfile(
+        "h100",
+        transport="ssh",
+        host="h100",
+        workspace="/work",
+        environment="managed",
+    )
+
+    resolved = CudaCompatibilityResolver().resolve(profile, transport)
+
+    assert resolved == plan
+    assert not any("index" in command for command in transport.commands)
 
 
 def test_missing_compatible_wheel_fails_instead_of_falling_back_to_wrong_cuda() -> None:

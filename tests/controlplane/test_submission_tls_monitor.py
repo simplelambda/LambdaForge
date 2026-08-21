@@ -194,7 +194,8 @@ def test_doctor_reports_legacy_managed_runtime_without_tls_trust() -> None:
             return self.transport_instance
 
     report = Doctor(
-        ClusterCatalog({"remote": profile}), Factory()  # type: ignore[arg-type]
+        ClusterCatalog({"remote": profile}),
+        Factory(),  # type: ignore[arg-type]
     ).check("remote")
 
     managed_tls = next(check for check in report.checks if check.name == "managed-python-tls")
@@ -254,6 +255,12 @@ def test_dataset_build_cli_hands_off_without_opening_a_transport(
                             "name": "prepare",
                             "inputs": {},
                             "outputs": {"index": "members.jsonl"},
+                            "resources": {
+                                "cpus": 7,
+                                "memory": "12GiB",
+                                "gpus": 1,
+                                "processes": 2,
+                            },
                             "task": {"target": "builtins.dict"},
                         }
                     }
@@ -304,6 +311,39 @@ def test_dataset_build_cli_hands_off_without_opening_a_transport(
     assert result == 0
     assert payload["state"] == "preparing"
     assert payload["cluster"] == "remote"
+    request = next((tmp_path / "state/lambdaforge/jobs/submissions").glob("*/request.json"))
+    reservation = json.loads(request.read_text(encoding="utf-8"))["resources"]
+    assert reservation["cpu_cores"] == 7
+    assert reservation["ram_bytes"] == 12 * 1024**3
+    assert reservation["gpu_count"] == 1
+    assert reservation["processes"] == 2
+
+    run_result = CommandLineInterface.main(
+        (
+            "run",
+            str(recipe),
+            "--on",
+            "remote",
+            "--clusters",
+            str(catalog),
+            "--force-stage",
+            "prepare",
+        )
+    )
+    run_payload = json.loads(capsys.readouterr().out)
+    assert run_result == 0
+    assert run_payload["job"]["state"] == "preparing"
+    requests = list((tmp_path / "state/lambdaforge/jobs/submissions").glob("*/request.json"))
+    assert len(requests) == 2
+    assert all(
+        json.loads(path.read_text(encoding="utf-8"))["resources"]["cpu_cores"] == 7
+        for path in requests
+    )
+    assert any(
+        json.loads(path.read_text(encoding="utf-8"))["run_arguments"]
+        == ["--force-stage", "prepare"]
+        for path in requests
+    )
 
 
 def test_submission_worker_persists_pre_scheduler_failure(
@@ -399,9 +439,7 @@ def test_tls_environment_reaches_the_scientific_scheduler_command(tmp_path: Path
             del selected
             return self.remote
 
-        def scheduler(
-            self, selected: ClusterProfile, transport: Transport
-        ) -> RecordingScheduler:
+        def scheduler(self, selected: ClusterProfile, transport: Transport) -> RecordingScheduler:
             del selected, transport
             return self.provider
 

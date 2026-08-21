@@ -2,7 +2,7 @@ kind: task
 schema_version: "1.0"
 name: discover-records
 required_artifacts: [roster.jsonl]
+resources: {cpus: 2, memory: 2GiB, time: 15m}
 task:
   # Consumer-project task: discovers stable logical IDs and emits a roster.
   target: my_project.dataset_tasks.DiscoverRecordsTask
-
