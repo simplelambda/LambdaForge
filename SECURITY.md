@@ -22,7 +22,9 @@ required. Do not include real credentials or private datasets.
   evaluation. Secrets are redacted from ordinary materialization; callers must explicitly request
   their value. Persisted workflow structure rejects secrets.
 - Inputs, task outputs, store keys, cache entries, archives and retention operations validate path
-  containment and symbolic-link boundaries at their owning layer.
+  containment and symbolic-link boundaries at their owning layer. Managed dataset deletion also
+  revalidates the exact immutable manifest identity inside the configured dataset root immediately
+  before removing bytes; stale, conflicting or unreachable index state fails closed.
 - Checksums detect accidental or malicious modification but do not authenticate a producer. Use
   HMAC where supported, restrict store permissions and obtain artifacts over authenticated channels.
 - Local and SLURM backends never interpolate a command through a local shell. Generated batch

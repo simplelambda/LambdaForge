@@ -1019,17 +1019,27 @@ REPLICATE or BUILD rather than returning a producer command. The
 Remote controller-side plans never reuse the local cache as if it were remote: unobserved cache is
 shown as `MISSING`, and the durable target worker rechecks the exact fingerprints before execution.
 
-DatasetRegistry is the placement authority for managed versions, so a consumer can simply use
-`dataset:example-records@1` without duplicating cluster paths. `DatasetResolver` pins the exact
-version/content and records the selected placement outside scientific identity. DataCatalog remains
+Managed dataset authority flows in one direction:
+
+```text
+DatasetArtifact + physical content  -> immutable scientific/content truth
+DatasetPlacement                    -> one location of that exact identity
+DatasetRegistry                     -> small reconciliable discovery index
+```
+
+The Registry is allowed to become stale and never overrides a matching physical manifest. A
+consumer can still use `dataset:example-records@1` without duplicating paths: `DatasetResolver` pins
+the exact version/content and records placement outside scientific identity. DataCatalog remains
 compatible for aliases, external/unmanaged data, loaders, explicit pins and institutional
-overrides. For example, an external dataset can still use:
+overrides.
 
 `lf datasets list` prints `name@version`; that exact text is guaranteed to work with `datasets
 show`. `show` reports identity, build, members, partitions, target schema, global assets, producer,
 lineage, publication time and every placement/root. An unversioned name is accepted only when one
 version exists. Multiple versions produce an ambiguity diagnostic listing the exact choices; the
 Registry, Resolver and CLI never select the newest version implicitly.
+
+For example, an external dataset can still use:
 
 ```yaml
 datasets:
@@ -1110,14 +1120,59 @@ Managed versions are discovered without a catalogue for operational queries:
 
 ```bash
 lf datasets list --all
-lf datasets show raw-corpus@v3
+lf datasets show raw-corpus@v3 --on atlas
 lf datasets stats raw-corpus@v3 --on atlas
 lf datasets verify raw-corpus@v3 --on atlas
+lf datasets reconcile raw-corpus@v3 --on atlas
+# Apply only the reviewed identity-preserving index repair:
+lf datasets reconcile raw-corpus@v3 --on atlas --apply
 lf datasets materialize raw-corpus@v3 --on gpu-lab
+# Preview physical deletion, then apply the exact same command with --apply:
+lf datasets delete raw-corpus@v3 --on atlas
+lf datasets delete raw-corpus@v3 --on atlas --apply
 ```
 
-`remove` changes registration only. Physical `delete` is a matching-manifest, active-consumer-
-checked preview and requires `--apply`. Storage GC can never delete dataset placements.
+Every target-aware operation uses the same bounded placement resolution; it queries only the
+explicit cluster, checks registered candidate roots plus the deterministic location beneath
+`storage.dataset_root`, and reads `dataset-artifact.json` rather than guessing identity from a path.
+`show --on` and reconciliation read only manifest identity. `verify` additionally validates the
+index, assets and checksums. This avoids checksumming multi-gigabyte datasets during ordinary
+inspection while keeping full verification explicit. A stored `DatasetPlacement.verified` value is
+only historical registration evidence; it is never used as proof of current availability by a
+target-aware or destructive operation.
+
+| Placement state | Meaning and safe response |
+|---|---|
+| `AVAILABLE` | Target Registry and exact physical manifest agree; materialize is `NOOP`. |
+| `REGISTERED_BUT_MISSING` | Index is stale and bytes are absent; reconcile can remove metadata. |
+| `DISCOVERED_UNREGISTERED` | Exact managed manifest exists; reconcile registers it without copying. |
+| `CONFLICT` | Identities or indexed roots disagree; no automatic repair, overwrite or deletion. |
+| `ABSENT` | Target was observed and no registered/bounded managed copy exists. |
+| `UNREACHABLE` | Target could not be observed; it is never treated as absent. |
+
+`datasets reconcile` is preview-first. `--apply` only registers a manifest whose name, version,
+`dataset_id` and `content_id` match, updates a stale controller cache from the target's own exact
+placement, or removes a registration whose root is demonstrably missing. Identity disagreements
+never auto-heal. `list --all` may return partial discovery but warns for each unavailable cluster;
+targeted physical or destructive commands propagate the failure.
+
+`remove` changes registration only and never bytes. With `--on`, it updates both the selected
+cluster's own placement index and the controller cache; without it, only the controller discovery
+record changes. Physical `delete` is stricter: preview re-resolves target state, verifies the exact
+manifest, confirms the root is below configured managed storage, obtains current size/file counts
+and checks active consumers of the exact version/identity. `--apply` rechecks manifest/path safety,
+deletes that one placement, then cleans target and controller registrations. The order is
+idempotent: if registry cleanup fails after bytes disappear, the next invocation reports
+`REGISTERED_BUT_MISSING` and safely converges by cleaning metadata. Preview never mutates bytes or
+either Registry. Registry writes use the existing cross-process lock, while deletion rechecks path
+containment and immutable manifest identity at the destructive boundary. This is deliberately not a
+distributed lock against unrelated external processes or a consumer that starts outside
+LambdaForge after preview; use placement permissions and rerun preview immediately before apply in
+shared operational environments. Storage GC can never delete dataset placements.
+
+An absent Registry file means a new empty index. Malformed JSON, an invalid record, permission
+failure or another read error is explicit corruption/storage failure, never “zero datasets”. This
+fail-closed behavior applies before every mutation and preserves the file for manual recovery.
 
 Workflow YAML may annotate a node with `on: atlas`, and dry-run plans display every placement.
 LambdaForge deliberately refuses to execute a mixed-cluster DAG in the in-process workflow runner:
@@ -1496,7 +1551,7 @@ snapshot without changing the environment.
 | `jobs list [--all]|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`, `jobs group list|show` | Reconnect and safely control persistent work/groups. | lifecycle commands only |
 | `resources [--on C|--all] [--processes]` | Separate observed host facts, scheduler view and declared job requests. | no |
 | `configs|experiments|tasks list|show|validate|plan|run`; `experiments status|history|runs|results` | Discover project YAML; experiment views expose revision, target, progress, attempts and evidence. | only run |
-| `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|delete|materialize|replicate` | Recipe/build/version/placement lifecycle and inspection. | build/add/remove; delete/transfer only with `--apply` |
+| `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|reconcile|delete|materialize|replicate` | Recipe/build/version/placement lifecycle; target-aware inspection uses `--on`. | build/add/remove; reconcile/delete/transfer only with `--apply` |
 | `storage status|gc`, `environments list|show|gc` | Inspect bytes/file counts and collect only reconstructible unreferenced cache. | GC only with `--apply` |
 | `data --catalog FILE list|locations|inspect|replicate` | Inspect logical datasets/manifests; replication needs `--apply`. | only replicate `--apply` |
 | `compose CONFIG` | Redacted materialization plus provenance. | no |
@@ -1903,7 +1958,8 @@ aggregates the same observed values for the current user's active LambdaForge jo
 `ResearchWork` similarly groups immutable `JobRecord` snapshots by scientific identity and target
 for display. `ProjectConfigService` combines configuration discovery with those jobs and local or
 synchronized `ResultCatalog` evidence to produce experiment status/history. Neither read model
-persists facts, so YAML, `JobStore`, `DatasetRegistry` and result artifacts remain the authorities.
+persists facts, so YAML, `JobStore`, physical `DatasetArtifact`/content and result artifacts remain
+the authorities; `DatasetRegistry` is a reconciliable dataset discovery index.
 `ResourceHistory` is deliberately TUI-local and bounded by `--history`: services expose timestamped
 snapshots, while each consumer decides how much display history to retain.
 

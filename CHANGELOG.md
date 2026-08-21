@@ -8,6 +8,36 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-21
+
+### Added
+
+- Target-aware placement reconciliation with explicit `AVAILABLE`, `REGISTERED_BUT_MISSING`,
+  `DISCOVERED_UNREGISTERED`, `CONFLICT`, `ABSENT` and `UNREACHABLE` states.
+- Preview-first `datasets reconcile`, target-aware `datasets show --on`, bounded managed-root
+  manifest discovery and degraded-discovery warnings for tolerant `datasets list --all` calls.
+- Local failure-injection regressions covering stale indexes, identity conflicts, offline targets,
+  corrupt registries, active consumers, path escape, preview purity and interrupted deletion.
+
+### Changed
+
+- `show`, physical inspection, `verify`, `materialize`, replication and deletion now derive target
+  reality through one immutable-manifest-backed placement resolution path.
+- `remove` is registration-only; `delete` is the strict physical operation and validates the exact
+  DatasetArtifact, managed-root containment and exact-version consumers before `--apply`.
+- Remote registries retain only their own placements; controller indexes merge those observations
+  by immutable identity without treating either index as stronger than physical content.
+
+### Fixed
+
+- In target-aware operations, a stale local record with no placement can no longer mask an exact
+  placement held by the target Registry, eliminating contradictory verify/materialize/delete
+  answers.
+- Missing, corrupt, unreadable and unreachable registry states are distinct: only a missing file is
+  an empty new Registry, and target connectivity failures are never interpreted as absence.
+- Physical deletion and subsequent target/controller index cleanup are idempotent, so retries safely
+  converge after either registry update fails without deleting unrelated paths.
+
 ## [0.10.0] - 2026-08-21
 
 ### Added
@@ -571,7 +601,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/simplelambda/LambdaForge/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/simplelambda/LambdaForge/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/simplelambda/LambdaForge/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/simplelambda/LambdaForge/compare/v0.9.0...v0.9.1

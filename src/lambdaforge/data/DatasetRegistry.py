@@ -11,7 +11,11 @@ from uuid import uuid4
 
 from lambdaforge.data.DatasetPlacement import DatasetPlacement
 from lambdaforge.data.DatasetRecord import DatasetRecord
-from lambdaforge.data.errors import AmbiguousDatasetVersionError, InvalidDatasetBuildError
+from lambdaforge.data.errors import (
+    AmbiguousDatasetVersionError,
+    DatasetRegistryCorruptionError,
+    InvalidDatasetBuildError,
+)
 from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 
@@ -38,17 +42,34 @@ class DatasetRegistry:
         return root / ".lambdaforge" / "datasets.json"
 
     def records(self) -> tuple[DatasetRecord, ...]:
-        value = self._read()
+        value = self._read(validate=False)
+        return self._records_from(value)
+
+    def _records_from(self, value: Mapping[str, object]) -> tuple[DatasetRecord, ...]:
+        """Validate the complete index so mutations cannot preserve hidden corruption."""
         raw = value.get("datasets", {})
         if not isinstance(raw, Mapping):
-            return ()
+            raise DatasetRegistryCorruptionError(
+                str(self.path), "the 'datasets' member is not an object"
+            )
         records = []
-        for item in raw.values():
-            if isinstance(item, Mapping):
-                try:
-                    records.append(DatasetRecord.from_mapping(item))
-                except (KeyError, TypeError, ValueError):
-                    continue
+        for key, item in raw.items():
+            if not isinstance(item, Mapping):
+                raise DatasetRegistryCorruptionError(
+                    str(self.path), f"dataset entry {key!r} is not an object"
+                )
+            try:
+                record = DatasetRecord.from_mapping(item)
+            except (KeyError, TypeError, ValueError) as error:
+                raise DatasetRegistryCorruptionError(
+                    str(self.path), f"dataset entry {key!r} is invalid: {error}"
+                ) from error
+            if str(key) != record.key:
+                raise DatasetRegistryCorruptionError(
+                    str(self.path),
+                    f"dataset entry key {key!r} does not match {record.key!r}",
+                )
+            records.append(record)
         return tuple(sorted(records, key=lambda record: (record.name, record.version)))
 
     def get(self, selector: str) -> DatasetRecord:
@@ -197,12 +218,27 @@ class DatasetRegistry:
             self._write(value)
         return updated
 
-    def _read(self) -> dict[str, object]:
+    def discard(self, selector: str, *, cluster: str | None = None) -> DatasetRecord | None:
+        """Idempotently remove index state, allowing interrupted cleanup to converge."""
+        try:
+            return self.remove(selector, cluster=cluster)
+        except KeyError:
+            return None
+
+    def _read(self, *, validate: bool = True) -> dict[str, object]:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return {"dataset_registry_version": 1, "datasets": {}}
-        return value if isinstance(value, dict) else {"dataset_registry_version": 1, "datasets": {}}
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise DatasetRegistryCorruptionError(str(self.path), str(error)) from error
+        if not isinstance(value, dict):
+            raise DatasetRegistryCorruptionError(
+                str(self.path), "the top-level JSON value is not an object"
+            )
+        if validate:
+            self._records_from(value)
+        return value
 
     def _write(self, value: Mapping[str, object]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

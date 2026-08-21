@@ -87,6 +87,7 @@ class DiagnosticClassifier:
         from lambdaforge.controlplane.RemoteCommandTimeout import RemoteCommandTimeout
         from lambdaforge.data.errors import (
             AmbiguousDatasetVersionError,
+            DatasetRegistryCorruptionError,
             DatasetResolutionError,
             InvalidDatasetBuildError,
             MissingDatasetPlacementError,
@@ -287,6 +288,30 @@ class DiagnosticClassifier:
                 commands=commands,
                 context={"cluster": context.cluster},
                 retryable=RetryDisposition.IMMEDIATE,
+                operation=context.operation,
+            )
+        if isinstance(error, DatasetRegistryCorruptionError):
+            return diagnostic(
+                ErrorCategory.DATA,
+                "Dataset registry state is corrupt or unreadable.",
+                message,
+                reason=(
+                    "An existing registry cannot be interpreted safely and must not be treated "
+                    "as an empty index."
+                ),
+                impact=(
+                    "No dataset absence was inferred.",
+                    "No registry or dataset bytes were modified.",
+                ),
+                fixes=(
+                    "Inspect or restore the registry file before retrying.",
+                    "Do not replace it with an empty file if physical placements still exist.",
+                ),
+                commands=commands,
+                context={
+                    "cluster": context.cluster,
+                    "registry": getattr(error, "path", None),
+                },
                 operation=context.operation,
             )
         if isinstance(error, DatasetResolutionError):

@@ -341,14 +341,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discover and safely manage immutable dataset versions.",
         description=(
             "Lifecycle: list/show registered versions, inspect or verify content, then "
-            "materialize, replicate or remove explicit placements. Run recipe YAML with lf run."
+            "materialize or replicate explicit placements; remove edits registration and delete "
+            "edits bytes only after preview. Run recipe YAML with lf run."
         ),
         epilog=(
             "Examples:\n"
             "  lf datasets list\n"
-            "  lf datasets show wisdom-dna@1\n"
+            "  lf datasets show wisdom-dna@1 --on citius\n"
             "  lf run datasets/dna.yaml --on citius\n"
-            "  lf datasets verify wisdom-dna@1 --on citius"
+            "  lf datasets verify wisdom-dna@1 --on citius\n"
+            "  lf datasets reconcile wisdom-dna@1 --on citius\n"
+            "  lf datasets delete wisdom-dna@1 --on citius\n"
+            "  lf datasets delete wisdom-dna@1 --on citius --apply"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -360,6 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_list.add_argument("--json", action="store_true")
     dataset_show = dataset_commands.add_parser("show")
     dataset_show.add_argument("dataset")
+    dataset_show.add_argument("--on")
     dataset_show.add_argument("--json", action="store_true")
     for build_operation in ("plan", "build"):
         dataset_build = dataset_commands.add_parser(build_operation)
@@ -415,10 +420,17 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_remove = dataset_commands.add_parser("remove")
     dataset_remove.add_argument("dataset")
     dataset_remove.add_argument("--on")
+    dataset_remove.add_argument("--json", action="store_true")
+    dataset_reconcile = dataset_commands.add_parser("reconcile")
+    dataset_reconcile.add_argument("dataset")
+    dataset_reconcile.add_argument("--on", required=True)
+    dataset_reconcile.add_argument("--apply", action="store_true")
+    dataset_reconcile.add_argument("--json", action="store_true")
     dataset_delete = dataset_commands.add_parser("delete")
     dataset_delete.add_argument("dataset")
     dataset_delete.add_argument("--on", required=True)
     dataset_delete.add_argument("--apply", action="store_true")
+    dataset_delete.add_argument("--json", action="store_true")
     dataset_materialize = dataset_commands.add_parser("materialize")
     dataset_materialize.add_argument("dataset")
     dataset_materialize.add_argument("--on", required=True)

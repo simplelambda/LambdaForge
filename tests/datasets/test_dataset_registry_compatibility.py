@@ -66,7 +66,7 @@ def test_092_dataset_list_show_resolve_and_consume_are_read_only(
     assert CommandLineInterface.main(["datasets", "show", "wisdom-dna@1"]) == 0
     shown_output = capsys.readouterr().out
     assert "Dataset: wisdom-dna@1" in shown_output
-    assert "citius-ctgpgpu12  AVAILABLE" in shown_output
+    assert "citius-ctgpgpu12  CACHED" in shown_output
     assert registry_path.read_bytes() == original
 
 

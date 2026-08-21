@@ -32,8 +32,9 @@ from lambdaforge.data import (
 class ManagedProfilerTransport(Transport):
     """Model a project profiler running beside remote data without a data download."""
 
-    def __init__(self) -> None:
+    def __init__(self, record: DatasetRecord) -> None:
         self.commands: list[tuple[str, ...]] = []
+        self.record = record
 
     def run(self, command, *, cwd=None, timeout=None) -> CommandResult:
         del cwd, timeout
@@ -42,11 +43,30 @@ class ManagedProfilerTransport(Transport):
         if values[:1] == ("cat",):
             return CommandResult(0, "/managed/bin/python\n", "")
         if "lambdaforge.data.DatasetOperations" in values:
+            operation = values[values.index("lambdaforge.data.DatasetOperations") + 1]
+            if operation == "inspect":
+                return CommandResult(
+                    0,
+                    json.dumps(
+                        {
+                            "exists": True,
+                            "manifest_valid": True,
+                            "root": self.record.placements[0].root,
+                            "name": self.record.name,
+                            "version": self.record.version,
+                            "dataset_id": self.record.dataset_id,
+                            "content_id": self.record.dataset_id,
+                        }
+                    ),
+                    "",
+                )
             return CommandResult(
                 0,
                 json.dumps({"member_count": 2, "size_bytes": 128, "file_count": 3}),
                 "",
             )
+        if "lambdaforge.data.DatasetRegistry" in values:
+            return CommandResult(0, json.dumps([self.record.to_dict()]), "")
         if "-c" in values:
             return CommandResult(0, json.dumps({"project_statistic": 17}), "")
         return CommandResult(1, "", "unexpected command")
@@ -167,7 +187,7 @@ def test_remote_project_profiler_uses_managed_environment_without_downloading(
             ),
         }
     )
-    transport = ManagedProfilerTransport()
+    transport = ManagedProfilerTransport(registry.get("managed@1"))
     service = DatasetService(
         registry,
         catalog,

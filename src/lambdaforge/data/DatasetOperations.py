@@ -18,6 +18,55 @@ class DatasetOperations:
     """Inspect/verify/delete an exact root without scanning unrelated filesystems."""
 
     @classmethod
+    def inspect(cls, root: str | Path) -> dict[str, Any]:
+        """Read only the bounded immutable manifest; do not checksum dataset assets."""
+        source = Path(root)
+        path = source.resolve(strict=False)
+        if source.is_symlink():
+            return {
+                "exists": True,
+                "manifest_valid": False,
+                "root": str(path),
+                "error": "Dataset root is a symlink.",
+            }
+        if not path.exists():
+            return {"exists": False, "manifest_valid": False, "root": str(path)}
+        if not path.is_dir():
+            return {
+                "exists": True,
+                "manifest_valid": False,
+                "root": str(path),
+                "error": "Dataset root is not a directory.",
+            }
+        manifest = path / "dataset-artifact.json"
+        if not manifest.is_file() or manifest.is_symlink():
+            return {
+                "exists": True,
+                "manifest_valid": False,
+                "root": str(path),
+                "error": "dataset-artifact.json is missing or unsafe.",
+            }
+        try:
+            artifact = DatasetArtifact.read_json(manifest)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            return {
+                "exists": True,
+                "manifest_valid": False,
+                "root": str(path),
+                "error": f"Invalid dataset-artifact.json: {error}",
+            }
+        return {
+            "exists": True,
+            "manifest_valid": True,
+            "root": str(path),
+            "name": artifact.name,
+            "version": artifact.version,
+            "dataset_id": artifact.dataset_id,
+            "content_id": artifact.content_id,
+            "created_at_utc": artifact.created_at_utc,
+        }
+
+    @classmethod
     def stats(cls, root: str | Path) -> dict[str, Any]:
         path = Path(root).resolve()
         manifest = path if path.name == "dataset-artifact.json" else path / "dataset-artifact.json"
@@ -159,20 +208,34 @@ class DatasetOperations:
         return DatasetIndex(index)
 
     @classmethod
-    def delete(cls, root: str | Path, expected_id: str, *, apply: bool) -> dict[str, Any]:
-        path = Path(root).resolve()
-        dangerous = {Path("/").resolve(), Path.home().resolve()}
-        if path in dangerous or len(path.parts) < 3:
-            raise ValueError(f"Refusing dangerous dataset root: {path}")
-        verification = cls.verify(path, expected_id)
-        if not verification.get("valid"):
-            raise ValueError("Dataset deletion requires a valid matching DatasetArtifact.")
+    def delete(
+        cls,
+        root: str | Path,
+        expected_id: str,
+        *,
+        managed_root: str | Path,
+        apply: bool,
+    ) -> dict[str, Any]:
+        source = Path(root)
+        path = source.resolve(strict=False)
+        allowed = Path(managed_root).resolve(strict=False)
+        dangerous = {Path("/").resolve(), Path.home().resolve(), allowed}
+        if (
+            path in dangerous
+            or len(path.parts) < 3
+            or not path.is_relative_to(allowed)
+            or source.is_symlink()
+        ):
+            raise ValueError(f"Refusing dataset root outside managed storage: {path}")
+        observation = cls.inspect(path)
+        if not observation.get("manifest_valid") or observation.get("dataset_id") != expected_id:
+            raise ValueError("Dataset deletion requires an exact matching DatasetArtifact.")
         if apply:
             if path.is_dir():
                 shutil.rmtree(path)
             else:
                 path.unlink()
-        return {**verification, "applied": bool(apply), "root": str(path)}
+        return {**observation, "valid": True, "applied": bool(apply), "root": str(path)}
 
     @staticmethod
     def _format(files: Sequence[Path]) -> str:
@@ -187,12 +250,19 @@ class DatasetOperations:
                 "Usage: DatasetOperations stats|verify|delete|members|member ROOT [ARGS]"
             )
         operation, root, *rest = values
-        if operation == "stats":
+        if operation == "inspect":
+            payload = cls.inspect(root)
+        elif operation == "stats":
             payload = cls.stats(root)
         elif operation == "verify" and rest:
             payload = cls.verify(root, rest[0])
-        elif operation == "delete" and rest:
-            payload = cls.delete(root, rest[0], apply="--apply" in rest[1:])
+        elif operation == "delete" and len(rest) >= 2:
+            payload = cls.delete(
+                root,
+                rest[0],
+                managed_root=rest[1],
+                apply="--apply" in rest[2:],
+            )
         elif operation == "members":
             options = json.loads(rest[0]) if rest else {}
             payload = cls.members(

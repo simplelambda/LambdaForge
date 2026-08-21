@@ -104,7 +104,30 @@ class ConfigurationDescriptor:
                 if set(item).issubset({"dataset", "version", "content_id", "subpath"}) and item.get(
                     "dataset"
                 ):
-                    found.add(str(item["dataset"]))
+                    name = str(item["dataset"])
+                    version = item.get("version")
+                    found.add(f"{name}@{version}" if version is not None else name)
+                for nested in item.values():
+                    visit(nested)
+            elif isinstance(item, (list, tuple)):
+                for nested in item:
+                    visit(nested)
+
+        visit(values)
+        return tuple(sorted(found))
+
+    @staticmethod
+    def dataset_ids(values: Mapping[str, Any]) -> tuple[str, ...]:
+        """Return immutable managed content identities captured during materialization."""
+        found: set[str] = set()
+
+        def visit(item: object) -> None:
+            if isinstance(item, Mapping):
+                identity = item.get("identity")
+                if isinstance(identity, Mapping):
+                    dataset_id = identity.get("dataset_id", identity.get("content_id"))
+                    if isinstance(dataset_id, str) and dataset_id.startswith("sha256:"):
+                        found.add(dataset_id)
                 for nested in item.values():
                     visit(nested)
             elif isinstance(item, (list, tuple)):
@@ -128,6 +151,7 @@ class ConfigurationDescriptor:
             "scientific_revision": self.revision,
             "source_config_path": str(self.source),
             "datasets": list(self.datasets),
+            "dataset_ids": list(self.dataset_ids(self.materialized)),
             "planned_units": self.planned_units,
             "unit": self.unit,
         }

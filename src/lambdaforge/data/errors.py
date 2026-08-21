@@ -7,6 +7,20 @@ class DatasetResolutionError(RuntimeError):
     """Base class for expected dataset failures rendered concisely by the CLI."""
 
 
+class DatasetRegistryCorruptionError(DatasetResolutionError):
+    """Refuse to treat an existing unreadable registry as an empty index."""
+
+    def __init__(self, path: str, detail: str, *, cluster: str | None = None) -> None:
+        self.path = path
+        self.cluster = cluster
+        location = f" on {cluster!r}" if cluster is not None else ""
+        super().__init__(
+            f"Dataset registry {path!r}{location} is corrupt or has an invalid shape.\n"
+            f"Reason: {detail}\n"
+            "No dataset state was assumed and no repair was attempted."
+        )
+
+
 class UnknownDatasetError(DatasetResolutionError):
     """Report an unknown logical dataset with an actionable next step."""
 

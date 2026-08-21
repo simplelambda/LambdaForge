@@ -16,6 +16,11 @@ class DatasetDeletionPlan:
     safe: bool
     reasons: tuple[str, ...]
     applied: bool = False
+    action: str = "DELETE_PLACEMENT"
+    dataset_id: str | None = None
+    placement_state: str = "available"
+    active_consumers: tuple[str, ...] = ()
+    logical_version_preserved: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -27,4 +32,9 @@ class DatasetDeletionPlan:
             "safe": self.safe,
             "reasons": list(self.reasons),
             "applied": self.applied,
+            "action": self.action,
+            "dataset_id": self.dataset_id,
+            "placement_state": self.placement_state,
+            "active_consumers": list(self.active_consumers),
+            "logical_version_preserved": self.logical_version_preserved,
         }

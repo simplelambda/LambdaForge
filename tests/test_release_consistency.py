@@ -46,6 +46,8 @@ def test_documented_cli_forms_share_the_canonical_parser() -> None:
         ["datasets", "plan", "example-records", "--on", "atlas"],
         ["datasets", "members", "example-records@1", "--partition", "split=train"],
         ["datasets", "diff", "example-records@1", "example-records@2", "--json"],
+        ["datasets", "reconcile", "example-records@1", "--on", "atlas", "--json"],
+        ["datasets", "delete", "example-records@1", "--on", "atlas", "--json"],
         ["completion", "bash"],
     )
     for form in forms:

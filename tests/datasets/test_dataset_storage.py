@@ -243,7 +243,7 @@ def test_build_materialization_plans_inputs_and_rejects_missing_lineage(tmp_path
             "atlas": ClusterProfile("atlas", storage={}, workspace=str(tmp_path / "atlas")),
         }
     )
-    service = DatasetService(registry, catalog)
+    service = DatasetService(registry, catalog, InventoryFactory({"atlas": "[]"}))
     plan = service.materialize("processed@v1", cluster="atlas", strategy="build")
     assert plan.action == "BUILD"
     assert plan.prerequisites[0]["action"] == "REPLICATE"

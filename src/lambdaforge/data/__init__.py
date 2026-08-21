@@ -27,6 +27,7 @@ _BUILD_MODEL_NAMES = (
 )
 _ERROR_NAMES = (
     "AmbiguousDatasetVersionError",
+    "DatasetRegistryCorruptionError",
     "DatasetResolutionError",
     "InvalidDatasetBuildError",
     "MissingDatasetPlacementError",
@@ -64,6 +65,8 @@ _DATA_NAMES = (
     "DatasetReferenceResolver",
     "DatasetRegistry",
     "DatasetResolution",
+    "DatasetPlacementResolution",
+    "DatasetPlacementState",
     "DatasetResolver",
     "DatasetService",
     "ExplicitVersionIdentityProvider",
@@ -83,6 +86,14 @@ LazyExports.install(
         **{name: ("lambdaforge.data.index", name) for name in _INDEX_NAMES},
         **{name: ("lambdaforge.data.recipe_config", name) for name in _RECIPE_CONFIG_NAMES},
         **{name: (f"lambdaforge.data.{name}", name) for name in _DATA_NAMES},
+        "DatasetPlacementResolution": (
+            "lambdaforge.data.DatasetResolution",
+            "DatasetPlacementResolution",
+        ),
+        "DatasetPlacementState": (
+            "lambdaforge.data.DatasetResolution",
+            "DatasetPlacementState",
+        ),
     },
 )
 

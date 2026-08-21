@@ -1,9 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="icons/lambdaforge-light.svg">
-    <source media="(prefers-color-scheme: light)" srcset="icons/lambdaforge-dark.svg">
-    <img src="icons/lambdaforge-dark.png" width="140" alt="LambdaForge logo">
-  </picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="icons/lambdaforge-light.svg"><source media="(prefers-color-scheme: light)" srcset="icons/lambdaforge-dark.svg"><img src="icons/lambdaforge-dark.png" width="140" alt="LambdaForge logo"></picture>
 </p>
 
 # LambdaForge
@@ -32,19 +28,13 @@ provenance, reuse, result-management and safety machinery around them.
 - Extend models, losses, metrics, tasks, callbacks and data code with normal Python imports.
 
 ```text
-project code + YAML + logical data
-              │
-              ▼
-      validate and materialize
-              │
-      ┌───────┼────────┐
-      ▼       ▼        ▼
-    tasks   datasets  experiments/HPO
-      └───────┼────────┘
-              ▼
-     local / SSH / SLURM jobs
-              ▼
- results + artifacts + provenance
+project code + YAML + logical data → validate and materialize
+                                      │
+                         tasks / datasets / experiments / HPO
+                                      │
+                            local / SSH / SLURM jobs
+                                      │
+                         results + artifacts + provenance
 ```
 
 ## Install
@@ -173,11 +163,19 @@ DatasetRecipe → DatasetBuild → DatasetVersion → DatasetPlacement
    how            execution       immutable         where verified
 ```
 
-Recipe stages use the ordinary Workflow DAG, can reuse verified content-addressed outputs and
-publish only after the final index and assets pass validation. The Registry owns managed
-placements; a DataCatalog remains available for external or institutionally managed data.
-`datasets list` prints the copyable `name@version` selector accepted by `datasets show`; an
-unversioned name is accepted only when exactly one version exists.
+Recipe stages use the ordinary Workflow DAG, reuse verified content-addressed outputs and publish
+only after the final index and assets pass validation. Physical bytes plus their immutable
+`dataset-artifact.json` are scientific truth; a `DatasetPlacement` says where that exact identity
+exists, while `DatasetRegistry` is only a small, safely reconciliable discovery index. A
+DataCatalog remains available for external or institutionally managed data.
+
+`datasets list` prints the copyable `name@version` accepted by `datasets show`; an unversioned name
+is valid only when unique. Add `--on CLUSTER` to reconcile the controller index, target index and a
+bounded manifest lookup. States are `AVAILABLE`, `REGISTERED_BUT_MISSING`,
+`DISCOVERED_UNREGISTERED`, `CONFLICT`, `ABSENT` and `UNREACHABLE`; uncertainty is never absence.
+Use preview-first `datasets reconcile` for identity-preserving index repair. `remove` changes only
+registration; `delete` validates an exact manifest inside configured managed storage, checks active
+consumers and removes one physical placement only after the reviewed plan receives `--apply`.
 
 Explicit local inputs of at most 10 MiB are content-hashed and copied automatically into the
 execution bundle, including inputs declared inside an embedded dataset-recipe stage. Users never

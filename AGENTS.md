@@ -26,6 +26,7 @@ infer CUDA usability from `nvidia-smi` alone.
 | Dataset discovery/convenience alias | `lf datasets plan NAME`; `lf datasets build NAME` |
 | Inspect dataset content | `lf datasets show/members/member/diff/stats/verify ...` |
 | Place a dataset | `lf datasets materialize SELECTOR --on CLUSTER`; add `--apply` after review |
+| Repair dataset indexes | `lf datasets reconcile SELECTOR --on CLUSTER`; preview before `--apply` |
 | Diagnose a cluster | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Diagnose any failed command | read its next action; add `--debug`; use `--json` for tools |
 | Reconnect to work | `lf jobs list/status/logs/cancel/retry`; selectors accept ID, name, prefix, `latest` |
@@ -92,7 +93,7 @@ bound deliberately, reinstall, require `pip check`, and never bypass it with `--
 - Clusters: `clusters add|list|show|inspect|set|unset|remove|export|credentials set|delete|test|bootstrap|resources|storage`.
 - Jobs: `jobs list|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`; `jobs group list|show`.
 - Storage: `storage status|gc`; `environments list|show|gc`.
-- Data: `data list|locations|inspect|replicate`; `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|delete|materialize|replicate`.
+- Data: `data list|locations|inspect|replicate`; `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|reconcile|delete|materialize|replicate`.
 - Evidence: `aggregate`, `retain`, `registry`, `dashboard`; `results audit|list|show|compare|export|sync`; `plot learning|sweep|seeds|hpo|resources`; `artifact inspect|export|validate|visualize|list|fetch|plugins`.
 
 ## Configuration and execution
@@ -159,11 +160,10 @@ file/directory/record/URI assets with real checksums. Artifact v2 uses path-inde
 `DatasetAsset.sha256` is the file-byte SHA-256; directories use the documented tree fingerprint.
 Legacy filename-prefixed file hashes are read-only compatibility, not an authoring contract.
 
-For managed data, `DatasetRegistry` owns exact versions and placements and `DatasetResolver` is
-Registry-first. `DataCatalog` remains for external data, aliases, loaders, pins and overrides. Prefer
-`dataset:NAME@VERSION/subpath`; an ambiguous unversioned match is an error. Materialization is only
-NOOP, verified atomic REPLICATE or durable BUILD. Dataset deletion and storage GC are exact-root,
-locked and preview-first.
+For managed data, bytes plus `dataset-artifact.json` own scientific identity; `DatasetPlacement` locates it and `DatasetRegistry` is only a reconciliable index. Target operations share manifest-backed `AVAILABLE`, `REGISTERED_BUT_MISSING`, `DISCOVERED_UNREGISTERED`, `CONFLICT`, `ABSENT` and
+`UNREACHABLE` states; never turn uncertainty into absence or auto-heal an identity conflict.
+`reconcile` repairs matching indexes preview-first. `remove` never touches bytes; `delete` requires an exact manifest below configured managed storage, exact-version consumers clear, and `--apply`.
+Prefer `dataset:NAME@VERSION/subpath`; DataCatalog remains for external data and overrides.
 
 ## Training, post-run and HPO
 

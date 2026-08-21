@@ -41,6 +41,9 @@ def test_control_plane_reference_commands_parse() -> None:
         ["jobs", "list", "--all", "--json"],
         ["jobs", "group", "show", "group-123"],
         ["datasets", "materialize", "corpus", "--on", "atlas"],
+        ["datasets", "show", "corpus@1", "--on", "atlas", "--json"],
+        ["datasets", "reconcile", "corpus@1", "--on", "atlas"],
+        ["datasets", "delete", "corpus@1", "--on", "atlas"],
         ["experiments", "status", "baseline", "--json"],
         ["experiments", "history", "baseline", "--json"],
         ["tasks", "run", "prepare", "--on", "atlas"],
@@ -57,8 +60,7 @@ def test_init_creates_complete_non_overwriting_consumer(tmp_path: Path, capsys: 
     assert (project / "schemas/lambdaforge-task.schema.json").is_file()
     current = Version(VERSION)
     requirement = (
-        f"lambdaforge>={current.major}.{current.minor},"
-        f"<{current.major}.{current.minor + 1}"
+        f"lambdaforge>={current.major}.{current.minor},<{current.major}.{current.minor + 1}"
     )
     assert requirement in (project / "pyproject.toml").read_text(encoding="utf-8")
     assert json.loads((project / ".vscode/settings.json").read_text(encoding="utf-8"))
