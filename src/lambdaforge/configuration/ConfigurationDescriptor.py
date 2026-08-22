@@ -49,6 +49,8 @@ class ConfigurationDescriptor:
             )
             if "preprocess" in values:
                 job_type = "preprocessing"
+            if cls._is_simple_work(values):
+                job_type = "work"
         elif document.kind is ConfigurationKind.EXPERIMENT:
             config = ExperimentConfig(values, source=source)
             runs = config.expand()
@@ -69,6 +71,15 @@ class ConfigurationDescriptor:
                 job_type, unit = "dataset-build", "stages"
             else:
                 unit = "nodes"
+                if cls._is_simple_work(values):
+                    metadata = values.get("metadata", {})
+                    if (
+                        isinstance(metadata, Mapping)
+                        and int(metadata.get("search_variants", 1)) > 1
+                    ):
+                        job_type, unit = "hpo", "trials"
+                    else:
+                        job_type, unit = "work", "runs"
         return cls(
             source,
             document.kind,
@@ -115,6 +126,18 @@ class ConfigurationDescriptor:
 
         visit(values)
         return tuple(sorted(found))
+
+    @staticmethod
+    def _is_simple_work(values: Mapping[str, Any]) -> bool:
+        extensions = values.get("extensions", {})
+        authoring = extensions.get("authoring", {}) if isinstance(extensions, Mapping) else {}
+        metadata = values.get("metadata", {})
+        return bool(
+            isinstance(authoring, Mapping)
+            and authoring.get("simple_work")
+            or isinstance(metadata, Mapping)
+            and metadata.get("authoring") == "simple-work"
+        )
 
     @staticmethod
     def dataset_ids(values: Mapping[str, Any]) -> tuple[str, ...]:

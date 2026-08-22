@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 from lambdaforge.LazyExports import LazyExports
+from lambdaforge.runtime.api import artifact, current, metric, publish_dataset
 
 if TYPE_CHECKING:
     from lambdaforge.artifacts.ArtifactService import ArtifactService
@@ -123,5 +124,9 @@ __all__ = [
     "WorkflowResult",
     "WorkflowValidationReport",
     "VisualizationService",
+    "artifact",
+    "current",
+    "metric",
+    "publish_dataset",
     "__version__",
 ]

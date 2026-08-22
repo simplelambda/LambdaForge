@@ -35,6 +35,9 @@ class TaskExecutionPlan(JsonResult):
         required_artifacts: Sequence[str] = (),
         inputs: Sequence[Mapping[str, Any]] = (),
         execution: Mapping[str, Any] | None = None,
+        callable_path: str | None = None,
+        parameters: Mapping[str, Any] | None = None,
+        resources: Mapping[str, Any] | None = None,
     ) -> None:
         self.name = str(name)
         self.run_dir = str(run_dir)
@@ -46,6 +49,9 @@ class TaskExecutionPlan(JsonResult):
         self.required_artifacts = tuple(str(path) for path in required_artifacts)
         self.inputs = tuple(FrozenJsonMapping(value) for value in inputs)
         self.execution = FrozenJsonMapping(execution or {"mode": "sequential"})
+        self.callable_path = callable_path
+        self.parameters = FrozenJsonMapping(parameters or {})
+        self.resources = FrozenJsonMapping(resources or {})
         self._freeze_mapping(self.to_dict())
 
     @property
@@ -68,6 +74,9 @@ class TaskExecutionPlan(JsonResult):
             "required_artifacts": list(self.required_artifacts),
             "inputs": [copy.deepcopy(value) for value in self.inputs],
             "execution": copy.deepcopy(self.execution),
+            **({"callable": self.callable_path} if self.callable_path else {}),
+            **({"parameters": copy.deepcopy(self.parameters)} if self.parameters else {}),
+            "resources": copy.deepcopy(self.resources),
         }
 
     def summary(self) -> str:

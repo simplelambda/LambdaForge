@@ -173,6 +173,35 @@ class TaskValidator:
         if not callable(getattr(target, "run", None)):
             errors.append("task.target must expose a callable run method.")
         if (
+            target.__module__ == "lambdaforge.runtime.callable"
+            and target.__name__ == "CallableTask"
+        ):
+            params = spec.get("params", {})
+            if isinstance(params, Mapping):
+                try:
+                    from lambdaforge.runtime.callable import signature_errors
+
+                    errors.extend(
+                        signature_errors(
+                            (
+                                str(params["callable_path"])
+                                if params.get("callable_path") is not None
+                                else None
+                            ),
+                            params.get("parameters", {}),
+                            params.get("seed"),
+                            class_path=(
+                                str(params["class_path"])
+                                if params.get("class_path") is not None
+                                else None
+                            ),
+                            init_parameters=params.get("init_parameters", {}),
+                            method=str(params.get("method", "run")),
+                        )
+                    )
+                except Exception as error:
+                    errors.append(f"run callable: {self._format_error(error)}")
+        if (
             target.__module__ == "lambdaforge.preprocessing.PreprocessingTask"
             and target.__name__ == "PreprocessingTask"
         ):

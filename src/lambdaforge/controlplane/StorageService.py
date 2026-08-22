@@ -132,13 +132,25 @@ class StorageService:
             apply=apply,
         )
 
+    def delete_job(self, cluster: str, job_id: str, *, apply: bool = False) -> dict[str, Any]:
+        """Preview or delete one exact job workspace without touching shared state."""
+        profile = self.catalog.get(cluster)
+        assert profile.storage is not None
+        return self._invoke(
+            cluster,
+            "delete-job",
+            profile.storage.to_dict(),
+            references={"job_id": job_id},
+            apply=apply,
+        )
+
     def _invoke(
         self,
         cluster: str,
         operation: str,
         descriptor: dict[str, Any],
         *,
-        references: dict[str, list[str]] | None = None,
+        references: dict[str, Any] | None = None,
         apply: bool = False,
     ) -> dict[str, Any]:
         if cluster == "local":
@@ -150,6 +162,10 @@ class StorageService:
                     (references or {}).get("environments", ()),
                     apply=apply,
                 )
+            if operation == "delete-job":
+                return StorageOperations.delete_job(
+                    descriptor, str((references or {})["job_id"]), apply=apply
+                )
             return StorageOperations.gc(descriptor, references or {}, apply=apply)
         profile = self.catalog.get(cluster)
         transport = self.factory.transport(profile)
@@ -160,7 +176,7 @@ class StorageService:
             operation,
             json.dumps(descriptor, separators=(",", ":")),
         ]
-        if operation in {"gc", "prune-environments"}:
+        if operation in {"gc", "prune-environments", "delete-job"}:
             arguments.extend(
                 (json.dumps(references or {}, separators=(",", ":")), str(apply).lower())
             )

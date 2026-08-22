@@ -44,7 +44,7 @@ class TaskOutput:
                 raise TypeError(f"Task metric {name!r} must be a numeric scalar.")
 
     @classmethod
-    def from_value(cls, value: TaskOutput | Mapping[str, Any] | None) -> TaskOutput:
+    def from_value(cls, value: Any) -> TaskOutput:
         """Normalize the supported task return forms without reserved mapping magic."""
         if value is None:
             return cls()
@@ -52,4 +52,10 @@ class TaskOutput:
             return value
         if isinstance(value, Mapping):
             return cls(outputs=value)
-        raise TypeError("Task.run() must return TaskOutput, a mapping, or None.")
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as error:
+            raise TypeError(
+                "Task.run() must return TaskOutput or a JSON-compatible value."
+            ) from error
+        return cls(outputs={"result": value})

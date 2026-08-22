@@ -6,8 +6,9 @@ under change. Current code and behavioral tests override stale assumptions.
 
 ## Product model
 
-LambdaForge is an installable Python >=3.10 PyTorch/Lightning research framework. Consumers own
-domain code/data; it runs tasks, datasets, workflows, experiments and HPO across local, SSH/SLURM.
+LambdaForge is an installable Python >=3.10 function-first research framework. Consumers own
+domain code/data; ordinary callables run as named Work across local, SSH/SLURM, while strict legacy
+Task/Workflow/Experiment/Dataset IR remains backward compatible.
 Use public imports only. Never copy it, share its `.venv`, patch `PYTHONPATH`, serialize secrets or
 infer CUDA usability from `nvidia-smi` alone.
 
@@ -29,12 +30,13 @@ infer CUDA usability from `nvidia-smi` alone.
 | Repair dataset indexes | `lf datasets reconcile SELECTOR --on CLUSTER`; preview before `--apply` |
 | Diagnose a cluster | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Diagnose any failed command | read its next action; add `--debug`; use `--json` for tools |
-| Reconnect to work | `lf jobs list/status/logs/cancel/retry`; selectors accept ID, name, prefix, `latest` |
+| Reconnect to work | `lf status`; `lf show/logs/cancel/retry NAME`; `jobs ...` is the advanced view |
 | Global runtime view | `lf top --history 120` for humans; `lf overview --json`, `lf jobs list --json`, `lf resources --all --json` for tools |
 | Query or compare results | `lf results list/show/compare/export` |
 | Plot scientific evidence | `lf plot learning/sweep/seeds/hpo/resources` |
 | Inspect/fetch artifacts | `lf artifact inspect/list/fetch/validate/visualize` |
-| Preview cache collection | `lf storage gc [--on CLUSTER]`; apply only after review |
+| Delete terminal Work | `lf delete NAME`; repeat with `--apply`; a tiny receipt makes retries idempotent |
+| Preview cache collection | `lf clean [--on CLUSTER]`; apply only after review |
 | Explain configuration/identity | `lf explain CONFIG`; `lf explain KIND PATH`; `lf explain changes CURRENT --against PREVIOUS` |
 | Shell completion | `lf completion bash|zsh|fish` |
 
@@ -85,24 +87,19 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 Install only needed extras. Consumer version bounds are authoritative: update an incompatible
 bound deliberately, reinstall, require `pip check`, and never bypass it with `--no-deps`.
 
-## Complete CLI surface
-
-- Author/inspect: `init`, `target`, `validate`, `inspect`, `plan`, `run`, `compose`, `diff`, `explain`, `migrate`, `debug`, `plugins`, `completion`, `project status`.
-- Discover: `configs|tasks list|show|validate|plan|run`; `experiments` adds `status|history|runs|results`.
-- Control: `doctor`, `overview`, `top`, `resources`, `status`, `logs`, `cancel`, `retry`.
-- Clusters: `clusters add|list|show|inspect|set|unset|remove|export|credentials set|delete|test|bootstrap|resources|storage`.
-- Jobs: `jobs list|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`; `jobs group list|show`.
-- Storage: `storage status|gc`; `environments list|show|gc`.
-- Data: `data list|locations|inspect|replicate`; `datasets plan|build|list|show|members|member|diff|locations|stats|verify|lineage|add|remove|reconcile|delete|materialize|replicate`.
-- Evidence: `aggregate`, `retain`, `registry`, `dashboard`; `results audit|list|show|compare|export|sync`; `plot learning|sweep|seeds|hpo|resources`; `artifact inspect|export|validate|visualize|list|fetch|plugins`.
+Complete CLI surface: author with `init|target|validate|inspect|plan|run|compose|diff|explain|migrate|debug|plugins|completion`; discover with `configs|tasks|experiments`; control with `doctor|overview|top|resources|status|show|logs|cancel|retry|delete|clean`.
+Infrastructure: `clusters`, `jobs`, `storage`, `environments`; data: `data`, `datasets`; evidence:
+`aggregate|retain|registry|dashboard|results|plot|artifact`. Use each resource's `--help` for actions.
 
 ## Configuration and execution
 
-Friendly authoring compiles to one strict `MaterializedConfig`. Trusted YAML `target` constructs,
-`ref` imports and `params` supplies kwargs. Targets must belong to the installed consumer package.
-Use `inspect --resolved` before editing advanced YAML.
+Canonical YAML is `name`, `run: package.function`, optional `with`, and `resources`. Exact
+`{file: PATH}` and `{dataset: NAME@VERSION}` arguments resolve to staged/managed `Path` values;
+ordinary strings are never guessed. `seeds`, `search`, `objective`, sequential `steps` and explicit
+`parallel` groups compile to the existing strict `MaterializedConfig` and runners. Use
+`inspect --resolved` only to diagnose that IR. Imports must belong to the installed consumer.
 
-The supported document families are:
+Strict compatibility document families remain:
 
 - `kind: task` for one reproducible non-training operation;
 - concise/strict preprocessing, compiled to a Task;
@@ -111,24 +108,25 @@ The supported document families are:
 - experiment Schema 1.1 for training, seeds, sweeps and HPO.
 
 Supported experiment migration inputs are unversioned and Schema 1.0. Preview with `lf migrate`;
-never rewrite source implicitly. Declare every scientific local input at the top level. Physical
-paths are resolved before execution but logical identity—not cluster placement—drives scientific
-reuse. Default run resumes compatible state; `--rerun`/legacy `--force` repeats terminal science,
+never rewrite source implicitly. Physical paths resolve before execution but logical identity—not
+placement—drives reuse. Default run resumes compatible state; `--rerun`/legacy `--force` repeats,
 `--restart` discards continuation and `--no-resume` only disables continuation. Active identical
-experiment revision+cluster is refused unless `--allow-duplicate`; another cluster is allowed.
+Work+cluster is refused unless `--allow-duplicate`; another cluster is allowed.
 
-Authored `resources` is the real scheduler request. CLI resource flags only override explicitly
-provided fields. A workflow/dataset top-level request is exact; otherwise LambdaForge derives the
-fixed outer allocation from node/stage resources, topological levels and `max_parallel`. Do not ask
-users to repeat YAML resources on the command line. `lf run` is canonical for dataset recipes;
+Authored `resources` is the real per-run request/default and step fields override it. LambdaForge
+derives the fixed outer allocation from node resources, DAG levels and `max_parallel`; a strict
+legacy workflow/dataset top-level request remains exact. Do not ask users to repeat YAML resources
+on the command line. `lf run` is canonical for dataset recipes;
 `datasets build` is only a compatible selector-oriented alias.
 
 ## Task and preprocessing contracts
 
-A project task implements `run(context) -> TaskOutput` (or the supported zero-argument duck-typed
-form). Use `context.input(NAME)` and `context.output(NAME, create=True)`. Return small JSON outputs,
-numeric metrics and explicit run-relative `ArtifactDeclaration` values. Never escape the run root or
-return symlinks.
+The primary contract is an ordinary function. Its JSON-compatible return is the final output.
+Inside execution, `lf.current()` exposes immutable context, `lf.metric(...)` appends history,
+`lf.artifact(...)` registers one run-owned file/directory and `lf.publish_dataset(...)` streams
+immutable publication. All fail outside a run. Seeds initialize Python/NumPy/PyTorch and inject
+`seed` only when declared. Advanced tasks may still implement `run(context) -> TaskOutput`; use
+`context.input(NAME)`/`output(NAME)` and never escape the run root or return symlinks.
 
 Preprocessing is `source -> transforms -> sink`. `workers=1` is sequential; `io` uses threads;
 `cpu` uses spawn-safe processes while the parent owns the sink/manifest; `gpu` requires one worker.
@@ -143,7 +141,10 @@ Keep these concepts distinct:
 DatasetRecipe -> DatasetBuild -> DatasetVersion -> DatasetPlacement
 ```
 
-Recipe stages compile to the existing Workflow DAG. `required` expresses scientific necessity;
+Prefer `lf.publish_dataset` from ordinary Python; generator members accept id, split/partitions,
+targets, metadata and named run-owned assets while retaining checksums, atomic publication and
+Registry placement. Recipe stages remain compatible and compile to the Workflow DAG. `required`
+expresses scientific necessity;
 `reuse: auto|never` controls cache policy. `--force-stage X` forces X and all transitive downstream
 stages. A successful build validates and atomically publishes the final root plus canonical JSONL
 `DatasetIndex`; incomplete stages never become a version.
@@ -261,13 +262,11 @@ raw run evidence immutable; retention/compression and deletion are preview-first
 
 ## Extension contracts
 
-- Model: `torch.nn.Module`; mapping output is recommended for named losses/metrics.
-- Loss: public `Loss`, consuming `(outputs, batch)` and returning a scalar tensor.
-- Metric: public `Metric`; keep state bounded or use documented exact behavior deliberately.
-- Task: public `Task` or compatible `run` method returning `TaskOutput`.
-- Preprocessing: `PreprocessingSource`, `PreprocessingTransform`, `PreprocessingSink`.
-- Dataset profiler and transfer: public `DatasetProfiler`, `DataTransferProvider`.
-- Runtime providers: `Transport`, `Scheduler`, `ExecutionBackend`, `ArtifactStore`.
+- Model: `torch.nn.Module`; Loss: public scalar `Loss`; Metric: public bounded `Metric`.
+- Advanced Task: public `Task`/compatible `run` returning `TaskOutput`.
+- Preprocessing: `PreprocessingSource`, `PreprocessingTransform`, `PreprocessingSink`; data:
+  `DatasetProfiler`, `DataTransferProvider`.
+- Providers: `Transport`, `Scheduler`, `ExecutionBackend`, `ArtifactStore`.
 - Training analysis: Lightning `Callback` or `PostRunAction`, according to lifecycle needs.
 - Reusable third-party components: `lambdaforge.<kind>` entry points; project-local objects should
   normally use installed `my_project.*` targets.
@@ -294,6 +293,7 @@ import or document private file paths.
 
 ## Targeted manual routes
 
-Open only the relevant heading in [docs/MANUAL.md](docs/MANUAL.md): configuration (6/20), tasks and preprocessing (7), identity (8), workflows (9), clusters (10), jobs/datasets (11), HPO (12), results
-(14), CLI (16), public API (17), architecture (19), migrations (21), process safety (22), outputs
-(23), retention (24), components (25), extensions (26), or limitations (28).
+Open only the relevant [manual](docs/MANUAL.md) heading: configuration (6/20), tasks (7), identity
+(8), workflows (9), clusters (10), jobs/datasets (11), HPO (12), results (14), CLI (16), API (17),
+architecture (19), migrations (21), safety (22), outputs (23), retention (24), extensions (26) or
+limitations (28).

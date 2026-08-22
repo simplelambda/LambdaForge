@@ -18,6 +18,7 @@ class WorkflowPlan:
     levels: tuple[tuple[str, ...], ...]
     max_parallel: int
     placements: Mapping[str, str] = field(default_factory=dict)
+    details: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible plan."""
@@ -28,6 +29,7 @@ class WorkflowPlan:
             "levels": [list(level) for level in self.levels],
             "max_parallel": self.max_parallel,
             "placements": dict(self.placements),
+            **({"details": copy.deepcopy(dict(self.details))} if self.details else {}),
         }
 
 
@@ -39,6 +41,7 @@ class WorkflowResult:
     run_dir: Path
     status: str
     nodes: Mapping[str, Mapping[str, Any]]
+    summary: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a defensive JSON-compatible result."""
@@ -48,6 +51,7 @@ class WorkflowResult:
             "run_dir": str(self.run_dir),
             "status": self.status,
             "nodes": copy.deepcopy(dict(self.nodes)),
+            **({"summary": copy.deepcopy(dict(self.summary))} if self.summary else {}),
         }
 
 

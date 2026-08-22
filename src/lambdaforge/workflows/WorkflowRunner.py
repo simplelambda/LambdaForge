@@ -48,7 +48,29 @@ class WorkflowRunner:
             tuple(levels),
             config.max_parallel,
             {node.name: node.cluster for node in config.nodes},
+            {node.name: self._node_detail(node) for node in config.nodes},
         )
+
+    @staticmethod
+    def _node_detail(node: WorkflowNode) -> dict[str, Any]:
+        values, _, _ = node.materialize()
+        materialized = AuthoringConfigNormalizer().normalize(values)
+        task = materialized.values.get("task", {})
+        params = task.get("params", {}) if isinstance(task, dict) else {}
+        return {
+            "needs": list(node.needs),
+            "on": node.cluster,
+            "resources": dict(node.resources),
+            **(
+                {
+                    "callable": params.get("callable_path", params.get("class_path")),
+                    "parameters": params.get("parameters", {}),
+                }
+                if isinstance(params, dict)
+                and task.get("target") == "lambdaforge.runtime.CallableTask"
+                else {}
+            ),
+        }
 
     def run(
         self,
@@ -131,9 +153,37 @@ class WorkflowRunner:
             if outcomes and all(value["status"] == "ok" for value in outcomes.values())
             else "failed"
         )
-        result = WorkflowResult(config.name, config.run_dir, status, outcomes)
+        result = WorkflowResult(
+            config.name,
+            config.run_dir,
+            status,
+            outcomes,
+            self._objective_summary(config.metadata.get("objective"), outcomes),
+        )
         self._write_result(config.run_dir / "workflow-result.json", result.to_dict())
         return result
+
+    @staticmethod
+    def _objective_summary(value: Any, outcomes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        metric = str(value.get("metric", ""))
+        mode = str(value.get("mode", ""))
+        candidates = [
+            (name, outcome.get("metrics", {}).get(metric))
+            for name, outcome in outcomes.items()
+            if outcome.get("status") == "ok"
+            and isinstance(outcome.get("metrics"), dict)
+            and isinstance(outcome.get("metrics", {}).get(metric), (int, float))
+        ]
+        if not candidates:
+            return {"objective": value, "best": None}
+        selected = (max if mode == "max" else min)(candidates, key=lambda item: item[1])
+        return {
+            "objective": value,
+            "best": {"run": selected[0], "value": selected[1]},
+            "evaluated": len(candidates),
+        }
 
     def _execute(
         self,

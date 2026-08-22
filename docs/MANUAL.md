@@ -11,10 +11,10 @@
 # LambdaForge Manual
 
 
-LambdaForge is SimpleLambda's object-oriented framework for reproducible AI work. It combines
-generic tasks, composable preprocessing, PyTorch, Lightning and a YAML engine behind one stable
-Python package, so a research project can focus on its data and science instead of rebuilding
-pipelines, training loops, provenance, result management and process scheduling.
+LambdaForge is SimpleLambda's function-first framework for reproducible AI work. A consumer writes
+ordinary importable Python for scientific behaviour and small YAML for execution. LambdaForge
+provides strict internal Tasks/Workflows, PyTorch/Lightning helpers, provenance, datasets, results,
+clusters and scheduling without making those internal structures mandatory authoring concepts.
 
 > **Status:** usable but pre-1.0. The public namespaces documented below are the intended
 > API; compatibility is not yet guaranteed between minor releases. The repository does not yet
@@ -149,11 +149,11 @@ python -c "import lambdaforge; print(lambdaforge.__version__)"
 ```
 
 The consumer dependency range is an executable compatibility contract. A declaration such as
-`lambdaforge[adaptive-hpo,parquet]>=0.9,<0.10` excludes every 0.10 release. Pip may still replace an
+`lambdaforge[adaptive-hpo,parquet]>=0.10,<0.11` excludes every 0.11 release. Pip may still replace an
 editable LambdaForge installation and only print a conflict warning because the consumer was
 already present; `python -m pip check` then reports the broken environment. A clean managed cluster
 solve sees both wheels together and refuses the contradiction. Do not work around it with
-`--no-deps`: review the new release, change the consumer range (for example to `>=0.10,<0.11`),
+`--no-deps`: review the new release, change the consumer range (for example to `>=0.11,<0.12`),
 reinstall the consumer and require `pip check` to pass. LambdaForge reads the built consumer wheel
 and reports this incompatibility locally before transferring a remote execution bundle.
 
@@ -199,13 +199,109 @@ are simpler. The [extension contracts](#26-extension-contracts) show both routes
 
 ## 4. Quick start
 
+### Canonical 0.11 workflow
+
+The shortest useful configuration is:
+
+```yaml
+name: baseline
+run: my_project.training.train
+with:
+  hidden_dim: 128
+resources:
+  gpu: 1
+  cpu: 4
+```
+
+`run` is a dotted import path to a normal function, `with` becomes keyword arguments and
+`resources` is the actual portable reservation. There is no user-authored `kind`, schema version,
+Task subclass, input/output block or object graph. The consumer package must be installed so the
+import works locally and in a managed remote environment.
+
+```python
+import lambdaforge as lf
+
+def train(hidden_dim: int) -> dict[str, float]:
+    score = do_research(hidden_dim)
+    lf.metric("score", score)
+    return {"score": score}
+```
+
+Use these commands in order:
+
+| Command | Meaning | Executes Python? |
+|---|---|---:|
+| `lf validate CONFIG` | Check YAML, imports, files/datasets and callable signature. | No |
+| `lf inspect CONFIG` | Show the scientific plan and reuse decision. | No |
+| `lf inspect CONFIG --resolved` | Show the strict internal IR for advanced diagnosis. | No |
+| `lf run CONFIG --dry-run` | Show placement/submission without launching it. | No |
+| `lf run CONFIG` | Run locally or submit with `--on CLUSTER`. | Yes |
+
+Only exact typed argument values have infrastructure meaning:
+
+```yaml
+with:
+  local_metadata: {file: data/source.json}
+  training_data: {dataset: wisdom-dna@1}
+  model_name: resnet50       # remains the ordinary string "resnet50"
+```
+
+File and dataset parameters arrive as `pathlib.Path` values. Local files participate in scientific
+identity and files no larger than 10 MiB are staged into remote bundles. Managed datasets resolve
+an immutable version/placement. A large unregistered path is refused instead of silently copied.
+
+The runtime facade is deliberately small:
+
+- `lf.current()` returns the immutable name, seed, parameters, attempt identity and run directory;
+- `lf.metric(name, value, step=..., split=...)` appends history and updates the final scalar;
+- `lf.artifact(name, path, role=..., metadata=...)` registers one run-owned file or directory;
+- `lf.publish_dataset(name, version, members, ...)` streams and atomically publishes a dataset.
+
+All four fail outside an active execution. A function may return any JSON-compatible value; a
+mapping is stored directly and another scalar/list becomes the `result` output.
+
+Semantics expand without changing Python:
+
+```yaml
+name: robust-baseline
+run: my_project.training.train
+with: {hidden_dim: 128}
+seeds: [7, 17, 27]
+objective: {metric: val_score, mode: max}
+```
+
+LambdaForge seeds Python, NumPy and PyTorch, and passes `seed` only when the signature declares it.
+Each seed is a Run inside one named Work. `search` adds parameter variants: `values` is exact;
+`range: [low, high]` uses the existing deterministic sampler and requires/accepts a bounded
+`trials` count (default 20). The result ranks the exact objective observations. Advanced adaptive
+multi-fidelity HPO remains available through its compatible strict configuration.
+
+```yaml
+name: pipeline
+steps:
+  - {name: prepare, run: project.prepare}
+  - parallel:
+      - {name: model-a, run: project.train_a, resources: {gpu: 1}}
+      - {name: model-b, run: project.train_b, resources: {gpu: 1}}
+  - {name: compare, run: project.compare}
+```
+
+The strict Workflow DAG is materialized internally. Each ordinary step depends on the previous
+level; parallel siblings do not depend on one another; the next step waits for all siblings.
+Document `resources` is inherited by each simple step/run and a step mapping overrides individual
+fields. The outer scheduler allocation is conservatively aggregated over parallel DAG levels. An
+explicit top-level allocation in strict legacy Workflow/Dataset YAML retains its exact old meaning.
+
+### Advanced compatibility model
+
 ### The ideas you need before running a command
 
 LambdaForge reads a **configuration file**: a plain-text YAML document that says what work should
 be performed, which Python objects implement it, which parameters they receive, where results go
 and which resources may be used. YAML is indentation-sensitive; use spaces, never tabs.
 
-There are three document types:
+Pre-0.11 strict authoring exposes three internal document families. They remain supported for
+existing projects and built-in Lightning/preprocessing helpers:
 
 | Document | Use it for | Example |
 |---|---|---|
@@ -929,6 +1025,31 @@ tests exercise credentials, transfers, submission, failures and reconnection wit
 This section covers the durable state machine, safe process identity, CPU/RAM/GPU leases, pause
 semantics, recovery guarantees and the dataset registry, profiling and lifecycle model.
 
+The normal user entity is **Work**: one name plus scientific identity on one target. An Execution
+is one invocation; seeds/search variants/parallel branches are Runs; retry creates an Attempt; a
+Job is the low-level scheduler/process record. These are semantics derived from the existing job
+store, not five redundant persistence models. Use names first and job IDs only for diagnosis:
+
+```bash
+lf status
+lf show baseline
+lf logs baseline --follow
+lf cancel baseline
+lf retry baseline
+```
+
+The same active identity on the same cluster is refused by default. `--allow-duplicate` is the
+explicit escape hatch; the same science on another cluster is independent and allowed.
+
+New datasets are normally published from an ordinary callable with
+`lf.publish_dataset(name, version, members)`. `members` may be a generator. Each mapping requires a
+stable `id`, accepts `split` or arbitrary `partitions`, `targets`, `metadata`, `display` and named
+`assets`. Local assets must already exist below the active run; URIs remain explicit. LambdaForge
+streams canonical JSONL, copies and hashes declared assets in staging, validates the complete
+DatasetIndex, derives DatasetArtifact v2 identity, atomically publishes and registers placement.
+Published `name@version` values are immutable. Recipe publication below is the supported advanced
+compatibility route and uses the same artifact/registry safety boundary.
+
 Every control-plane submission returns a short LambdaForge `job_id` and stores one atomic JSON
 record under the user's XDG state directory (`~/.local/state/lambdaforge/jobs` by default). The
 record contains cluster, scheduler ID, exact argument vector, resources, bundle identity, timestamps
@@ -1546,7 +1667,10 @@ snapshot without changing the environment.
 | `run CONFIG --allow-duplicate` | Intentionally permit an already-active experiment revision on the same target. | yes |
 | `run CONFIG --on CLUSTER|--profile PROFILE` | Persist an ID immediately, then prepare/cache/submit remotely in a detached controller. `--wait-for-submit` waits for provider acknowledgement. | job metadata; remote only without dry-run |
 | `clusters add|list|show|inspect|set|unset|remove|export|credentials|test|bootstrap|resources|storage` | Manage profiles and inspect their environment, resources and storage. | profile/credential/bootstrap mutations |
-| `status`, `overview`, `top [--history SECONDS]` | Global cluster/job/dataset view; `top` is interactive on a TTY, `top --once` is one-shot and `top --json --follow` is NDJSON. | no |
+| `status`, `overview`, `top [--history SECONDS]` | Global cluster/Work/dataset view; `top` is interactive on a TTY, `top --once` is one-shot and `top --json --follow` is NDJSON. | no |
+| `show WORK`, `logs WORK`, `cancel WORK`, `retry WORK` | Name-first Work inspection and lifecycle; low-level job selectors remain accepted. | lifecycle commands only |
+| `delete WORK [--apply]` | Preview or remove terminal attempts and exact managed job workspaces; preserve datasets/shared state. | only with `--apply` |
+| `clean [--on CLUSTER] [--apply]` | Simple alias for reference-aware reconstructible-cache GC. | only with `--apply` |
 | `status|logs|cancel|retry` | Short aliases for the corresponding common persistent-job operations. | lifecycle commands only |
 | `jobs list [--all]|status|show|logs|pause|resume|cancel|retry|delete|reconcile|groups`, `jobs group list|show` | Reconnect and safely control persistent work/groups. | lifecycle commands only |
 | `resources [--on C|--all] [--processes]` | Separate observed host facts, scheduler view and declared job requests. | no |
@@ -1672,6 +1796,7 @@ The supported entry points are deliberately narrow:
 
 | Entry point | Purpose |
 |---|---|
+| `import lambdaforge as lf; lf.current/metric/artifact/publish_dataset` | Canonical callable runtime context, evidence and streaming dataset publication. |
 | `from lambdaforge import LambdaForge` | Load, run or construct objects through the facade. |
 | `from lambdaforge import MaterializedConfig, JobHandle` | Inspect compiled authoring and durable submissions. |
 | `from lambdaforge import Experiment` | Inspect, execute, aggregate and load one experiment suite. |
@@ -1924,7 +2049,7 @@ LambdaForge/
 │   ├── operations/               # inference, evaluation and export tasks
 │   ├── plugins/                  # lazy installed-package extension discovery
 │   ├── preprocessing/            # source/transform/sink pipelines and dataset identity
-│   ├── runtime/                  # shared cross-process filesystem locks
+│   ├── runtime/                  # callable adapter, active facade and process locks
 │   ├── registry/                 # result queries, comparisons, reports and dashboard
 │   ├── reproducibility/          # profiles, seed derivation and environment exports
 │   ├── schemas/                  # packaged experiment and generic-task JSON Schemas
@@ -1946,6 +2071,11 @@ interaction/rendering. The private `SubmissionWorker` is deliberately an interna
 point, not another public execution engine. This separation lets a future GUI call the same service
 objects or JSON commands without importing a TUI.
 
+`AuthoringConfigNormalizer` compiles `run/with/resources`, typed arguments, seeds/search and
+step/parallel syntax into strict Task/Workflow IR. `CallableTask` is the only adapter and
+`TaskRunner` remains the execution authority; its contextvar-backed runtime capture merges metrics,
+artifacts and dataset receipts into the existing `TaskResult`. There is no second runner.
+
 `ConfigurationDescriptor` is the single pure interpretation used by submission and project views
 for document kind, research name, scientific identity, referenced datasets, job type and planned
 units. It does not replace `Task`, `Experiment`, `Workflow` or `DatasetRecipe`; those retain their
@@ -1955,8 +2085,11 @@ selector-oriented adapter over `DatasetBuildService`.
 `JobObservation` derives presentation-only timing and usage from `JobRecord` plus authoritative
 provider state; it does not mutate identity or create a competing store. `ResourceService`
 aggregates the same observed values for the current user's active LambdaForge jobs.
-`ResearchWork` similarly groups immutable `JobRecord` snapshots by scientific identity and target
-for display. `ProjectConfigService` combines configuration discovery with those jobs and local or
+`ResearchWork` groups immutable `JobRecord` snapshots by scientific identity and target for
+display. `WorkService` resolves names and permits preview-first deletion only for terminal records
+and exact children of the configured job root. After all owned roots are gone it stores one tiny
+completion receipt (identity, job IDs and deletion time), making a repeated delete converge without
+retaining results or artifacts. `ProjectConfigService` combines discovery with local or
 synchronized `ResultCatalog` evidence to produce experiment status/history. Neither read model
 persists facts, so YAML, `JobStore`, physical `DatasetArtifact`/content and result artifacts remain
 the authorities; `DatasetRegistry` is a reconciliable dataset discovery index.

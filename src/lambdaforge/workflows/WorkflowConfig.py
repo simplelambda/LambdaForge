@@ -42,6 +42,10 @@ class WorkflowConfig:
         self.source = Path(source).resolve() if source else None
         source_dir = self.source.parent if self.source else Path.cwd().resolve()
         self.name = name
+        metadata = data.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            raise TypeError("Workflow metadata must be a mapping.")
+        self.metadata = copy.deepcopy(dict(metadata))
         self.max_parallel = self._positive_int(data.get("max_parallel", 1), "max_parallel")
         raw_resources = data.get("resources")
         if raw_resources is not None and not isinstance(raw_resources, Mapping):

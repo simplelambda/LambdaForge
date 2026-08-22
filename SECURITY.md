@@ -25,6 +25,15 @@ required. Do not include real credentials or private datasets.
   containment and symbolic-link boundaries at their owning layer. Managed dataset deletion also
   revalidates the exact immutable manifest identity inside the configured dataset root immediately
   before removing bytes; stale, conflicting or unreachable index state fails closed.
+- Function-first runtime APIs retain that boundary: `artifact` accepts only existing run-contained
+  paths, and `publish_dataset` accepts only run-owned local assets or explicit URIs, rejects
+  traversal/symlinks, hashes assets, verifies staging and atomically publishes before registration.
+  Ordinary YAML strings are never guessed to be paths; only explicit `file`/`dataset` markers
+  authorize resolution and staging.
+- `lf delete WORK` is preview-first, refuses active attempts and removes only an exact tracked job-ID
+  child of the configured job root. Published datasets, shared caches/environments and other Work
+  are outside this operation; dataset deletion remains a separate manifest-checked command. A
+  minimal completion receipt contains no scientific outputs and makes a repeated deletion safe.
 - Checksums detect accidental or malicious modification but do not authenticate a producer. Use
   HMAC where supported, restrict store permissions and obtain artifacts over authenticated channels.
 - Local and SLURM backends never interpolate a command through a local shell. Generated batch

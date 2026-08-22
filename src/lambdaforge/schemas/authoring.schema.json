@@ -9,6 +9,13 @@
     "schema_version": {"type": "string"},
     "kind": {"enum": ["task", "workflow", "experiment", "dataset"]},
     "name": {"type": "string", "minLength": 1},
+    "run": {"oneOf": [{"type": "string", "minLength": 3}, {"type": "object"}]},
+    "with": {"type": "object"},
+    "steps": {"type": "array", "items": {"type": "object"}},
+    "parallel": {"type": "array", "items": {"type": "object"}},
+    "seeds": {"type": "array", "items": {"type": "integer"}, "uniqueItems": true},
+    "search": {"type": "object"},
+    "objective": {"type": "object"},
     "inputs": {
       "oneOf": [
         {"type": "array", "items": {"type": "object"}},

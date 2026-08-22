@@ -7,6 +7,7 @@ import json
 import os
 import time
 import traceback
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.experiments.StdIOCapture import StdIOCapture
 from lambdaforge.observability.EventLogger import EventLogger
 from lambdaforge.plugins.PluginRegistry import PluginRegistry
+from lambdaforge.runtime.api import RunContext, RuntimeCapture, activate
 from lambdaforge.tasks.artifacts import ArtifactDeclaration, TaskArtifact
 from lambdaforge.tasks.TaskConfig import TaskConfig
 from lambdaforge.tasks.TaskContext import TaskContext
@@ -53,6 +55,13 @@ class TaskRunner:
         else:
             plugin = spec["plugin"]
             target = f"plugin:{plugin['kind']}:{plugin['name']}"
+        spec_params = spec.get("params", {})
+        callable_path = None
+        parameters: Mapping[str, Any] = {}
+        if target == "lambdaforge.runtime.CallableTask" and isinstance(spec_params, Mapping):
+            callable_path = str(spec_params.get("callable_path") or spec_params.get("class_path"))
+            raw_parameters = spec_params.get("parameters", {})
+            parameters = raw_parameters if isinstance(raw_parameters, Mapping) else {}
         return TaskExecutionPlan(
             name=config.name,
             run_dir=config.run_dir,
@@ -64,6 +73,9 @@ class TaskRunner:
             required_artifacts=config.required_artifacts,
             inputs=[value.to_dict() for value in config.resolved_inputs],
             execution=config.get("execution", {"mode": "sequential"}),
+            callable_path=callable_path,
+            parameters=parameters,
+            resources=config.resources.to_dict(),
         )
 
     def run(
@@ -129,7 +141,24 @@ class TaskRunner:
                     )
                     if context.stop_requested:
                         raise KeyboardInterrupt("Task execution was cancelled before start.")
-                    output = TaskOutput.from_value(self._invoke(method, context))
+                    runtime = RuntimeCapture(
+                        RunContext(
+                            context.name,
+                            context.run_dir,
+                            context.source_dir,
+                            context.attempt_id,
+                            context.config_fingerprint,
+                            getattr(task, "seed", None),
+                            (
+                                task.runtime_parameters(context)
+                                if callable(getattr(task, "runtime_parameters", None))
+                                else {}
+                            ),
+                        )
+                    )
+                    with activate(runtime):
+                        returned = self._invoke(method, context)
+                    output = self._merge_runtime(TaskOutput.from_value(returned), runtime)
                     artifacts = self._materialize_artifacts(output, config)
                     finished = datetime.now(timezone.utc)
                     result = TaskResult(
@@ -191,6 +220,30 @@ class TaskRunner:
             )
         events.write("task_finished", event_fields)
         return result
+
+    @staticmethod
+    def _merge_runtime(output: TaskOutput, capture: RuntimeCapture) -> TaskOutput:
+        artifacts = list(output.artifacts)
+        if capture.metric_count:
+            artifacts.append(
+                ArtifactDeclaration(
+                    "metrics.jsonl",
+                    name="metrics",
+                    kind="metrics",
+                    media_type="application/x-ndjson",
+                )
+            )
+        artifacts.extend(capture.artifacts)
+        return TaskOutput(
+            outputs=output.outputs,
+            metrics={**dict(capture.metrics), **dict(output.metrics)},
+            artifacts=artifacts,
+            metadata={
+                **dict(output.metadata),
+                "metric_observations": capture.metric_count,
+                "published_datasets": capture.datasets,
+            },
+        )
 
     @staticmethod
     def _register_dataset(config: TaskConfig, run_dir: Path, events: EventLogger) -> None:

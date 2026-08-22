@@ -53,11 +53,12 @@ class SubmissionService:
                 "Detached submission cannot prompt for a password. Store a keyring credential "
                 "reference or use OpenSSH authentication first."
             )
-        # Parse first so authoring errors remain immediate and no doomed request is queued.
-        # Tasks do not need active-experiment deduplication. Their complete input/code
-        # fingerprint is attached by the worker, keeping the foreground hand-off cheap.
+        # Parse and identify first so authoring errors and duplicate scientific work remain
+        # immediate; expensive remote preparation still happens in the detached controller.
         descriptor = ConfigurationDescriptor.from_path(source, resolve_task_code_identity=False)
-        if descriptor.job_type in {"experiment", "hpo"} and not allow_duplicate:
+        if descriptor.job_type == "work":
+            descriptor = ConfigurationDescriptor.from_path(source)
+        if descriptor.job_type in {"experiment", "hpo", "work"} and not allow_duplicate:
             self.jobs.refuse_active_execution(
                 descriptor.scientific_identity,
                 cluster,

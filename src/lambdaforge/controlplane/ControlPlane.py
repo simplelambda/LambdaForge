@@ -72,7 +72,11 @@ class ControlPlane:
         descriptor = ConfigurationDescriptor.from_path(config_path)
         materialized_kind = descriptor.kind
         request = resources or ConfigurationResourceResolver.resolve(config_path)
-        if descriptor.job_type in {"experiment", "hpo"} and not dry_run and not allow_duplicate:
+        if (
+            descriptor.job_type in {"experiment", "hpo", "work"}
+            and not dry_run
+            and not allow_duplicate
+        ):
             self.jobs.refuse_active_execution(
                 descriptor.scientific_identity,
                 cluster,
@@ -261,18 +265,22 @@ class ControlPlane:
             trust = runtime.tls_trust if runtime is not None else None
             if isinstance(trust, TlsTrust):
                 environment_assignments.extend(trust.assignments())
+            environment_assignments.extend(
+                (
+                    "LAMBDAFORGE_DATASET_REGISTRY="
+                    f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
+                    f"LAMBDAFORGE_CLUSTER={cluster}",
+                )
+            )
+            if storage.dataset_root is not None:
+                environment_assignments.append(f"LAMBDAFORGE_DATASET_ROOT={storage.dataset_root}")
             if materialized_kind.value == "dataset":
-                assert storage.dataset_root is not None
                 environment_assignments.extend(
                     (
-                        "LAMBDAFORGE_DATASET_REGISTRY="
-                        f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
-                        f"LAMBDAFORGE_DATASET_ROOT={storage.dataset_root}",
                         "LAMBDAFORGE_DATASET_BUILD_ROOT="
                         f"{PurePosixPath(storage.run_root) / 'dataset-builds'}",
                         "LAMBDAFORGE_STAGE_CACHE_ROOT="
                         f"{PurePosixPath(storage.cache_root) / 'dataset-stages'}",
-                        f"LAMBDAFORGE_CLUSTER={cluster}",
                     )
                 )
             environment_prefix = (

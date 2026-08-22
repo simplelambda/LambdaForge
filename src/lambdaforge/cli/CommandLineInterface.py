@@ -49,6 +49,7 @@ from lambdaforge.controlplane.OverviewService import OverviewService
 from lambdaforge.controlplane.ResourceService import ResourceService
 from lambdaforge.controlplane.StorageService import StorageService
 from lambdaforge.controlplane.SubmissionService import SubmissionService
+from lambdaforge.controlplane.WorkService import WorkService
 from lambdaforge.data.DataCatalog import DataCatalog
 from lambdaforge.data.DataService import DataService
 from lambdaforge.data.DatasetBuildService import DatasetBuildService
@@ -305,10 +306,10 @@ class CommandLineInterface:
                 return 0
             except Exception as error:
                 return report_error(error)
-        if arguments.command == "storage":
+        if arguments.command in {"storage", "clean"}:
             try:
                 storage_service = StorageService(ClusterCatalog.load(arguments.clusters))
-                if arguments.storage_command == "status":
+                if arguments.command == "storage" and arguments.storage_command == "status":
                     reports = (
                         storage_service.all()
                         if arguments.all
@@ -375,6 +376,18 @@ class CommandLineInterface:
                         )
                     )
                 print(json.dumps(plan.to_dict(), indent=2))
+                return 0
+            except Exception as error:
+                return report_error(error)
+        if arguments.command in {"show", "delete"}:
+            try:
+                work_service = WorkService(ClusterCatalog.load(arguments.clusters))
+                payload = (
+                    work_service.show(arguments.selector).to_dict()
+                    if arguments.command == "show"
+                    else work_service.delete(arguments.selector, apply=arguments.apply)
+                )
+                print(json.dumps(payload, indent=2))
                 return 0
             except Exception as error:
                 return report_error(error)
@@ -548,7 +561,18 @@ class CommandLineInterface:
                 if arguments.json:
                     forwarded.append("--json")
             else:
-                forwarded.extend((arguments.command, arguments.job_id))
+                selected = arguments.job_id
+                if selected is not None:
+                    try:
+                        selected = (
+                            WorkService(ClusterCatalog.load(arguments.clusters))
+                            .show(selected)
+                            .primary_job_id
+                        )
+                    except KeyError:
+                        pass
+                assert selected is not None
+                forwarded.extend((arguments.command, selected))
                 if arguments.command == "status" and arguments.json:
                     forwarded.append("--json")
                 if arguments.command == "logs":
@@ -704,7 +728,7 @@ class CommandLineInterface:
                 return 0 if workflow_report.is_valid else 1
             validator = (
                 TaskValidator()
-                if TaskConfig.is_task_file(arguments.config)
+                if materialized_kind is ConfigurationKind.TASK
                 else ExperimentValidator()
             )
             validation_report = validator.validate_file(
@@ -950,7 +974,7 @@ class CommandLineInterface:
                     run_dir=workflow_outcome.run_dir,
                 )
             )
-        if TaskConfig.is_task_file(arguments.config):
+        if materialized_kind is ConfigurationKind.TASK:
             if arguments.command == "aggregate":
                 raise ValueError("aggregate applies only to training experiment YAML.")
             task = TaskRun.from_yaml(arguments.config)
@@ -1043,9 +1067,7 @@ class CommandLineInterface:
                 )
             print(json.dumps(run_outcome.to_dict(), indent=2, default=str))
             return 0
-        failed_results = [
-            result for result in run_outcome if result.get("status") == "failed"
-        ]
+        failed_results = [result for result in run_outcome if result.get("status") == "failed"]
         if failed_results:
             first = failed_results[0]
             return report_diagnostic(
@@ -1210,16 +1232,16 @@ class CommandLineInterface:
         print(f"Datasets: {', '.join(datasets) if datasets else 'none'}")
         planned = payload.get("planned_work", {})
         if isinstance(planned, dict):
-            print(
-                f"Planned work: {planned.get('total', '?')} "
-                f"{planned.get('unit', 'units')}"
-            )
+            print(f"Planned work: {planned.get('total', '?')} {planned.get('unit', 'units')}")
         if payload.get("model"):
             model = payload["model"]
             print(f"Model: {model.get('target')}({model.get('params', {})})")
         if payload.get("training"):
             training = payload["training"]
             print(f"Training: maximum {training.get('max_epochs', '?')} epochs")
+        if payload.get("callable"):
+            print(f"Callable: {payload['callable']}")
+            print(f"Parameters: {payload.get('parameters', {})}")
         if payload.get("seeds"):
             print(f"Seeds: {', '.join(str(value) for value in payload['seeds'])}")
         if payload.get("objective"):

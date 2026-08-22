@@ -132,6 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
     storage_gc.add_argument("--on", default="local")
     storage_gc.add_argument("--apply", action="store_true")
     storage_gc.add_argument("--json", action="store_true")
+    clean = subparsers.add_parser(
+        "clean", help="Preview safe cleanup of reconstructible LambdaForge cache data."
+    )
+    clean.add_argument("--on", default="local")
+    clean.add_argument("--clusters", type=Path)
+    clean.add_argument("--apply", action="store_true")
+    clean.add_argument("--json", action="store_true")
     environments = subparsers.add_parser("environments", help="Inspect managed environments.")
     environments.add_argument("--clusters", type=Path)
     environment_commands = environments.add_subparsers(dest="environment_command", required=True)
@@ -308,6 +315,17 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--name")
     status.add_argument("--clusters", type=Path)
     status.add_argument("--json", action="store_true")
+    show = subparsers.add_parser("show", help="Show one semantic Work by name, ID or revision.")
+    show.add_argument("selector")
+    show.add_argument("--clusters", type=Path)
+    show.add_argument("--json", action="store_true")
+    delete = subparsers.add_parser(
+        "delete", help="Preview deletion of one terminal Work and its owned workspaces."
+    )
+    delete.add_argument("selector")
+    delete.add_argument("--clusters", type=Path)
+    delete.add_argument("--apply", action="store_true")
+    delete.add_argument("--json", action="store_true")
     logs = subparsers.add_parser("logs", help="Read or follow one persistent job log.")
     logs.add_argument("job_id")
     logs.add_argument("--tail", type=int)

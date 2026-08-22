@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import itertools
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,8 @@ class AuthoringConfigNormalizer:
                 f"Unsupported authoring_version {declared_authoring!r}; "
                 f"current is {self.VERSION!r}."
             )
+        if "run" in data or "steps" in data or "parallel" in data:
+            data = self._simple_work(data)
         kind = self.detect(data)
         if kind is ConfigurationKind.DATASET:
             data.setdefault("kind", "dataset")
@@ -65,6 +69,14 @@ class AuthoringConfigNormalizer:
                 ) from error
         if "nodes" in values:
             return ConfigurationKind.WORKFLOW
+        if "run" in values:
+            return (
+                ConfigurationKind.WORKFLOW
+                if "seeds" in values or "search" in values
+                else ConfigurationKind.TASK
+            )
+        if "steps" in values or "parallel" in values:
+            return ConfigurationKind.WORKFLOW
         # A training experiment also owns a top-level ``task`` object.  Its
         # explicit experiment block therefore has priority over the concise
         # generic-task shorthand.
@@ -73,6 +85,331 @@ class AuthoringConfigNormalizer:
         if "task" in values or "preprocess" in values:
             return ConfigurationKind.TASK
         return ConfigurationKind.EXPERIMENT
+
+    def _simple_work(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Compile function-first YAML to strict Task/Workflow IR."""
+        if "steps" in values or ("parallel" in values and "run" not in values):
+            return self._simple_steps(values)
+        if "run" not in values:
+            raise ValueError("Simple work requires run, steps or parallel.")
+        seeds = values.pop("seeds", None)
+        search = values.pop("search", None)
+        maximum = values.pop("max_parallel", None)
+        objective = values.pop("objective", None)
+        trials = values.pop("trials", None)
+        if seeds is None and search is None:
+            if objective is not None:
+                values["objective"] = objective
+            return self._simple_task(values)
+        seed_values = self._seed_values(seeds)
+        variants = self._search_variants(search, trials=trials)
+        base = copy.deepcopy(values)
+        nodes: dict[str, Any] = {}
+        index = 0
+        for variant in variants:
+            for seed in seed_values:
+                index += 1
+                node = copy.deepcopy(base)
+                parameters = dict(node.get("with", {}))
+                parameters.update(variant)
+                node["with"] = parameters
+                if seed is not None:
+                    node["seed"] = seed
+                nodes[f"run-{index:03d}"] = {"config": self._simple_task(node)}
+        return {
+            "kind": "workflow",
+            "schema_version": "1.0",
+            "name": str(base.get("name", "work")),
+            "nodes": nodes,
+            "max_parallel": int(maximum if maximum is not None else min(len(nodes), 4)),
+            "metadata": {
+                "authoring": "simple-work",
+                "seeds": [value for value in seed_values if value is not None],
+                "search_variants": len(variants),
+                **({"objective": self._objective(objective)} if objective is not None else {}),
+            },
+            **({"output_root": str(base["output_root"])} if "output_root" in base else {}),
+        }
+
+    def _simple_steps(self, values: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "name",
+            "steps",
+            "parallel",
+            "resources",
+            "max_parallel",
+            "output_root",
+            "metadata",
+        }
+        unexpected = set(values) - allowed
+        if unexpected:
+            raise ValueError(f"Unknown simple workflow keys: {sorted(unexpected)}.")
+        raw_steps: Any = values.get("steps")
+        if raw_steps is None:
+            raw_steps = [{"parallel": values.get("parallel")}]
+        if not isinstance(raw_steps, Sequence) or isinstance(raw_steps, (str, bytes, bytearray)):
+            raise TypeError("steps must be a list.")
+        nodes: dict[str, Any] = {}
+        default_resources = values.get("resources", {})
+        if not isinstance(default_resources, Mapping):
+            raise TypeError("Workflow resources must be a mapping.")
+        previous: tuple[str, ...] = ()
+        largest_level = 1
+        for position, entry in enumerate(raw_steps, 1):
+            if not isinstance(entry, Mapping):
+                raise TypeError(f"steps[{position - 1}] must be a mapping.")
+            group = entry.get("parallel")
+            entries: Sequence[Any]
+            if group is not None:
+                if not isinstance(group, Sequence) or isinstance(group, (str, bytes, bytearray)):
+                    raise TypeError(f"steps[{position - 1}].parallel must be a list.")
+                entries = group
+            else:
+                entries = (entry,)
+            current: list[str] = []
+            largest_level = max(largest_level, len(entries))
+            for offset, step in enumerate(entries, 1):
+                if not isinstance(step, Mapping):
+                    raise TypeError("Each workflow step must be a mapping.")
+                raw_name = step.get("name") or str(step.get("run", "step")).rsplit(".", 1)[-1]
+                name = self._unique_node_name(str(raw_name), position, offset, nodes)
+                node = dict(step)
+                node.pop("name", None)
+                step_resources = node.get("resources", {})
+                if not isinstance(step_resources, Mapping):
+                    raise TypeError(f"Resources for step {name!r} must be a mapping.")
+                inherited_resources = {
+                    **copy.deepcopy(dict(default_resources)),
+                    **copy.deepcopy(dict(step_resources)),
+                }
+                if inherited_resources:
+                    node["resources"] = inherited_resources
+                nodes[name] = {
+                    "config": self._simple_task(node),
+                    **({"needs": list(previous)} if previous else {}),
+                }
+                current.append(name)
+            previous = tuple(current)
+        maximum = values.get("max_parallel", largest_level)
+        return {
+            "kind": "workflow",
+            "schema_version": "1.0",
+            "name": str(values.get("name", "workflow")),
+            "nodes": nodes,
+            "max_parallel": int(maximum),
+            **({"output_root": str(values["output_root"])} if "output_root" in values else {}),
+            **({"metadata": copy.deepcopy(values["metadata"])} if "metadata" in values else {}),
+        }
+
+    def _simple_task(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        data = copy.deepcopy(dict(values))
+        allowed = {
+            "name",
+            "run",
+            "with",
+            "resources",
+            "output_root",
+            "metadata",
+            "resume",
+            "rerun_completed",
+            "code_version",
+            "data_catalog",
+            "seed",
+            "objective",
+        }
+        unexpected = set(data) - allowed
+        if unexpected:
+            raise ValueError(f"Unknown simple run keys: {sorted(unexpected)}.")
+        target = data.get("run")
+        class_spec: dict[str, Any] | None = None
+        if isinstance(target, Mapping):
+            class_spec = copy.deepcopy(dict(target))
+            unexpected_run = set(class_spec) - {"class", "target", "init", "method", "with"}
+            if unexpected_run:
+                raise ValueError(f"Unknown run class keys: {sorted(unexpected_run)}.")
+            if "class" in class_spec and "target" in class_spec:
+                raise ValueError("Use run.class or run.target, not both.")
+            class_path = class_spec.get("class", class_spec.get("target"))
+            if not isinstance(class_path, str) or not class_path.strip():
+                raise ValueError("run.class must be a non-empty dotted class path.")
+            if not isinstance(class_spec.get("init", {}), Mapping):
+                raise TypeError("run.init must be a mapping.")
+        elif not isinstance(target, str) or not target.strip():
+            raise ValueError("run must be a dotted Python callable path or class mapping.")
+        if class_spec is not None and "with" in data and "with" in class_spec:
+            raise ValueError("Declare with either beside run or inside the advanced class form.")
+        parameters = data.get("with", class_spec.get("with", {}) if class_spec else {})
+        if not isinstance(parameters, Mapping):
+            raise TypeError("with must map Python parameter names to values.")
+        inputs: list[dict[str, Any]] = []
+        resolved_parameters = self._parameter_inputs(parameters, inputs, marker=False)
+        seed = data.get("seed")
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise TypeError("seed must be an integer.")
+        task_params: dict[str, Any] = {
+            "parameters": resolved_parameters,
+        }
+        if class_spec is None:
+            task_params["callable_path"] = target
+        else:
+            task_params.update(
+                {
+                    "class_path": class_spec.get("class", class_spec.get("target")),
+                    "init_parameters": self._parameter_inputs(
+                        class_spec.get("init", {}), inputs, marker=False
+                    ),
+                    "method": str(class_spec.get("method", "run")),
+                }
+            )
+        if seed is not None:
+            task_params["seed"] = seed
+        extensions: dict[str, Any] = {
+            "authoring": {
+                "simple_work": True,
+                **({"resources": copy.deepcopy(data["resources"])} if "resources" in data else {}),
+                **{key: data[key] for key in ("code_version", "data_catalog") if key in data},
+                **(
+                    {"objective": self._objective(data["objective"])} if "objective" in data else {}
+                ),
+            }
+        }
+        return {
+            "kind": "task",
+            "schema_version": "1.0",
+            "name": str(
+                data.get(
+                    "name",
+                    str(
+                        class_spec.get("class", class_spec.get("target"))
+                        if class_spec is not None
+                        else target
+                    ).rsplit(".", 1)[-1],
+                )
+            ),
+            "inputs": inputs,
+            "task": {
+                "target": "lambdaforge.runtime.CallableTask",
+                "params": task_params,
+            },
+            "extensions": extensions,
+            **({"output_root": str(data["output_root"])} if "output_root" in data else {}),
+            **({"metadata": copy.deepcopy(data["metadata"])} if "metadata" in data else {}),
+            **({"resume": bool(data["resume"])} if "resume" in data else {}),
+            **(
+                {"rerun_completed": bool(data["rerun_completed"])}
+                if "rerun_completed" in data
+                else {}
+            ),
+        }
+
+    def _parameter_inputs(
+        self, value: Any, inputs: list[dict[str, Any]], *, marker: bool = True
+    ) -> Any:
+        if isinstance(value, Mapping):
+            if marker and set(value) == {"file"}:
+                name = f"argument_{len(inputs)}"
+                inputs.append({"name": name, "path": str(value["file"])})
+                return {"__lambdaforge_input__": name}
+            if marker and set(value) == {"dataset"}:
+                name = f"argument_{len(inputs)}"
+                selector = str(value["dataset"])
+                inputs.append(
+                    {
+                        "name": name,
+                        "dataset": selector
+                        if selector.startswith("dataset:")
+                        else f"dataset:{selector}",
+                    }
+                )
+                return {"__lambdaforge_input__": name}
+            return {str(key): self._parameter_inputs(item, inputs) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._parameter_inputs(item, inputs) for item in value]
+        return value
+
+    @staticmethod
+    def _seed_values(value: Any) -> tuple[int | None, ...]:
+        if value is None:
+            return (None,)
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("seeds must be a list of integers.")
+        seeds = tuple(value)
+        if not seeds or any(isinstance(seed, bool) or not isinstance(seed, int) for seed in seeds):
+            raise TypeError("seeds must be a non-empty list of integers.")
+        if len(seeds) != len(set(seeds)):
+            raise ValueError("seeds cannot contain duplicates.")
+        return seeds
+
+    @staticmethod
+    def _search_variants(value: Any, *, trials: Any = None) -> tuple[dict[str, Any], ...]:
+        if value is None:
+            if trials is not None:
+                raise ValueError("trials requires a search space.")
+            return ({},)
+        if not isinstance(value, Mapping) or not value:
+            raise TypeError("search must map parameter names to finite values.")
+        names: list[str] = []
+        dimensions: list[Sequence[Any]] = []
+        random_space: dict[str, dict[str, Any]] = {}
+        has_range = False
+        for name, descriptor in value.items():
+            if "." in str(name):
+                raise ValueError("Simple callable search parameter names cannot contain dots.")
+            if isinstance(descriptor, Mapping) and "range" in descriptor:
+                bounds = descriptor["range"]
+                if (
+                    not isinstance(bounds, Sequence)
+                    or isinstance(bounds, (str, bytes, bytearray))
+                    or len(bounds) != 2
+                ):
+                    raise TypeError(f"search.{name}.range must contain [low, high].")
+                kind = str(descriptor.get("type", "uniform"))
+                if kind == "float":
+                    kind = "uniform"
+                if descriptor.get("scale") == "log":
+                    kind = "loguniform"
+                random_space[str(name)] = {"type": kind, "low": bounds[0], "high": bounds[1]}
+                has_range = True
+                continue
+            values = descriptor.get("values") if isinstance(descriptor, Mapping) else descriptor
+            if (
+                not isinstance(values, Sequence)
+                or isinstance(values, (str, bytes, bytearray))
+                or not values
+            ):
+                raise TypeError(f"search.{name} must define values or range.")
+            names.append(str(name))
+            dimensions.append(tuple(values))
+            random_space[str(name)] = {"type": "choice", "values": list(values)}
+        if has_range or trials is not None:
+            count = 20 if trials is None else int(trials)
+            from lambdaforge.hpo.RandomSearch import RandomSearch
+
+            return tuple(
+                dict(trial.parameters) for trial in RandomSearch(random_space).trials(count)
+            )
+        return tuple(
+            dict(zip(names, combination, strict=True))
+            for combination in itertools.product(*dimensions)
+        )
+
+    @staticmethod
+    def _objective(value: Any) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            raise TypeError("objective must contain metric and mode.")
+        metric = str(value.get("metric", "")).strip()
+        mode = str(value.get("mode", "")).strip().lower()
+        if not metric or mode not in {"min", "max"}:
+            raise ValueError("objective requires a metric and mode: min or max.")
+        return {"metric": metric, "mode": mode}
+
+    @staticmethod
+    def _unique_node_name(raw: str, position: int, offset: int, existing: Mapping[str, Any]) -> str:
+        slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-.") or "step"
+        candidate = slug
+        if candidate in existing:
+            candidate = f"{slug}-{position}-{offset}"
+        return candidate
 
     def _task(self, values: dict[str, Any]) -> dict[str, Any]:
         values.setdefault("kind", "task")

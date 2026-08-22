@@ -8,6 +8,7 @@ from pathlib import Path
 from packaging.version import Version
 
 from lambdaforge._version import VERSION
+from lambdaforge.configuration.AuthoringSchemaCatalog import AuthoringSchemaCatalog
 from lambdaforge.tasks.TaskSchemaCatalog import TaskSchemaCatalog
 
 
@@ -36,31 +37,26 @@ dependencies = ["{_framework_requirement()}"]
 where = ["src"]
 """,
         "src/my_project/__init__.py": '"""Project-local datasets, models and tasks."""\n',
-        "src/my_project/tasks.py": '''"""Project task implementations."""
+        "src/my_project/tasks.py": '''"""Ordinary project functions executed by LambdaForge."""
 
 import json
 
-from lambdaforge.tasks import ArtifactDeclaration, Task, TaskContext, TaskOutput
+import lambdaforge as lf
 
 
-class ExampleTask(Task):
-    """Write one small JSON artifact through the public task contract."""
-
-    def run(self, context: TaskContext) -> TaskOutput:
-        """Create the configured example output."""
-        path = context.output_path("output.json", create_parent=True)
-        path.write_text(json.dumps({"status": "ready"}) + "\\n", encoding="utf-8")
-        return TaskOutput(
-            outputs={"status": "ready"},
-            artifacts=[ArtifactDeclaration("output.json", media_type="application/json")],
-        )
+def example(message: str = "ready") -> dict[str, str]:
+    """Write one small artifact and return the final structured result."""
+    path = lf.current().run_dir / "output.json"
+    path.write_text(json.dumps({"status": message}) + "\\n", encoding="utf-8")
+    lf.artifact("output", path, role="report", media_type="application/json")
+    return {"status": message}
 ''',
-        "experiments/task.yaml": """kind: task
-schema_version: "1.0"
-name: example
-task:
-  target: my_project.tasks.ExampleTask
-required_artifacts: [output.json]
+        "experiments/task.yaml": """name: example
+run: my_project.tasks.example
+with:
+  message: ready
+resources:
+  cpu: 1
 """,
         "README.md": """# My AI project
 
@@ -74,10 +70,15 @@ lambdaforge run experiments/task.yaml --dry-run
 lambdaforge run experiments/task.yaml
 ```
 """,
+        "schemas/lambdaforge-authoring.schema.json": json.dumps(
+            AuthoringSchemaCatalog().schema(), indent=2
+        )
+        + "\n",
+        # Retained for editors/tools that still open strict compatible task documents.
         "schemas/lambdaforge-task.schema.json": json.dumps(TaskSchemaCatalog().schema(), indent=2)
         + "\n",
         ".vscode/settings.json": json.dumps(
-            {"yaml.schemas": {"./schemas/lambdaforge-task.schema.json": "experiments/task*.yaml"}},
+            {"yaml.schemas": {"./schemas/lambdaforge-authoring.schema.json": "experiments/*.yaml"}},
             indent=2,
         )
         + "\n",
@@ -106,87 +107,61 @@ slurm-*.err
     preprocessing_files = {
         "src/my_project/preprocessing.py": '''"""Project preprocessing functions."""
 
+import json
+from pathlib import Path
 
-def normalize_record(value: object) -> object:
-    """Replace this example with the domain transformation."""
-    return value
+import lambdaforge as lf
+
+
+def preprocess(source: Path) -> dict[str, int]:
+    """Process JSONL with normal Python and register the resulting directory."""
+    output = lf.current().run_dir / "processed.jsonl"
+    records = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
+    output.write_text("".join(json.dumps(row) + "\\n" for row in records))
+    lf.metric("records", len(records))
+    lf.artifact("processed", output, role="dataset")
+    return {"records": len(records)}
 ''',
         "data/raw.jsonl": '{"id": "example", "value": 1}\n',
         "experiments/preprocessing.yaml": """name: prepare-data
-inputs:
-  raw: ../data/raw.jsonl
-outputs:
-  processed: processed
-preprocess:
-  function: my_project.preprocessing.normalize_record
-  input: raw
-  output: processed
-  key_field: id
-  workers: 2
-  workload: io
+run: my_project.preprocessing.preprocess
+with:
+  source:
+    file: ../data/raw.jsonl
+resources:
+  cpu: 2
+  memory: 1GiB
 """,
     }
     training_files = {
-        "src/my_project/models.py": '''"""Project model definitions."""
+        "src/my_project/training.py": '''"""Small ordinary training function."""
 
-from torch import Tensor, nn
-
-
-class ProjectModel(nn.Module):
-    """Tiny baseline to replace with the research model."""
-
-    def __init__(self, in_features: int = 4) -> None:
-        super().__init__()
-        self.head = nn.Linear(in_features, 1)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Return one binary logit per sample."""
-        return self.head(x)
-''',
-        "src/my_project/data.py": '''"""Project dataset definitions."""
-
+import lambdaforge as lf
 import torch
-from torch.utils.data import Dataset
 
 
-class ProjectDataset(Dataset[dict[str, torch.Tensor]]):
-    """Deterministic toy data to verify the complete training path."""
-
-    def __init__(self, split: str, size: int = 32) -> None:
-        generator = torch.Generator().manual_seed(7 if split == "train" else 17)
-        self.x = torch.randn(size, 4, generator=generator)
-        self.target = (self.x.sum(dim=1, keepdim=True) > 0).float()
-
-    def __len__(self) -> int:
-        return len(self.x)
-
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        return {"x": self.x[index], "target": self.target[index]}
+def train(hidden_dim: int, epochs: int = 2, seed: int = 0) -> dict[str, float]:
+    """Replace this tiny loop with the project's real model and dataloaders."""
+    model = torch.nn.Sequential(torch.nn.Linear(4, hidden_dim), torch.nn.Linear(hidden_dim, 1))
+    optimizer = torch.optim.AdamW(model.parameters())
+    loss_value = 0.0
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        loss = model(torch.randn(8, 4)).square().mean()
+        loss.backward()
+        optimizer.step()
+        loss_value = float(loss.detach())
+        lf.metric("loss", loss_value, step=epoch, split="train")
+    return {"final_loss": loss_value, "seed": float(seed)}
 ''',
-        "experiments/training.yaml": """schema_version: "1.1"
-experiment:
-  name: baseline
-  output_root: ../runs/experiments
-  seeds: [7]
-data:
-  train: {target: my_project.data.ProjectDataset, params: {split: train}}
-  val: {target: my_project.data.ProjectDataset, params: {split: val}}
-  datamodule:
-    target: lambdaforge.training.data.LightningDataModule
-    params: {batch_size: 8, num_workers: 0}
-model: {target: my_project.models.ProjectModel}
-losses:
-  - target: lambdaforge.nn.losses.BinaryCrossEntropyWithLogitsLoss
-    params: {output_key: logits, target_key: target}
-val_metrics:
-  - target: lambdaforge.metrics.BinaryAccuracy
-    params: {pred_key: logits, target_key: target}
-optimizer: {ref: torch.optim.AdamW, params: {lr: 0.001}}
-task:
-  target: lambdaforge.training.LightningTask
-  params: {model_input_key: x, model_output_key: logits}
-trainer: {max_epochs: 2, accelerator: auto, devices: auto}
-execution: {mode: sequential}
+        "experiments/training.yaml": """name: baseline
+run: my_project.training.train
+with:
+  hidden_dim: 16
+  epochs: 2
+seeds: [7]
+resources:
+  cpu: 1
 """,
     }
     if template in {"preprocessing", "full"}:

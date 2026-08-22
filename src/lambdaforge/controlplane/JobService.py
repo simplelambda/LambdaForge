@@ -259,9 +259,7 @@ class JobService:
         exclude_job_id: str | None = None,
     ) -> None:
         """Reject an accidental duplicate while retaining an explicit escape hatch."""
-        active = self.active_execution(
-            scientific_identity, cluster, exclude_job_id=exclude_job_id
-        )
+        active = self.active_execution(scientific_identity, cluster, exclude_job_id=exclude_job_id)
         if not active:
             return
         selected = active[0]
@@ -274,7 +272,7 @@ class JobService:
         raise LambdaForgeError(
             diagnostic(
                 ErrorCategory.OPERATION_REFUSED,
-                f"Experiment {name!r} is already active on {cluster!r}.",
+                f"Work {name!r} is already active on {cluster!r}.",
                 "No duplicate execution was submitted.",
                 reason=(
                     f"Scientific revision {revision} already has active job {selected.job_id} "
@@ -286,19 +284,19 @@ class JobService:
                     "Use --allow-duplicate only when concurrent duplicate work is intentional.",
                 ),
                 commands=(
-                    ("Experiment status", f"lf experiments status {shlex.quote(name)}"),
+                    ("Work status", f"lf show {shlex.quote(name)}"),
                     ("Existing job", f"lf jobs show {selected.job_id}"),
                     ("Intentional duplicate", rerun),
                 ),
                 context={
-                    "experiment": name,
+                    "work": name,
                     "scientific_identity": scientific_identity,
                     "scientific_revision": revision,
                     "cluster": cluster,
                     "active_job_id": selected.job_id,
                 },
                 retryable=RetryDisposition.NO,
-                operation="experiment submission",
+                operation="work submission",
                 job_id=selected.job_id,
             )
         )

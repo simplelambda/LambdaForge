@@ -66,17 +66,42 @@ def explain_configuration(path: str | Path) -> dict[str, Any]:
         payload["nodes"] = [
             {
                 "name": str(name),
-                "depends_on": list(_sequence(node.get("depends_on")))
+                "depends_on": list(_sequence(node.get("needs", node.get("depends_on"))))
                 if isinstance(node, Mapping)
                 else [],
+                **(_simple_callable(node.get("config")) if isinstance(node, Mapping) else {}),
             }
             for name, node in nodes.items()
         ]
     else:
-        payload["task"] = _object(values.get("task"))
+        simple = _simple_callable(values)
+        if simple:
+            payload.update(simple)
+            extensions = values.get("extensions", {})
+            authoring = extensions.get("authoring", {}) if isinstance(extensions, Mapping) else {}
+            if isinstance(authoring, Mapping) and authoring.get("objective"):
+                payload["objective"] = authoring["objective"]
+        else:
+            payload["task"] = _object(values.get("task"))
         payload["inputs"] = values.get("inputs", [])
         payload["required_artifacts"] = values.get("required_artifacts", [])
     return payload
+
+
+def _simple_callable(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    task = value.get("task", {})
+    if not isinstance(task, Mapping) or task.get("target") != "lambdaforge.runtime.CallableTask":
+        return {}
+    params = task.get("params", {})
+    if not isinstance(params, Mapping):
+        return {}
+    return {
+        "callable": params.get("callable_path", params.get("class_path")),
+        "parameters": dict(params.get("parameters", {})),
+        **({"seed": params["seed"]} if "seed" in params else {}),
+    }
 
 
 def _object(value: Any) -> dict[str, Any] | None:

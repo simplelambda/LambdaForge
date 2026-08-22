@@ -1,15 +1,18 @@
-kind: workflow
-schema_version: "1.0"
-name: preprocessing-and-training
-output_root: ../runs/workflows
-max_parallel: 2
-metadata:
-  purpose: Connect the runnable preprocessing task to the complete training template.
-nodes:
-  preprocess:
-    config: preprocessing.yaml
-  train:
-    config: experiment.yaml
-    needs: [preprocess]
-    bindings:
-      data.train.params.dataset_manifest: ${nodes.preprocess.artifacts.dataset-artifact.json}
+name: complete-study
+resources:
+  cpu: 4
+steps:
+  - name: prepare
+    run: lambdaforge.examples.prepare
+    with:
+      source:
+        file: preprocessing-input.jsonl
+  - parallel:
+      - name: model-a
+        run: lambdaforge.examples.train_a
+        resources: {gpu: 1, cpu: 4}
+      - name: model-b
+        run: lambdaforge.examples.train_b
+        resources: {gpu: 1, cpu: 4}
+  - name: compare
+    run: lambdaforge.examples.compare

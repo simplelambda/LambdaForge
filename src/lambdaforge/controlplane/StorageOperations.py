@@ -105,6 +105,37 @@ class StorageOperations:
             }
 
     @classmethod
+    def delete_job(
+        cls, descriptor: Mapping[str, Any], job_id: str, *, apply: bool = False
+    ) -> dict[str, Any]:
+        """Preview or remove one exact LambdaForge-owned job workspace."""
+        if not job_id.startswith("job-") or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in job_id
+        ):
+            raise ValueError("Invalid LambdaForge job id.")
+        root = cls._roots(descriptor)["job_workspaces"].resolve()
+        target = (root / job_id).resolve(strict=False)
+        if target.parent != root or target.name != job_id:
+            raise RuntimeError("Job cleanup target escaped the configured job root.")
+        usage = cls._usage(target)
+        candidate = {
+            "category": "job_workspace",
+            "name": job_id,
+            **usage,
+            "reason": "selected-work",
+        }
+        if apply and usage["exists"]:
+            if target.is_symlink() or not target.is_dir():
+                raise RuntimeError(f"Unsafe job workspace: {target}")
+            shutil.rmtree(target)
+        return {
+            "candidates": [candidate] if usage["exists"] else [],
+            "reclaimable_bytes": int(usage["bytes"]),
+            "applied": apply,
+            "preserved": ["datasets", "shared caches", "other work", "cluster environment"],
+        }
+
+    @classmethod
     def _gc(
         cls,
         descriptor: Mapping[str, Any],
@@ -379,7 +410,8 @@ class StorageOperations:
         if len(values) not in {2, 4}:
             raise SystemExit(
                 "Usage: StorageOperations status DESCRIPTOR | "
-                "gc DESCRIPTOR REFS APPLY | prune-environments DESCRIPTOR REFS APPLY"
+                "gc DESCRIPTOR REFS APPLY | prune-environments DESCRIPTOR REFS APPLY | "
+                "delete-job DESCRIPTOR REFS APPLY"
             )
         descriptor = json.loads(values[1])
         if values[0] == "status":
@@ -391,6 +423,13 @@ class StorageOperations:
             payload = cls.prune_environments(
                 descriptor,
                 references.get("environments", ()) if isinstance(references, dict) else (),
+                apply=values[3] == "true",
+            )
+        elif values[0] == "delete-job" and len(values) == 4:
+            references = json.loads(values[2])
+            payload = cls.delete_job(
+                descriptor,
+                str(references["job_id"]),
                 apply=values[3] == "true",
             )
         else:

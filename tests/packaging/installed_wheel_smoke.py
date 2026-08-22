@@ -42,9 +42,7 @@ def main() -> None:
     materialized = AuthoringConfig(
         {
             "name": "wheel-only",
-            "model": "torch.nn.Identity",
-            "loss": "torch.nn.MSELoss",
-            "trainer": {"epochs": 1},
+            "run": "lambdaforge.examples.train_a",
         }
     ).materialize()
     print(json.dumps({"version": lambdaforge.__version__, "kind": materialized.kind.value}))

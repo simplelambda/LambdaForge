@@ -8,6 +8,46 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-22
+
+### Added
+
+- Function-first Work authoring with `run`, `with` and `resources`; ordinary project functions now
+  execute through the established strict Task runner without a framework base class or context
+  parameter.
+- Explicit nested `{file: PATH}` and `{dataset: NAME@VERSION}` parameters, preserving content
+  identity, managed resolution and bounded remote staging while leaving ordinary strings alone.
+- Public `current`, `metric`, `artifact` and streaming `publish_dataset` runtime APIs. Metric history,
+  final values, artifact checksums and immutable DatasetArtifact v2 publication are merged into the
+  existing result and registry contracts.
+- Simple seed/search/objective expansion, sequential steps, explicit parallel groups and an
+  advanced class/method escape hatch, all compiled to the existing Workflow DAG and HPO sampler.
+- Name-first `lf show`, preview-first `lf delete` for exact terminal Work roots and `lf clean` as a
+  conservative cache-GC alias. Tiny completion receipts make local/remote deletion retries
+  idempotent. The same active Work identity is refused only on the same cluster.
+- Local integration tests for callable execution, explicit files, metrics, artifacts, streaming
+  publication, steps/parallel, seeds/search, duplicate prevention and exact-root cleanup.
+
+### Changed
+
+- `lf init` now generates normal Python functions and minimal YAML instead of requiring Task,
+  Lightning or object-graph authoring for starter projects.
+- The README, manual, examples and agent guide lead with Python-defined science and YAML-defined
+  execution. Strict Task, Workflow, Experiment and DatasetRecipe forms are documented as advanced
+  compatibility surfaces.
+- Remote tasks receive the selected cluster's dataset registry/root environment when available, so
+  callable publication uses the same permanent placement boundary as recipe publication.
+- Release identity advances to 0.11.0 from the single canonical `_version.py` source.
+
+### Security
+
+- Runtime artifacts and dataset assets must exist below the active run, reject path escape and
+  symlinks, and are hashed before success/publication. Dataset publication remains staged,
+  verified, immutable and atomic.
+- Work deletion accepts only terminal tracked job IDs and exact children of the configured job
+  root; it is preview-only without `--apply` and cannot select datasets, shared caches or
+  environments.
+
 ## [0.10.1] - 2026-08-21
 
 ### Added
