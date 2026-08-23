@@ -9,7 +9,6 @@ import random
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
 from lambdaforge.hpo.Trial import Trial
 
 
@@ -46,22 +45,6 @@ class RandomSearch:
                 output.append(Trial(len(output), parameters, self.seed, fingerprint))
         if len(output) != count:
             raise ValueError("Search space cannot produce the requested number of unique trials.")
-        return tuple(output)
-
-    def materialize(self, base: Mapping[str, Any], count: int) -> tuple[dict[str, Any], ...]:
-        """Apply sampled dotted paths to independent configuration copies."""
-        output: list[dict[str, Any]] = []
-        for trial in self.trials(count):
-            config = json.loads(json.dumps(base))
-            for path, value in trial.parameters.items():
-                ExperimentConfig.set_value(config, path, value)
-            config.setdefault("extensions", {})["hpo_trial"] = {
-                "number": trial.number,
-                "seed": trial.seed,
-                "fingerprint": trial.fingerprint,
-                "parameters": dict(trial.parameters),
-            }
-            output.append(config)
         return tuple(output)
 
     @staticmethod

@@ -10,7 +10,7 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class DatasetIdentity:
-    """Describe which immutable dataset content a task consumes."""
+    """Describe which immutable dataset content a Work consumes."""
 
     provider: str
     value: str

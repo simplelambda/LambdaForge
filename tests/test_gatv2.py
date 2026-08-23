@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.nn.models.graph.attention.GATv2 import GATv2
 from lambdaforge.nn.models.graph.attention.GATv2Layer import GATv2Layer
 from lambdaforge.nn.models.graph.GraphSelfLoopFill import GraphSelfLoopFill
@@ -191,32 +190,6 @@ class TestGATv2:
         assert output.shape == (3, 2)
         assert torch.isfinite(output).all()
 
-    def test_yaml_object_factory_constructs_complete_stack(self) -> None:
-        model = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.models.graph.attention.GATv2.GATv2",
-                "params": {
-                    "in_channels": 4,
-                    "out_channels": 2,
-                    "hidden_channels": [6],
-                    "heads": [2, 1],
-                    "concatenate_heads": [True, False],
-                    "share_weights": [True, False],
-                    "edge_channels": 1,
-                    "activation": "gelu",
-                    "normalization": "layernorm",
-                    "self_loop_fill": "mean",
-                },
-            }
-        )
-
-        output = model(
-            torch.randn(3, 4),
-            torch.tensor([[0, 1], [1, 2]], dtype=torch.int32),
-            torch.randn(2, 1),
-        )
-        assert isinstance(model, GATv2)
-        assert output.shape == (3, 2)
 
     @pytest.mark.parametrize(
         ("arguments", "error", "message"),

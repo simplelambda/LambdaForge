@@ -12,8 +12,8 @@ from lambdaforge.diagnostics.service import (
     DiagnosticClassifier,
     DiagnosticContext,
     DiagnosticRecorder,
-    execution_failure_diagnostic,
     job_failure_diagnostic,
+    work_failure_diagnostic,
 )
 
 __all__ = [
@@ -23,9 +23,9 @@ __all__ = [
     "DiagnosticRenderer",
     "ErrorCategory",
     "ErrorDiagnostic",
-    "execution_failure_diagnostic",
     "LambdaForgeError",
     "RetryDisposition",
     "diagnostic",
     "job_failure_diagnostic",
+    "work_failure_diagnostic",
 ]

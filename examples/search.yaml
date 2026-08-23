@@ -1,0 +1,8 @@
+name: search-example
+run: examples.work.Train
+seeds: [7, 17]
+search:
+  learning_rate: {values: [0.001, 0.01]}
+objective: {metric: score, mode: max}
+resources:
+  cpu: 1

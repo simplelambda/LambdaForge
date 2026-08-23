@@ -9,12 +9,8 @@ from typing import Any
 
 import yaml
 
-from lambdaforge.configuration.ProjectConfigService import ProjectConfigService
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
-from lambdaforge.controlplane.JobService import JobService
-from lambdaforge.data.DatasetBuildService import DatasetBuildService
 from lambdaforge.data.DatasetService import DatasetService
-from lambdaforge.data.recipe_config import DatasetRecipeConfig
 
 
 class DatasetCommands:
@@ -24,32 +20,8 @@ class DatasetCommands:
     def run(cls, arguments: argparse.Namespace) -> int:
         service = DatasetService(clusters=ClusterCatalog.load(arguments.clusters))
         operation = arguments.dataset_command
-        if operation in {"plan", "build"}:
-            recipe_path = ProjectConfigService().resolve(arguments.dataset, kind="dataset")
-            recipe = DatasetRecipeConfig.from_yaml(recipe_path)
-            builds = DatasetBuildService(
-                service.registry,
-                JobService(service.clusters, factory=service.factory),
-            )
-            if operation == "plan":
-                payload: Any = builds.plan(
-                    recipe,
-                    cluster=arguments.on,
-                    force=arguments.force,
-                    force_stages=arguments.force_stage,
-                ).to_dict()
-            else:
-                handle = builds.submit(
-                    recipe,
-                    cluster=arguments.on,
-                    force=arguments.force,
-                    force_stages=arguments.force_stage,
-                    dry_run=arguments.dry_run,
-                    wait_for_submit=getattr(arguments, "wait_for_submit", False),
-                )
-                payload = handle.to_dict()
-        elif operation == "list":
-            payload = [
+        if operation == "list":
+            payload: Any = [
                 value.to_dict()
                 for value in service.list(cluster=arguments.on, all_clusters=arguments.all)
             ]
@@ -149,24 +121,6 @@ class DatasetCommands:
                     f"{record['dataset_id']}"
                 )
             return
-        if operation == "plan":
-            source = f" ({default_source})" if default_source else ""
-            print(f"Dataset: {payload['dataset']}  Target: {payload['target_cluster']}{source}")
-            resources = payload["resources"]
-            print(
-                "Reservation: "
-                f"CPU={resources['cpu_cores']} RAM={resources['ram_bytes']} "
-                f"GPU={resources['gpu_count']} processes={resources['processes']} "
-                f"time={resources['runtime_seconds']}s"
-            )
-            print("STAGE  ACTION" + ("  REASON" if verbose else ""))
-            for stage in payload["stages"]:
-                suffix = f"  {stage['reason']}" if verbose else ""
-                print(f"{stage['stage']}  {stage['action']}{suffix}")
-            publish = payload["publish"]
-            suffix = f"  {publish['reason']}" if verbose else ""
-            print(f"publish  {publish['action']}{suffix}")
-            return
         if operation == "members":
             print("MEMBER  PARTITIONS  TARGETS  ASSETS")
             for member in payload["members"]:
@@ -261,12 +215,5 @@ class DatasetCommands:
                     "Apply: lf datasets reconcile "
                     f"{payload['dataset']} --on {payload['cluster']} --apply"
                 )
-            return
-        if operation == "build":
-            source = f" ({default_source})" if default_source else ""
-            print(
-                f"Dataset build job {payload['job_id']}: {payload['state']} "
-                f"on {payload['cluster']}{source}"
-            )
             return
         print(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True).rstrip())

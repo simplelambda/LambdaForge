@@ -1,14 +1,9 @@
 """Environment provenance capture and run-artifact integration."""
 
-import importlib.metadata as metadata
 import json
-from types import SimpleNamespace
-
-import pytest
 
 from lambdaforge.EnvironmentManifest import EnvironmentManifest
-from lambdaforge.experiments import ExperimentRunner
-from lambdaforge.plugins import PluginDescriptor, PluginKind, PluginReference, PluginRegistry
+from lambdaforge.plugins import PluginDescriptor, PluginKind
 
 
 class TestEnvironmentManifest:
@@ -62,70 +57,3 @@ class TestEnvironmentManifest:
             "version": None,
         }
         assert manifest.with_plugins(()).plugins == ()
-
-    def test_dry_run_writes_manifest_beside_materialized_config(self, tmp_path) -> None:
-        config = {
-            "experiment": {
-                "name": "manifest_demo",
-                "base_name": "manifest_demo",
-                "variant": "base",
-                "seed": 7,
-                "output_root": str(tmp_path),
-            }
-        }
-        result = ExperimentRunner().run_single_experiment(config, dry_run=True)
-        run_dir = tmp_path / "manifest_demo" / "base" / "seed=7"
-        assert result["status"] == "dry_run"
-        assert (run_dir / "config.yaml").exists()
-        assert (run_dir / "environment.json").exists()
-        content = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
-        assert content["plugins"] == []
-
-    def test_failed_run_persists_only_plugins_resolved_in_that_run(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        distribution = SimpleNamespace(
-            metadata={"Name": "lambda-test-plugins"},
-            version="3.2.0",
-        )
-        entries = [
-            metadata.EntryPoint(
-                name=name,
-                value="tests.fixtures.UserModel:UserModel",
-                group=PluginKind.MODEL.entry_point_group,
-            )._for(distribution)
-            for name in ("previous_model", "used_model")
-        ]
-
-        def selected_entry_points(**selection):
-            return metadata.EntryPoints(entries).select(**selection)
-
-        monkeypatch.setattr(metadata, "entry_points", selected_entry_points)
-        registry = PluginRegistry()
-        monkeypatch.setattr(PluginRegistry, "_default", registry)
-        registry.resolve(PluginReference(PluginKind.MODEL, "previous_model"))
-        config = {
-            "experiment": {
-                "name": "plugin_failure",
-                "base_name": "plugin_failure",
-                "variant": "base",
-                "seed": 5,
-                "output_root": str(tmp_path),
-            },
-            "data": {
-                "train": {
-                    "target": "tests.fixtures.TinyMappingDataset.TinyMappingDataset",
-                }
-            },
-            "model": {"plugin": {"kind": "model", "name": "used_model"}},
-            "losses": [],
-        }
-
-        with pytest.raises(RuntimeError, match="at least one loss"):
-            ExperimentRunner().run_single_experiment(config)
-
-        path = tmp_path / "plugin_failure" / "base" / "seed=5" / "environment.json"
-        content = json.loads(path.read_text(encoding="utf-8"))
-        assert [item["name"] for item in content["plugins"]] == ["used_model"]
-        assert content["plugins"][0]["distribution"] == "lambda-test-plugins"
-        assert content["plugins"][0]["version"] == "3.2.0"

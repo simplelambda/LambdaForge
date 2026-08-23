@@ -9,15 +9,11 @@ import torch
 from torch import nn
 
 from lambdaforge.data import CategoricalFeatureEncoder
-from lambdaforge.experiments import ObjectFactory
 from lambdaforge.nn import (
-    SAINT,
     ArchitectureConformanceCase,
     ArchitectureConformancePack,
-    AutoInt,
     ConformalPredictionInterval,
     ConformerModel,
-    DeepFM,
     DeepONet,
     DiffusionSchedule,
     FourierNeuralOperator1D,
@@ -25,7 +21,6 @@ from lambdaforge.nn import (
     NeuralCDE,
     NeuralODE,
     StateSpaceAdapter,
-    TabNet,
     TemperatureScaler,
     TensorFieldNetwork,
     TransformerDecoderModel,
@@ -88,31 +83,6 @@ class TestRoadmapThirteenToSeventeen:
         assert encoder.cardinalities == (3, 2)
         assert restored.transform([["missing", "small"]]).tolist() == [[0, 1]]
 
-    def test_tabular_research_models_are_yaml_buildable_and_differentiable(self) -> None:
-        continuous = torch.randn(4, 3, requires_grad=True)
-        categorical = torch.tensor([[0, 1], [1, 2], [2, 0], [1, 1]])
-        tabnet = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.models.TabNet",
-                "params": {"in_features": 3, "out_features": 2, "hidden_features": 8},
-            }
-        )
-        models = (
-            tabnet,
-            SAINT(3, [3, 3], 2, d_model=8, num_heads=2),
-            AutoInt(3, [3, 3], 2, embedding_features=8, num_heads=2),
-            DeepFM(3, [3, 3], 2, embedding_features=4, hidden_features=(8,)),
-        )
-
-        for model in models:
-            output = (
-                model(continuous) if isinstance(model, TabNet) else model(continuous, categorical)
-            )
-            assert output.shape == (4, 2)
-            output.sum().backward(retain_graph=True)
-        _, masks = tabnet.forward_with_masks(continuous)
-        assert len(masks) == 3
-        assert torch.allclose(masks[0].sum(dim=-1), torch.ones(4))
 
     def test_long_sequence_models_and_optional_adapter_preserve_contracts(self) -> None:
         source = torch.randn(2, 7, 3, requires_grad=True)

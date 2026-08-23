@@ -63,4 +63,4 @@ class OverviewService:
     def _jobs(service: JobService) -> tuple[Any, ...]:
         """Reconcile every reachable provider before composing the global view."""
         service.reconcile(all_clusters=True)
-        return service.list(refresh=False)
+        return service.list(refresh=True)

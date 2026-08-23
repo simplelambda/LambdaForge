@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from packaging.version import Version
 
 from lambdaforge._version import VERSION
-from lambdaforge.configuration.AuthoringSchemaCatalog import AuthoringSchemaCatalog
-from lambdaforge.tasks.TaskSchemaCatalog import TaskSchemaCatalog
 
 
 def _framework_requirement() -> str:
@@ -36,52 +33,28 @@ dependencies = ["{_framework_requirement()}"]
 [tool.setuptools.packages.find]
 where = ["src"]
 """,
-        "src/my_project/__init__.py": '"""Project-local datasets, models and tasks."""\n',
-        "src/my_project/tasks.py": '''"""Ordinary project functions executed by LambdaForge."""
-
-import json
+        "src/my_project/__init__.py": '"""Project-local scientific Work classes."""\n',
+        "src/my_project/work.py": '''"""Scientific Work managed by LambdaForge."""
 
 import lambdaforge as lf
 
 
-def example(message: str = "ready") -> dict[str, str]:
+class Example(lf.Work):
     """Write one small artifact and return the final structured result."""
-    path = lf.current().run_dir / "output.json"
-    path.write_text(json.dumps({"status": message}) + "\\n", encoding="utf-8")
-    lf.artifact("output", path, role="report", media_type="application/json")
-    return {"status": message}
+
+    def run(self, message: str = "ready") -> dict[str, str]:
+        path = self.run_dir / "output.txt"
+        path.write_text(message + "\\n", encoding="utf-8")
+        self.outputs.artifact("output", path, role="report", media_type="text/plain")
+        return {"status": message}
 ''',
-        "experiments/task.yaml": """name: example
-run: my_project.tasks.example
+        "experiments/work.yaml": """name: example
+run: my_project.work.Example
 with:
   message: ready
 resources:
   cpu: 1
 """,
-        "README.md": """# My AI project
-
-Create an environment, install LambdaForge and this package, then run:
-
-```bash
-python -m pip install -e .
-lambdaforge validate experiments/task.yaml
-lambdaforge inspect experiments/task.yaml
-lambdaforge run experiments/task.yaml --dry-run
-lambdaforge run experiments/task.yaml
-```
-""",
-        "schemas/lambdaforge-authoring.schema.json": json.dumps(
-            AuthoringSchemaCatalog().schema(), indent=2
-        )
-        + "\n",
-        # Retained for editors/tools that still open strict compatible task documents.
-        "schemas/lambdaforge-task.schema.json": json.dumps(TaskSchemaCatalog().schema(), indent=2)
-        + "\n",
-        ".vscode/settings.json": json.dumps(
-            {"yaml.schemas": {"./schemas/lambdaforge-authoring.schema.json": "experiments/*.yaml"}},
-            indent=2,
-        )
-        + "\n",
         ".gitignore": """.venv/
 __pycache__/
 *.py[cod]
@@ -105,7 +78,7 @@ slurm-*.err
 """,
     }
     preprocessing_files = {
-        "src/my_project/preprocessing.py": '''"""Project preprocessing functions."""
+        "src/my_project/preprocessing.py": '''"""Project preprocessing Work."""
 
 import json
 from pathlib import Path
@@ -113,18 +86,19 @@ from pathlib import Path
 import lambdaforge as lf
 
 
-def preprocess(source: Path) -> dict[str, int]:
+class Preprocess(lf.Work):
     """Process JSONL with normal Python and register the resulting directory."""
-    output = lf.current().run_dir / "processed.jsonl"
-    records = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
-    output.write_text("".join(json.dumps(row) + "\\n" for row in records))
-    lf.metric("records", len(records))
-    lf.artifact("processed", output, role="dataset")
-    return {"records": len(records)}
+    def run(self, source: Path) -> dict[str, int]:
+        output = self.run_dir / "processed.jsonl"
+        records = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
+        output.write_text("".join(json.dumps(row) + "\\n" for row in records))
+        self.metrics.log("records", len(records))
+        self.outputs.artifact("processed", output, role="dataset")
+        return {"records": len(records)}
 ''',
         "data/raw.jsonl": '{"id": "example", "value": 1}\n',
         "experiments/preprocessing.yaml": """name: prepare-data
-run: my_project.preprocessing.preprocess
+run: my_project.preprocessing.Preprocess
 with:
   source:
     file: ../data/raw.jsonl
@@ -140,22 +114,23 @@ import lambdaforge as lf
 import torch
 
 
-def train(hidden_dim: int, epochs: int = 2, seed: int = 0) -> dict[str, float]:
+class Train(lf.Work):
     """Replace this tiny loop with the project's real model and dataloaders."""
-    model = torch.nn.Sequential(torch.nn.Linear(4, hidden_dim), torch.nn.Linear(hidden_dim, 1))
-    optimizer = torch.optim.AdamW(model.parameters())
-    loss_value = 0.0
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        loss = model(torch.randn(8, 4)).square().mean()
-        loss.backward()
-        optimizer.step()
-        loss_value = float(loss.detach())
-        lf.metric("loss", loss_value, step=epoch, split="train")
-    return {"final_loss": loss_value, "seed": float(seed)}
+    def run(self, hidden_dim: int, epochs: int = 2) -> dict[str, float]:
+        model = torch.nn.Sequential(torch.nn.Linear(4, hidden_dim), torch.nn.Linear(hidden_dim, 1))
+        optimizer = torch.optim.AdamW(model.parameters())
+        loss_value = 0.0
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            loss = model(torch.randn(8, 4)).square().mean()
+            loss.backward()
+            optimizer.step()
+            loss_value = float(loss.detach())
+            self.metrics.log("loss", loss_value, step=epoch, split="train")
+        return {"final_loss": loss_value, "seed": float(self.seed or 0)}
 ''',
         "experiments/training.yaml": """name: baseline
-run: my_project.training.train
+run: my_project.training.Train
 with:
   hidden_dim: 16
   epochs: 2
@@ -169,10 +144,10 @@ resources:
     if template in {"training", "full"}:
         files.update(training_files)
     if template in {"preprocessing", "training"}:
-        files.pop("src/my_project/tasks.py")
-        files.pop("experiments/task.yaml")
+        files.pop("src/my_project/work.py")
+        files.pop("experiments/work.yaml")
     entry = {
-        "minimal": "experiments/task.yaml",
+        "minimal": "experiments/work.yaml",
         "preprocessing": "experiments/preprocessing.yaml",
         "training": "experiments/training.yaml",
         "full": "experiments/preprocessing.yaml",
@@ -188,7 +163,7 @@ python -m pip install -e /absolute/path/to/LambdaForge
 python -m pip install -e .
 lambdaforge doctor
 lambdaforge validate {entry}
-lambdaforge inspect {entry} --resolved
+lambdaforge explain {entry}
 lambdaforge run {entry} --dry-run
 lambdaforge run {entry}
 ```

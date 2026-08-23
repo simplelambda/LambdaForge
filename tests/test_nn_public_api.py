@@ -6,7 +6,6 @@ import importlib
 
 import lambdaforge.nn as neural
 import lambdaforge.nn.models as models
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 
 
 class TestNeuralPublicAPI:
@@ -62,33 +61,3 @@ class TestNeuralPublicAPI:
             package = importlib.import_module(package_name)
             assert set(package.__all__) <= model_names
         assert model_names <= neural_names
-
-    def test_object_factory_resolves_short_public_model_targets(self) -> None:
-        """Keep package-level YAML targets independent from implementation files."""
-        assert ObjectFactory.import_object("lambdaforge.nn.models.MLP") is models.MLP
-        assert ObjectFactory.import_object("lambdaforge.nn.models.GAT") is models.GAT
-        assert ObjectFactory.import_object("lambdaforge.nn.models.NODE") is models.NODE
-        assert ObjectFactory.import_object("lambdaforge.nn.models.ConvNeXt2D") is models.ConvNeXt2D
-        assert ObjectFactory.import_object("lambdaforge.nn.models.SIREN") is models.SIREN
-
-    def test_object_factory_builds_advanced_graph_stacks_from_short_targets(self) -> None:
-        """Construct every advanced graph family through the stable models API."""
-        specifications = (
-            ("EGNN", {"in_channels": 3, "out_channels": 2}),
-            ("GATv2", {"in_channels": 3, "out_channels": 2}),
-            ("GraphTransformer", {"in_channels": 3, "out_channels": 2}),
-            ("PNA", {"in_channels": 3, "out_channels": 2}),
-            (
-                "RelationalGCN",
-                {"in_channels": 3, "out_channels": 2, "num_relations": 4},
-            ),
-        )
-
-        for name, parameters in specifications:
-            model = ObjectFactory.build(
-                {
-                    "target": f"lambdaforge.nn.models.{name}",
-                    "params": parameters,
-                }
-            )
-            assert isinstance(model, getattr(models, name))

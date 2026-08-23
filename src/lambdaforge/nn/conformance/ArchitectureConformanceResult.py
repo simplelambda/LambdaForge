@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lambdaforge.experiments.JsonResult import JsonResult
+from lambdaforge.ImmutableJson import JsonResult
 
 
 class ArchitectureConformanceResult(JsonResult):

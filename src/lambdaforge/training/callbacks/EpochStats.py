@@ -19,7 +19,7 @@ class EpochStats(CallbackBase):
     r"""Log per-epoch wall time and peak GPU memory.
 
     These land in the same ``metrics.csv`` row as the losses/metrics logged by
-    :class:`~lambdaforge.training.LightningTask.LightningTask`, so the CSV is
+    :class:`~lambdaforge.training.LightningModule.LightningModule`, so the CSV is
     directly plottable against epoch (training curve, time per epoch, memory
     footprint) without post-processing.
 

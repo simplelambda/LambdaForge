@@ -16,17 +16,16 @@ required. Do not include real credentials or private datasets.
 
 ## Security model
 
-- YAML `target`, `ref`, plugins, pickle payloads and consumer Python are trusted code and may execute
-  arbitrary Python. LambdaForge is not a sandbox.
-- Configuration interpolation supports references and environment lookup, never expression
-  evaluation. Secrets are redacted from ordinary materialization; callers must explicitly request
-  their value. Persisted workflow structure rejects secrets.
-- Inputs, task outputs, store keys, cache entries, archives and retention operations validate path
+- A YAML `run` import names trusted consumer Python and may execute arbitrary code. LambdaForge is
+  not a sandbox; configuration must come from the researcher or another trusted source. YAML has no
+  expression evaluation, recursive construction, arbitrary function target or secret interpolation.
+- Inputs, Work outputs, cache/checkpoint entries and cleanup operations validate path
   containment and symbolic-link boundaries at their owning layer. Managed dataset deletion also
   revalidates the exact immutable manifest identity inside the configured dataset root immediately
   before removing bytes; stale, conflicting or unreachable index state fails closed.
-- Function-first runtime APIs retain that boundary: `artifact` accepts only existing run-contained
-  paths, and `publish_dataset` accepts only run-owned local assets or explicit URIs, rejects
+- Work-owned runtime services retain that boundary: `self.outputs.artifact` accepts only verified
+  paths and owns an external artifact by safe copy; `self.outputs.dataset` accepts only run-owned
+  local assets or explicit URIs, rejects
   traversal/symlinks, hashes assets, verifies staging and atomically publishes before registration.
   Ordinary YAML strings are never guessed to be paths; only explicit `file`/`dataset` markers
   authorize resolution and staging.
@@ -61,5 +60,5 @@ required. Do not include real credentials or private datasets.
 - Tracking and S3-compatible providers expand the trust boundary to their SDK, credentials, network
   and service. They are optional and loaded only when configured.
 
-The detailed trust boundaries and data flow are documented in the
-[canonical manual](docs/MANUAL.md#27-security-model).
+The detailed ownership and control-plane boundaries are documented in the
+[canonical manual](docs/MANUAL.md#10-cleanup-and-safety).

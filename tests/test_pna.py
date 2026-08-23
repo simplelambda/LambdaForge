@@ -7,7 +7,6 @@ import math
 import pytest
 import torch
 
-from lambdaforge.experiments import ObjectFactory
 from lambdaforge.nn.models.graph.message_passing.DegreeScaler import DegreeScaler
 from lambdaforge.nn.models.graph.message_passing.PNA import PNA
 from lambdaforge.nn.models.graph.message_passing.PNAAggregator import PNAAggregator
@@ -199,25 +198,6 @@ class TestPNA:
         assert torch.isfinite(output).all()
         assert x.grad is not None
 
-    def test_pna_is_constructible_from_yaml_compatible_specification(self) -> None:
-        model = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.models.graph.message_passing.PNA.PNA",
-                "params": {
-                    "in_channels": 4,
-                    "out_channels": 2,
-                    "hidden_channels": [6],
-                    "aggregators": ["mean", "max", "std"],
-                    "scalers": ["identity", "attenuation"],
-                    "average_degree": [2.0, 2.0],
-                    "average_log_degree": [1.0, 1.0],
-                    "normalization": "layernorm",
-                },
-            }
-        )
-
-        assert isinstance(model, PNA)
-        assert model(torch.randn(3, 4), torch.tensor([[0, 1], [1, 2]])).shape == (3, 2)
 
     @pytest.mark.parametrize(
         ("keyword", "value", "match"),

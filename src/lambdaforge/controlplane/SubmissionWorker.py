@@ -36,9 +36,7 @@ def serve(request_path: str | Path) -> int:
         jobs = JobService(catalog, store=store)
         jobs.update_preparation(job_id, "validation")
         arguments = value.get("run_arguments", ())
-        if not isinstance(arguments, Sequence) or isinstance(
-            arguments, (str, bytes, bytearray)
-        ):
+        if not isinstance(arguments, Sequence) or isinstance(arguments, (str, bytes, bytearray)):
             raise TypeError("Submission run_arguments must be a sequence.")
 
         def progress(phase: str) -> None:

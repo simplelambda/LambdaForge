@@ -9,12 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
-from lambdaforge.experiments.ExperimentRunner import ExperimentRunner
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.integrations.Lightning import Lightning, LoggerType
-from lambdaforge.plugins.PluginRegistry import PluginRegistry
 from lambdaforge.tracking import (
     MLflowTrackingLogger,
     TensorBoardTrackingLogger,
@@ -23,8 +19,6 @@ from lambdaforge.tracking import (
     TrackingDependencyGuard,
     WeightsAndBiasesTrackingLogger,
 )
-from lambdaforge.training.LightningRunner import LightningRunner
-from lambdaforge.training.LightningTrainConfig import LightningTrainConfig
 
 
 class TestTrackingAdapters:
@@ -341,77 +335,3 @@ class TestTrackingAdapters:
             MLflowTrackingLogger(synchronous=True)
         with pytest.raises(TypeError, match="add_file_policy='immutable' requires"):
             WeightsAndBiasesTrackingLogger(add_file_policy="immutable")
-
-    def test_yaml_object_factory_and_runner_accept_native_adapter(
-        self,
-        monkeypatch,
-        tmp_path: Path,
-    ) -> None:
-        """Build a public target from YAML and pass it unchanged to Trainer."""
-        native_calls: list[dict[str, Any]] = []
-        monkeypatch.setattr(TrackingDependencyGuard, "require", lambda _guard: None)
-        monkeypatch.setattr(
-            Lightning.TensorBoardLogger,
-            "__init__",
-            lambda _logger, **kwargs: native_calls.append(kwargs),
-        )
-        config = yaml.safe_load(
-            f"""
-experiment:
-  name: tracking-yaml
-  output_root: {tmp_path.as_posix()}
-  variant: base
-  seed: 5
-trainer:
-  max_epochs: 1
-  checkpoint_policy: none
-  logger:
-    target: lambdaforge.tracking.TensorBoardTrackingLogger
-    params:
-      save_dir: {tmp_path.as_posix()}/events
-      name: experiment
-      version: seed-5
-      max_queue: 9
-"""
-        )
-
-        runner = ExperimentRunner()._build_runner(
-            config,
-            metrics=[],
-            plugins=PluginRegistry(),
-        )
-
-        assert isinstance(runner, LightningRunner)
-        assert isinstance(runner.config, LightningTrainConfig)
-        assert isinstance(runner.config.logger, TensorBoardTrackingLogger)
-        assert runner._build_logger() is runner.config.logger
-        assert native_calls == [
-            {
-                "save_dir": f"{tmp_path.as_posix()}/events",
-                "name": "experiment",
-                "version": "seed-5",
-                "log_graph": False,
-                "default_hp_metric": True,
-                "prefix": "",
-                "sub_dir": None,
-                "max_queue": 9,
-            }
-        ]
-
-    @pytest.mark.parametrize(
-        ("target", "expected"),
-        [
-            ("lambdaforge.tracking.MLflowTrackingLogger", MLflowTrackingLogger),
-            (
-                "lambdaforge.tracking.TensorBoardTrackingLogger",
-                TensorBoardTrackingLogger,
-            ),
-            (
-                "lambdaforge.tracking.WeightsAndBiasesTrackingLogger",
-                WeightsAndBiasesTrackingLogger,
-            ),
-        ],
-    )
-    def test_public_lazy_exports_are_object_factory_targets(self, target: str, expected) -> None:
-        """Expose concise stable target paths for all tracking backends."""
-        assert ObjectFactory.import_object(target) is expected

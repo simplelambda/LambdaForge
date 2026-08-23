@@ -79,14 +79,14 @@ class LightningTrainConfig:
     write_epoch_metrics_csv : bool
         Preserve the canonical dense ``metrics.csv`` artifact independently
         of the selected Lightning logger. Disable explicitly only when the
-        experiment does not require LambdaForge aggregation.
+        Work does not require a dense epoch history.
     track_epoch_stats : bool
         If true, attach :class:`~lambdaforge.training.callbacks.EpochStats.EpochStats` so
         per-epoch wall time and peak GPU memory land in ``metrics.csv``.
     print_epoch_table : bool
         If true, mirror epoch-level losses, metrics and runtime stats to
-        stdout as a compact table. Since experiment runners capture stdout,
-        these rows also appear in each run's ``train.log``.
+        stdout as a compact table. Since Work captures stdout, these rows also appear in
+        ``work.log``.
     trainer_kwargs : dict[str, Any]
         Extra keyword arguments forwarded to ``lightning.Trainer``. Keys
         managed explicitly by this class cannot be overridden here.

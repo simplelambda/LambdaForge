@@ -8,7 +8,7 @@ from typing import Any
 
 from lambdaforge.data.DataIdentityProvider import DataIdentityProvider
 from lambdaforge.data.DatasetIdentity import DatasetIdentity
-from lambdaforge.tasks.artifacts import TaskArtifact
+from lambdaforge.data.StoredArtifact import StoredArtifact
 
 
 class ManifestIdentityProvider(DataIdentityProvider):
@@ -26,5 +26,5 @@ class ManifestIdentityProvider(DataIdentityProvider):
         manifest = manifest if manifest.is_absolute() else (source_dir / manifest).resolve()
         if not manifest.is_file() or manifest.is_symlink():
             raise FileNotFoundError(f"Dataset identity manifest is not a regular file: {manifest}")
-        digest, _ = TaskArtifact.fingerprint_path(manifest)
+        digest, _ = StoredArtifact.fingerprint_path(manifest)
         return DatasetIdentity("manifest", digest)

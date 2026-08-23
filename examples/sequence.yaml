@@ -1,0 +1,10 @@
+name: sequence-example
+steps:
+  - name: prepare
+    run: examples.work.Summarize
+    with:
+      source: {file: input.txt}
+  - name: consume
+    run: examples.work.Consume
+    with:
+      summary: {from: prepare.summary}

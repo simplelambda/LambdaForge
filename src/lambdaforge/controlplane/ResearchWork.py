@@ -75,20 +75,18 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
             if identity
             else None
         )
-        planned_raw = primary.metadata.get("planned_units")
+        remote = primary.metadata.get("remote_state", {})
+        remote = remote if isinstance(remote, dict) else {}
+        progress = remote.get("progress", {})
+        progress = progress if isinstance(progress, dict) else {}
+        planned_raw = progress.get("total", primary.metadata.get("planned_units"))
         planned = int(planned_raw) if isinstance(planned_raw, int) else None
-        completed_raw = primary.metadata.get("completed_units")
+        completed_raw = progress.get("completed", primary.metadata.get("completed_units"))
         completed = int(completed_raw) if isinstance(completed_raw, int) else None
         if completed is None and primary.state.value == "succeeded":
             completed = planned
-        semantic_kind = {
-            "dataset-build": "dataset",
-            "hpo": "experiment",
-            "preprocessing": "task",
-        }.get(primary.job_type, primary.job_type)
-        digest = hashlib.sha256(
-            f"{identity_key}\0{cluster}\0{name}".encode()
-        ).hexdigest()[:16]
+        semantic_kind = "work"
+        digest = hashlib.sha256(f"{identity_key}\0{cluster}\0{name}".encode()).hexdigest()[:16]
         output.append(
             ResearchWork(
                 f"work-{digest}",
@@ -100,7 +98,7 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
                 revision,
                 completed,
                 planned,
-                str(primary.metadata.get("unit") or "jobs"),
+                "items" if progress else str(primary.metadata.get("unit") or "runs"),
                 len(ordered),
                 primary.job_id,
                 tuple(record.job_id for record in ordered),

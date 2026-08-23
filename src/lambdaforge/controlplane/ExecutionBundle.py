@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
 @dataclass(frozen=True, slots=True)

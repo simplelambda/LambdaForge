@@ -6,7 +6,6 @@ import math
 import pytest
 import torch
 
-from lambdaforge.experiments import ObjectFactory
 from lambdaforge.metrics import (
     MulticlassCurveAverage,
     StreamingMulticlassAUPRC,
@@ -195,19 +194,6 @@ class TestStreamingMulticlassMetrics:
         assert calls == [(2, 3, 8)]
         assert metric.distributed_state()["positive_counts"].sum().item() == 4
 
-    def test_yaml_factory_constructs_public_metric(self) -> None:
-        metric = ObjectFactory.build(
-            {
-                "target": "lambdaforge.metrics.StreamingMulticlassAUROC",
-                "params": {
-                    "num_classes": 3,
-                    "num_bins": 32,
-                    "average": "weighted",
-                },
-            }
-        )
-        assert isinstance(metric, StreamingMulticlassAUROC)
-        assert metric.average is MulticlassCurveAverage.WEIGHTED
 
     def test_state_round_trip_has_same_scores(self) -> None:
         metric = StreamingMulticlassAUROC(num_classes=3, num_bins=8)

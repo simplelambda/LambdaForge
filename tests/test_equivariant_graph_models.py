@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.nn.models.Aggregation import Aggregation
 from lambdaforge.nn.models.graph.equivariant import (
     EGNN,
@@ -420,30 +419,3 @@ class TestEquivariantGraphModels:
 
         assert features.shape == (0, 2)
         assert coordinates.shape == (0, 5)
-
-    def test_yaml_object_factory_builds_equivariant_stack(self) -> None:
-        model = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.models.graph.equivariant.EGNN.EGNN",
-                "params": {
-                    "in_channels": 3,
-                    "out_channels": 2,
-                    "hidden_channels": [5],
-                    "edge_channels": 2,
-                    "message_channels": [7, 6],
-                    "feature_dropout": [0.1, 0.0],
-                    "normalization": "layernorm",
-                    "layer_kwargs": [
-                        {"attention": True, "coordinate_tanh": True},
-                        {"normalize_displacements": True},
-                    ],
-                },
-            }
-        )
-        x, edge_index, coordinates, edge_features = self.graph()
-
-        output = model(x, edge_index, coordinates, edge_features)
-
-        assert isinstance(model, EGNN)
-        assert isinstance(output, torch.Tensor)
-        assert output.shape == (4, 2)

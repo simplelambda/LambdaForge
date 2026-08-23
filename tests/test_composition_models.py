@@ -4,10 +4,8 @@ import math
 
 import pytest
 import torch
-import yaml
 from torch import nn
 
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.nn.models.composition import (
     AutoEncoder,
     EnsembleModel,
@@ -213,31 +211,6 @@ class TestCompositionModels:
         assert identical.shape == (5, 1)
         assert torch.allclose(identical, torch.ones_like(identical), atol=1e-6)
 
-    def test_nested_yaml_builds_injected_mixture(self) -> None:
-        spec = yaml.safe_load(
-            """
-            target: lambdaforge.nn.models.composition.MixtureOfExperts.MixtureOfExperts
-            params:
-              experts:
-                - target: torch.nn.Linear
-                  params: {in_features: 3, out_features: 2}
-                - target: torch.nn.Linear
-                  params: {in_features: 3, out_features: 2}
-              gate:
-                target: torch.nn.Linear
-                params: {in_features: 3, out_features: 2}
-              temperature: 0.8
-              top_k: 1
-              balance_loss_weight: 0.02
-            """
-        )
-        model = ObjectFactory.build(spec)
-        assert isinstance(model, MixtureOfExperts)
-        assert model(torch.randn(4, 3)).shape == (4, 2)
-        assert torch.equal(
-            (model.routing_weights(torch.randn(4, 3)) > 0).sum(dim=-1),
-            torch.ones(4, dtype=torch.long),
-        )
 
     @pytest.mark.parametrize(
         "constructor",
@@ -318,27 +291,6 @@ class TestSIREN:
             for linear in configured.linears
         )
 
-    def test_nonlinear_output_and_yaml_factory(self) -> None:
-        spec = yaml.safe_load(
-            """
-            target: lambdaforge.nn.models.implicit.SIREN.SIREN
-            params:
-              in_features: 2
-              out_features: 1
-              hidden: [12, 10]
-              first_omega: 25.0
-              hidden_omega: [18.0]
-              output_omega: 7.0
-              outermost_linear: false
-              output_transform:
-                target: torch.nn.Tanh
-            """
-        )
-        model = ObjectFactory.build(spec)
-        assert isinstance(model, SIREN)
-        output = model(torch.randn(9, 2))
-        assert output.shape == (9, 1)
-        assert bool((output.abs() <= 1.0).all())
 
     @pytest.mark.parametrize(
         "kwargs",

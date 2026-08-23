@@ -11,7 +11,7 @@ class Reduction(str, Enum):
     """Eliminate magic reduction strings while remaining YAML-compatible.
 
     LambdaForge training losses intentionally support only scalar reductions;
-    unreduced tensors belong in task-specific code rather than ``LightningTask``.
+    unreduced tensors belong in domain code rather than ``LightningModule``.
     """
 
     MEAN = "mean"

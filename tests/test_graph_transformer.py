@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.nn.models.graph.attention.GraphTransformer import GraphTransformer
 from lambdaforge.nn.models.graph.attention.GraphTransformerLayer import (
     GraphTransformerLayer,
@@ -246,27 +245,3 @@ class TestGraphTransformer:
         assert output.shape == (0, 3)
         assert [tuple(edges.shape) for edges in routed] == [(2, 0), (2, 0)]
         assert [tuple(weights.shape) for weights in attention] == [(0, 2), (0, 1)]
-
-    def test_yaml_object_factory_builds_graph_transformer_stack(self) -> None:
-        model = ObjectFactory.build(
-            {
-                "target": (
-                    "lambdaforge.nn.models.graph.attention.GraphTransformer.GraphTransformer"
-                ),
-                "params": {
-                    "in_channels": 4,
-                    "out_channels": 3,
-                    "hidden_channels": [6],
-                    "heads": [2, 1],
-                    "concatenate_heads": [True, False],
-                    "edge_channels": 2,
-                    "feedforward_channels": [9, 7],
-                    "self_loop_edge_fill": ["mean", 0.5],
-                    "pre_norm": [True, False],
-                },
-            }
-        )
-        x, edge_index, edge_features = self.graph()
-
-        assert isinstance(model, GraphTransformer)
-        assert model(x, edge_index, edge_features).shape == (5, 3)

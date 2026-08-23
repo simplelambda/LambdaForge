@@ -105,6 +105,8 @@ class ProcessSupervisor:
                 return 0
             environment = os.environ.copy()
             environment["LAMBDAFORGE_CLUSTER"] = str(request.get("cluster", "local"))
+            environment["LAMBDAFORGE_JOB_ID"] = job_id
+            environment["LAMBDAFORGE_PROGRESS_PATH"] = str(job_dir / "progress.json")
             dataset_registry = request.get("dataset_registry")
             if dataset_registry is not None:
                 environment["LAMBDAFORGE_DATASET_REGISTRY"] = str(dataset_registry)
@@ -364,6 +366,7 @@ class ProcessSupervisor:
             usage["process_observation"] = "unavailable"
         with (job_dir / "usage.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(usage, sort_keys=True) + "\n")
+        progress = cls._read_json(job_dir / "progress.json")
         cls._update_state(
             job_dir,
             {
@@ -371,6 +374,7 @@ class ProcessSupervisor:
                 "updated_at_utc": now,
                 "started_at_utc": state.get("started_at_utc", started),
                 "observed_usage": usage,
+                "progress": progress if isinstance(progress, Mapping) else None,
             },
         )
 

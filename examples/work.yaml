@@ -1,0 +1,8 @@
+name: summarize
+run: examples.work.Summarize
+with:
+  source: {file: input.txt}
+  label: example
+resources:
+  cpu: 1
+  memory: 512MiB

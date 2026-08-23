@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 import yaml
 
-from lambdaforge.cli.CommandLineInterface import CommandLineInterface
 from lambdaforge.cli.LiveJobMonitor import MonitorRenderer
 from lambdaforge.controlplane import (
     ClusterCatalog,
@@ -30,11 +29,13 @@ from lambdaforge.controlplane import (
     TlsTrustResolver,
     Transport,
 )
+from lambdaforge.controlplane.ExecutionBundleBuilder import ExecutionBundleBuilder
 from lambdaforge.controlplane.PreparedEnvironment import PreparedEnvironment
 from lambdaforge.controlplane.python_runtime import PythonRuntime
 from lambdaforge.controlplane.TorchInstallationPlan import TorchInstallationPlan
 from lambdaforge.execution import ResourceRequest
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
+from lambdaforge.reproducibility import CodeIdentity
 
 
 class TrustTransport(Transport):
@@ -85,12 +86,9 @@ def task_config(path: Path) -> Path:
     path.write_text(
         yaml.safe_dump(
             {
-                "kind": "task",
-                "schema_version": "1.0",
-                "name": "queued-task",
-                "inputs": {},
-                "outputs": {"result": "result.json"},
-                "task": {"target": "builtins.dict"},
+                "name": "queued-work",
+                "run": "tests.work_cases.Producer",
+                "resources": {"cpu": 2, "memory": "1GiB"},
             },
             sort_keys=False,
         ),
@@ -222,6 +220,11 @@ def test_remote_enqueue_returns_preparing_before_any_remote_work(
         return Process()
 
     monkeypatch.setattr("subprocess.Popen", launch)
+    monkeypatch.setattr(
+        CodeIdentity,
+        "capture",
+        classmethod(lambda cls, source_dir: cls("test", "submission-fixture")),
+    )
 
     handle = SubmissionService(catalog, jobs).enqueue(config, cluster="remote")
 
@@ -235,117 +238,6 @@ def test_remote_enqueue_returns_preparing_before_any_remote_work(
     assert cancelled.state is JobState.CANCELLED
 
 
-def test_dataset_build_cli_hands_off_without_opening_a_transport(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    recipe = tmp_path / "dataset.yaml"
-    recipe.write_text(
-        yaml.safe_dump(
-            {
-                "kind": "dataset",
-                "schema_version": "1.0",
-                "dataset": {"name": "dna", "version": "1"},
-                "stages": {
-                    "prepare": {
-                        "task": {
-                            "kind": "task",
-                            "schema_version": "1.0",
-                            "name": "prepare",
-                            "inputs": {},
-                            "outputs": {"index": "members.jsonl"},
-                            "resources": {
-                                "cpus": 7,
-                                "memory": "12GiB",
-                                "gpus": 1,
-                                "processes": 2,
-                            },
-                            "task": {"target": "builtins.dict"},
-                        }
-                    }
-                },
-                "publish": {"from": "prepare", "index": "members.jsonl"},
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    catalog = tmp_path / "clusters.yaml"
-    catalog.write_text(
-        yaml.safe_dump(
-            {
-                "clusters": {
-                    "remote": {
-                        "transport": "ssh",
-                        "host": "gpu.invalid",
-                        "workspace": "/work/user",
-                        "storage": {"dataset_root": "/datasets"},
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    class Process:
-        pid = 12345
-
-    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: Process())
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-
-    result = CommandLineInterface.main(
-        (
-            "datasets",
-            "--clusters",
-            str(catalog),
-            "build",
-            str(recipe),
-            "--on",
-            "remote",
-            "--json",
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert result == 0
-    assert payload["state"] == "preparing"
-    assert payload["cluster"] == "remote"
-    request = next((tmp_path / "state/lambdaforge/jobs/submissions").glob("*/request.json"))
-    reservation = json.loads(request.read_text(encoding="utf-8"))["resources"]
-    assert reservation["cpu_cores"] == 7
-    assert reservation["ram_bytes"] == 12 * 1024**3
-    assert reservation["gpu_count"] == 1
-    assert reservation["processes"] == 2
-
-    run_result = CommandLineInterface.main(
-        (
-            "run",
-            str(recipe),
-            "--on",
-            "remote",
-            "--clusters",
-            str(catalog),
-            "--force-stage",
-            "prepare",
-        )
-    )
-    run_payload = json.loads(capsys.readouterr().out)
-    assert run_result == 0
-    assert run_payload["job"]["state"] == "preparing"
-    requests = list((tmp_path / "state/lambdaforge/jobs/submissions").glob("*/request.json"))
-    assert len(requests) == 2
-    assert all(
-        json.loads(path.read_text(encoding="utf-8"))["resources"]["cpu_cores"] == 7
-        for path in requests
-    )
-    assert any(
-        json.loads(path.read_text(encoding="utf-8"))["run_arguments"]
-        == ["--force-stage", "prepare"]
-        for path in requests
-    )
-
-
 def test_submission_worker_persists_pre_scheduler_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -357,6 +249,11 @@ def test_submission_worker_persists_pre_scheduler_failure(
         pid = 12345
 
     monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(
+        CodeIdentity,
+        "capture",
+        classmethod(lambda cls, source_dir: cls("test", "submission-fixture")),
+    )
     handle = SubmissionService(catalog, jobs).enqueue(config, cluster="remote")
     request = jobs.store.root / "submissions" / handle.job_id / "request.json"
 
@@ -377,7 +274,7 @@ def test_submission_worker_persists_pre_scheduler_failure(
 
 
 def test_tls_environment_reaches_the_scientific_scheduler_command(tmp_path: Path) -> None:
-    """The fix must extend beyond bootstrap into task/experiment/dataset processes."""
+    """TLS trust must extend beyond bootstrap into Work processes."""
     config = task_config(tmp_path / "task.yaml")
     profile = remote_profile()
     catalog = ClusterCatalog({"remote": profile})
@@ -557,3 +454,14 @@ def test_monitor_renderer_uses_the_same_machine_readable_job_items() -> None:
     assert "dataset-build" in rendered
     assert "phase=bundle" in rendered
     assert "80%" in rendered
+
+
+def test_bundle_staging_rejects_nested_input_symlinks(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private", encoding="utf-8")
+    (source / "escape").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="contains a symbolic link"):
+        ExecutionBundleBuilder._size(source)

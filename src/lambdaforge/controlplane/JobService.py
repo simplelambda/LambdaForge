@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
@@ -396,7 +396,8 @@ class JobService:
         if not refresh or record.scheduler_id is None or record.state.terminal:
             return record
         profile = self.catalog.get(record.cluster)
-        scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
+        transport = self.factory.transport(profile)
+        scheduler = self.factory.scheduler(profile, transport)
         try:
             state = scheduler.state(record.scheduler_id)
         except Exception as error:
@@ -429,18 +430,38 @@ class JobService:
                     source="scheduler",
                 )
             return record
-        if state is not record.state:
+        metadata = dict(record.metadata)
+        if profile.scheduler == "slurm" and state in {JobState.RUNNING, JobState.PAUSED}:
+            progress_path = str(PurePosixPath(record.work_dir).parent / "progress.json")
+            progress_result = transport.run(("cat", progress_path), timeout=5.0)
+            if progress_result.returncode == 0:
+                try:
+                    progress = json.loads(progress_result.stdout)
+                except (TypeError, ValueError):
+                    progress = None
+                if isinstance(progress, Mapping):
+                    remote_state = metadata.get("remote_state", {})
+                    remote_state = dict(remote_state) if isinstance(remote_state, Mapping) else {}
+                    remote_state["progress"] = dict(progress)
+                    metadata["remote_state"] = remote_state
+        if state is not record.state or metadata != record.metadata:
             previous_state = record.state
             record = record.with_updates(
-                state=state, updated_at_utc=datetime.now(timezone.utc).isoformat()
+                state=state,
+                metadata=metadata,
+                updated_at_utc=datetime.now(timezone.utc).isoformat(),
             )
             self.store.write(record)
-            self.store.append_event(
-                job_id,
-                state=state.value,
-                message=f"Scheduler state changed from {previous_state.value} to {state.value}.",
-                source="scheduler",
-            )
+            if state is not previous_state:
+                self.store.append_event(
+                    job_id,
+                    state=state.value,
+                    message=(
+                        f"Scheduler state changed from {previous_state.value} "
+                        f"to {state.value}."
+                    ),
+                    source="scheduler",
+                )
         return record
 
     def list(
@@ -790,7 +811,7 @@ class JobService:
         )
 
     def _retry_source_config(self, previous: JobRecord) -> str | None:
-        """Recover the controller-side config from current or 0.9.x async records."""
+        """Recover the controller-side Work config recorded for asynchronous retry."""
         configured = previous.metadata.get("source_config_path")
         if configured:
             return str(configured)

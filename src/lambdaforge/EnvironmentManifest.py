@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import torch
 
-from lambdaforge.LambdaForge import LambdaForge
+from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 from lambdaforge.plugins.PluginDescriptor import PluginDescriptor
 
 
@@ -39,21 +39,14 @@ class EnvironmentManifest:
         "lightning",
         "pytorch-lightning",
         "mlflow",
-        "optuna",
         "boto3",
-        "pandas",
-        "pyarrow",
-        "onnx",
-        "onnxscript",
         "tensorboard",
         "tensorboardX",
         "wandb",
         "jsonschema",
-        "matplotlib",
         "numpy",
         "psutil",
         "PyYAML",
-        "ruamel.yaml",
         "torch",
         "torchmetrics",
     )
@@ -69,7 +62,7 @@ class EnvironmentManifest:
         plugin_snapshot = tuple(sorted(set(plugins), key=PluginDescriptor.sort_key))
         return cls(
             created_at_utc=datetime.now(timezone.utc).isoformat(),
-            lambdaforge_version=LambdaForge.VERSION,
+            lambdaforge_version=LambdaForgeVersion.CURRENT,
             python={
                 "version": platform.python_version(),
                 "implementation": platform.python_implementation(),

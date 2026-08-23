@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shlex
@@ -19,7 +20,6 @@ from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.data.ClassificationDatasetProfiler import ClassificationDatasetProfiler
-from lambdaforge.data.DatasetBuildService import DatasetBuildService
 from lambdaforge.data.DatasetDeletionPlan import DatasetDeletionPlan
 from lambdaforge.data.DatasetMaterializationPlan import DatasetMaterializationPlan
 from lambdaforge.data.DatasetOperations import DatasetOperations
@@ -35,13 +35,11 @@ from lambdaforge.data.errors import (
     DatasetRegistryCorruptionError,
     DatasetResolutionError,
     MissingDatasetPlacementError,
-    MissingDatasetRecipeError,
     MissingManagedEnvironmentError,
     OfflineClusterError,
     UnknownDatasetError,
     UnsafeDatasetOperationError,
 )
-from lambdaforge.data.recipe_config import DatasetRecipeConfig
 from lambdaforge.diagnostics import ErrorCategory, LambdaForgeError, diagnostic
 
 
@@ -404,9 +402,12 @@ class DatasetService:
                     ClassificationDatasetProfiler().profile(Path(placement.root), record, schema)
                 )
             elif schema.get("profiler") is not None:
-                from lambdaforge.experiments.ObjectFactory import ObjectFactory
-
-                profiler = ObjectFactory.build(schema["profiler"])
+                path = str(schema["profiler"])
+                module_name, separator, symbol_name = path.rpartition(".")
+                if not separator:
+                    raise ValueError("Dataset profiler must be a dotted class import path.")
+                profiler_type = getattr(importlib.import_module(module_name), symbol_name)
+                profiler = profiler_type()
                 method = getattr(profiler, "profile", None)
                 if not callable(method):
                     raise TypeError("Dataset profiler must expose profile(root, record, schema).")
@@ -672,16 +673,15 @@ class DatasetService:
         strategy: str = "auto",
         apply: bool = False,
     ) -> DatasetMaterializationPlan:
-        """Deterministically plan NOOP/REPLICATE/BUILD; never transfer large bytes silently."""
-        if strategy not in {"auto", "replicate", "build"}:
-            raise ValueError("Dataset materialization strategy must be auto, replicate or build.")
+        """Plan NOOP/RECONCILE/REPLICATE for an existing immutable version."""
+        if strategy not in {"auto", "replicate"}:
+            raise ValueError("Dataset materialization strategy must be auto or replicate.")
         try:
             resolution = self.resolve_placement(selector, cluster)
-        except (KeyError, UnknownDatasetError):
-            recipe = self._recipe(selector)
-            if strategy == "replicate":
-                raise RuntimeError("An unbuilt dataset cannot be replicated.") from None
-            return self._build_materialization(recipe, cluster, apply=apply)
+        except (KeyError, UnknownDatasetError) as error:
+            raise UnknownDatasetError(
+                str(selector), tuple(record.key for record in self.list())
+            ) from error
         record = resolution.record
         if resolution.state is DatasetPlacementState.UNREACHABLE:
             raise OfflineClusterError(cluster, resolution.reason)
@@ -719,72 +719,10 @@ class DatasetService:
             ),
             None,
         )
-        producer = str(record.producer.get("config", "")) or None
-        if strategy == "build" or (source is None and producer):
-            prerequisites: list[dict[str, Any]] = []
-            for input_selector in record.lineage:
-                try:
-                    input_record = self.show(input_selector)
-                except KeyError as error:
-                    raise RuntimeError(
-                        f"Producer input {input_selector!r} is not registered."
-                    ) from error
-                target_placement = next(
-                    (value for value in input_record.placements if value.cluster == cluster),
-                    None,
-                )
-                if target_placement is not None:
-                    prerequisites.append(
-                        {"dataset": input_record.key, "action": "NOOP", "cluster": cluster}
-                    )
-                    continue
-                input_source = next(
-                    iter(sorted(input_record.placements, key=lambda value: value.cluster)),
-                    None,
-                )
-                if input_source is None:
-                    raise RuntimeError(
-                        f"Producer input {input_selector!r} has no physical placement."
-                    )
-                prerequisites.append(
-                    {
-                        "dataset": input_record.key,
-                        "action": "REPLICATE",
-                        "source_cluster": input_source.cluster,
-                        "target_cluster": cluster,
-                        "estimated_bytes": input_source.size_bytes,
-                    }
-                )
-            try:
-                recipe = self._recipe(producer or record.name)
-            except MissingDatasetRecipeError:
-                try:
-                    recipe = self._recipe(record.name)
-                except MissingDatasetRecipeError:
-                    if apply:
-                        raise
-                    return DatasetMaterializationPlan(
-                        record.key,
-                        cluster,
-                        "BUILD",
-                        producer=producer,
-                        reason=(
-                            "Legacy task producer is recorded, but automatic BUILD apply "
-                            "requires a kind: dataset recipe. Preview remains compatible."
-                        ),
-                        prerequisites=tuple(prerequisites),
-                    )
-            if apply:
-                for item in prerequisites:
-                    if item["action"] == "REPLICATE":
-                        self.replicate(
-                            str(item["dataset"]),
-                            source=str(item["source_cluster"]),
-                            destination=cluster,
-                            apply=True,
-                        )
-            return self._build_materialization(
-                recipe, cluster, apply=apply, prerequisites=tuple(prerequisites)
+        if strategy == "build":
+            raise ValueError(
+                "Dataset BUILD is performed by 'lf run WORK.yaml' and "
+                "self.outputs.dataset(...); materialize only places an existing version."
             )
         if source is None:
             raise RuntimeError("Dataset has neither a placement nor a usable producer.")
@@ -826,59 +764,6 @@ class DatasetService:
             self._replicate(record, placement, destination)
         return plan
 
-    def _recipe(self, selector_or_path: str) -> DatasetRecipeConfig:
-        """Resolve a recipe path/name without introducing a second project registry."""
-        from lambdaforge.configuration.ProjectConfigService import ProjectConfigService
-
-        raw = str(selector_or_path)
-        path = Path(raw)
-        if path.is_file():
-            return DatasetRecipeConfig.from_yaml(path)
-        selector = raw.removeprefix("dataset:").split("/", 1)[0]
-        name = selector.split("@", 1)[0]
-        try:
-            resolved = ProjectConfigService().resolve(selector, kind="dataset")
-        except (KeyError, ValueError) as error:
-            known = tuple(
-                record.name
-                for record in ProjectConfigService().list(kind="dataset")
-                if record.valid
-            )
-            raise MissingDatasetRecipeError(name, known) from error
-        recipe = DatasetRecipeConfig.from_yaml(resolved)
-        requested_version = raw.partition("@")[2] or None
-        if requested_version is not None and recipe.version != requested_version:
-            raise MissingDatasetRecipeError(raw, (recipe.selector,))
-        return recipe
-
-    def _build_materialization(
-        self,
-        recipe: DatasetRecipeConfig,
-        cluster: str,
-        *,
-        apply: bool,
-        prerequisites: tuple[dict[str, Any], ...] = (),
-    ) -> DatasetMaterializationPlan:
-        service = DatasetBuildService(
-            self.registry, JobService(self.clusters, factory=self.factory)
-        )
-        build_plan = service.plan(recipe, cluster=cluster)
-        handle = service.submit(recipe, cluster=cluster) if apply else None
-        return DatasetMaterializationPlan(
-            recipe.selector,
-            cluster,
-            "BUILD",
-            producer=str(recipe.source) if recipe.source is not None else None,
-            reason=(
-                "Dataset recipe submitted as one durable dataset-build job."
-                if apply
-                else "Missing placement can be produced by the registered dataset recipe."
-            ),
-            prerequisites=prerequisites,
-            stages=tuple(stage.to_dict() for stage in build_plan.stages),
-            job_id=handle.job_id if handle is not None else None,
-        )
-
     def _remote_profile(
         self,
         placement: DatasetPlacement,
@@ -893,11 +778,13 @@ class DatasetService:
             "import json,sys; "
             "from pathlib import Path; "
             "from lambdaforge.data import ClassificationDatasetProfiler,DatasetRecord; "
-            "from lambdaforge.experiments.ObjectFactory import ObjectFactory; "
+            "import importlib; "
             "schema=json.loads(sys.argv[2]); "
             "record=DatasetRecord.from_mapping(json.loads(sys.argv[3])); "
+            "path=str(schema.get('profiler','')); "
+            "module,name=path.rsplit('.',1) if path else ('',''); "
             "profiler=(ClassificationDatasetProfiler() if schema.get('task')=='classification' "
-            "else ObjectFactory.build(schema['profiler'])); "
+            "else getattr(importlib.import_module(module),name)()); "
             "print(json.dumps(profiler.profile(Path(sys.argv[1]),record,schema),default=str))"
         )
         result = transport.run(

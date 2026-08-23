@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
 @dataclass(frozen=True, slots=True)

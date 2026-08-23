@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lambdaforge.execution.ResourceRequest import ResourceRequest
-from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
 @dataclass(frozen=True, slots=True)

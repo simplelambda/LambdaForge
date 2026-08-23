@@ -34,7 +34,6 @@ _NAMES = (
     "JobGroupStore",
     "JobService",
     "JobStore",
-    "LocalScheduler",
     "LocalTransport",
     "ManagedEnvironmentProvider",
     "MultiClusterSubmissionService",

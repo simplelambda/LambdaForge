@@ -8,7 +8,7 @@ from typing import Any
 
 from lambdaforge.data.DataIdentityProvider import DataIdentityProvider
 from lambdaforge.data.DatasetIdentity import DatasetIdentity
-from lambdaforge.tasks.artifacts import TaskArtifact
+from lambdaforge.data.StoredArtifact import StoredArtifact
 
 
 class StrictContentHashIdentityProvider(DataIdentityProvider):
@@ -19,5 +19,5 @@ class StrictContentHashIdentityProvider(DataIdentityProvider):
     ) -> DatasetIdentity:
         """Return a content identity after a complete deterministic scan."""
         del descriptor, source_dir
-        digest, _ = TaskArtifact.fingerprint_path(path)
+        digest, _ = StoredArtifact.fingerprint_path(path)
         return DatasetIdentity("strict", digest)

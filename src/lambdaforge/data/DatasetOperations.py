@@ -9,9 +9,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.data.DatasetArtifact import DatasetArtifact
 from lambdaforge.data.index import DatasetAsset, DatasetIndex
-from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
-from lambdaforge.tasks.artifacts import TaskArtifact
+from lambdaforge.data.StoredArtifact import StoredArtifact
 
 
 class DatasetOperations:
@@ -140,7 +140,7 @@ class DatasetOperations:
             ):
                 errors.append(f"Missing or unsafe artifact: {expected.path}")
                 continue
-            digest, size = TaskArtifact.fingerprint_path(candidate)
+            digest, size = StoredArtifact.fingerprint_path(candidate)
             if digest != expected.sha256 or size != expected.size_bytes:
                 errors.append(f"Artifact bytes differ: {expected.path}")
         for name, asset in artifact.global_assets.items():
@@ -158,7 +158,7 @@ class DatasetOperations:
                 digest, size = DatasetAsset.fingerprint_path(candidate)
                 checksum_matches = f"sha256:{digest}" == asset.sha256
                 if not checksum_matches and candidate.is_file():
-                    legacy_digest, _ = TaskArtifact.fingerprint_path(candidate)
+                    legacy_digest, _ = StoredArtifact.fingerprint_path(candidate)
                     checksum_matches = f"sha256:{legacy_digest}" == asset.sha256
                 if not checksum_matches or (
                     asset.size_bytes is not None and size != asset.size_bytes

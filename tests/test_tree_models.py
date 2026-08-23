@@ -5,11 +5,8 @@ import copy
 import pytest
 import torch
 
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.nn.activations import Entmax15, Entmoid15
-from lambdaforge.nn.losses import BinaryCrossEntropyWithLogitsLoss
 from lambdaforge.nn.models import GRANDE, NODE, GradTree, ObliviousDecisionTree
-from lambdaforge.training import LightningTask
 
 
 class TestTreeActivations:
@@ -68,24 +65,6 @@ class TestGradTree:
         clone.load_state_dict(copy.deepcopy(model.state_dict()))
         assert torch.equal(model(x), clone(x))
 
-    def test_named_parameter_groups_integrate_with_training(self) -> None:
-        model = GradTree(3, 1, depth=2)
-        groups = model.parameter_groups()
-        assert set(groups) == {"selectors", "thresholds", "leaves"}
-        assert {id(value) for group in groups.values() for value in group} == {
-            id(value) for value in model.parameters()
-        }
-        task = LightningTask(
-            model=model,
-            losses=BinaryCrossEntropyWithLogitsLoss(),
-            optimizer_group_kwargs={
-                "selectors": {"lr": 0.02},
-                "thresholds": {"lr": 0.03},
-            },
-        )
-        optimizer = task.configure_optimizers()
-        learning_rates = {group["lr"] for group in optimizer.param_groups}
-        assert {0.001, 0.02, 0.03} <= learning_rates
 
 
 class TestGRANDE:
@@ -191,23 +170,6 @@ class TestNODE:
             assert parameter.grad is not None
             assert torch.isfinite(parameter.grad).all()
 
-    def test_linear_readout_and_yaml_factory(self) -> None:
-        model = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.models.NODE",
-                "params": {
-                    "in_features": 5,
-                    "out_features": 2,
-                    "num_layers": 2,
-                    "num_trees": [2, 3],
-                    "depth": [2, 2],
-                    "tree_dim": [4, 3],
-                    "readout": "linear",
-                },
-            }
-        )
-        assert isinstance(model, NODE)
-        assert model(torch.randn(7, 5)).shape == (7, 2)
 
     @pytest.mark.parametrize(
         ("factory", "match"),

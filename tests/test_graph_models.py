@@ -3,7 +3,6 @@
 import pytest
 import torch
 
-from lambdaforge.experiments import ObjectFactory
 from lambdaforge.nn.models.Aggregation import Aggregation
 from lambdaforge.nn.models.graph import (
     GAT,
@@ -265,21 +264,6 @@ class TestGraphModels:
         x, edge_index = self.graph()
         assert model(x, edge_index).shape == (5, 2)
 
-    def test_gat_is_constructible_from_yaml_specification(self) -> None:
-        model = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.models.GAT",
-                "params": {
-                    "in_channels": 4,
-                    "out_channels": 2,
-                    "hidden_channels": [6],
-                    "heads": [2, 1],
-                    "concatenate_heads": [True, False],
-                    "activation": "gelu",
-                },
-            }
-        )
-        assert isinstance(model, GAT)
 
     def test_gat_rejects_non_divisible_concatenated_width(self) -> None:
         with pytest.raises(ValueError, match="divisible"):

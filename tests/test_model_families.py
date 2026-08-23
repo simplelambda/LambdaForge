@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.nn.models.sequence import (
     GRUModel,
     LSTMModel,
@@ -152,23 +151,6 @@ class TestModelFamilies:
         first.sum().backward()
         assert continuous.grad is not None
 
-    def test_ft_transformer_builds_from_yaml_compatible_spec(self) -> None:
-        model = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.models.tabular.FTTransformer.FTTransformer",
-                "params": {
-                    "num_continuous_features": 2,
-                    "categorical_cardinalities": [3],
-                    "out_features": 1,
-                    "d_model": 8,
-                    "num_heads": 2,
-                    "num_layers": 1,
-                    "dropout": 0.0,
-                },
-            }
-        )
-        output = model(torch.randn(2, 2), torch.tensor([[0], [2]]))
-        assert output.shape == (2, 1)
 
     def test_residual_mlp_supports_per_block_configuration_and_gradients(self) -> None:
         model = ResidualMLP(

@@ -9,14 +9,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from uuid import uuid4
 
+from lambdaforge.data.DatasetArtifact import DatasetArtifact
 from lambdaforge.data.DatasetPlacement import DatasetPlacement
 from lambdaforge.data.DatasetRecord import DatasetRecord
 from lambdaforge.data.errors import (
     AmbiguousDatasetVersionError,
     DatasetRegistryCorruptionError,
-    InvalidDatasetBuildError,
+    InvalidDatasetPublicationError,
 )
-from lambdaforge.preprocessing.DatasetArtifact import DatasetArtifact
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 
 
@@ -106,7 +106,7 @@ class DatasetRegistry:
             if isinstance(previous, Mapping):
                 existing = DatasetRecord.from_mapping(previous)
                 if existing.dataset_id != record.dataset_id:
-                    raise InvalidDatasetBuildError(
+                    raise InvalidDatasetPublicationError(
                         f"Dataset {record.key} already has a different immutable identity. "
                         f"Existing content: {existing.dataset_id}. "
                         f"New content: {record.dataset_id}."

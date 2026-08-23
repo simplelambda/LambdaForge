@@ -364,9 +364,10 @@ class PythonRuntimeResolver:
             if published.returncode:
                 self._cleanup(transport, temporary)
                 existing = self._read_runtime(transport, destination / self.MARKER)
-                if existing is None or self._probe(
-                    profile, transport, existing.executable, trust=trust
-                ) is None:
+                if (
+                    existing is None
+                    or self._probe(profile, transport, existing.executable, trust=trust) is None
+                ):
                     raise RuntimeError(
                         f"Could not atomically publish managed runtime: {published.stderr.strip()}"
                     )

@@ -68,9 +68,7 @@ class StorageService:
                 for record in active
                 if record.metadata.get("python_runtime_id")
             ],
-            "stage_cache": ["*"]
-            if any(record.job_type == "dataset-build" for record in active)
-            else [],
+            "stage_cache": [],
         }
         payload = self._invoke(
             cluster, "gc", profile.storage.to_dict(), references=references, apply=apply

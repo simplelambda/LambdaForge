@@ -63,22 +63,8 @@ class MissingDatasetPlacementError(DatasetResolutionError):
         )
 
 
-class MissingDatasetRecipeError(DatasetResolutionError):
-    """Identify a recipe required for BUILD rather than leaking an internal KeyError."""
-
-    def __init__(self, selector: str, known: tuple[str, ...] = ()) -> None:
-        self.selector = selector
-        self.known = known
-        rendered = ", ".join(known) if known else "none"
-        super().__init__(
-            f"No DatasetRecipe is known for {selector!r}.\n"
-            f"Known recipes: {rendered}\n"
-            "Next: create/discover a kind: dataset recipe, then run lf run DATASET_CONFIG"
-        )
-
-
-class InvalidDatasetBuildError(DatasetResolutionError):
-    """Prevent incomplete stage evidence from becoming a published version."""
+class InvalidDatasetPublicationError(DatasetResolutionError):
+    """Prevent incomplete evidence from becoming a published version."""
 
 
 class UnsafeDatasetOperationError(DatasetResolutionError):

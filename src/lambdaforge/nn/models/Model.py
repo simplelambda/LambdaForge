@@ -13,7 +13,7 @@ class Model(nn.Module, ABC):
     """Base class for trainable LambdaForge models.
 
     Models may accept tensors, mappings, or multiple structured arguments. The
-    training task controls how a batch is forwarded, so this abstraction does
+    calling Work or Lightning module controls how a batch is forwarded, so this abstraction does
     not impose one domain-specific input or output schema.
     """
 

@@ -9,8 +9,8 @@ if TYPE_CHECKING:
     from lambdaforge.training.callbacks.EpochMetricsCSV import EpochMetricsCSV
     from lambdaforge.training.callbacks.EpochStats import EpochStats
     from lambdaforge.training.CheckpointPolicy import CheckpointPolicy
+    from lambdaforge.training.LightningModule import LightningModule
     from lambdaforge.training.LightningRunner import LightningRunner
-    from lambdaforge.training.LightningTask import LightningTask
     from lambdaforge.training.LightningTrainConfig import LightningTrainConfig
     from lambdaforge.training.LoggerMode import LoggerMode
     from lambdaforge.training.MatmulPrecision import MatmulPrecision
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from lambdaforge.training.orchestration.ProcessGuard import ProcessGuard
     from lambdaforge.training.orchestration.TrainingJob import TrainingJob
     from lambdaforge.training.orchestration.TrainingOrchestrator import TrainingOrchestrator
-    from lambdaforge.training.TaskLoggingConfig import TaskLoggingConfig
+    from lambdaforge.training.TrainingLoggingConfig import TrainingLoggingConfig
 
 LazyExports.install(
     __name__,
@@ -37,7 +37,7 @@ LazyExports.install(
         ),
         "EpochStats": ("lambdaforge.training.callbacks.EpochStats", "EpochStats"),
         "LightningRunner": ("lambdaforge.training.LightningRunner", "LightningRunner"),
-        "LightningTask": ("lambdaforge.training.LightningTask", "LightningTask"),
+        "LightningModule": ("lambdaforge.training.LightningModule", "LightningModule"),
         "LightningTrainConfig": (
             "lambdaforge.training.LightningTrainConfig",
             "LightningTrainConfig",
@@ -57,9 +57,9 @@ LazyExports.install(
             "lambdaforge.training.orchestration.TrainingOrchestrator",
             "TrainingOrchestrator",
         ),
-        "TaskLoggingConfig": (
-            "lambdaforge.training.TaskLoggingConfig",
-            "TaskLoggingConfig",
+        "TrainingLoggingConfig": (
+            "lambdaforge.training.TrainingLoggingConfig",
+            "TrainingLoggingConfig",
         ),
     },
 )
@@ -70,7 +70,7 @@ __all__ = [
     "EpochMetricsCSV",
     "EpochStats",
     "LightningRunner",
-    "LightningTask",
+    "LightningModule",
     "LightningTrainConfig",
     "LoggerMode",
     "MatmulPrecision",
@@ -78,5 +78,5 @@ __all__ = [
     "ProcessGuard",
     "TrainingJob",
     "TrainingOrchestrator",
-    "TaskLoggingConfig",
+    "TrainingLoggingConfig",
 ]

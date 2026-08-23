@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.nn.activations import (
     CELU,
     GEGLU,
@@ -37,16 +36,13 @@ from lambdaforge.nn.kernels import LaplacianKernel, PolynomialKernel, RBFKernel
 from lambdaforge.nn.losses import (
     BinaryCrossEntropyWithLogitsLoss,
     BinaryFocalLoss,
-    ContrastiveLoss,
     CrossEntropyLoss,
     DiceLoss,
     HuberLoss,
-    InfoNCELoss,
     MeanAbsoluteErrorLoss,
     MeanSquaredErrorLoss,
     MulticlassFocalLoss,
     SmoothL1Loss,
-    TripletMarginLoss,
     TverskyLoss,
 )
 from lambdaforge.nn.normalizations import (
@@ -200,35 +196,6 @@ class TestNeuralComponentCatalog:
             and binary_logits.grad is not None
         )
 
-    def test_embedding_losses_reduction_and_yaml_factory(self) -> None:
-        first = torch.eye(4, requires_grad=True)
-        second = torch.eye(4, requires_grad=True)
-        contrastive = ContrastiveLoss()(
-            {"embedding_a": first, "embedding_b": second}, {"target": torch.ones(4)}
-        )
-        triplet = TripletMarginLoss()(
-            {"anchor": first, "positive": second, "negative": -second}, {}
-        )
-        info_nce = InfoNCELoss(temperature=0.1)({"embedding_a": first, "embedding_b": second}, {})
-        assert contrastive < 1e-8
-        assert triplet.ndim == 0 and info_nce.ndim == 0
-        (contrastive + triplet + info_nce).backward()
-        assert first.grad is not None and torch.isfinite(first.grad).all()
-        with pytest.raises(ValueError, match="matrices"):
-            ContrastiveLoss()(
-                {"embedding_a": first.unsqueeze(0), "embedding_b": second.unsqueeze(0)},
-                {"target": torch.ones(1, 4)},
-            )
-        with pytest.raises(ValueError, match="mean.*sum"):
-            HuberLoss(reduction="none")
-
-        configured = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.losses.HuberLoss.HuberLoss",
-                "params": {"delta": 2.0, "reduction": "sum"},
-            }
-        )
-        assert isinstance(configured, HuberLoss)
 
     def test_normalizations_have_expected_shapes_and_norms(self) -> None:
         vectors = torch.randn(3, 4, requires_grad=True)

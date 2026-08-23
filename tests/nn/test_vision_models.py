@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.nn.models.vision import (
     FeaturePyramidNetwork2D,
     InvertedResidualBlock2D,
@@ -138,28 +137,3 @@ class TestVisionRoadmapModels:
             and maps[index].shape[-1] >= maps[index + 1].shape[-1]
             for index in range(len(maps) - 1)
         )
-
-    def test_feature_pyramid_builds_recursively_from_yaml_compatible_spec(self) -> None:
-        model = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.models.FeaturePyramidNetwork2D",
-                "params": {
-                    "backbone": {
-                        "target": "lambdaforge.nn.models.MobileNetV2",
-                        "params": {
-                            "in_channels": 3,
-                            "stage_channels": [8, 16],
-                            "blocks_per_stage": [1, 1],
-                            "stage_strides": [1, 2],
-                            "expansion_ratios": [1.0, 2.0],
-                            "stem_channels": 8,
-                            "final_channels": 24,
-                        },
-                    },
-                    "out_channels": 6,
-                },
-            }
-        )
-
-        assert isinstance(model, FeaturePyramidNetwork2D)
-        assert [feature.shape[1] for feature in model(torch.randn(1, 3, 32, 32))] == [6, 6]

@@ -9,7 +9,7 @@ from typing import Any
 
 from lambdaforge.controlplane.SchedulerCommand import SchedulerCommand
 from lambdaforge.controlplane.SlurmResourceMapping import SlurmResourceMapping
-from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
 @dataclass(frozen=True, slots=True)

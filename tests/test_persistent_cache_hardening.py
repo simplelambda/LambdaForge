@@ -24,7 +24,6 @@ from lambdaforge.data import (
     MemoryMappedCacheBackend,
     NumpyDatasetSerializer,
 )
-from lambdaforge.experiments import ObjectFactory
 from tests.fixtures.CacheBlockedWriterJob import CacheBlockedWriterJob
 from tests.fixtures.CacheCrashJob import CacheCrashJob
 from tests.fixtures.CacheWriterJob import CacheWriterJob
@@ -575,55 +574,3 @@ class TestCoordinatedDiskCache:
         assert usage.bytes <= max_bytes
         assert not list(backend.directory.glob("*.tmp"))
         assert backend.write(f"{22:064x}", payload)
-
-    def test_object_factory_builds_complete_hardened_yaml_tree(
-        self,
-        tmp_path: Path,
-        monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("LAMBDAFORGE_FACTORY_CACHE_KEY", "q" * 32)
-        cache = ObjectFactory.build(
-            {
-                "target": "lambdaforge.data.DatasetCache",
-                "params": {
-                    "dataset": {
-                        "target": "tests.fixtures.TinyMappingDataset.TinyMappingDataset",
-                        "params": {"size": 2},
-                    },
-                    "max_memory_bytes_per_process": 0,
-                    "backend": {
-                        "target": "lambdaforge.data.MemoryMappedCacheBackend",
-                        "params": {
-                            "root": str(tmp_path),
-                            "namespace": "factory-hardened",
-                            "max_bytes": 100_000,
-                            "record_codec": {
-                                "target": "lambdaforge.data.CacheRecordCodec",
-                                "params": {
-                                    "integrity": "hmac_sha256",
-                                    "authentication_key_env": "LAMBDAFORGE_FACTORY_CACHE_KEY",
-                                },
-                            },
-                        },
-                    },
-                    "serializer": {
-                        "target": "lambdaforge.data.NumpyDatasetSerializer",
-                        "params": {"compressed": False},
-                    },
-                    "fingerprint": {
-                        "target": "lambdaforge.data.DatasetFingerprint",
-                        "params": {
-                            "content": "sha256:fixture",
-                            "transform": "identity-v1",
-                            "configuration": {"size": 2},
-                        },
-                    },
-                },
-            }
-        )
-
-        assert isinstance(cache, DatasetCache)
-        first = cache[0]
-        second = cache[0]
-        assert torch.equal(first["x"], second["x"])
-        assert cache.stats().backend_hits == 1

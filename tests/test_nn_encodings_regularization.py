@@ -2,9 +2,7 @@
 
 import torch
 
-from lambdaforge.experiments import ObjectFactory
 from lambdaforge.nn.encodings import (
-    FourierFeatureEncoding,
     LearnedPositionalEncoding,
     RotaryPositionalEncoding,
     SinusoidalPositionalEncoding,
@@ -24,22 +22,6 @@ class TestEncodingsAndRegularization:
         output.sum().backward()
         assert learned.positions.grad is not None
 
-    def test_fourier_encoding_is_rng_isolated_and_yaml_constructible(self) -> None:
-        state = torch.random.get_rng_state()
-        encoding = ObjectFactory.build(
-            {
-                "target": "lambdaforge.nn.encodings.FourierFeatureEncoding",
-                "params": {
-                    "in_features": 3,
-                    "num_frequencies": 5,
-                    "include_input": True,
-                    "seed": 17,
-                },
-            }
-        )
-        assert torch.equal(state, torch.random.get_rng_state())
-        assert isinstance(encoding, FourierFeatureEncoding)
-        assert encoding(torch.randn(4, 3)).shape == (4, 13)
 
     def test_rotary_encoding_preserves_pair_norms(self) -> None:
         x = torch.randn(2, 6, 8)

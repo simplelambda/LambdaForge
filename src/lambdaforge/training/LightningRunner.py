@@ -72,7 +72,7 @@ class LightningRunner:
 
     def fit(
         self,
-        task: LightningModuleBase,
+        module: LightningModuleBase,
         datamodule: LightningDataModuleBase,
         ckpt_path: str | Path | None = None,
         stop_event: Any | None = None,
@@ -82,19 +82,19 @@ class LightningRunner:
             stop_event=stop_event,
             continue_epoch_metrics=ckpt_path is not None,
         )
-        trainer.fit(model=task, datamodule=datamodule, ckpt_path=ckpt_path)
+        trainer.fit(model=module, datamodule=datamodule, ckpt_path=ckpt_path)
         return trainer
 
     def test(
         self,
-        task: LightningModuleBase,
+        module: LightningModuleBase,
         datamodule: LightningDataModuleBase,
         ckpt_path: str | Path | None = "best",
         stop_event: Any | None = None,
     ) -> TrainerType:
         """Run ``trainer.test`` and return the trainer."""
         trainer = self.build_trainer(stop_event=stop_event)
-        trainer.test(model=task, datamodule=datamodule, ckpt_path=ckpt_path)
+        trainer.test(model=module, datamodule=datamodule, ckpt_path=ckpt_path)
         return trainer
 
     def build_trainer(

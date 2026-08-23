@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from lambdaforge.cli import CommandLineInterface
 from lambdaforge.data import (
@@ -14,7 +15,7 @@ from lambdaforge.data import (
     DatasetResolver,
     DatasetService,
 )
-from lambdaforge.experiments.ExperimentConfig import ExperimentConfig
+from lambdaforge.work import WorkConfig
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "dataset-registry-0.9.2.json"
 
@@ -34,31 +35,25 @@ def test_092_dataset_list_show_resolve_and_consume_are_read_only(
     shown = service.show(listed[0].key)
     assert shown.dataset_id == "sha256:" + "a" * 64
     assert shown.placements[0].cluster == "citius-ctgpgpu12"
-    resolution = DatasetResolver(
-        registry, environment="citius-ctgpgpu12"
-    ).resolve("dataset:wisdom-dna@1")
+    resolution = DatasetResolver(registry, environment="citius-ctgpgpu12").resolve(
+        "dataset:wisdom-dna@1"
+    )
     assert resolution.location.uri.endswith("/wisdom-dna/1/aaaaaaaaaaaaaaaa")
 
     monkeypatch.setenv("LAMBDAFORGE_DATASET_REGISTRY", str(registry_path))
-    experiment = ExperimentConfig(
-        {
-            "schema_version": "1.1",
-            "experiment": {"name": "consumer"},
-            "data": {
-                "datamodule": {
-                    "target": "builtins.dict",
-                    "params": {"root": {"dataset": "wisdom-dna", "version": "1"}},
-                }
-            },
-            "model": {"target": "builtins.dict"},
-            "losses": [{"target": "builtins.dict"}],
-            "extensions": {"authoring": {"environment": "citius-ctgpgpu12"}},
-        },
-        source=tmp_path / "experiment.yaml",
+    config_path = tmp_path / "work.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "consumer",
+                "run": "tests.work_cases.InputWork",
+                "with": {"source": {"dataset": "wisdom-dna@1"}},
+            }
+        ),
+        encoding="utf-8",
     )
-    assert experiment["data"]["datamodule"]["params"]["root"].endswith(
-        "/wisdom-dna/1/aaaaaaaaaaaaaaaa"
-    )
+    config = WorkConfig.from_yaml(config_path)
+    assert config.levels[0].runs[0].parameters["source"] == {"dataset": "wisdom-dna@1"}
     monkeypatch.chdir(tmp_path)
     assert CommandLineInterface.main(["datasets", "list"]) == 0
     listed_output = capsys.readouterr().out

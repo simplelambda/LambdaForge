@@ -55,10 +55,8 @@ class SubmissionService:
             )
         # Parse and identify first so authoring errors and duplicate scientific work remain
         # immediate; expensive remote preparation still happens in the detached controller.
-        descriptor = ConfigurationDescriptor.from_path(source, resolve_task_code_identity=False)
-        if descriptor.job_type == "work":
-            descriptor = ConfigurationDescriptor.from_path(source)
-        if descriptor.job_type in {"experiment", "hpo", "work"} and not allow_duplicate:
+        descriptor = ConfigurationDescriptor.from_path(source)
+        if not allow_duplicate:
             self.jobs.refuse_active_execution(
                 descriptor.scientific_identity,
                 cluster,

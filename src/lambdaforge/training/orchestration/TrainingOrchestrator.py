@@ -196,7 +196,7 @@ class TrainingOrchestrator:
         not-yet-started jobs get exit code ``None``.
 
         ``on_job_finished`` is called in the parent process after each launched
-        job exits. It is used by the experiment framework to refresh aggregates
+        job exits. It can be used by Work-oriented search code to refresh summaries
         and plots while a long sweep is still running.
 
         Returns

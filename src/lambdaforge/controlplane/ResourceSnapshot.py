@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
 @dataclass(frozen=True, slots=True)

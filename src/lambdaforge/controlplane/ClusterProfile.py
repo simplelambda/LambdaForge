@@ -14,7 +14,7 @@ from lambdaforge.controlplane.python_runtime import PythonRuntimePolicy
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
 from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
-from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
 @dataclass(frozen=True, slots=True)

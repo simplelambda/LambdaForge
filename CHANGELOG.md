@@ -8,6 +8,50 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-23
+
+### Changed
+
+- Made `lambdaforge.Work` the only YAML-executable contract and `Work.run()` the only scientific
+  lifecycle entry point.
+- Replaced multi-family authoring with a strict Work schema supporting normal parameters, typed
+  file/dataset values, sequence, parallel groups, seeds, finite/random search and metric objectives.
+- Bound immutable configuration, inputs, resources, seeds and trial context plus managed outputs,
+  metrics, progress, checkpoints, cache and paths directly to each Work instance.
+- Replaced Task-based execution/materialization in the control plane with direct `WorkConfig` plans,
+  Work bundles and `WorkRunner` execution. Parallel Runs use spawn isolation.
+- Unified scientific execution under `lf run`; dataset creation now uses
+  `self.outputs.dataset(...)`, while dataset inspection, verification and placement commands remain.
+- Simplified the public package root and CLI around Work/Execution operations, retaining Jobs as the
+  advanced scheduler/process view.
+- Renamed the reusable Lightning helper and logging policy so no non-executable public class is
+  presented as a Task.
+
+### Added
+
+- Durable Work Execution/Run/Attempt result envelopes with scientific fingerprints, environment
+  manifests, captured logs, metrics, outputs, artifacts, datasets, failures and resume evidence.
+- Immutable submitted-configuration snapshots ensure retry keeps the same Execution definition
+  even when the authored YAML changes later.
+- Seed-aware objective summaries rank parameter variants by their mean metric and retain every
+  contributing Run and seed.
+- Safe JSON checkpoint helpers, identity-scoped cache paths, progress snapshots and resumable
+  bounded `Work.map()`.
+- Per-Job mutable remote workspaces, embedded controller code identity and supervisor-consumed Work
+  progress; immutable bundle caches are never used as execution directories.
+- Preview-first, idempotent deletion for direct local Executions as well as scheduled Work roots.
+- Current Work JSON Schema, Work-only scaffolds/examples and focused Work runtime tests.
+
+### Removed
+
+- Function execution, global current-runtime helpers and legacy YAML execution fields/kinds.
+- Separate dataset-build command/protocol and the old authoring schemas/examples.
+- Compatibility/migration routes for superseded pre-1.0 execution configuration.
+- The unused `ExecutionBackend` hierarchy and parallel resource/retry policy layer; scheduler
+  providers are the single operational execution boundary.
+- The unused catalog-oriented `DataService`/transfer-provider path; `DatasetService` is the single
+  dataset lifecycle service.
+
 ## [0.11.0] - 2026-08-22
 
 ### Added

@@ -1,299 +1,132 @@
-# LambdaForge agent operating guide
+# LambdaForge agent guide
 
-This is the low-token entry point for LambdaForge agents. Do not crawl package READMEs. Open only
-the relevant [canonical manual](docs/MANUAL.md) section, then the public contract/implementation
-under change. Current code and behavioral tests override stale assumptions.
+This is the low-token source of truth for agents using or modifying LambdaForge 0.12.0. Read the
+relevant section of `docs/MANUAL.md` only when more detail is needed, then inspect the public
+signature or implementation being changed. Current tests and code override assumptions.
 
-## Product model
+## One execution model
 
-LambdaForge is an installable Python >=3.10 function-first research framework. Consumers own
-domain code/data; ordinary callables run as named Work across local, SSH/SLURM, while strict legacy
-Task/Workflow/Experiment/Dataset IR remains backward compatible.
-Use public imports only. Never copy it, share its `.venv`, patch `PYTHONPATH`, serialize secrets or
-infer CUDA usability from `nvidia-smi` alone.
+Every YAML executes one or more classes inheriting `lambdaforge.Work`. A class has one lifecycle
+entry point: `run(...)`. Reject functions, non-Work classes, required constructor arguments and old
+configuration fields locally before submission. Never create a second runner or translate Work YAML
+to Task/Experiment/Workflow/DatasetRecipe objects.
+
+Do not reintroduce executable Task/TaskContext/PreprocessingTask, YAML `kind`, `schema_version`,
+`target/ref/params`, constructor or method selection, source/transform/sink requirements, arbitrary
+DAG edges, recursive object construction, global `lf.current()/metric()/artifact()` APIs, or a
+compatibility path unless the project explicitly reverses this architectural decision.
 
 ## Fast routes
 
-| Need | Use |
+| Need | Command |
 |---|---|
 | Validate without execution | `lf validate CONFIG` |
-| Inspect strict materialization | `lf inspect CONFIG --resolved` |
-| Read-only execution plan | `lf plan CONFIG [--on CLUSTER]` |
-| Run any supported config | `lf run CONFIG [--on CLUSTER]` |
-| Discover project configs | `lf configs list`; `lf experiments list`; `lf tasks list` |
-| Inspect research history | `lf experiments show/status/history/runs/results NAME` |
-| Create a consumer scaffold | `lf init DIRECTORY` |
-| Debug preprocessing samples | `lf debug CONFIG --records N` |
-| Dataset discovery/convenience alias | `lf datasets plan NAME`; `lf datasets build NAME` |
-| Inspect dataset content | `lf datasets show/members/member/diff/stats/verify ...` |
-| Place a dataset | `lf datasets materialize SELECTOR --on CLUSTER`; add `--apply` after review |
-| Repair dataset indexes | `lf datasets reconcile SELECTOR --on CLUSTER`; preview before `--apply` |
-| Diagnose a cluster | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
-| Diagnose any failed command | read its next action; add `--debug`; use `--json` for tools |
-| Reconnect to work | `lf status`; `lf show/logs/cancel/retry NAME`; `jobs ...` is the advanced view |
-| Global runtime view | `lf top --history 120` for humans; `lf overview --json`, `lf jobs list --json`, `lf resources --all --json` for tools |
-| Query or compare results | `lf results list/show/compare/export` |
-| Plot scientific evidence | `lf plot learning/sweep/seeds/hpo/resources` |
-| Inspect/fetch artifacts | `lf artifact inspect/list/fetch/validate/visualize` |
-| Delete terminal Work | `lf delete NAME`; repeat with `--apply`; a tiny receipt makes retries idempotent |
-| Preview cache collection | `lf clean [--on CLUSTER]`; apply only after review |
-| Explain configuration/identity | `lf explain CONFIG`; `lf explain KIND PATH`; `lf explain changes CURRENT --against PREVIOUS` |
-| Shell completion | `lf completion bash|zsh|fish` |
+| Explain signature/defaults/resources | `lf explain CONFIG` |
+| Read-only expansion | `lf run CONFIG --dry-run` |
+| Execute | `lf run CONFIG [--on CLUSTER]` |
+| Deliberate new execution | `lf run CONFIG --rerun` |
+| Monitor semantic work | `lf top`; `lf overview --json` |
+| Work operations | `lf show/logs/cancel/retry/delete SELECTOR` |
+| Low-level jobs | `lf jobs list/show/logs/cancel/retry` |
+| Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
+| Results | `lf results list/show/compare` |
+| Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
+| Preview cache cleanup | `lf clean [--on CLUSTER]`; add `--apply` after review |
+| Scaffold | `lf init DIRECTORY` |
 
-`lf` equals `lambdaforge`; grammar is `lf <resource> <action> <object> [--on CONTEXT]`.
+Append `--json` for automation and consume stable fields; use `--debug` only for framework
+tracebacks. Remote run returns after durable asynchronous preparation unless `--wait-for-submit` is
+explicit. Never parse prose or secrets.
 
-## Error and diagnostic contract
+## Writing Work
 
-Do not parse prose or catch a private implementation exception in agent automation. CLI failures
-use the stable categories `configuration`, `validation`, `environment`, `execution`, `resource`,
-`connection`, `authentication`, `data`, `storage`, `operation_refused`, `internal`, `warning` and
-`cancelled`. Append `--json` anywhere and consume `category`, `exit_code`, `retryable`, `job_id`,
-`context` and `commands`; append `--debug` only when traceback internals are needed. `--verbose` is
-operational detail, not debug.
+```python
+from pathlib import Path
+import lambdaforge as lf
 
-Exit codes are 2 for configuration/validation/refusal, 3 for environment/connection/authentication,
-4 for execution/data, 5 for resource/storage, 10 for unexpected internal failures and 130 for
-cancellation. Warnings remain exit 0. A preflight error explicitly means no job was submitted;
-`EXECUTION FAILED` means code started. For failed jobs use `lf jobs logs JOB --tail 300` and
-`lf jobs show JOB --json`. Dataset/workflow diagnostics present one root `FAILED` component and
-dependent `BLOCKED` components; never treat every blocked node as another root failure.
-
-Boundary failures persist a redacted record below `$XDG_STATE_HOME/lambdaforge/logs/errors`
-(normally `~/.local/state/lambdaforge/logs/errors`). Secrets must never be copied from debug output
-or injected into commands. When extending LambdaForge, raise `LambdaForgeError(ErrorDiagnostic)`
-only where the domain knows WHAT/WHY/IMPACT/FIX; preserve the original with `raise ... from error`.
-Ordinary internal `ValueError`/`TypeError` contracts may remain technical because the central CLI
-classifier handles the operational boundary. Public diagnostic types live in
-`lambdaforge.diagnostics`.
-
-## Consumer installation
-
-```bash
-cd /path/to/research-project
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e /absolute/path/to/LambdaForge
-python -m pip install -e .
-python -m pip check
-python -c "import lambdaforge; print(lambdaforge.__version__)"
+class Example(lf.Work):
+    def run(self, source: Path, limit: int = 100) -> dict[str, int]:
+        rows = source.read_text().splitlines()[:limit]
+        self.metrics.log("rows", len(rows))
+        self.outputs.value("summary", {"rows": len(rows)})
+        return {"rows": len(rows)}
 ```
 
-Prefer an immutable wheel for released/offline work. Let the consumer lock and verify PyTorch:
-
-```bash
-python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
+```yaml
+name: example
+run: my_project.Example
+with:
+  source: {file: data/input.txt}
+  limit: 100
+resources:
+  cpu: 2
+  memory: 2GiB
 ```
 
-Install only needed extras. Consumer version bounds are authoritative: update an incompatible
-bound deliberately, reinstall, require `pip check`, and never bypass it with `--no-deps`.
+Python signatures and docstrings own parameter truth. Use only the typed markers `{file: ...}`,
+`{dataset: NAME@VERSION}` and `{from: STEP.OUTPUT}`. Plain strings are never guessed as paths.
+Every project class must be importable from its installed consumer package.
 
-Complete CLI surface: author with `init|target|validate|inspect|plan|run|compose|diff|explain|migrate|debug|plugins|completion`; discover with `configs|tasks|experiments`; control with `doctor|overview|top|resources|status|show|logs|cancel|retry|delete|clean`.
-Infrastructure: `clusters`, `jobs`, `storage`, `environments`; data: `data`, `datasets`; evidence:
-`aggregate|retain|registry|dashboard|results|plot|artifact`. Use each resource's `--help` for actions.
+Work properties are available only during execution:
 
-## Configuration and execution
+- immutable: `name`, `config`, `inputs`, `resources`, `seed`, `trial`, `source_dir`, `resuming`;
+- managed services: `outputs.value/artifact/dataset`, `metrics.log/log_many`,
+  `checkpoints.path/exists/save_json/load_json`, `cache.path`, `progress.update`;
+- owned paths: `run_dir` is durable per Attempt; `temp_dir` is ephemeral;
+- intra-job concurrency: `map(items, function, key=..., workers=..., executor=...)` preserves input
+  order, requires unique stable keys and stores JSON checkpoints for retry/resume.
 
-Canonical YAML is `name`, `run: package.function`, optional `with`, and `resources`. Exact
-`{file: PATH}` and `{dataset: NAME@VERSION}` arguments resolve to staged/managed `Path` values;
-ordinary strings are never guessed. `seeds`, `search`, `objective`, sequential `steps` and explicit
-`parallel` groups compile to the existing strict `MaterializedConfig` and runners. Use
-`inspect --resolved` only to diagnose that IR. Imports must belong to the installed consumer.
+`return` is the primary JSON result. Registered names cannot collide. Never pickle results, mutate
+planning inputs, construct hidden paths, create fingerprints, or expose Registry/scheduler services
+to scientific code.
 
-Strict compatibility document families remain:
+## YAML composition and studies
 
-- `kind: task` for one reproducible non-training operation;
-- concise/strict preprocessing, compiled to a Task;
-- `kind: dataset` for staged immutable publication;
-- `kind: workflow` for a local dependency DAG of tasks/experiments;
-- experiment Schema 1.1 for training, seeds, sweeps and HPO.
+`steps` is a sequence. `{parallel: [...]}` is one concurrent level. The following level waits for
+all members. Cross-step outputs reference `step.output` and are invalid when the producer has
+multiple seeds/trials. `seeds` creates separate Runs and does not inject a `seed` argument.
+`search` parameters override normal `with` values and are passed normally to `run()`. The objective
+must name a scalar logged through `self.metrics`; variants with several seeds are ranked by their
+mean, never by the best individual seed.
 
-Supported experiment migration inputs are unversioned and Schema 1.0. Preview with `lf migrate`;
-never rewrite source implicitly. Physical paths resolve before execution but logical identity—not
-placement—drives reuse. Default run resumes compatible state; `--rerun`/legacy `--force` repeats,
-`--restart` discards continuation and `--no-resume` only disables continuation. Active identical
-Work+cluster is refused unless `--allow-duplicate`; another cluster is allowed.
+Do not confuse `self.map` concurrency inside one Work with a YAML parallel group. A parallel group
+uses isolated spawned Work processes inside the enclosing Job's aggregate fixed allocation;
+seed/search members of each Work definition remain serial.
 
-Authored `resources` is the real per-run request/default and step fields override it. LambdaForge
-derives the fixed outer allocation from node resources, DAG levels and `max_parallel`; a strict
-legacy workflow/dataset top-level request remains exact. Do not ask users to repeat YAML resources
-on the command line. `lf run` is canonical for dataset recipes;
-`datasets build` is only a compatible selector-oriented alias.
+## Identity, attempts and ownership
 
-## Task and preprocessing contracts
+Hierarchy: Work -> Execution -> Run -> Attempt -> Job. Scientific identity includes Work import
+path, consumer code identity, normalized parameters, file hashes, dataset content IDs, seed and
+trial values; it excludes cluster, paths, IDs and time. Environment/hardware provenance is separate.
 
-The primary contract is an ordinary function. Its JSON-compatible return is the final output.
-Inside execution, `lf.current()` exposes immutable context, `lf.metric(...)` appends history,
-`lf.artifact(...)` registers one run-owned file/directory and `lf.publish_dataset(...)` streams
-immutable publication. All fail outside a run. Seeds initialize Python/NumPy/PyTorch and inject
-`seed` only when declared. Advanced tasks may still implement `run(context) -> TaskOutput`; use
-`context.input(NAME)`/`output(NAME)` and never escape the run root or return symlinks.
+Normal execution reuses verified success. Retry means same Run/new Attempt; resume means compatible
+checkpoints; rerun means a deliberate new Execution. Published datasets are durable independent
+objects. Results/checkpoints are scientific state. Bundle/environment/cache bytes are
+reconstructible. Deletion and cleanup must be exact-root, symlink-safe, idempotent and preview-first.
 
-Preprocessing is `source -> transforms -> sink`. `workers=1` is sequential; `io` uses threads;
-`cpu` uses spawn-safe processes while the parent owns the sink/manifest; `gpu` requires one worker.
-Sample debugging never finalizes the production sink. Preprocessing does not publish a managed
-dataset unless `publish_dataset: true` or compatible `dataset_name` is explicit.
+Dataset creation occurs only from `self.outputs.dataset(...)`; it streams members into the existing
+DatasetArtifact v2/index/registry format. There is no dataset-build execution protocol. Preserve v1
+manifest reads and immutable name/version conflict checks.
 
-## Dataset lifecycle
+## Control-plane invariants
 
-Keep these concepts distinct:
+Keep `Transport` and `Scheduler` provider boundaries. OpenSSH multiplexing reuses a private
+ControlMaster for its configured idle period. Credentials stay in interactive/keyring/env sources
+and never enter argv, YAML, bundles, state or logs. Managed Python environments are immutable,
+user-space and wheel-identified; do not modify system Python, CUDA, drivers or shell startup files.
+CUDA usability requires an actual tensor probe, not `nvidia-smi` alone.
 
-```text
-DatasetRecipe -> DatasetBuild -> DatasetVersion -> DatasetPlacement
-```
+Direct/SLURM jobs retain durable state, heartbeat, logs, usage, cancellation and identity checks.
+Provider outage is unknown state, not scientific failure. Do not contact a real cluster or run a
+real scientific dataset while testing repository changes.
 
-Prefer `lf.publish_dataset` from ordinary Python; generator members accept id, split/partitions,
-targets, metadata and named run-owned assets while retaining checksums, atomic publication and
-Registry placement. Recipe stages remain compatible and compile to the Workflow DAG. `required`
-expresses scientific necessity;
-`reuse: auto|never` controls cache policy. `--force-stage X` forces X and all transitive downstream
-stages. A successful build validates and atomically publishes the final root plus canonical JSONL
-`DatasetIndex`; incomplete stages never become a version.
+## Modification checklist
 
-Remote bundles relocate every explicitly declared local Task input up to 10 MiB, including named
-inputs inside embedded recipe-stage tasks; never tell a user to copy data into a hashed bundle or
-job directory. Inputs above the bound must fail before submission. Represent them as a DataCatalog
-reference with an explicit target-cluster location, a materialized managed DatasetVersion, or an
-explicit transfer-provider workflow. LambdaForge must not guess or implicitly move large data.
-
-`DatasetMember` has a stable logical ID, arbitrary partitions/targets/metadata and named
-file/directory/record/URI assets with real checksums. Artifact v2 uses path-independent
-`content_id == dataset_id`; `build_id` describes recipe provenance. Never mutate a published alias.
-`DatasetAsset.sha256` is the file-byte SHA-256; directories use the documented tree fingerprint.
-Legacy filename-prefixed file hashes are read-only compatibility, not an authoring contract.
-
-For managed data, bytes plus `dataset-artifact.json` own scientific identity; `DatasetPlacement` locates it and `DatasetRegistry` is only a reconciliable index. Target operations share manifest-backed `AVAILABLE`, `REGISTERED_BUT_MISSING`, `DISCOVERED_UNREGISTERED`, `CONFLICT`, `ABSENT` and
-`UNREACHABLE` states; never turn uncertainty into absence or auto-heal an identity conflict.
-`reconcile` repairs matching indexes preview-first. `remove` never touches bytes; `delete` requires an exact manifest below configured managed storage, exact-version consumers clear, and `--apply`.
-Prefer `dataset:NAME@VERSION/subpath`; DataCatalog remains for external data and overrides.
-
-## Training, post-run and HPO
-
-The standard task expects mapping-shaped batches. Add models, losses and metrics through public
-contracts or importable project classes. Use a Lightning callback for batch/epoch validation logic;
-`validation_step` exposes detached `model_outputs` and `loss`. Log exact `val_*` names for
-checkpointing and HPO.
-
-Use `PostRunAction` for bounded same-allocation analysis after successful training. It receives an
-immutable `PostRunContext` and returns `PostRunResult` artifacts. Required failure prevents run
-success; optional failure is recorded. Action identity is separate from training identity, receipts
-are content-verified, and actions run rank-zero sequentially. Use a Task/Workflow for different
-resources, clusters or long dependent work.
-
-Finite sweeps/random/Optuna and adaptive HPO are separate modes; do not combine `sweep` with enabled
-adaptive `hpo`. Adaptive space keys are dotted scientific paths with float/int/ordinal/categorical/
-bool dimensions and optional conditions. The objective must be an exact dense `metrics.csv` column.
-Inspect/dry-run are read-only. START_NEW, checkpoint RESUME and ADD_SEED share cost/memory-aware
-ranking; confirmation is separate. Relaunch identical YAML to reconcile/resume controller state.
-
-Memory capacity is explicitly UNKNOWN, UNBOUNDED or KNOWN. A candidate-aware CUDA preflight must
-perform representative forward/backward/step in an isolated child; an OOM is censored lower-bound
-evidence. Never claim allocator caps are physical isolation or silently shrink batch size. The seed
-mean model uses `tau² / n + (v₁ + ... + vₙ) / n²`; with one seed, never invent uncertainty.
-
-Extension policies use the immutable public action/estimate types. Exact searcher, fidelity, seed,
-curve, cost, memory, admission and selector signatures are in the HPO section of the manual and
-their public docstrings.
-
-## Clusters, environments and jobs
-
-`Transport` and `Scheduler` are real provider boundaries. OpenSSH is preferred and preserves normal
-keys, agent, known_hosts and ProxyJump. It opens a client per operation but reuses a private
-ControlMaster socket until the configured idle `persist` time. Password mode resolves only hidden
-interactive, `keyring:` or `env:` references and must never put values in argv/YAML/bundles/state,
-fingerprints or logs.
-
-Keep `PythonRuntime -> PythonEnvironment -> InstalledPackages` separate. New managed profiles use
-`python.strategy=auto`: probe the configured/bounded alternatives, reuse a Conda-family manager, or
-stage the pinned verified micromamba and create a runtime below `storage.cache_root`. A legacy
-`python: python3` string means strict `existing`; migrate it with
-`lf clusters set NAME python.strategy auto`. Use `bootstrap --dry-run` before provisioning.
-Managed environments are immutable user-space venvs identified by exact framework/consumer/
-dependency wheel bytes, resolved runtime, offline policy and Torch plan. Never use `conda activate`,
-modify shell startup files, system Python, drivers/CUDA, or silently fall back to CPU.
-Bootstrap accepts LambdaForge itself from either an editable PEP 610 source or a regular installed
-wheel; never infer a source root from `lambdaforge.__file__` or require `pyproject.toml` inside a
-consumer virtual environment. Read `Requires-Python` from release and consumer metadata; do not
-duplicate the version floor in code. Runtime/package caches are reconstructible, but GC must retain
-runtimes referenced by active jobs, the active pointer or retained environments.
-After successful bootstrap, obsolete LambdaForge environment directories are pruned only after the
-new pointer is active; the current environment and live-job references remain protected, and a
-concurrent build defers cleanup.
-Automatic Torch selection uses actual remote Python, driver and compute capability plus official
-wheel availability, and the installed environment must pass a CUDA tensor probe when required.
-LambdaForge-managed runtimes also record one locally validated host CA bundle and propagate it to
-runtime creation, pip/Requests and scientific commands. Never disable verification, download roots
-or modify the system trust store. `doctor` exposes `system-python-tls` and `managed-python-tls`.
-
-Remote CLI runs first return a durable `preparing` job and detach bundle/runtime/transfer work;
-`--wait-for-submit` explicitly restores synchronous scheduler acknowledgement. `submission_phase`
-is machine-readable. Direct jobs then use one detached `ProcessSupervisor`; SLURM remains
-authoritative for scheduled work.
-`lf top` isolates provider refresh and full-log loading in cancellable processes; never move SSH/
-resource/log polling into its keyboard loop. Its default lower list is research work derived from
-jobs by identity+target; `v` exposes raw jobs. Crossing the cluster/work boundary changes selection
-and `Enter` opens paired history, personal usage and cluster-filtered jobs. Cancellation remains a
-rendered, non-blocking confirmation. `--history SECONDS` controls only bounded TUI history.
-GUI integrations consume `overview --json` job `timing`/`usage`, `jobs list --json` and
-`resources --all --json` `personal` aggregates, not terminal escape sequences. Keep requested
-allocations separate from observed use and leave unsupported scheduler accounting unknown.
-Job logs have separate lifecycle, submission-worker and scientific streams. Use
-`JobService.events` for durable framework/provider transitions and `scientific_logs` for raw
-consumer output; scheduler reachability or a supervisor heartbeat is liveness, not proof of
-scientific progress. Workflow nodes and preprocessing checkpoints provide generic progress, but a
-long opaque consumer operation must emit its own bounded flushed messages.
-State, heartbeats, logs and usage are durable. Provider outages report unknown plus last-known state,
-not fake scientific failure. Pause retains leases. Signals require matching PID, process group,
-creation time and command hash. Direct-host admission is cooperative affinity/visibility, not cgroup
-isolation. Mixed-cluster DAG coordination and shared multi-cluster HPO state are intentionally absent.
-`jobs retry` is only for failed/cancelled/timed-out attempts; it retains science, increments attempt
-and creates a job. Scheduler `jobs resume` only continues a paused allocation.
-
-## Results and publication discipline
-
-Use `ResultService`, Registry and job services rather than filesystem globs. A result is identified
-by materialized scientific configuration, logical data, code identity, seed/variant and attempt.
-Treat ambiguous successful duplicates as an error before publication. Rebuild summaries with
-`aggregate`; use exact metric names and explicit direction for comparisons.
-
-`results sync JOB` transfers only allowlisted small evidence; `artifact fetch JOB NAME` retrieves one
-explicit heavy artifact. NPY/NPZ inspection disables pickle, bounds previews and samples large
-statistics deterministically. Every plot has a renderer-neutral `PlotSpec` and atomic sidecar. Keep
-raw run evidence immutable; retention/compression and deletion are preview-first.
-
-## Extension contracts
-
-- Model: `torch.nn.Module`; Loss: public scalar `Loss`; Metric: public bounded `Metric`.
-- Advanced Task: public `Task`/compatible `run` returning `TaskOutput`.
-- Preprocessing: `PreprocessingSource`, `PreprocessingTransform`, `PreprocessingSink`; data:
-  `DatasetProfiler`, `DataTransferProvider`.
-- Providers: `Transport`, `Scheduler`, `ExecutionBackend`, `ArtifactStore`.
-- Training analysis: Lightning `Callback` or `PostRunAction`, according to lifecycle needs.
-- Reusable third-party components: `lambdaforge.<kind>` entry points; project-local objects should
-  normally use installed `my_project.*` targets.
-
-Public classes require concise docstrings explaining responsibility, invariants and contract. Do not
-import or document private file paths.
-
-## Repository modification rules
-
-1. Preserve current YAML, CLI, documented Python APIs, DatasetArtifact v1 reads, supported config
-   migrations and public plugin contracts unless the request explicitly authorizes a break.
-2. Preserve dataset publication atomicity, content-addressed reuse, result identity, job durability,
-   transport/scheduler boundaries, storage safety and HPO semantics.
-3. Prefer cohesive modules and simple functions over one-class-per-file ceremony or forwarding-only
-   service chains. Do not replace meaningful typed states with ambiguous dictionaries.
-4. Check static imports, exports, YAML strings, schemas, examples and entry points before declaring
-   code dead. LambdaForge resolves objects dynamically.
-5. Keep the base install light; optional providers stay lazy and optional.
-6. Update `docs/MANUAL.md` for user-visible behavior, `AGENTS.md` only for agent operations,
-   `CHANGELOG.md` for release history and `SECURITY.md` for threat-model changes.
-7. Run focused tests after each subsystem, then ruff, mypy, the relevant full suites, package build,
-   installed-wheel/CLI smoke and example validation. Do not hide skipped CUDA tests.
-8. Change release identity only in `src/lambdaforge/_version.py`; packaging consumes it dynamically.
-
-## Targeted manual routes
-
-Open only the relevant [manual](docs/MANUAL.md) heading: configuration (6/20), tasks (7), identity
-(8), workflows (9), clusters (10), jobs/datasets (11), HPO (12), results (14), CLI (16), API (17),
-architecture (19), migrations (21), safety (22), outputs (23), retention (24), extensions (26) or
-limitations (28).
+1. Keep the final path `WorkConfig -> ExecutionPlan -> ControlPlane/Scheduler -> WorkRunner ->
+   Work.run()`; infrastructure below Work may be reused.
+2. Update `docs/MANUAL.md`, README examples, this file, schema and changelog for user-visible work.
+3. Audit dynamic imports before deleting ordinary domain helpers, but delete obsolete execution
+   adapters/tests rather than preserving compatibility.
+4. Keep base dependencies light and providers lazy.
+5. Test the smallest changed subsystem, then ruff, mypy, broader retained suites, wheel build and an
+   installed-wheel CLI/scaffold smoke. CUDA tests must be run or explicitly reported as unavailable.

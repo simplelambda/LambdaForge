@@ -601,14 +601,11 @@ class Doctor:
     def _data_checks(self, cluster: str, config_path: Path) -> tuple[DoctorCheck, ...]:
         """Resolve logical data through the same Registry-first policy used at runtime."""
         try:
-            from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
-            from lambdaforge.controlplane.ExecutionBundleBuilder import ExecutionBundleBuilder
-            from lambdaforge.data.DataCatalog import DataCatalog
+            from lambdaforge.configuration.ConfigurationDescriptor import ConfigurationDescriptor
             from lambdaforge.data.DatasetRegistry import DatasetRegistry
             from lambdaforge.data.DatasetResolver import DatasetResolver
 
-            materialized = AuthoringConfig.from_yaml(config_path).materialize().to_dict()
-            references = ExecutionBundleBuilder._experiment_dataset_references(materialized)
+            references = ConfigurationDescriptor.from_path(config_path).datasets
             if not references:
                 return (
                     DoctorCheck(
@@ -617,18 +614,9 @@ class Doctor:
                         "The configuration declares no logical dataset references.",
                     ),
                 )
-            extensions = materialized.get("extensions", {})
-            authoring = extensions.get("authoring", {}) if isinstance(extensions, dict) else {}
-            catalog_value = authoring.get("data_catalog") if isinstance(authoring, dict) else None
-            catalog = None
-            if catalog_value is not None:
-                source = Path(str(catalog_value))
-                source = source if source.is_absolute() else (config_path.resolve().parent / source)
-                catalog = DataCatalog.from_yaml(source)
             profile = self.catalog.get(cluster)
             resolver = DatasetResolver(
                 DatasetRegistry(DatasetRegistry.project_path(config_path.resolve().parent)),
-                catalog,
                 environment=profile.data_environment or cluster,
                 managed_environment=cluster,
                 source_dir=config_path.resolve().parent,
@@ -656,15 +644,8 @@ class Doctor:
     def _requires_cuda(config_path: Path) -> bool:
         """Return whether an authored config explicitly requests one or more GPUs."""
         try:
-            from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
+            from lambdaforge.work import WorkConfig
 
-            values = AuthoringConfig.from_yaml(config_path).materialize().to_dict()
-            extensions = values.get("extensions", {})
-            authoring = extensions.get("authoring", {}) if isinstance(extensions, dict) else {}
-            resources = authoring.get("resources", {}) if isinstance(authoring, dict) else {}
-            if not isinstance(resources, dict):
-                return False
-            gpus = resources.get("gpus", 0)
-            return gpus == "auto" or int(gpus) > 0
+            return WorkConfig.from_yaml(config_path).resources.gpu_count > 0
         except (OSError, TypeError, ValueError):
             return False

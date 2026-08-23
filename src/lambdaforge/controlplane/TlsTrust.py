@@ -55,7 +55,7 @@ class TlsTrustResolver:
     _PROBE = (
         "import json,os,ssl;"
         "p=ssl.get_default_verify_paths();"
-        "values=[p.cafile,p.openssl_cafile," 
+        "values=[p.cafile,p.openssl_cafile,"
         "'/etc/ssl/certs/ca-certificates.crt','/etc/pki/tls/certs/ca-bundle.crt',"
         "'/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem','/etc/ssl/cert.pem'];"
         "valid=[];"

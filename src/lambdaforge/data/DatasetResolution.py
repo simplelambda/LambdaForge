@@ -86,9 +86,7 @@ class DatasetPlacementResolution:
                 else None
             ),
             "target_placement": (
-                self.target_placement.to_dict()
-                if self.target_placement is not None
-                else None
+                self.target_placement.to_dict() if self.target_placement is not None else None
             ),
             "physical": copy.deepcopy(dict(self.physical)),
             "reason": self.reason,

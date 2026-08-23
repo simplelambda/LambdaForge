@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
-from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
 class JobState(str, Enum):

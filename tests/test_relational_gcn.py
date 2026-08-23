@@ -8,7 +8,6 @@ import pytest
 import torch
 from torch import nn
 
-from lambdaforge.experiments.ObjectFactory import ObjectFactory
 from lambdaforge.nn.models.Aggregation import Aggregation
 from lambdaforge.nn.models.graph.message_passing.RelationalGCN import RelationalGCN
 from lambdaforge.nn.models.graph.message_passing.RelationalGCNLayer import (
@@ -458,35 +457,3 @@ class TestRelationalGCN:
                 hidden_channels=[3],
                 message_chunk_size=[1],
             )
-
-    def test_model_is_constructible_from_yaml_object_specification(self) -> None:
-        model = ObjectFactory.build(
-            {
-                "target": (
-                    "lambdaforge.nn.models.graph.message_passing.RelationalGCN.RelationalGCN"
-                ),
-                "params": {
-                    "in_channels": 3,
-                    "out_channels": 2,
-                    "num_relations": 3,
-                    "hidden_channels": [4],
-                    "num_bases": [2, None],
-                    "message_chunk_size": [1, None],
-                    "aggregation": ["mean", "sum"],
-                    "activation": "gelu",
-                    "normalization": "layernorm",
-                    "dropout": [0.0, 0.0],
-                    "residual": [False, False],
-                    "root_weight": [True, True],
-                    "bias": [True, False],
-                },
-            }
-        )
-
-        assert isinstance(model, RelationalGCN)
-        output = model(
-            torch.randn(4, 3),
-            torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.int32),
-            torch.tensor([0, 1, 2], dtype=torch.int32),
-        )
-        assert output.shape == (4, 2)

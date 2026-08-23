@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lambdaforge"
 dynamic = ["version"]
-description = "Reproducible AI workflows from local authoring to multi-cluster execution."
+description = "Managed scientific Work runtime for reproducible local and cluster research."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "SimpleLambda" }]
@@ -19,12 +19,10 @@ classifiers = [
 dependencies = [
     "lightning>=2.2,<3",
     "jsonschema>=4.21",
-    "matplotlib>=3.7",
     "numpy>=1.24,<2.5",
     "packaging>=23",
     "psutil>=5.9",
     "PyYAML>=6",
-    "ruamel.yaml>=0.18,<0.19",
     "threadpoolctl>=3.2",
     "tomli>=2",
     "torch>=2.1",
@@ -47,33 +45,8 @@ tracking = [
     "tensorboard>=2.14",
     "wandb>=0.16",
 ]
-hpo = [
-    "optuna>=3.6",
-]
-adaptive-hpo = [
-    "botorch>=0.14,<0.17; python_version < '3.11'",
-    "botorch>=0.17,<0.18; python_version >= '3.11'",
-]
 s3 = [
     "boto3>=1.34",
-]
-parquet = [
-    "pandas>=2.1",
-    "pyarrow>=15",
-]
-onnx = [
-    "onnx>=1.16",
-    "onnxscript>=0.1",
-]
-viz = [
-    "plotly>=5.20",
-]
-graph = [
-    "networkx>=3.2",
-]
-viz3d = [
-    "plotly>=5.20",
-    "trimesh>=4.0",
 ]
 cluster-password = [
     "keyring>=25",
@@ -110,21 +83,18 @@ lambdaforge = [
 [tool.setuptools.data-files]
 "share/lambdaforge" = [
     "AGENTS.md",
+    "AGENTS.es.md",
     "CHANGELOG.md",
+    "README.es.md",
     "SECURITY.md",
 ]
 "share/lambdaforge/examples" = [
-    "examples/adaptive-hpo.yaml",
-    "examples/experiment.yaml",
-    "examples/data-catalog.yaml",
     "examples/lambdaforge.clusters.yaml",
-    "examples/preprocessing-input.jsonl",
-    "examples/preprocessing.yaml",
-    "examples/workflow.yaml",
-    "examples/dataset-recipe.yaml",
-    "examples/dataset-stage-roster.yaml",
-    "examples/dataset-stage-normalize.yaml",
-    "examples/dataset-stage-labels.yaml",
+    "examples/input.txt",
+    "examples/work.py",
+    "examples/work.yaml",
+    "examples/sequence.yaml",
+    "examples/search.yaml",
 ]
 "share/lambdaforge/docs" = [
     "docs/MANUAL.md",
@@ -136,7 +106,6 @@ pythonpath = ["src", "."]
 testpaths = ["tests"]
 markers = [
     "cuda: requires a working CUDA device and exercises accelerator-specific integration",
-    "optional_hpo: requires the adaptive-hpo BoTorch extra",
     "process_integration: real OS signal and process-tree lifecycle tests",
 ]
 
@@ -157,8 +126,6 @@ warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
 module = [
-    "botorch.*",
-    "gpytorch.*",
     "keyring",
     "psutil",
     "sklearn.*",
@@ -168,8 +135,4 @@ module = [
     "win32con",
     "win32job",
 ]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["ruamel.*"]
 ignore_missing_imports = true

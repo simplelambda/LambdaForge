@@ -14,8 +14,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
-from lambdaforge.experiments.FrozenJsonMapping import FrozenJsonMapping
-from lambdaforge.tasks.artifacts import TaskArtifact
+from lambdaforge.data.StoredArtifact import StoredArtifact
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,12 +98,12 @@ class DatasetAsset:
         """Return the canonical checksum and byte size for one local dataset asset.
 
         Files use the conventional SHA-256 of their bytes. Directories retain the
-        deterministic relative-path tree hash used by task artifacts because a
+        deterministic relative-path tree hash used by managed artifacts because a
         directory has no standalone byte stream.
         """
         resolved = Path(path)
         if not resolved.is_file():
-            return TaskArtifact.fingerprint_path(resolved)
+            return StoredArtifact.fingerprint_path(resolved)
         digest = hashlib.sha256()
         size = 0
         with resolved.open("rb") as handle:
@@ -322,11 +322,11 @@ class DatasetIndex:
                     digest, size = DatasetAsset.fingerprint_path(resolved)
                     checksum_matches = f"sha256:{digest}" == asset.sha256
                     if not checksum_matches and resolved.is_file():
-                        # DatasetArtifact v2 was initially validated with the task
-                        # artifact tree hash, which prefixes a file's basename.
+                        # Early DatasetArtifact v2 writers used the artifact tree hash,
+                        # which prefixes a file's basename.
                         # Read it for compatibility; all new descriptors use the
                         # ordinary byte checksum above.
-                        legacy_digest, _ = TaskArtifact.fingerprint_path(resolved)
+                        legacy_digest, _ = StoredArtifact.fingerprint_path(resolved)
                         checksum_matches = f"sha256:{legacy_digest}" == asset.sha256
                         if checksum_matches:
                             warnings.append(

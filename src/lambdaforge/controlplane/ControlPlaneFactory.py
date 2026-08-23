@@ -7,10 +7,10 @@ from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.CredentialService import CredentialService
 from lambdaforge.controlplane.EnvironmentProvider import EnvironmentProvider
 from lambdaforge.controlplane.ExistingEnvironmentProvider import ExistingEnvironmentProvider
-from lambdaforge.controlplane.LocalScheduler import LocalScheduler
 from lambdaforge.controlplane.LocalTransport import LocalTransport
 from lambdaforge.controlplane.ManagedEnvironmentProvider import ManagedEnvironmentProvider
 from lambdaforge.controlplane.PasswordSshTransport import PasswordSshTransport
+from lambdaforge.controlplane.ProcessScheduler import ProcessScheduler
 from lambdaforge.controlplane.Scheduler import Scheduler
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.controlplane.SlurmScheduler import SlurmScheduler
@@ -64,7 +64,7 @@ class ControlPlaneFactory:
     def scheduler(self, profile: ClusterProfile, transport: Transport) -> Scheduler:
         """Build the configured scheduler over the selected transport."""
         if profile.scheduler == "local":
-            return LocalScheduler(transport, profile)
+            return ProcessScheduler(transport, profile)
         return SlurmScheduler(transport, profile=cast(SlurmProfile, profile.slurm_profile))
 
     def environment_provider(self, profile: ClusterProfile) -> EnvironmentProvider:

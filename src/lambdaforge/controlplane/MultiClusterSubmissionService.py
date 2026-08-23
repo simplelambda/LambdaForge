@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from lambdaforge.configuration.AuthoringConfig import AuthoringConfig
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ControlPlane import ControlPlane
 from lambdaforge.controlplane.JobGroupStore import JobGroupStore
@@ -41,9 +40,15 @@ class MultiClusterSubmissionService:
     ) -> JobGroup:
         if len(set(clusters)) != len(clusters) or not clusters:
             raise ValueError("Multi-cluster submission requires unique cluster names.")
-        materialized = AuthoringConfig.from_yaml(config).materialize()
-        hpo = materialized.values.get("hpo", {})
-        if isinstance(hpo, dict) and hpo.get("enabled") and not independent_hpo:
+        from lambdaforge.work import WorkConfig
+
+        work = WorkConfig.from_yaml(config)
+        is_study = any(
+            definition.run_count > len(definition.seeds)
+            for level in work.levels
+            for definition in level.runs
+        )
+        if is_study and not independent_hpo:
             raise ValueError(
                 "Multi-cluster HPO is not coordinated. Use --independent-hpo to run "
                 "separate studies with no shared optimizer state."

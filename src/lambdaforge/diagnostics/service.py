@@ -89,9 +89,8 @@ class DiagnosticClassifier:
             AmbiguousDatasetVersionError,
             DatasetRegistryCorruptionError,
             DatasetResolutionError,
-            InvalidDatasetBuildError,
+            InvalidDatasetPublicationError,
             MissingDatasetPlacementError,
-            MissingDatasetRecipeError,
             OfflineClusterError,
             UnknownDatasetError,
             UnsafeDatasetOperationError,
@@ -209,7 +208,7 @@ class DiagnosticClassifier:
                 ErrorCategory.DATA,
                 f"Dataset {error.name!r} has more than one matching version.",
                 "LambdaForge refused to guess which scientific data should be used.",
-                reason="Unversioned resolution would make the experiment identity ambiguous.",
+                reason="Unversioned resolution would make the Work identity ambiguous.",
                 impact=("No dataset was selected and no computation was started.",),
                 fixes=("Use one exact name@version selector from the available versions.",),
                 commands=tuple(
@@ -234,19 +233,7 @@ class DiagnosticClassifier:
                 context={"dataset": error.selector, "known": error.known},
                 operation=context.operation,
             )
-        if isinstance(error, MissingDatasetRecipeError):
-            return diagnostic(
-                ErrorCategory.CONFIGURATION,
-                f"No DatasetRecipe is available for {error.selector!r}.",
-                "LambdaForge cannot build an unregistered version without its source recipe.",
-                reason="A kind: dataset YAML recipe defines the reproducible build DAG.",
-                impact=("No build job was submitted.",),
-                fixes=("Create or discover a kind: dataset recipe, then build it by name.",),
-                commands=(("List dataset configs", "lf configs list"),),
-                context={"dataset": error.selector, "known_recipes": error.known},
-                operation=context.operation,
-            )
-        if isinstance(error, InvalidDatasetBuildError):
+        if isinstance(error, InvalidDatasetPublicationError):
             if "different immutable identity" in lowered:
                 return diagnostic(
                     ErrorCategory.OPERATION_REFUSED,
@@ -839,46 +826,18 @@ def job_failure_diagnostic(record: Any, logs: str = "") -> ErrorDiagnostic:
             operation="job submission",
             job_id=job_id,
         )
-    payload = _dataset_build_payload(logs)
-    impact: list[str] = []
-    details: list[str] = []
+    del logs
     fixes = ["Inspect the logs, fix the root cause, then retry the terminal job."]
     cause = str(record.stderr).strip() or "The remote process exited unsuccessfully."
     title = f"Job {job_id} failed after it was started."
-    if payload is not None:
-        title = f"Dataset build {payload.get('dataset', record.metadata.get('name', ''))} failed."
-        stages = payload.get("stages", {})
-        failed = [name for name, item in stages.items() if item.get("status") == "failed"]
-        blocked = [name for name, item in stages.items() if item.get("status") == "blocked"]
-        completed = [name for name, item in stages.items() if item.get("status") == "ok"]
-        if failed:
-            root = failed[0]
-            error = stages[root].get("error", {})
-            cause = f"{error.get('type', 'Error')}: {error.get('message', 'stage failed')}"
-            details.append(f"Root cause: {root} FAILED — {cause}")
-        details.extend(
-            f"{name} BLOCKED by {', '.join(stages[name].get('blocked_by', ())) or 'dependency'}"
-            for name in blocked
-        )
-        if completed:
-            impact.append(f"Reusable completed stages preserved: {', '.join(completed)}.")
-            fixes.append(
-                "It is safe to retry after the fix; verified completed stages may be reused."
-            )
-        if failed:
-            impact.append(f"Failed stage: {failed[0]}.")
-        if blocked:
-            impact.append(f"Derived blocked stages did not execute: {', '.join(blocked)}.")
-    else:
-        impact.append(
-            "LambdaForge cannot infer whether an external kill, resource limit or project error "
-            "caused the exit from the available summary."
-        )
+    impact = [
+        "The Work result, captured logs and durable Job metadata remain available for diagnosis."
+    ]
     return diagnostic(
         ErrorCategory.RESOURCE if state == "timeout" else ErrorCategory.EXECUTION,
         title,
         cause,
-        reason="The job was submitted and project/task code or its allocated process failed.",
+        reason="The job was submitted and Work code or its allocated process failed.",
         impact=impact,
         fixes=fixes,
         commands=(
@@ -895,82 +854,35 @@ def job_failure_diagnostic(record: Any, logs: str = "") -> ErrorDiagnostic:
         retryable=RetryDisposition.AFTER_FIX,
         operation="job status",
         job_id=job_id,
-        details=details,
     )
 
 
-def execution_failure_diagnostic(
+def work_failure_diagnostic(
     *,
-    kind: str,
     name: str,
     source: str | Path,
     error: Mapping[str, Any] | str | None = None,
-    nodes: Mapping[str, Mapping[str, Any]] | None = None,
     run_dir: str | Path | None = None,
 ) -> ErrorDiagnostic:
-    """Explain a synchronous task/workflow failure and derived blocked branches."""
-    context = {"kind": kind, "name": name, "config": str(source), "run_dir": run_dir}
-    impact: list[str] = []
-    details: list[str] = []
-    summary = "Project or task code returned an unsuccessful result."
+    """Explain an exception raised by the single current Work execution contract."""
+    context = {"kind": "work", "name": name, "config": str(source), "run_dir": run_dir}
+    summary = "Work code returned an unsuccessful result."
     if isinstance(error, Mapping):
         summary = f"{error.get('type', 'Error')}: {error.get('message', 'execution failed')}"
     elif error:
         summary = str(error)
-    if nodes:
-        failed = [key for key, value in nodes.items() if value.get("status") == "failed"]
-        blocked = [key for key, value in nodes.items() if value.get("status") == "blocked"]
-        completed = [key for key, value in nodes.items() if value.get("status") == "ok"]
-        if failed:
-            root = failed[0]
-            root_error = nodes[root].get("error", {})
-            if isinstance(root_error, Mapping):
-                summary = (
-                    f"{root_error.get('type', 'Error')}: "
-                    f"{root_error.get('message', 'stage failed')}"
-                )
-            details.append(f"Root cause: {root} FAILED — {summary}")
-            impact.append(f"Failed component: {root}.")
-        for blocked_name in blocked:
-            dependencies = nodes[blocked_name].get("blocked_by", ())
-            details.append(
-                f"{blocked_name} BLOCKED by "
-                f"{', '.join(str(value) for value in dependencies) or 'dependency'}"
-            )
-        if blocked:
-            impact.append(f"Blocked components did not execute: {', '.join(blocked)}.")
-        if completed:
-            impact.append(f"Verified completed work was preserved: {', '.join(completed)}.")
     invocation = DiagnosticContext.from_argv(("run", str(source)))
-    category = (
-        ErrorCategory.DATA
-        if "duplicate preprocessing record" in summary.lower()
-        else ErrorCategory.EXECUTION
-    )
     return diagnostic(
-        category,
-        f"{kind.title()} {name!r} failed after execution started.",
+        ErrorCategory.EXECUTION,
+        f"Work {name!r} failed after execution started.",
         summary,
-        reason="The configured project task/component raised or returned a failed result.",
-        impact=impact or ("No successful terminal result was published for this execution.",),
+        reason="The configured Work class raised an unhandled exception.",
+        impact=("No successful terminal result was published for this Attempt.",),
         fixes=(
-            "Inspect the project/task error, correct its cause, then rerun the same configuration.",
+            "Inspect the Work traceback, correct its cause, then retry the same configuration.",
         ),
         commands=(("Retry after fixing", invocation.command),),
         context=context,
         retryable=RetryDisposition.AFTER_FIX,
-        operation=f"run {kind}",
-        details=details,
+        operation="run work",
     )
-
-
-def _dataset_build_payload(logs: str) -> dict[str, Any] | None:
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", logs):
-        try:
-            value, _ = decoder.raw_decode(logs[match.start() :])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict) and value.get("kind") == "dataset-build":
-            return value
-    return None

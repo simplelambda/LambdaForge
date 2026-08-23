@@ -13,7 +13,7 @@ from lambdaforge.nn.models.Model import Model
 class MultiTaskModel(Model):
     """Apply named task heads to one shared backbone representation.
 
-    ``heads`` is a YAML-friendly mapping from stable task names to arbitrary
+    ``heads`` is a normal Python mapping from stable task names to arbitrary
     modules. Tasks listed in ``detach_backbone_for`` receive detached shared
     features, allowing a head to train without updating the backbone. A
     mapping output is intentional because tasks may have unrelated shapes.
