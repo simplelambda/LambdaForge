@@ -1,5 +1,7 @@
 # Security policy
 
+[Español](SECURITY.es.md) · English
+
 ## Supported versions
 
 LambdaForge is pre-1.0. Security fixes are applied to the current development branch and the most
@@ -29,10 +31,21 @@ required. Do not include real credentials or private datasets.
   traversal/symlinks, hashes assets, verifies staging and atomically publishes before registration.
   Ordinary YAML strings are never guessed to be paths; only explicit `file`/`dataset` markers
   authorize resolution and staging.
+- Managed cache/checkpoint files reject absolute/traversing keys and symbolic links, publish only
+  after validation, `fsync`, SHA-256 and atomic replacement, and expose a read-only path-like
+  handle. `Work.map` persists their logical key/content evidence rather than controller paths.
+  Work cache GC takes an exclusive lock while active Work executions retain a shared lease.
+- `Work.tools.run` accepts argv only and never invokes a shell. Thread controls and environment
+  overrides are scoped to the child process; captured output may contain project data and therefore
+  remains subject to the same log-sharing caution as exception diagnostics.
 - `lf delete WORK` is preview-first, refuses active attempts and removes only an exact tracked job-ID
   child of the configured job root. Published datasets, shared caches/environments and other Work
   are outside this operation; dataset deletion remains a separate manifest-checked command. A
   minimal completion receipt contains no scientific outputs and makes a repeated deletion safe.
+- Interactive history deletion requires a second explicit key, never removes active Jobs and runs
+  the same exact-root storage operation as the CLI. Per-Job absolute local roots prevent a later
+  invocation from deleting below a different current directory. Whole-history cleanup retains the
+  local record whenever its owned workspace could not be removed safely.
 - Checksums detect accidental or malicious modification but do not authenticate a producer. Use
   HMAC where supported, restrict store permissions and obtain artifacts over authenticated channels.
 - Local and SLURM backends never interpolate a command through a local shell. Generated batch
@@ -61,4 +74,4 @@ required. Do not include real credentials or private datasets.
   and service. They are optional and loaded only when configured.
 
 The detailed ownership and control-plane boundaries are documented in the
-[canonical manual](docs/MANUAL.md#10-cleanup-and-safety).
+[canonical manual](docs/MANUAL.md#11-cleanup-and-safety).

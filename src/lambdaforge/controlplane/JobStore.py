@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,6 +79,13 @@ class JobStore:
         """Delete only local metadata for one validated job id."""
         self.get(job_id)
         path = self.root / f"{job_id}.json"
+        submission = self.root / "submissions" / job_id
+        if submission.exists() and (submission.is_symlink() or not submission.is_dir()):
+            raise RuntimeError(f"Unsafe Job submission history path: {submission}")
+        if submission.exists():
+            if submission.is_symlink() or not submission.is_dir():
+                raise RuntimeError(f"Unsafe Job submission history path: {submission}")
+            shutil.rmtree(submission)
         with CrossProcessFileLock(
             path.with_suffix(".lock"),
             shared=False,

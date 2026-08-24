@@ -130,14 +130,26 @@ class StorageService:
             apply=apply,
         )
 
-    def delete_job(self, cluster: str, job_id: str, *, apply: bool = False) -> dict[str, Any]:
+    def delete_job(
+        self,
+        cluster: str,
+        job_id: str,
+        *,
+        apply: bool = False,
+        local_run_root: str | None = None,
+    ) -> dict[str, Any]:
         """Preview or delete one exact job workspace without touching shared state."""
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
+        descriptor = profile.storage.to_dict()
+        if local_run_root is not None:
+            if profile.transport != "local":
+                raise ValueError("A per-Job local run root cannot override remote storage.")
+            descriptor["run_root"] = local_run_root
         return self._invoke(
             cluster,
             "delete-job",
-            profile.storage.to_dict(),
+            descriptor,
             references={"job_id": job_id},
             apply=apply,
         )

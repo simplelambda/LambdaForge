@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import pytest
 
 from lambdaforge.controlplane import ClusterProfile, JobState, LocalTransport, ProcessScheduler
 from lambdaforge.controlplane.ProcessIdentity import ProcessIdentity
+from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor
 from lambdaforge.execution import ResourceRequest
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Process groups require POSIX.")
@@ -49,7 +51,12 @@ def test_submit_returns_and_reconnects_to_durable_state(tmp_path: Path) -> None:
     job_id = "job-060-reconnect"
     started = time.monotonic()
     submission = value.submit(
-        (sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(1)"),
+        (
+            sys.executable,
+            "-c",
+            "import os,time; print(os.environ['LAMBDAFORGE_CACHE_ROOT'], flush=True); "
+            "time.sleep(1)",
+        ),
         ResourceRequest(),
         work_dir=tmp_path,
         job_id=job_id,
@@ -62,8 +69,76 @@ def test_submit_returns_and_reconnects_to_durable_state(tmp_path: Path) -> None:
         JobState.SUCCEEDED,
     }
     assert wait_for(reconnected, job_id, {JobState.SUCCEEDED}) is JobState.SUCCEEDED
-    assert "ready" in reconnected.logs(job_id)
-    assert reconnected.inventory()[0]["request"]["job_id"] == job_id
+    assert str(tmp_path / "cache") in reconnected.logs(job_id)
+    request = reconnected.inventory()[0]["request"]
+    assert request["job_id"] == job_id
+    assert request["cache_root"] == str(tmp_path / "cache")
+
+
+def test_supervisor_does_not_copy_an_already_staged_workspace_onto_itself(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "jobs" / "job-already-staged"
+    work_dir = job_dir / "work"
+    work_dir.mkdir(parents=True)
+    (work_dir / "config.yaml").write_text("name: retained\n", encoding="utf-8")
+    request = job_dir / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "job_id": job_dir.name,
+                "command": [sys.executable, "-c", "print('launched')"],
+                "cluster": "remote",
+                "source_work_dir": str(work_dir),
+                "stage_source": True,
+                "resources": {},
+                "lease_root": str(tmp_path / "gpu-leases"),
+                "resource_lease_root": str(tmp_path / "process-leases"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert ProcessSupervisor.serve(request) == 0
+    assert (work_dir / "config.yaml").is_file()
+    assert "launched" in (job_dir / "stdout.log").read_text(encoding="utf-8")
+
+
+def test_prelaunch_failure_has_empty_stable_log_streams(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "job-prelaunch-failure"
+    job_dir.mkdir(parents=True)
+    request = job_dir / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "job_id": job_dir.name,
+                "command": [sys.executable, "-c", "print('never')"],
+                "cluster": "remote",
+                "source_work_dir": str(tmp_path / "missing"),
+                "stage_source": True,
+                "resources": {},
+                "lease_root": str(tmp_path / "gpu-leases"),
+                "resource_lease_root": str(tmp_path / "process-leases"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert ProcessSupervisor.serve(request) == 1
+    assert (job_dir / "stdout.log").read_text(encoding="utf-8") == ""
+    assert (job_dir / "stderr.log").read_text(encoding="utf-8") == ""
+    state = json.loads((job_dir / "state.json").read_text(encoding="utf-8"))
+    assert "Unsafe or missing staged source" in state["message"]
+    observed = scheduler(tmp_path)
+    assert observed.state(job_dir.name) is JobState.FAILED
+    assert "Unsafe or missing staged source" in str(observed.details(job_dir.name)["message"])
+
+
+def test_log_reader_treats_legacy_missing_streams_as_no_output(tmp_path: Path) -> None:
+    value = scheduler(tmp_path)
+    (tmp_path / "jobs" / "job-legacy-no-streams").mkdir(parents=True)
+
+    assert value.logs("job-legacy-no-streams") == ""
 
 
 def test_dataset_environment_wrapper_preserves_supervisor_python(tmp_path: Path) -> None:

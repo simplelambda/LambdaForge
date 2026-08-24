@@ -210,8 +210,10 @@ class ControlPlane:
                 (
                     "LAMBDAFORGE_DATASET_REGISTRY="
                     f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
+                    f"LAMBDAFORGE_CACHE_ROOT={storage.cache_root}",
                     f"LAMBDAFORGE_CLUSTER={cluster}",
                     "LAMBDAFORGE_BUNDLE=1",
+                    "LAMBDAFORGE_EXECUTION_MODE=worker",
                     f"LAMBDAFORGE_JOB_ID={reserved_job_id}" if reserved_job_id else "",
                     (
                         "LAMBDAFORGE_PROGRESS_PATH="

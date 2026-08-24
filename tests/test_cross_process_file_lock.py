@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from lambdaforge.data.cache.CacheFileLock import CacheFileLock
 from lambdaforge.runtime import CrossProcessFileLock
 from tests.fixtures.FileLockHolderJob import FileLockHolderJob
 
@@ -67,18 +66,17 @@ class TestCrossProcessFileLock:
 
         assert not (external / "unsafe.lock").exists()
 
-    def test_context_manager_and_cache_adapter_preserve_contract(
+    def test_context_manager_preserves_contract(
         self,
         tmp_path: Path,
     ) -> None:
-        lock = CacheFileLock(
+        lock = CrossProcessFileLock(
             tmp_path / "cache.lock",
             shared=False,
             timeout_seconds=1.0,
             poll_interval_seconds=0.01,
         )
 
-        assert isinstance(lock, CrossProcessFileLock)
         assert not lock.acquired
         with lock as lease:
             assert lease is lock

@@ -1,5 +1,7 @@
 # Changelog
 
+[Español](CHANGELOG.es.md) · English
+
 All notable LambdaForge changes are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The repository currently has no Git
@@ -7,6 +9,68 @@ tags; the 0.1.0 and 0.2.0 entries below were reconstructed from their version co
 metadata rather than invented release numbers.
 
 ## [Unreleased]
+
+### Fixed
+
+- Prevented direct SSH supervisors from copying an already staged Job workspace onto itself, which
+  failed before scientific launch with recursive `SameFileError` data.
+- Made pre-launch stdout/stderr streams stable and taught Job logs to distinguish absent legacy
+  streams from the supervisor's durable failure reason.
+- Fixed local asynchronous Jobs becoming `unknown` after scheduler acknowledgement because the
+  detached submitter and later observers resolved a relative provider root from different working
+  directories. New Jobs persist absolute project-anchored roots and old records recover from their
+  saved source path.
+
+### Changed
+
+- Made normal local `lf run` use the same durable, non-blocking Job handoff as remote execution;
+  supervised children still execute inline and `--dry-run` remains read-only.
+- Added forward/back arrow navigation across Work, Job, cluster detail and full logs in `lf top`.
+- Replaced redundant `v`/`l` monitor shortcuts with confirmed `d` selected-history deletion and `D`
+  terminal-history cleanup; destructive provider work remains asynchronous and active Jobs survive.
+- Made Work cache a real reconstructible storage category in preview-first `lf clean`, coordinated
+  with an active-Work shared lease rather than merely describing raw paths as collectible.
+- Consolidated managed path containment and file/directory fingerprinting and made the common
+  `CrossProcessFileLock` the direct dataset-cache and Work-cache coordination primitive.
+- Made plain `Work.map` an ordered concurrency helper without hidden persistence and introduced the
+  explicit `resume_map` spelling for stable-key per-item checkpoints; legacy keyed calls remain
+  compatible.
+- Changed `lf top` drill-down from raw Job rows to human-numbered Work Attempts, including cluster
+  detail and log titles, while retaining machine Job IDs in `overview --json` and `lf jobs`.
+- Documented the complete existing neural model-family catalog instead of adding redundant generic
+  MLP/GNN aliases or another model factory.
+- Propagated each target's configured `storage.cache_root` into direct and scheduled Work processes
+  so the simple and file cache APIs share the intended reusable/collectible location.
+
+### Added
+
+- Added `Work.log(message, level=...)` for timestamped, immediately flushed messages while retaining
+  normal `print()` and Python logging capture.
+- Added path-like `ManagedFile`, integrity-checked `Work.cache.file/fetch/rate_limit`, validated
+  atomic checkpoint files and automatically finalized `outputs.file/directory` helpers.
+- Extended `Work.map` with field keys, restored-result validation, per-item retry/backoff and safe
+  logical managed-cache dependencies so cache cleanup recomputes only affected items.
+- Added `Work.tools.require/run` with argv-only execution, streamed bounded logs, child-scoped thread
+  controls, explicit version probes and single-source environment provenance.
+- Added optional `lambdaforge.clustering` adapters for KMeans, MiniBatchKMeans, DBSCAN, HDBSCAN and
+  agglomerative clustering, one immutable result contract, explicit Distance compatibility,
+  guarded precomputed metrics and generic ARI/silhouette/stability evidence.
+- Added a complete Spanish manual and security policy alongside synchronized English/Spanish
+  README and agent guidance.
+- Added preview-first `lf jobs clear [--apply]` and definitive individual Job deletion that removes
+  the exact owned workspace, events and detached-submission record.
+- Added the small `Work.cache.put/get` API for atomically stored bytes, text and strict JSON without
+  exposing cache paths or unsafe pickle serialization.
+- Added optional `publish_to`/`overwrite` managed-output publication: a verified Attempt artifact
+  remains authoritative while an explicit local or remote-host copy is published atomically;
+  symlink traversal, type changes and self/owner directory replacement are refused.
+- Added `attempt_history` to the semantic Work read model so TUIs and external wrappers share the
+  same numbered-attempt information.
+
+### Removed
+
+- Removed the forwarding-only cache-specific file-lock subclass; dataset and Work caches now use
+  the shared runtime lock directly.
 
 ## [0.12.0] - 2026-08-23
 

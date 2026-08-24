@@ -12,6 +12,38 @@ from lambdaforge.controlplane.jobs import JobRecord
 
 
 @dataclass(frozen=True, slots=True)
+class ResearchAttempt:
+    """Human-numbered scheduler attempt linked to its machine Job identifier."""
+
+    number: int
+    job_id: str
+    state: str
+    cluster: str
+    scheduler: str
+    scheduler_id: str | None
+    job_type: str
+    created_at_utc: str
+    updated_at_utc: str
+    retry_of: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a display-first record while retaining the Job ID for automation."""
+        return {
+            "number": self.number,
+            "label": f"Attempt {self.number}",
+            "job_id": self.job_id,
+            "state": self.state,
+            "cluster": self.cluster,
+            "scheduler": self.scheduler,
+            "scheduler_id": self.scheduler_id,
+            "job_type": self.job_type,
+            "created_at_utc": self.created_at_utc,
+            "updated_at_utc": self.updated_at_utc,
+            "retry_of": self.retry_of,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchWork:
     """Group attempts of one scientific revision on one target without owning new state."""
 
@@ -28,6 +60,7 @@ class ResearchWork:
     attempts: int
     primary_job_id: str
     job_ids: tuple[str, ...]
+    attempt_history: tuple[ResearchAttempt, ...]
     created_at_utc: str
     updated_at_utc: str
 
@@ -49,6 +82,7 @@ class ResearchWork:
             "attempts": self.attempts,
             "primary_job_id": self.primary_job_id,
             "job_ids": list(self.job_ids),
+            "attempt_history": [attempt.to_dict() for attempt in self.attempt_history],
             "created_at_utc": self.created_at_utc,
             "updated_at_utc": self.updated_at_utc,
         }
@@ -102,6 +136,21 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
                 len(ordered),
                 primary.job_id,
                 tuple(record.job_id for record in ordered),
+                tuple(
+                    ResearchAttempt(
+                        number,
+                        record.job_id,
+                        record.state.value,
+                        record.cluster,
+                        record.scheduler,
+                        record.scheduler_id,
+                        record.job_type,
+                        record.created_at_utc,
+                        record.updated_at_utc,
+                        record.retry_of,
+                    )
+                    for number, record in enumerate(ordered, 1)
+                ),
                 ordered[0].created_at_utc,
                 max(record.updated_at_utc for record in ordered),
             )

@@ -178,6 +178,9 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile = job_commands.add_parser("reconcile")
     reconcile.add_argument("--cluster")
     reconcile.add_argument("--all", action="store_true")
+    clear = job_commands.add_parser("clear")
+    clear.add_argument("--apply", action="store_true")
+    clear.add_argument("--json", action="store_true")
 
     for operation in ("show", "logs", "cancel", "retry", "delete"):
         item = commands.add_parser(operation, help=f"Work-level {operation} operation.")

@@ -1,0 +1,571 @@
+# Manual de LambdaForge 0.12
+
+[English](MANUAL.md) · Español
+
+## Índice
+
+1. [Modelo mental](#1-modelo-mental)
+2. [Instalación y estructura](#2-instalación-y-estructura)
+3. [API de Work](#3-api-de-work)
+4. [Ficheros gestionados, cache, map, outputs y herramientas](#4-ficheros-gestionados-cache-map-outputs-y-herramientas)
+5. [Referencia YAML](#5-referencia-yaml)
+6. [Ficheros y datasets](#6-ficheros-y-datasets)
+7. [Secuencia, paralelismo, seeds y búsqueda](#7-secuencia-paralelismo-seeds-y-búsqueda)
+8. [Ejecución, identidad y reutilización](#8-ejecución-identidad-y-reutilización)
+9. [Resultados y metadata](#9-resultados-y-metadata)
+10. [Clústeres y Jobs](#10-clústeres-y-jobs)
+11. [Limpieza y seguridad](#11-limpieza-y-seguridad)
+12. [Referencia CLI](#12-referencia-cli)
+13. [Clustering](#13-clustering)
+14. [Componentes neuronales reutilizables](#14-componentes-neuronales-reutilizables)
+15. [Arquitectura y extensiones](#15-arquitectura-y-extensiones)
+
+## 1. Modelo mental
+
+LambdaForge ejecuta clases Python y posee la infraestructura que las rodea:
+
+```text
+YAML Work -> WorkConfig -> plan -> scheduler/Job -> WorkRunner -> Work.run()
+```
+
+El investigador implementa una subclase de `lambdaforge.Work` y su método `run()`. YAML elige la
+clase, argumentos normales, recursos y repeticiones. LambdaForge resuelve entradas externas,
+calcula identidad, enlaza servicios, captura salidas y conserva un resultado inspeccionable. Una
+función o una clase que no herede `Work` no puede ser target de YAML.
+
+La jerarquía durable es:
+
+- Work: operación o estudio con nombre humano;
+- Execution: una invocación en un destino;
+- Run: un miembro científico de seed/variante;
+- Attempt: un intento de completar ese Run;
+- Job: el proceso o trabajo del scheduler que ejecuta el Attempt.
+
+## 2. Instalación y estructura
+
+Framework y proyecto consumidor son paquetes independientes instalados en el entorno del proyecto:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install lambdaforge==0.12.0
+python -m pip install -e .
+python -m pip check
+```
+
+Para desarrollar el framework se sustituye la primera instalación por
+`python -m pip install -e /ruta/absoluta/LambdaForge`. No se comparte el `.venv` del framework, no
+se modifica `PYTHONPATH` en producción ni se copia el código fuente dentro del consumidor.
+`lf init DIRECTORIO` crea `pyproject.toml`, un paquete `src/`, YAML y exclusiones seguras.
+
+```text
+proyecto/
+  pyproject.toml
+  src/mi_proyecto/work.py
+  experiments/estudio.yaml
+  data/entrada-pequeña.json
+  .lambdaforge/                 # estado gestionado; ignorado por Git
+```
+
+## 3. API de Work
+
+Una subclase normalmente no define constructor y tiene una única entrada científica: `run()`.
+Todas las propiedades de runtime fallan si se usan fuera de una ejecución gestionada.
+
+| API | Vida | Responsabilidad |
+|---|---|---|
+| `run(**parameters)` | una vez por Attempt | cálculo científico y resultado JSON primario |
+| `name`, `config` | inmutable | nombre, clase, parámetros y recursos normalizados |
+| `inputs` | inmutable | procedencia y rutas resueltas de file/dataset tipados |
+| `outputs` | Attempt | valores, ficheros/directorios, artefactos y datasets |
+| `metrics` | append-only | historia escalar y valores finales |
+| `checkpoints` | Run | estado explícito para reanudar |
+| `cache` | reconstruible | valores simples y ficheros reutilizables ligados a identidad |
+| `tools` | ejecución | programas externos y su procedencia |
+| `progress` | snapshot | avance vivo `completed/total/message` |
+| `log(...)` | stream | diagnóstico humano con fecha y flush |
+| `resources`, `seed`, `trial` | inmutable | reserva y miembro del estudio |
+| `run_dir` | Attempt | raíz durable avanzada |
+| `temp_dir` | Attempt | temporales eliminados al finalizar |
+| `source_dir` | inmutable | contexto del paquete consumidor |
+| `resuming` | inmutable | existía checkpoint compatible al comenzar |
+| `map(...)` | Job | concurrencia ordenada sin persistencia |
+| `resume_map(...)` | Job | reanudación explícita por elemento y clave estable |
+
+`outputs.value` acepta una vez valores JSON. `outputs.file/directory` es la vía recomendada para
+artefactos nuevos; `outputs.artifact` importa de forma avanzada una ruta ya creada. `metrics.log`
+acepta escalares finitos y `step/split` opcionales. `print()`, stdout, stderr y `logging` se capturan
+en los logs del Job y en `work.log`. `self.log()` añade nivel y fecha; `progress.update` representa
+avance, mientras `metrics.log` conserva evidencia científica.
+
+## 4. Ficheros gestionados, cache, map, outputs y herramientas
+
+### 4.1 Elegir almacenamiento
+
+| Necesidad | Servicio | Sobrevive retry | Lo elimina `lf clean` | Resultado publicado |
+|---|---|---:|---:|---:|
+| bytes/texto/JSON pequeño reconstruible | `cache.put/get` | se reutiliza | sí | no |
+| fichero descargable/calculable | `cache.file/fetch` | se reutiliza | sí | no |
+| estado secuencial para reanudar | `checkpoints.file/save_json` | sí | no | evidencia de resume |
+| fichero/árbol científico final | `outputs.file/directory` | pertenece al Attempt | no | sí |
+| intermedio desechable | `temp_dir` | no | automático | no |
+
+`cache.path`, `checkpoints.path` y escrituras directas bajo `run_dir` son escapes avanzados. El
+usuario que los elige también asume validación, atomicidad y registro.
+
+### 4.2 ManagedFile y cache
+
+El caso normal no exige rutas ni callbacks:
+
+```python
+self.cache.put("resumen", {"aceptadas": 1842, "schema": 3})
+resumen = self.cache.get("resumen")
+fallback = self.cache.get("ausente", {"aceptadas": 0})
+```
+
+`put(clave, contenido)` admite `bytes`, texto UTF-8 o JSON estricto y reemplaza atómicamente el
+valor. `get(clave, default=None)` devuelve el tipo soportado original o el default si no existe una
+entrada íntegra. No se admite pickle ni serialización implícita de objetos. El perfil de storage
+elige la ubicación física; el Work normal no necesita hacerlo. `cache.path` queda como escape
+avanzado explícito.
+
+```bash
+lf clusters add gpu --host HOST --user USER --workspace /remote/work \
+  --cache-root /scratch/USER/lambdaforge-cache
+```
+
+La raíz elegida se propaga a cada proceso Work, también a Jobs directos detached; no depende del
+estado del shell. La ejecución local usa por defecto `.lambdaforge/cache` del proyecto.
+
+Cuando una librería necesita una ruta o la construcción es pesada se usa `ManagedFile`:
+
+```python
+estructura = self.cache.file(
+    f"estructuras/{identificador}.cif",
+    build=lambda destino: crear_estructura(identificador, destino),
+    validate=lambda fichero: fichero.size_bytes > 0 and estructura_valida(str(fichero)),
+)
+```
+
+`build(destino: Path)` escribe un temporal real; su retorno se ignora. En un hit se comprueban
+registro, SHA-256, tamaño y validador semántico. En un miss o entrada inválida se adquiere un lock
+exclusivo entre procesos para esa clave, se vuelve a comprobar, se construye junto al destino, se
+valida, se hace `fsync`, se promociona atómicamente y se actualiza el registro. Un fallo no publica
+bytes parciales. Las claves son relativas; se rechazan rutas absolutas, `..` y symlinks.
+
+`ManagedFile` es de solo lectura y compatible con `os.PathLike`: ofrece `str`, `path` como escape,
+`open/read_text/read_bytes`, `exists` y metadata inmutable `key`, `sha256`, `size_bytes` y `scope`.
+Los checkpoints guardan clave y evidencia de contenido, nunca la ruta física.
+
+```python
+limite = self.cache.rate_limit("archivo", requests_per_second=4)
+fichero = self.cache.fetch(
+    url,
+    key=f"archivo/{identificador}.json",
+    retries=5,
+    retry_backoff=0.5,
+    timeout=30,
+    decompress="gzip",
+    validate=registro_valido,
+    rate_limit=limite,
+)
+```
+
+`fetch` hace un GET HTTP(S) cacheable, no sustituye a un cliente HTTP general. Añade timeout,
+reintentos después del intento inicial, backoff exponencial y gzip opcional. El limitador es seguro
+entre threads de esa instancia de Work; no coordina Jobs distribuidos. `lf clean` muestra cada cache
+de Work y `--apply` lo elimina solo cuando obtiene el lock exclusivo; un Work activo mantiene una
+lease compartida.
+
+`DatasetCache` sigue siendo el cache especializado de muestras serializadas. Work cache reutiliza
+el `CrossProcessFileLock`, convenciones de huella/atomicidad y ownership, pero no usa su sobre opaco
+porque un fichero científico debe seguir siendo path-like.
+
+### 4.3 Map simple y reanudable
+
+La operación habitual es directa:
+
+```python
+resultados = self.map(filas, procesar, workers=8, executor="thread", retries=2)
+```
+
+`map(items, function, *, workers=1, executor="thread", name=None, retries=0,
+retry_backoff=0.5)` conserva el orden de entrada, limita concurrencia, informa progreso y no crea
+cache ni checkpoints. `thread` es apropiado para I/O; `process` exige callback y argumentos
+serializables mediante spawn.
+
+Solo un cálculo largo que deba reanudar elementos elige la variante explícita:
+
+```python
+resultados = self.resume_map(
+    filas,
+    procesar,
+    key="record_id",
+    workers=16,
+    executor="thread",
+    resume=True,
+    name="features",
+    validate=resultado_restaurado_valido,
+    retries=2,
+    retry_backoff=0.5,
+)
+```
+
+La firma completa es `resume_map(items, function, *, key, workers=1, executor="thread",
+resume=True, name=None, validate=None, retries=0, retry_backoff=0.5)`. La clave es un campo de mapping, atributo
+de dataclass/objeto o callable explícito; debe ser única y estable. El resultado conserva el orden
+de entrada. `map(..., key=...)` conserva esta semántica por compatibilidad, pero el nombre
+`resume_map` hace visible el efecto persistente y es el recomendado para código nuevo.
+
+Cada elemento se guarda como JSON estricto ampliado solo con referencias `ManagedFile` de cache o
+checkpoint. Para cada fichero devuelto, anidado en el resultado o tocado mediante `self.cache` dentro de callback
+secuencial/thread se conservan scope, key, SHA y tamaño. Al restaurar se verifican primero las
+dependencias. Si falta una, está corrupta o `validate` devuelve false, solo ese elemento vuelve a
+pending. Una excepción del validador se informa porque puede ser un bug científico. Los reintentos
+son por elemento y su agotamiento sigue siendo fail-fast. En executor `process`, el callback debe
+ser serializable por spawn y las dependencias deben estar en item/resultado: el contexto de runtime
+no cruza procesos.
+
+### 4.4 Outputs y checkpoints
+
+```python
+informe = self.outputs.file(
+    "informe",
+    filename="informe.json",
+    role="report",
+    media_type="application/json",
+    publish_to="resultados/informe.json",
+)
+informe.write_json(resumen)
+
+figuras = self.outputs.directory("figuras", role="visualization")
+renderizar(Path(figuras))
+```
+
+Un fichero gestionado tiene `write_text`, `write_bytes`, `write_json` y `build`, todos con promoción
+atómica. Un directorio existe desde su declaración, permite hijos seguros con `/` y solo se hashea
+al finalizar. Después de un `run()` correcto se validan tipo, containment y symlinks de todo el
+conjunto y se registra automáticamente. Si una declaración falta o es insegura, la finalización
+falla y ninguna declaración gestionada del conjunto entra en el resultado. No se llama además a
+`outputs.artifact`.
+
+`publish_to` es opcional para ficheros y directorios. Una ruta relativa parte de `self.source_dir`;
+una absoluta se usa de forma explícita. LambdaForge valida y hashea primero el artefacto gestionado
+y después publica una copia atómica por destino. Reutiliza contenido idéntico y rechaza contenido
+distinto ya existente salvo `overwrite=True`. El resultado gestionado sigue siendo la autoridad y
+su metadata registra `published_to`. En remoto es una ruta del host remoto: para sobrevivir a la
+limpieza del Job se elige almacenamiento persistente absoluto. No se copian árboles grandes al
+controlador de forma implícita. También se rechazan enlaces simbólicos, cambios entre fichero y
+directorio y cualquier destino de directorio que contenga su fuente gestionada o esté contenido en
+ella; `overwrite=True` nunca autoriza sustituir la raíz del proyecto o del Attempt.
+
+```python
+indice = self.checkpoints.file(
+    "leakage/mmseqs.tsv",
+    build=lambda destino: construir_indice(destino),
+    validate=indice_valido,
+)
+```
+
+El checkpoint usa construcción temporal, registro de integridad y validador como el cache, pero
+pertenece al Run y nunca es cache reconstruible. Retry reutiliza uno válido y reconstruye uno
+ausente/corrupto/inválido. `save_json/load_json/exists` es la vía para estado pequeño. `--restart`
+elimina el árbol compatible antes del nuevo Attempt.
+
+### 4.5 Herramientas externas
+
+```python
+mmseqs = self.tools.require("mmseqs", version_args=["version"])
+completado = self.tools.run(
+    [mmseqs, "easy-search", str(consulta), str(base), str(salida)],
+    name="MMseqs2",
+    threads=self.resources.cpu,
+    cwd=self.temp_dir,
+    env={"PROJECT_MODE": "strict"},
+    timeout=3600,
+)
+```
+
+`require(executable, version_args=None, version_timeout=10)` resuelve `PATH` y solo ejecuta el probe
+pedido. Devuelve un `Tool` path-like. `run(command, *, name=None, threads=None, cwd=None, env=None,
+timeout=None, check=True)` exige argv y nunca usa shell. Emite stdout/stderr línea a línea, conserva
+una cola acotada en `ToolResult`, registra duración/status y lanza `ToolExecutionError` si procede.
+`threads` configura OMP/MKL/OpenBLAS/NumExpr solo en el hijo. La herramienta y su versión explícita
+se registran una vez en `environment.json`.
+
+## 5. Referencia YAML
+
+Los campos superiores son `name`, `run`, `with`, `resources`, `seeds`, `search`, `objective` y
+`steps`. Un documento define exactamente `run` o `steps`; los campos desconocidos fallan.
+
+```yaml
+name: evaluar
+run: proyecto.work.Evaluar
+with:
+  threshold: 0.5
+resources:
+  cpu: 4
+  memory: 8GiB
+  gpu: 1
+  gpu_memory: 12GiB
+  time: 4h
+  storage: 20GiB
+  processes: 2
+```
+
+Los recursos son la reserva absoluta. `processes` no supera CPU. Se admiten unidades decimales y
+binarias de bytes y `s/m/h/d` para tiempo. `lf validate` importa cada Work y comprueba herencia,
+constructor, firma, tipos evidentes, recursos, entradas, expansión y referencias sin enviar nada.
+`lf explain` muestra docstring, tipos, valores y defaults.
+
+## 6. Ficheros y datasets
+
+```yaml
+with:
+  manifiesto: {file: ../data/manifest.json}
+  corpus: {dataset: research-corpus@3}
+```
+
+Un `file` se resuelve respecto al YAML, se comprueba/hashea y se pasa como `Path`. Un bundle remoto
+solo copia entradas por debajo del límite configurado; una entrada grande exige almacenamiento
+durable ya disponible o un dataset gestionado. Así el coste de transferencia es explícito.
+
+El marcador `file` solo describe una entrada que debe existir antes del envío. Un resultado nuevo
+se crea en Python con `outputs.file/directory/value/dataset`; no hay otro esquema YAML de outputs.
+El artefacto gestionado es el default seguro y `publish_to` solo se añade cuando una herramienta o
+persona necesita además una ruta convencional, teniendo presente que local y remoto son sistemas
+de ficheros físicos distintos.
+
+`dataset` resuelve una versión exacta e inmutable, content ID y placement válida. Se publica desde
+Python con `self.outputs.dataset(name=..., version=..., members=...)`. Los miembros se escriben en
+JSONL, se copian y hashean assets, se valida el índice, se calcula identidad independiente de ruta,
+se promociona staging atómicamente y se registra placement. Reutilizar nombre/versión con otro
+contenido se rechaza; DatasetArtifact v1 sigue siendo legible.
+
+## 7. Secuencia, paralelismo, seeds y búsqueda
+
+```yaml
+name: comparacion
+steps:
+  - name: preparar
+    run: proyecto.Preparar
+  - parallel:
+      - name: a
+        run: proyecto.EntrenarA
+        with: {data: {from: preparar.dataset}}
+      - name: b
+        run: proyecto.EntrenarB
+        with: {data: {from: preparar.dataset}}
+  - name: comparar
+    run: proyecto.Comparar
+```
+
+Cada nivel espera al anterior. Cada miembro paralelo usa un proceso spawn aislado; seeds/variantes
+del mismo miembro son seriales dentro de su reserva. Una referencia requiere un único Run
+productor. Ramas, condiciones y bucles complejos pertenecen a Python.
+
+`seeds` crea Runs independientes. `search` forma un producto cartesiano de valores finitos o una
+búsqueda numérica reproducible con `trials`. Los valores son parámetros normales, `self.trial`
+describe variante y `self.seed` la seed. `objective` nombra exactamente una métrica del Work. La
+clasificación de una variante con varias seeds usa su media y conserva Runs/seeds contribuyentes,
+nunca selecciona una seed afortunada.
+
+## 8. Ejecución, identidad y reutilización
+
+La identidad científica incluye import del Work, identidad del código consumidor, argumentos,
+hashes de ficheros, content IDs de datasets, seed y parámetros de variante. Clúster, rutas, tiempo,
+Job y Attempt son procedencia operacional y no cambian la definición.
+
+El plan no crea estado. Una ejecución normal reutiliza un éxito verificado. Un Run fallido puede
+tener otro Attempt usando el snapshot YAML enviado aunque el original cambie; checkpoints
+compatibles activan `resuming`. `--restart` elimina checkpoints del Run. `--rerun` crea otra
+Execution deliberada. El control plane rechaza un duplicado activo de misma identidad/destino salvo
+`--allow-duplicate`.
+
+## 9. Resultados y metadata
+
+Cada Attempt escribe `result.json`, `environment.json`, `work.log`, JSONL de métricas, progreso,
+outputs y artefactos. La Execution escribe `execution.json`, su configuración inmutable y un
+`result.json` agregado. Se preservan identidad, paquete/código consumidor, argumentos lógicos,
+entradas, recursos pedidos, tiempos, resultado, métricas, checksums, datasets, fallo, resume y Job.
+
+`environment.json` es la única fuente de procedencia del entorno: Python/plataforma, paquetes
+críticos, Torch/CUDA, Git y herramientas externas usadas. No se duplica el listado en cada resultado.
+Las rutas físicas son evidencia operacional y nunca sustituyen la identidad lógica.
+`lf results list/show/compare` lee manifests, no infiere semántica mediante globs. La comparación
+calcula count/media/min/max; una clasificación exige `--metric` y dirección explícita.
+
+## 10. Clústeres y Jobs
+
+```bash
+lf clusters add gpu --host HOST --user USER --workspace /remote/work
+lf clusters bootstrap gpu --dry-run
+lf clusters bootstrap gpu
+lf doctor --on gpu
+lf run experiments/train.yaml --on gpu
+```
+
+`lf run` local/remoto crea un Job durable de preparación y devuelve control. `--wait-for-submit`
+espera preparación y aceptación del scheduler, no el cálculo; `--dry-run` es directo y sin efectos.
+SSH usa OpenSSH, claves/agent/known_hosts/ProxyJump y un ControlMaster privado durante su persistencia.
+Los passwords solo proceden de prompt/keyring/env y no entran en argv/YAML/bundles/estado/logs.
+
+Los entornos gestionados son instalaciones inmutables de usuario identificadas por wheels, Python
+y plan Torch. Pueden reutilizar Conda o micromamba verificado, pero nunca modifican Python/CUDA/
+drivers del sistema ni hacen fallback silencioso a CPU. Cada Job tiene workspace mutable propio;
+no ejecuta sobre bundle cache. En remoto `source_dir` es el código consumidor staged.
+
+`lf top` muestra Works y clústeres semánticos: arriba/abajo recorre, Enter/derecha avanza de Work a
+Attempts numerados y después a logs; izquierda vuelve. Los IDs operativos largos se reservan para
+`lf jobs` y la vista máquina. `lf overview --json` expone Works, `attempt_history` y Jobs para
+herramientas. `lf jobs ...` conserva el
+control avanzado de IDs, scheduler, logs, cancelación y reconciliación. Cada Job local conserva sus
+raíces absolutas, por lo que envío detached, observación, logs y borrado no dependen del directorio
+actual; los registros relativos antiguos se resuelven desde la configuración fuente guardada. Un
+proveedor inaccesible es estado unknown/last-known, no un falso fallo científico; al recuperarse se
+restaura el estado real y desaparece el error de conexión obsoleto.
+
+## 11. Limpieza y seguridad
+
+- Attempt/Execution: resultados, logs, artefactos, progreso y workspace exacto;
+- Run: checkpoints e intentos;
+- durable independiente: datasets publicados y placements;
+- compartido inmutable: entornos y bundles referenciados;
+- reconstruible: caches y entradas no referenciadas;
+- externo: fuentes y ubicaciones mencionadas, nunca poseídas por referencia.
+
+`lf delete WORK` es preview-first y elimina una Execution local exacta o Job terminal exacto. Los
+datasets y materializaciones tienen operaciones separadas. `lf clean` solo presenta cache
+reconstruible, conserva referencias/leases activas, rechaza raíces/symlinks inseguros y es
+idempotente. YAML es código confiable y puede importar Python arbitrario; LambdaForge no es sandbox.
+
+En `lf top`, `d` confirma el borrado del Work terminal o Attempt seleccionado y `D` confirma la
+limpieza de todo el historial terminal. Los Jobs activos nunca se borran. La operación se ejecuta
+fuera del loop de teclado, elimina workspace, eventos y registro de envío exactos y conserva
+datasets publicados, caches, entornos y Jobs ajenos. `lf jobs clear` presenta la operación y
+`lf jobs clear --apply` la aplica; un fallo conserva el registro local afectado.
+
+## 12. Referencia CLI
+
+| Comando | Propósito único |
+|---|---|
+| `init` | crear proyecto Work instalable |
+| `validate` | validar configuración/clase/entradas localmente |
+| `explain` | explicar firma, defaults y recursos |
+| `run` | única ejecución científica |
+| `top`, `overview` | vista humana viva y vista máquina |
+| `show`, `logs`, `cancel`, `retry`, `delete` | operaciones semánticas de Work |
+| `jobs ...` | control de bajo nivel; `clear [--apply]` limpia historial terminal |
+| `clusters ...`, `doctor`, `resources` | configuración y diagnóstico de destinos |
+| `datasets ...` | inspección/verificación/placement/borrado de versiones |
+| `results list/show/compare` | consultar resultados de Execution |
+| `clean` | preview/aplicación de GC reconstruible |
+
+Los fallos tienen categorías/códigos estables. `--json` es para tooling y `--debug` añade traceback.
+No existen comandos antiguos de authoring o dataset build: todo cálculo usa `lf run`.
+
+## 13. Clustering
+
+Se instala con `python -m pip install "lambdaforge[clustering]"`. Importar `lambdaforge` funciona
+sin el extra; usar un clusterer sin backend produce el comando de instalación. El backend es
+scikit-learn >=1.3,<2 por incluir una implementación madura de HDBSCAN.
+
+```python
+import lambdaforge as lf
+
+resultado = lf.clustering.HDBSCAN(
+    min_cluster_size=20,
+    min_samples=5,
+    distance="euclidean",
+    threads=8,
+).cluster(features)
+```
+
+El paquete está fuera de `nn` porque no es una capa neuronal. No hay factory ni registro adicional:
+las clases directas son explícitas y una extensión hereda el ABC pequeño `Clusterer`.
+
+Todo clusterer acepta matriz finita `[N, F]` de NumPy o PyTorch; el tensor se separa y normaliza por
+CPU. Un `Distance` custom se evalúa en el device/dtype de sus parámetros o buffers y la matriz se
+separa después hacia CPU para el backend.
+Devuelve `ClusteringResult` inmutable con `labels`, `n_clusters`, `noise_count`, `noise_fraction` y
+`diagnostics`. `centers`, `inertia` y `probabilities` solo existen cuando son reales. Ruido es `-1`.
+
+| Clusterer | Distancias | Evidencia específica |
+|---|---|---|
+| `KMeans`, `MiniBatchKMeans` | solo Euclídea/cuadrada | centros e inercia; `seed` determinista |
+| `DBSCAN` | euclidean, manhattan, minkowski, chebyshev, cosine o `Distance` precomputed | ruido |
+| `HDBSCAN` | mismas métricas density o `Distance` precomputed | ruido y probabilidades |
+| `Agglomerative` | Ward solo euclidean; otros linkages native/precomputed | etiquetas |
+
+Solo existe el contrato `lambdaforge.nn.distances.Distance`: `EuclideanDistance`,
+`SquaredEuclideanDistance`, `ManhattanDistance`, `MinkowskiDistance`, `ChebyshevDistance`,
+`CosineDistance`, `AngularDistance` y `MahalanobisDistance`. Un objeto no nativo crea de forma
+explícita `[N,N]` bajo `no_grad`, valida resultado y usa `metric="precomputed"`. El límite por defecto
+es 512 MiB; `max_pairwise_bytes=None` es un escape deliberado con coste O(N²).
+
+`adjusted_rand_index`, `silhouette_score` y `stability` producen evidencia. Escalado, imputación,
+PCA, parámetros y umbral de estabilidad siguen siendo política científica del proyecto.
+
+## 14. Componentes neuronales reutilizables
+
+Los componentes PyTorch no dependen de Work/YAML: se instancian en Python del proyecto.
+`lambdaforge.nn.models` reexporta el catálogo público:
+
+| Familia | Opciones públicas |
+|---|---|
+| general/densa | `Model`, `MLP`, `CNN2D`, `ECMP`, `BatchedKNN` |
+| grafos | `GCN`, `GAT`, `GATv2`, `GIN`, `GraphSAGE`, `PNA`, `RelationalGCN`, `GraphTransformer`, `EGNN`, `TensorFieldNetwork`, capas públicas y `GraphReadout` |
+| secuencia | `RNNModel`, `GRUModel`, `LSTMModel`, `TemporalConvNet`, Transformer encoder/decoder/seq2seq, `ConformerModel`, `StateSpaceAdapter` |
+| conjuntos | `DeepSets`, `SetTransformer` |
+| tabular | `ResidualMLP`, `FTTransformer`, `TabNet`, `SAINT`, `AutoInt`, `DeepFM` |
+| visión | `ResNet2D`, `UNet2D`, `MobileNetV2`, `ConvNeXt2D`, `VisionTransformer2D`, `FeaturePyramidNetwork2D` y bloques/backbone públicos |
+| composición | `AutoEncoder`, `VariationalAutoEncoder`, `SiameseModel`, `MultiTaskModel`, `MixtureOfExperts`, `EnsembleModel` |
+| generativos | `GaussianDiffusion`, `DiffusionSchedule`, `VectorQuantizedAutoEncoder` |
+| científicos/implícitos | `NeuralODE`, `NeuralCDE`, `DeepONet`, `FourierNeuralOperator1D`, `SIREN` |
+| árboles diferenciables | `ObliviousDecisionTree`, `NODE`, `GradTree`, `GRANDE` |
+
+Los namespaces contiguos son `lambdaforge.nn.losses`, `activations`, `normalizations`, `pooling`,
+`distances`, `similarities`, `kernels`, `encodings`, `regularization` y `uncertainty`; las métricas
+clásicas están en `lambdaforge.metrics`. Las firmas y docstrings concretas son la autoridad de
+parámetros.
+
+Esta revisión no añade un `GNN` genérico, otro MLP ni una factory. El catálogo ya cubre baselines
+densos, grafos, secuencias, imágenes, conjuntos y tabular. Un alias vago ocultaría decisiones
+científicas de topología, agregación, readout, equivariancia y forma de salida, además de duplicar
+clases probadas. Una arquitectura de dominio pertenece al proyecto; un nuevo primitivo reutilizable
+solo se añade con contrato tensorial y pruebas de conformidad precisas.
+
+## 15. Arquitectura y extensiones
+
+`WorkConfig` posee parsing, introspección y expansión. `WorkRunner` enlaza runtime, llama una vez a
+`run()` y finaliza resultados. `ControlPlane` selecciona destino, evita duplicados y prepara entorno,
+bundle y scheduler. `Transport` y `Scheduler` son fronteras reales. Servicios de Job, dataset y
+storage conservan ownership durable independiente.
+
+| Componente | Responsabilidad | Por qué le pertenece |
+|---|---|---|
+| `WorkConfig` | esquema, firma Python, expansión y valores enviados | la configuración termina antes del scheduler |
+| `WorkRunner` | directorios, identidad, entradas, una llamada a `run()` y resultado | es la frontera local del lifecycle científico |
+| `WorkRuntime` | servicios/vistas enlazados una vez | evita estado global mutable |
+| `ManagedFileStore` | claves, records, lock, validación, huella y promoción | cache/checkpoint comparten invariantes de bytes |
+| `WorkCache` | valores tipados, ficheros/fetch/rate limit y lease GC | su vida difiere de checkpoint |
+| `CheckpointCollection` | JSON/ficheros del Run | resume no pertenece a outputs ni cache GC |
+| `OutputCollection` | nombres, outputs, copia externa opcional y publicación dataset | un éxito exige evidencia completa |
+| `ToolService` | resolución, proceso argv, logs, env hijo y ledger | el proyecto elige comando; framework ejecuta seguro |
+| `EnvironmentManifest` | procedencia software/hardware/Git/plugin/tool | una sola fuente de verdad |
+| `SubmissionService`/`ControlPlane` | preparación asíncrona y destino | responsabilidad operacional |
+| `Transport` | conexión y transferencia | no decide semántica del scheduler |
+| `Scheduler` | submit/observe/signals de Jobs | proceso directo y SLURM tienen autoridades distintas |
+| `DatasetPublisher`/`DatasetRegistry` | bytes/índice inmutable y placements | dataset sobrevive al Attempt |
+| adapters `Clusterer` | input, capabilities y resultado normalizado | ciencia Python independiente del runtime/YAML |
+
+Un Attempt resuelve entradas/identidad, crea servicios, captura entorno, llama `run()` redirigiendo
+logs, valida el JSON primario, finaliza todo output, añade las herramientas usadas al mismo manifest,
+elimina temporales y persiste `WorkResult`. Un fallo no publica outputs gestionados ni staging de
+dataset incompleto, pero conserva logs y diagnóstico.
+
+El proyecto extiende Python normal: módulos PyTorch, losses, métricas, lectores y helpers se crean
+dentro del Work. La infraestructura permanece en servicios cohesionados
+`outputs/metrics/checkpoints/cache/tools/progress`. No se introduce otro ejecutable, DSL, Task,
+Source/Transform/Sink ni selector global. Un campo YAML nuevo solo se justifica por una decisión de
+planificación del investigador, no por un objeto interno que puede seguir en Python.

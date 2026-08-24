@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import multiprocessing
 import os
@@ -31,7 +30,10 @@ from lambdaforge.EnvironmentManifest import EnvironmentManifest
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
+from lambdaforge.work.cache import WorkCache
+from lambdaforge.work.checkpoints import CheckpointCollection
 from lambdaforge.work.config import RunDefinition, WorkConfig, import_work_class
+from lambdaforge.work.managed import fingerprint
 from lambdaforge.work.models import (
     WorkConfiguration,
     WorkInput,
@@ -40,7 +42,7 @@ from lambdaforge.work.models import (
     WorkTrial,
     atomic_json,
 )
-from lambdaforge.work.runtime import CacheCollection, CheckpointCollection, WorkRuntime
+from lambdaforge.work.runtime import WorkRuntime
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,9 +170,7 @@ class WorkRunner:
                 "execution_id": plan.execution_id,
                 "scientific_fingerprint": plan.scientific_fingerprint,
                 "code_identity": _code_identity(self._project_root(plan.source.parent)),
-                "consumer_package": _consumer_package(
-                    self._project_root(plan.source.parent)
-                ),
+                "consumer_package": _consumer_package(self._project_root(plan.source.parent)),
                 "lambdaforge_version": VERSION,
                 "source": str(plan.source),
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -291,11 +291,7 @@ class WorkRunner:
         objective_runs = [result for result in outcomes if result.name == objective_name]
         successful = [result for result in objective_runs if result.ok]
         if any(metric not in result.metrics for result in successful):
-            missing = [
-                result.run_id
-                for result in successful
-                if metric not in result.metrics
-            ]
+            missing = [result.run_id for result in successful if metric not in result.metrics]
             summary["objective"] = dict(objective)
             summary["objective_error"] = f"Successful Runs missing metric {metric!r}: {missing}."
             return summary
@@ -500,10 +496,11 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
         temp_dir,
         project_root,
         checkpoints,
-        CacheCollection(
+        WorkCache(
             Path(os.environ.get("LAMBDAFORGE_CACHE_ROOT", project_root / ".lambdaforge" / "cache"))
             / "work"
-            / identity.removeprefix("sha256:")
+            / identity.removeprefix("sha256:"),
+            hold_gc_lease=True,
         ),
         seed,
         trial,
@@ -530,8 +527,7 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
             with redirect_stdout(_Tee(log, sys.stdout)), redirect_stderr(_Tee(log, sys.stderr)):
                 primary = instance.run(**parameters)
         json.dumps(primary, allow_nan=False)
-        # Dataset publication and artifact registration happen synchronously, so reaching here
-        # means every declared output was verified successfully.
+        runtime.outputs.finalize()
     except BaseException as error:
         status = "failed"
         # A rejected return value must not leak into the durable result envelope. This
@@ -554,8 +550,18 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
             ).to_dict(),
         }
     finally:
+        # The initial manifest guarantees a record even if Work construction fails. Re-capturing
+        # here adds only external tools that the Work actually required or executed.
+        try:
+            EnvironmentManifest.capture(
+                project_root,
+                external_tools=runtime.tools.provenance,
+            ).write(run_dir / "environment.json")
+        except Exception:
+            pass
         if temp_dir.exists() and temp_dir.is_dir() and not temp_dir.is_symlink():
             shutil.rmtree(temp_dir)
+        runtime.cache.close()
     finished = datetime.now(timezone.utc)
     result = WorkResult(
         definition.name,
@@ -682,22 +688,8 @@ def _identity_values(value: Any, source_dir: Path) -> Any:
 def _path_fingerprint(path: Path) -> tuple[str, int]:
     if not path.exists() or path.is_symlink():
         raise FileNotFoundError(f"File input is missing or symbolic: {path}")
-    digest = hashlib.sha256()
-    size = 0
-    entries = (path,) if path.is_file() else tuple(sorted(path.rglob("*")))
-    for item in entries:
-        if item.is_symlink():
-            raise ValueError(f"File input contains a symbolic link: {item}")
-        if not item.is_file():
-            continue
-        relative = item.name if path.is_file() else item.relative_to(path).as_posix()
-        digest.update(relative.encode())
-        digest.update(b"\0")
-        with item.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-                size += len(chunk)
-    return f"sha256:{digest.hexdigest()}", size
+    digest, size = fingerprint(path)
+    return f"sha256:{digest}", size
 
 
 def _code_identity(project_root: Path) -> dict[str, Any]:

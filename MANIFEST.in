@@ -1,8 +1,11 @@
 include AGENTS.md
 include AGENTS.es.md
 include CHANGELOG.md
+include CHANGELOG.es.md
+include README.md
 include README.es.md
 include SECURITY.md
+include SECURITY.es.md
 recursive-include docs *.md
 recursive-include examples *.yaml *.py *.txt
 recursive-include icons *.png *.svg

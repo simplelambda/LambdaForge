@@ -1,8 +1,9 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.12.0. Read the
-relevant section of `docs/MANUAL.md` only when more detail is needed, then inspect the public
-signature or implementation being changed. Current tests and code override assumptions.
+This is the low-token source of truth for agents using or modifying LambdaForge 0.12.0. Spanish is
+in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
+then inspect the public signature or implementation being changed. Current tests and code override
+assumptions.
 
 ## One execution model
 
@@ -27,7 +28,7 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Deliberate new execution | `lf run CONFIG --rerun` |
 | Monitor semantic work | `lf top`; `lf overview --json` |
 | Work operations | `lf show/logs/cancel/retry/delete SELECTOR` |
-| Low-level jobs | `lf jobs list/show/logs/cancel/retry` |
+| Low-level jobs | `lf jobs list/show/logs/cancel/retry/delete`; `lf jobs clear [--apply]` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
 | Results | `lf results list/show/compare` |
 | Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
@@ -35,8 +36,8 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Scaffold | `lf init DIRECTORY` |
 
 Append `--json` for automation and consume stable fields; use `--debug` only for framework
-tracebacks. Remote run returns after durable asynchronous preparation unless `--wait-for-submit` is
-explicit. Never parse prose or secrets.
+tracebacks. Local and remote run both return after durable asynchronous preparation unless
+`--wait-for-submit` is explicit; `--dry-run` is direct and read-only. Never parse prose or secrets.
 
 ## Writing Work
 
@@ -47,6 +48,8 @@ import lambdaforge as lf
 class Example(lf.Work):
     def run(self, source: Path, limit: int = 100) -> dict[str, int]:
         rows = source.read_text().splitlines()[:limit]
+        report = self.outputs.file("report", filename="report.json", role="report")
+        report.write_json({"rows": len(rows)})
         self.metrics.log("rows", len(rows))
         self.outputs.value("summary", {"rows": len(rows)})
         return {"rows": len(rows)}
@@ -70,15 +73,55 @@ Every project class must be importable from its installed consumer package.
 Work properties are available only during execution:
 
 - immutable: `name`, `config`, `inputs`, `resources`, `seed`, `trial`, `source_dir`, `resuming`;
-- managed services: `outputs.value/artifact/dataset`, `metrics.log/log_many`,
-  `checkpoints.path/exists/save_json/load_json`, `cache.path`, `progress.update`;
+- managed services: `outputs.file/directory/value/dataset`, `metrics.log/log_many`,
+  `checkpoints.file/exists/save_json/load_json`, `cache.put/get/file/fetch/rate_limit`,
+  `tools.require/run`, `progress.update`,
+  `log(message, level=...)`;
 - owned paths: `run_dir` is durable per Attempt; `temp_dir` is ephemeral;
-- intra-job concurrency: `map(items, function, key=..., workers=..., executor=...)` preserves input
-  order, requires unique stable keys and stores JSON checkpoints for retry/resume.
+- intra-job concurrency: `map(items, function, workers=..., executor=..., retries=...)` is ordered
+  and has no persistence; `resume_map(..., key=..., validate=...)` explicitly stores safe
+  dependency-aware JSON checkpoints. Legacy `map(..., key=...)` delegates to `resume_map`.
 
 `return` is the primary JSON result. Registered names cannot collide. Never pickle results, mutate
 planning inputs, construct hidden paths, create fingerprints, or expose Registry/scheduler services
 to scientific code.
+
+Cache is reconstructible; checkpoints are resumable Run state; outputs are durable evidence. Work
+code should not manage cache directories, `.part` names, locks, `fsync` or `os.replace`. Prefer
+`cache.put/get` for bytes/text/strict JSON, `cache.file/fetch` for path-like content, managed
+checkpoint files and managed outputs; `cache.path`, `checkpoints.path`,
+`run_dir` and `outputs.artifact` are advanced interoperability escapes, not examples for ordinary
+code. A `ManagedFile` is path-like but resumable-map state stores only its logical key/SHA/size.
+`resume_map` must validate those dependencies and selectively rerun an invalid item after cache cleanup. Never
+serialize machine paths or arbitrary pickle as scientific state.
+
+`outputs.file/directory(..., publish_to=PATH)` optionally publishes a verified copy after successful
+finalization and refuses different existing content unless `overwrite=True`. Relative destinations
+use `source_dir`; on remote execution they are remote paths. Use an absolute persistent cluster path
+when the copy must outlive Job cleanup; never describe it as an automatic transfer to the controller.
+
+Use `tools.require(..., version_args=...)` and `tools.run(argv, ...)` for external executables.
+Commands are argv, never shell strings; child thread variables and environment overrides remain
+scoped, output reaches Work logs, and tool provenance belongs only in `environment.json`.
+
+## Clustering contract
+
+Use `lambdaforge.clustering` for non-neural clustering. `KMeans`, `MiniBatchKMeans`, `DBSCAN`,
+`HDBSCAN` and `Agglomerative` share `Clusterer.cluster(X) -> ClusteringResult`; sklearn is lazy and
+optional through `lambdaforge[clustering]`. Do not add a factory/registry, expose backend estimators,
+or create clustering-specific distance types. Reuse `lambdaforge.nn.distances.Distance`, enforce
+the algorithm capability table and guard custom precomputed matrices before O(N²) allocation.
+KMeans and Ward are Euclidean; reject invalid combinations with the scientific reason. Do not hide
+scaling, imputation, PCA, thresholds or stability policy in clusterer defaults.
+
+`print()` and standard Python logging are captured by Job logs. Use `self.log()` for timestamped,
+immediately flushed human narration, `self.progress.update()` for completion and `metrics.log()` for
+scientific numeric evidence. In `lf top`, Enter/right drills from Work to numbered Attempt to logs
+and left backs out; the primary TUI hides long Job IDs. `d` deletes one confirmed terminal
+selection and `D` clears confirmed terminal history while preserving active Jobs. Automation uses
+`lf overview --json` (`work.items[].attempt_history` retains Job IDs), ordinary `lf logs` and
+preview-first `lf jobs clear [--apply]` instead of parsing the TUI. Local provider paths belong to
+the durable Job and must never be recomputed from the observer's current directory.
 
 ## YAML composition and studies
 
@@ -92,6 +135,14 @@ mean, never by the best individual seed.
 Do not confuse `self.map` concurrency inside one Work with a YAML parallel group. A parallel group
 uses isolated spawned Work processes inside the enclosing Job's aggregate fixed allocation;
 seed/search members of each Work definition remain serial.
+
+## Neural component route
+
+Before adding a model, inspect `lambdaforge.nn.models` and manual section 14. Existing families
+include MLP/CNN, extensive graph and equivariant models, sequence/Transformer/Conformer, sets,
+tabular, vision, composition, generative, scientific/implicit and differentiable-tree models.
+Do not add a generic `GNN`, redundant alias/factory or domain policy; add only a reusable primitive
+with a precise tensor contract and focused conformance tests.
 
 ## Identity, attempts and ownership
 
@@ -124,7 +175,8 @@ real scientific dataset while testing repository changes.
 
 1. Keep the final path `WorkConfig -> ExecutionPlan -> ControlPlane/Scheduler -> WorkRunner ->
    Work.run()`; infrastructure below Work may be reused.
-2. Update `docs/MANUAL.md`, README examples, this file, schema and changelog for user-visible work.
+2. Update `docs/MANUAL.md` and `docs/MANUAL.es.md`, both READMEs, both AGENTS files, schema/examples
+   when affected and changelog for user-visible work.
 3. Audit dynamic imports before deleting ordinary domain helpers, but delete obsolete execution
    adapters/tests rather than preserving compatibility.
 4. Keep base dependencies light and providers lazy.

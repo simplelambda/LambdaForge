@@ -10,6 +10,8 @@ class Summarize(lf.Work):
 
     def run(self, source: Path, label: str = "sample") -> dict[str, int | str]:
         count = len(source.read_text(encoding="utf-8").splitlines())
+        report = self.outputs.file("report", filename="report.json", role="report")
+        report.write_json({"label": label, "records": count})
         self.metrics.log("records", count)
         self.outputs.value("summary", {"label": label, "records": count})
         return {"label": label, "records": count}

@@ -20,7 +20,7 @@ def test_version_and_minimal_public_api_are_consistent() -> None:
     assert version is not None
     assert version.group(1) == LambdaForgeVersion.CURRENT == "0.12.0"
     assert lambdaforge.__version__ == "0.12.0"
-    assert lambdaforge.__all__ == ["Work", "__version__"]
+    assert lambdaforge.__all__ == ["Work", "__version__", "clustering"]
 
 
 def test_cli_reports_version_and_accepts_only_current_execution_route(
@@ -32,6 +32,8 @@ def test_cli_reports_version_and_accepts_only_current_execution_route(
     assert exit_info.value.code == 0
     assert capsys.readouterr().out.strip() == "lf 0.12.0"
     assert parser.parse_args(["run", "study.yaml"]).command == "run"
+    clear = parser.parse_args(["jobs", "clear", "--apply"])
+    assert clear.job_command == "clear" and clear.apply is True
     assert parser.parse_args(["datasets", "members", "data@1"]).command == "datasets"
     with pytest.raises(ValueError):
         parser.parse_args(["datasets", "build", "old.yaml"])

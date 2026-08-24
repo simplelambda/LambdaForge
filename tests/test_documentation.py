@@ -36,7 +36,12 @@ def test_readme_yaml_uses_the_current_schema() -> None:
 
 
 def test_normal_documentation_contains_no_superseded_yaml_language() -> None:
-    for relative in ("README.md", "README.es.md", "docs/MANUAL.md"):
+    for relative in (
+        "README.md",
+        "README.es.md",
+        "docs/MANUAL.md",
+        "docs/MANUAL.es.md",
+    ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         for removed in ("kind:", "schema_version", "required_artifacts", "bindings:", "needs:"):
             assert removed not in text, (relative, removed)

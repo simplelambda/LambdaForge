@@ -7,7 +7,7 @@ import os
 import platform
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
@@ -34,6 +34,7 @@ class EnvironmentManifest:
     git: dict[str, Any]
     environment: dict[str, str]
     plugins: tuple[PluginDescriptor, ...] = ()
+    external_tools: tuple[dict[str, str | None], ...] = ()
 
     TRACKED_PACKAGES = (
         "lightning",
@@ -47,6 +48,8 @@ class EnvironmentManifest:
         "numpy",
         "psutil",
         "PyYAML",
+        "scikit-learn",
+        "scipy",
         "torch",
         "torchmetrics",
     )
@@ -57,6 +60,7 @@ class EnvironmentManifest:
         repository: str | Path | None = None,
         *,
         plugins: Iterable[PluginDescriptor] = (),
+        external_tools: Iterable[Mapping[str, str | None]] = (),
     ) -> EnvironmentManifest:
         """Capture current provenance without mutating process or device state."""
         plugin_snapshot = tuple(sorted(set(plugins), key=PluginDescriptor.sort_key))
@@ -82,12 +86,20 @@ class EnvironmentManifest:
                 key: os.environ[key] for key in ("CUDA_VISIBLE_DEVICES",) if key in os.environ
             },
             plugins=plugin_snapshot,
+            external_tools=tuple(
+                dict(value)
+                for value in sorted(
+                    external_tools,
+                    key=lambda item: (str(item.get("name", "")), str(item.get("path", ""))),
+                )
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a defensive JSON-compatible mapping."""
         payload = asdict(self)
         payload["plugins"] = [descriptor.to_dict() for descriptor in self.plugins]
+        payload["external_tools"] = [dict(value) for value in self.external_tools]
         return payload
 
     def with_plugins(self, plugins: Iterable[PluginDescriptor]) -> EnvironmentManifest:

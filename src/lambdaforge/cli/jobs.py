@@ -13,6 +13,7 @@ from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.JobGroupStore import JobGroupStore
 from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.JobService import JobService
+from lambdaforge.controlplane.WorkService import WorkService
 from lambdaforge.diagnostics import LambdaForgeError, job_failure_diagnostic
 
 
@@ -80,8 +81,12 @@ def run_job_command(arguments: argparse.Namespace) -> int:
         print(json.dumps(resumed.to_dict(), indent=2))
         return 0
     if arguments.job_command == "delete":
-        jobs.delete(selected_job_id)
-        print(json.dumps({"deleted": selected_job_id}, indent=2))
+        result = WorkService(jobs.catalog, jobs=jobs).delete_job(selected_job_id, apply=True)
+        print(json.dumps(result, indent=2))
+        return 0
+    if arguments.job_command == "clear":
+        result = WorkService(jobs.catalog, jobs=jobs).clear_history(apply=arguments.apply)
+        print(json.dumps(result, indent=2))
         return 0
     if arguments.job_command == "reconcile":
         reconciled = jobs.reconcile(cluster=arguments.cluster, all_clusters=arguments.all)

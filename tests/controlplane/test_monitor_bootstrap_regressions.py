@@ -21,6 +21,7 @@ from lambdaforge.cli.LiveJobMonitor import (
     MonitorRenderer,
     ResourceHistory,
     SnapshotProcess,
+    WorkAttemptRenderer,
     _move_overview_selection,
 )
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
@@ -146,6 +147,140 @@ def test_monitor_defaults_to_research_work_and_retains_advanced_jobs() -> None:
     assert "baseline" in research and "3/7 runs" in research
     assert "LambdaForge advanced jobs" in advanced
     assert "job-low-level" in advanced
+    assert "d delete" in research and "D clear terminal history" in research
+    assert "v research/jobs" not in research and "l logs" not in research
+
+
+def test_monitor_deletes_selected_work_and_clears_terminal_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "clusters": [],
+        "jobs": {
+            "items": [
+                {
+                    "job_id": "job-old",
+                    "cluster": "local",
+                    "state": "failed",
+                    "created_at_utc": "",
+                    "metadata": {"name": "old-work"},
+                }
+            ],
+            "by_state": {"failed": 1},
+            "total": 1,
+        },
+        "work": {
+            "items": [
+                {
+                    "work_id": "work-old",
+                    "name": "old-work",
+                    "kind": "work",
+                    "state": "failed",
+                    "cluster": "local",
+                    "primary_job_id": "job-old",
+                    "created_at_utc": "",
+                }
+            ]
+        },
+    }
+
+    class ImmediateSnapshots:
+        def __init__(self, overview: Any) -> None:
+            del overview
+            self.pending = False
+
+        @property
+        def running(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.pending = True
+
+        def take(self) -> tuple[dict[str, Any], None] | None:
+            if not self.pending:
+                return None
+            self.pending = False
+            return payload, None
+
+        def close(self) -> None:
+            pass
+
+    class ScriptedTerminal:
+        def __init__(self, stream: Any) -> None:
+            del stream
+            self.keys = iter(("d", "y", "D", "y", "q"))
+
+        def __enter__(self) -> ScriptedTerminal:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def key(self, timeout: float) -> str:
+            del timeout
+            return next(self.keys)
+
+    actions: list[tuple[str, str]] = []
+
+    class RecordingWorks:
+        def delete(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
+            assert apply
+            actions.append(("delete-work", selector))
+            return {"applied": True}
+
+        def clear_history(self, *, apply: bool = False) -> dict[str, Any]:
+            assert apply
+            actions.append(("clear-history", ""))
+            return {
+                "deleted_jobs": ["job-old"],
+                "active_jobs_preserved": [],
+                "failures": [],
+            }
+
+    class ImmediateAction:
+        def __init__(self, works: Any, action: str, selector: str = "") -> None:
+            self.works, self.action, self.selector, self.pending = (
+                works,
+                action,
+                selector,
+                False,
+            )
+
+        @property
+        def running(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.pending = True
+
+        def take(self) -> tuple[dict[str, Any], None] | None:
+            if not self.pending:
+                return None
+            self.pending = False
+            result = (
+                self.works.delete(self.selector, apply=True)
+                if self.action == "delete-work"
+                else self.works.clear_history(apply=True)
+            )
+            return {"action": self.action, "result": result}, None
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor.SnapshotProcess", ImmediateSnapshots)
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor.HistoryActionProcess", ImmediateAction)
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor._TerminalSession", ScriptedTerminal)
+
+    result = LiveJobMonitor(
+        cast(Any, object()),
+        cast(Any, object()),
+        interval=1,
+        stream=StringIO(),
+        works=cast(Any, RecordingWorks()),
+    ).run()
+
+    assert result == 0
+    assert actions == [("delete-work", "work-old"), ("clear-history", "")]
 
 
 def test_monitor_scrolls_clusters_without_always_showing_personal_usage() -> None:
@@ -288,6 +423,116 @@ def test_monitor_renders_confirmation_before_cancelling(
     assert "Cancel job-1? Press x again, y or Enter to confirm" in output.getvalue()
 
 
+def test_right_opens_work_attempt_then_logs_and_left_walks_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "clusters": [],
+        "jobs": {
+            "items": [
+                {
+                    "job_id": "job-linked",
+                    "cluster": "local",
+                    "state": "running",
+                    "created_at_utc": "",
+                    "metadata": {"name": "study"},
+                }
+            ],
+            "by_state": {"running": 1},
+            "total": 1,
+        },
+        "work": {
+            "items": [
+                {
+                    "work_id": "work-study",
+                    "name": "study",
+                    "kind": "work",
+                    "state": "running",
+                    "cluster": "local",
+                    "primary_job_id": "job-linked",
+                    "created_at_utc": "",
+                }
+            ]
+        },
+    }
+
+    class ImmediateSnapshots:
+        def __init__(self, overview: Any) -> None:
+            del overview
+            self.pending = False
+
+        @property
+        def running(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.pending = True
+
+        def take(self) -> tuple[dict[str, Any], None] | None:
+            if not self.pending:
+                return None
+            self.pending = False
+            return payload, None
+
+        def close(self) -> None:
+            pass
+
+    class ImmediateLogs:
+        def __init__(self, jobs: Any, job_id: str) -> None:
+            del jobs
+            assert job_id == "job-linked"
+            self.pending = False
+
+        @property
+        def running(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.pending = True
+
+        def take(self) -> tuple[str, None] | None:
+            if not self.pending:
+                return None
+            self.pending = False
+            return "complete scientific log\n", None
+
+        def close(self) -> None:
+            pass
+
+    class ScriptedTerminal:
+        def __init__(self, stream: Any) -> None:
+            del stream
+            self.keys = iter(("\x1b[C", "\x1b[C", "\x1b[D", "\x1b[D", "q"))
+
+        def __enter__(self) -> ScriptedTerminal:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def key(self, timeout: float) -> str:
+            del timeout
+            return next(self.keys)
+
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor.SnapshotProcess", ImmediateSnapshots)
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor.LogProcess", ImmediateLogs)
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor._TerminalSession", ScriptedTerminal)
+    output = StringIO()
+
+    result = LiveJobMonitor(
+        cast(Any, object()), cast(Any, object()), interval=1, stream=output
+    ).run()
+
+    rendered = output.getvalue()
+    assert result == 0
+    assert "LambdaForge research activity" in rendered
+    assert "LambdaForge Work · study" in rendered
+    assert "Attempt 1" in rendered
+    assert "LambdaForge log · study · Attempt 1" in rendered
+    assert "complete scientific log" in rendered
+    assert "LambdaForge advanced jobs" not in rendered
+
+
 def test_cluster_detail_renders_history_personal_usage_and_only_cluster_jobs() -> None:
     history = ResourceHistory(30)
     clusters = [
@@ -344,8 +589,65 @@ def test_cluster_detail_renders_history_personal_usage_and_only_cluster_jobs() -
     assert "mine requested: C2" in rendered
     assert "mine observed: C2.0 cores" in rendered
     assert "█ cluster  ▓ mine" in rendered
-    assert "job-on-a" in rendered
+    assert "Work · Attempt 1" in rendered
+    assert "job-on-a" not in rendered
     assert "job-on-b" not in rendered
+
+
+def test_work_attempt_renderer_numbers_retries_without_showing_job_ids() -> None:
+    payload = {
+        "jobs": {
+            "items": [
+                {
+                    "job_id": "job-very-long-first-identifier",
+                    "cluster": "gpu",
+                    "state": "failed",
+                    "created_at_utc": "",
+                    "resources": {},
+                },
+                {
+                    "job_id": "job-very-long-second-identifier",
+                    "cluster": "gpu",
+                    "state": "running",
+                    "created_at_utc": "",
+                    "resources": {},
+                },
+            ]
+        },
+        "work": {
+            "items": [
+                {
+                    "name": "dna-design",
+                    "state": "running",
+                    "cluster": "gpu",
+                    "attempt_history": [
+                        {
+                            "number": 1,
+                            "label": "Attempt 1",
+                            "job_id": "job-very-long-first-identifier",
+                        },
+                        {
+                            "number": 2,
+                            "label": "Attempt 2",
+                            "job_id": "job-very-long-second-identifier",
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+
+    rendered = WorkAttemptRenderer.render(
+        payload,
+        0,
+        selected_attempt=1,
+        message="",
+        width=160,
+        height=24,
+    )
+
+    assert "Attempt 1" in rendered and "▶ Attempt 2" in rendered
+    assert "job-very-long" not in rendered
 
 
 def test_complete_log_viewer_pages_over_the_same_document() -> None:

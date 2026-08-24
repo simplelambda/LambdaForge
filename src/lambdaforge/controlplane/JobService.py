@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
+from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.jobs import JobHandle, JobRecord, JobState
 from lambdaforge.controlplane.JobStore import JobStore
@@ -58,7 +59,11 @@ class JobService:
         job_id: str | None = None,
     ) -> JobHandle:
         """Submit one schedulable unit and persist its complete reconnection data."""
-        profile = self.catalog.get(cluster)
+        profile = self._submission_profile(
+            self.catalog.get(cluster),
+            config_path=config_path,
+            work_dir=work_dir,
+        )
         transport = self.factory.transport(profile)
         scheduler = self.factory.scheduler(profile, transport)
         now = datetime.now(timezone.utc).isoformat()
@@ -77,6 +82,10 @@ class JobService:
             **(dict(reserved.metadata) if reserved is not None else {}),
             **dict(metadata or {}),
         }
+        if profile.transport == "local":
+            assert profile.storage is not None
+            record_metadata["local_workspace"] = profile.workspace
+            record_metadata["local_storage"] = profile.storage.to_dict()
         record_metadata.setdefault("attempt", self._attempt_number(retry_of))
         record = JobRecord(
             job_id=job_id,
@@ -395,11 +404,10 @@ class JobService:
         record = self.store.get(job_id)
         if not refresh or record.scheduler_id is None or record.state.terminal:
             return record
-        profile = self.catalog.get(record.cluster)
-        transport = self.factory.transport(profile)
-        scheduler = self.factory.scheduler(profile, transport)
+        profile, transport, scheduler = self._provider(record)
         try:
             state = scheduler.state(record.scheduler_id)
+            provider_details = scheduler.details(record.scheduler_id)
         except Exception as error:
             previous_state = record.state
             metadata = dict(record.metadata)
@@ -431,6 +439,11 @@ class JobService:
                 )
             return record
         metadata = dict(record.metadata)
+        metadata.pop("unreachable_error", None)
+        metadata.pop("last_known_state", None)
+        metadata["last_refresh_at_utc"] = datetime.now(timezone.utc).isoformat()
+        if provider_details:
+            metadata["remote_state"] = dict(provider_details)
         if profile.scheduler == "slurm" and state in {JobState.RUNNING, JobState.PAUSED}:
             progress_path = str(PurePosixPath(record.work_dir).parent / "progress.json")
             progress_result = transport.run(("cat", progress_path), timeout=5.0)
@@ -457,8 +470,7 @@ class JobService:
                     job_id,
                     state=state.value,
                     message=(
-                        f"Scheduler state changed from {previous_state.value} "
-                        f"to {state.value}."
+                        f"Scheduler state changed from {previous_state.value} to {state.value}."
                     ),
                     source="scheduler",
                 )
@@ -513,8 +525,7 @@ class JobService:
         if record.scheduler_id is None:
             value = record.stdout + record.stderr
             return "\n".join(value.splitlines()[-tail:]) if tail else value
-        profile = self.catalog.get(record.cluster)
-        scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
+        _profile, _transport, scheduler = self._provider(record)
         return scheduler.logs(record.scheduler_id, tail=tail)
 
     def logs(self, job_id: str, *, tail: int | None = None) -> str:
@@ -527,6 +538,12 @@ class JobService:
         if heartbeat:
             lifecycle.append(
                 f"[{heartbeat}] [runtime] {record.state.value}: supervisor heartbeat observed."
+            )
+        provider_message = remote.get("message")
+        if provider_message:
+            lifecycle.append(
+                f"[{remote.get('updated_at_utc', record.updated_at_utc)}] [runtime] "
+                f"{remote.get('state', record.state.value)}: {provider_message}"
             )
         observed = datetime.now(timezone.utc).isoformat()
         lifecycle.append(
@@ -585,8 +602,7 @@ class JobService:
                 message="Job cancelled before scheduler acknowledgement.",
             )
             return record
-        profile = self.catalog.get(record.cluster)
-        scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
+        _profile, _transport, scheduler = self._provider(record)
         scheduler.cancel(record.scheduler_id)
         record = record.with_updates(
             state=JobState.CANCELLED,
@@ -701,8 +717,7 @@ class JobService:
         record = self.get(job_id)
         if record.scheduler_id is None:
             raise ValueError("The job has no scheduler identity.")
-        profile = self.catalog.get(record.cluster)
-        scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
+        profile, _transport, scheduler = self._provider(record)
         capability = getattr(scheduler.capabilities, f"supports_{operation}")
         if not capability:
             raise LambdaForgeError(
@@ -732,6 +747,103 @@ class JobService:
             source="scheduler",
         )
         return record
+
+    def job_root(self, record: JobRecord) -> str:
+        """Return the exact provider Job root recorded for one durable local Job.
+
+        Current records contain an absolute local storage descriptor.  The source-relative
+        fallback intentionally supports Jobs submitted before that descriptor existed, when the
+        detached submission worker resolved the built-in local workspace from the YAML directory.
+        """
+        profile = self.catalog.get(record.cluster)
+        if profile.transport != "local":
+            assert profile.storage is not None
+            return profile.storage.job_root
+        storage = record.metadata.get("local_storage")
+        if isinstance(storage, Mapping) and storage.get("run_root"):
+            root = Path(str(storage["run_root"])).expanduser()
+            if root.is_absolute():
+                return str(root.resolve())
+        work = Path(record.work_dir).expanduser()
+        candidates: list[Path] = []
+        if work.is_absolute():
+            candidates.append(work)
+        else:
+            source = record.metadata.get("source_config_path") or record.config_path
+            if source:
+                candidates.append(Path(str(source)).expanduser().resolve().parent / work)
+            candidates.append(Path.cwd().resolve() / work)
+        valid: list[Path] = []
+        for candidate in candidates:
+            selected = candidate.resolve(strict=False)
+            if selected.name == "work" and selected.parent.name == record.job_id:
+                valid.append(selected.parent.parent)
+        if not valid:
+            raise RuntimeError(
+                f"Persisted local work directory is not owned by {record.job_id}: "
+                f"{record.work_dir}"
+            )
+        for root in valid:
+            if (root / record.job_id / "state.json").is_file():
+                return str(root)
+        return str(valid[0])
+
+    def _provider(self, record: JobRecord) -> tuple[Any, Any, Any]:
+        """Resolve a provider using per-Job local roots and current remote credentials."""
+        profile = self.catalog.get(record.cluster)
+        if profile.transport == "local":
+            storage = record.metadata.get("local_storage")
+            workspace = str(record.metadata.get("local_workspace") or profile.workspace)
+            if isinstance(storage, Mapping):
+                local_storage = ClusterStoragePolicy.from_mapping(storage, workspace=workspace)
+            else:
+                assert profile.storage is not None
+                local_storage = replace(profile.storage, run_root=self.job_root(record))
+            profile = replace(profile, workspace=workspace, storage=local_storage)
+        transport = self.factory.transport(profile)
+        return profile, transport, self.factory.scheduler(profile, transport)
+
+    @classmethod
+    def _submission_profile(
+        cls,
+        profile: Any,
+        *,
+        config_path: str | None,
+        work_dir: str | Path,
+    ) -> Any:
+        """Anchor built-in local storage to the consumer project before detaching."""
+        if profile.transport != "local":
+            return profile
+        start = (
+            Path(config_path).expanduser().resolve().parent
+            if config_path is not None
+            else Path(work_dir).expanduser().resolve()
+        )
+        base = next(
+            (
+                candidate
+                for candidate in (start, *start.parents)
+                if (candidate / "pyproject.toml").is_file()
+            ),
+            start,
+        )
+
+        def anchored(value: str | None) -> str | None:
+            if value is None:
+                return None
+            selected = Path(value).expanduser()
+            resolved = selected.resolve() if selected.is_absolute() else (base / selected).resolve()
+            return str(resolved)
+
+        assert profile.storage is not None
+        storage = replace(
+            profile.storage,
+            state_root=str(anchored(profile.storage.state_root)),
+            cache_root=str(anchored(profile.storage.cache_root)),
+            run_root=str(anchored(profile.storage.run_root)),
+            dataset_root=anchored(profile.storage.dataset_root),
+        )
+        return replace(profile, workspace=str(anchored(profile.workspace)), storage=storage)
 
     @staticmethod
     def _phase_message(phase: str) -> str:

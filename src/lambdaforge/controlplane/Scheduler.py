@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.SchedulerCapabilities import SchedulerCapabilities
@@ -53,3 +54,8 @@ class Scheduler(ABC):
     def inventory(self) -> tuple[dict[str, object], ...]:
         """Return durable provider-owned LambdaForge jobs when discoverable."""
         return ()
+
+    def details(self, scheduler_id: str) -> Mapping[str, Any]:
+        """Return optional provider details for diagnostics and observation."""
+        del scheduler_id
+        return {}

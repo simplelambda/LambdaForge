@@ -41,14 +41,16 @@ class SubmissionService:
         retry_of: str | None = None,
         allow_duplicate: bool = False,
     ) -> JobHandle:
-        """Persist and launch a remote submission request without waiting for SSH preparation."""
+        """Persist and launch preparation without blocking on the selected execution target."""
         source = Path(config).expanduser().resolve()
         if not source.is_file():
             raise FileNotFoundError(f"Configuration does not exist: {source}")
-        if cluster == "local":
-            raise ValueError("Local execution does not use asynchronous remote preparation.")
         profile = self.catalog.get(cluster)
-        if profile.auth.mode == "password" and profile.auth.credential is None:
+        if (
+            profile.transport == "ssh"
+            and profile.auth.mode == "password"
+            and profile.auth.credential is None
+        ):
             raise ValueError(
                 "Detached submission cannot prompt for a password. Store a keyring credential "
                 "reference or use OpenSSH authentication first."

@@ -7,15 +7,16 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, TypeVar
 
+from lambdaforge.work.cache import WorkCache
+from lambdaforge.work.checkpoints import CheckpointCollection
 from lambdaforge.work.models import WorkConfiguration, WorkInput, WorkResources, WorkTrial
+from lambdaforge.work.outputs import OutputCollection
 from lambdaforge.work.runtime import (
-    CacheCollection,
-    CheckpointCollection,
     MetricCollection,
-    OutputCollection,
     ProgressReporter,
     WorkRuntime,
 )
+from lambdaforge.work.tools import ToolService
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -89,14 +90,23 @@ class Work:
         return self._bound().checkpoints
 
     @property
-    def cache(self) -> CacheCollection:
+    def cache(self) -> WorkCache:
         """Reconstructible identity-scoped storage eligible for ``lf clean``."""
         return self._bound().cache
+
+    @property
+    def tools(self) -> ToolService:
+        """Resolve and execute external scientific tools with recorded provenance."""
+        return self._bound().tools
 
     @property
     def progress(self) -> ProgressReporter:
         """Optional bounded progress snapshot consumed by monitoring."""
         return self._bound().progress
+
+    def log(self, message: object, *, level: str = "info") -> None:
+        """Emit a timestamped message visible in Attempt and scheduler logs immediately."""
+        self._bound().log.emit(message, level=level)
 
     @property
     def resources(self) -> WorkResources:
@@ -138,14 +148,61 @@ class Work:
         items: Iterable[T],
         function: Callable[[T], R],
         *,
-        key: Callable[[T], str],
+        key: Callable[[T], str] | str | None = None,
+        workers: int = 1,
+        executor: str = "thread",
+        resume: bool | None = None,
+        name: str | None = None,
+        validate: Callable[[R], bool] | None = None,
+        retries: int = 0,
+        retry_backoff: float = 0.5,
+    ) -> list[R]:
+        """Apply ``function`` with ordered concurrency and no hidden persistence.
+
+        ``key`` remains a compatibility bridge to the old resumable behavior.
+        New code should call :meth:`resume_map` when per-item checkpoints are wanted.
+        """
+        if key is None:
+            if resume is not None or validate is not None:
+                raise ValueError("resume and validate require Work.resume_map(..., key=...).")
+            return self._bound().map(
+                items,
+                function,
+                workers=workers,
+                executor=executor,
+                name=name,
+                retries=retries,
+                retry_backoff=retry_backoff,
+            )
+        return self.resume_map(
+            items,
+            function,
+            key=key,
+            workers=workers,
+            executor=executor,
+            resume=True if resume is None else resume,
+            name=name,
+            validate=validate,
+            retries=retries,
+            retry_backoff=retry_backoff,
+        )
+
+    def resume_map(
+        self,
+        items: Iterable[T],
+        function: Callable[[T], R],
+        *,
+        key: Callable[[T], str] | str,
         workers: int = 1,
         executor: str = "thread",
         resume: bool = True,
         name: str | None = None,
+        validate: Callable[[R], bool] | None = None,
+        retries: int = 0,
+        retry_backoff: float = 0.5,
     ) -> list[R]:
-        """Run bounded intra-job mapping with stable keys, progress and safe JSON resume."""
-        return self._bound().map(
+        """Apply with explicit stable keys and dependency-aware per-item resume."""
+        return self._bound().resume_map(
             items,
             function,
             key=key,
@@ -153,6 +210,9 @@ class Work:
             executor=executor,
             resume=resume,
             name=name,
+            validate=validate,
+            retries=retries,
+            retry_backoff=retry_backoff,
         )
 
     def _bind(self, runtime: WorkRuntime) -> None:

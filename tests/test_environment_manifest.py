@@ -25,6 +25,8 @@ class TestEnvironmentManifest:
         assert "tensorboard" in content["packages"]
         assert "tensorboardX" in content["packages"]
         assert "wandb" in content["packages"]
+        assert "scikit-learn" in content["packages"]
+        assert "scipy" in content["packages"]
         assert content["plugins"] == []
 
     def test_manifest_serializes_deduplicated_plugins_in_canonical_order(self, tmp_path) -> None:

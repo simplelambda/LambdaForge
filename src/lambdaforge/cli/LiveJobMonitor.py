@@ -17,6 +17,7 @@ from typing import Any, TextIO
 from lambdaforge.cli.common import age
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.OverviewService import OverviewService
+from lambdaforge.controlplane.WorkService import WorkService
 
 
 def _ram(observed: Mapping[str, Any]) -> float | None:
@@ -151,6 +152,65 @@ def _selected_job_id(item: Mapping[str, Any]) -> str:
     return str(value)
 
 
+def _work_attempt_jobs(
+    payload: Mapping[str, Any], work: Mapping[str, Any]
+) -> list[Mapping[str, Any]]:
+    """Join one semantic Work's human attempt history to observable Job facts."""
+    jobs = payload.get("jobs", {})
+    jobs = jobs if isinstance(jobs, Mapping) else {}
+    raw = {
+        str(item.get("job_id", "")): item
+        for item in jobs.get("items", ())
+        if isinstance(item, Mapping)
+    }
+    history = work.get("attempt_history", ())
+    history = history if isinstance(history, (list, tuple)) else ()
+    if history:
+        output: list[Mapping[str, Any]] = []
+        for fallback, attempt in enumerate(history, 1):
+            if not isinstance(attempt, Mapping):
+                continue
+            job_id = str(attempt.get("job_id", ""))
+            output.append(
+                {
+                    **dict(attempt),
+                    **dict(raw.get(job_id, {})),
+                    "attempt_number": int(attempt.get("number", fallback)),
+                    "attempt_label": str(attempt.get("label") or f"Attempt {fallback}"),
+                }
+            )
+        return output
+    identifiers = work.get("job_ids", ())
+    identifiers = identifiers if isinstance(identifiers, (list, tuple)) else ()
+    if not identifiers and work.get("primary_job_id"):
+        identifiers = (work["primary_job_id"],)
+    return [
+        {
+            **dict(raw.get(str(job_id), {"job_id": str(job_id)})),
+            "attempt_number": number,
+            "attempt_label": f"Attempt {number}",
+        }
+        for number, job_id in enumerate(identifiers, 1)
+    ]
+
+
+def _job_label(payload: Mapping[str, Any], job: Mapping[str, Any]) -> str:
+    """Return a human Work/Attempt label without exposing an operational ID."""
+    job_id = str(job.get("job_id", ""))
+    work = payload.get("work", {})
+    work = work if isinstance(work, Mapping) else {}
+    for item in work.get("items", ()):
+        if not isinstance(item, Mapping):
+            continue
+        attempts = _work_attempt_jobs(payload, item)
+        for attempt in attempts:
+            if str(attempt.get("job_id", "")) == job_id:
+                return f"{item.get('name', 'Work')} · {attempt.get('attempt_label', 'Attempt')}"
+    metadata = job.get("metadata", {})
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    return f"{metadata.get('name') or job.get('job_type') or 'Work'} · Attempt 1"
+
+
 class MonitorRenderer:
     """Render immutable snapshots while leaving I/O and actions to the monitor."""
 
@@ -199,7 +259,7 @@ class MonitorRenderer:
                 f"total={jobs.get('total', 0)}"
             ),
             "",
-            "CLUSTERS (whole-cluster observation; Enter opens detail)",
+            "CLUSTERS (whole-cluster observation; Enter/→ opens detail)",
             "  CLUSTER           STATUS   CPU    RAM    GPU    CORES  RAM FREE   GPUS  JOBS",
         ]
         for offset, cluster in enumerate(
@@ -284,7 +344,7 @@ class MonitorRenderer:
                         "",
                         f"Selected: {job.get('name')}  "
                         f"revision={job.get('scientific_revision') or 'legacy'}  "
-                        f"job={job.get('primary_job_id')}",
+                        f"attempts={job.get('attempts', 1)}",
                     )
                 )
             else:
@@ -302,8 +362,8 @@ class MonitorRenderer:
             (
                 "",
                 message
-                or "↑/↓ select · Enter cluster detail · v research/jobs · l logs · "
-                "x cancel · r refresh · q quit",
+                or "↑/↓ select · Enter/→ open · ← back · x cancel · d delete · "
+                "D clear terminal history · r refresh · q quit",
             )
         )
         return _screen(lines, width=width, height=terminal_height)
@@ -351,6 +411,85 @@ class MonitorRenderer:
             f"{actual} / req C{requested.get('cpu_cores', 0)} "
             f"R{_bytes(requested.get('ram_bytes'))} G{requested.get('gpu_count', 0)}"
         )
+
+
+class WorkAttemptRenderer:
+    """Render one human Work and its numbered operational Attempts."""
+
+    @staticmethod
+    def attempts(
+        payload: Mapping[str, Any], work_index: int
+    ) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]]]:
+        work = payload.get("work", {})
+        work = work if isinstance(work, Mapping) else {}
+        items = [item for item in work.get("items", ()) if isinstance(item, Mapping)]
+        if not items:
+            return None, []
+        selected = items[min(work_index, len(items) - 1)]
+        return selected, _work_attempt_jobs(payload, selected)
+
+    @classmethod
+    def render(
+        cls,
+        payload: Mapping[str, Any],
+        work_index: int,
+        *,
+        selected_attempt: int,
+        message: str,
+        width: int,
+        height: int,
+    ) -> str:
+        work, attempts = cls.attempts(payload, work_index)
+        if work is None:
+            return "LambdaForge Work\n\nNo Work is available.\n\n←/b/Esc/q back"
+        progress = work.get("progress", {})
+        progress = progress if isinstance(progress, Mapping) else {}
+        completed, total = progress.get("completed"), progress.get("total")
+        progress_text = (
+            f"{completed if completed is not None else '?'}/"
+            f"{total if total is not None else '?'} {progress.get('unit', 'units')}"
+        )
+        lines = [
+            f"LambdaForge Work · {work.get('name', '-')} · {work.get('state', '-')}",
+            (
+                f"target: {work.get('cluster', '-')}  |  progress: {progress_text}  |  "
+                f"revision: {work.get('scientific_revision') or 'legacy'}"
+            ),
+            "",
+            "  ATTEMPT       STATE       TARGET             RUN       CREATED    USED / REQUESTED",
+        ]
+        selected_attempt = min(selected_attempt, max(0, len(attempts) - 1))
+        capacity = max(1, height - len(lines) - 4)
+        start = max(0, selected_attempt - capacity + 1)
+        for offset, attempt in enumerate(attempts[start : start + capacity]):
+            index = start + offset
+            timing = attempt.get("timing", {})
+            timing = timing if isinstance(timing, Mapping) else {}
+            runtime = timing.get("runtime_seconds")
+            runtime_text = (
+                "waiting"
+                if runtime is None
+                and attempt.get("state") in {"preparing", "staging", "queued"}
+                else _seconds(runtime if runtime is not None else timing.get("elapsed_seconds"))
+            )
+            lines.append(
+                f"{'▶' if index == selected_attempt else ' '} "
+                f"{str(attempt.get('attempt_label', f'Attempt {index + 1}')):<13.13} "
+                f"{str(attempt.get('state', '-')):<11.11} "
+                f"{str(attempt.get('cluster', work.get('cluster', '-'))):<18.18} "
+                f"{runtime_text:<9.9} "
+                f"{age(str(attempt.get('created_at_utc', ''))):<10.10} "
+                f"{MonitorRenderer._job_usage(attempt)}"
+            )
+        lines.extend(
+            (
+                "",
+                message
+                or "↑/↓ attempts · Enter/→ full log · ←/b/Esc/q back · "
+                "x cancel · d delete · D clear terminal history · r refresh",
+            )
+        )
+        return _screen(lines, width=width, height=height)
 
 
 class HistoryChart:
@@ -474,8 +613,8 @@ class ClusterDetailRenderer:
         lines.extend(
             (
                 "",
-                f"JOBS ON {name} ({len(jobs)})",
-                "  JOB                             STATE       RUN      AGE      LAST ACTIVITY",
+                f"ATTEMPTS ON {name} ({len(jobs)})",
+                "  WORK / ATTEMPT                   STATE       RUN      AGE      LAST ACTIVITY",
             )
         )
         capacity = max(1, height - len(lines) - 4)
@@ -491,11 +630,18 @@ class ClusterDetailRenderer:
             runtime = timing.get("runtime_seconds")
             lines.append(
                 f"{'▶' if index == selected_job else ' '} "
-                f"{str(job.get('job_id', '-')):<32.32} {str(job.get('state', '-')):<11.11} "
+                f"{_job_label(payload, job):<32.32} {str(job.get('state', '-')):<11.11} "
                 f"{_seconds(runtime if runtime is not None else timing.get('elapsed_seconds')):<8} "
                 f"{age(str(job.get('created_at_utc', ''))):<8} {str(activity)[11:19] or '-'}"
             )
-        lines.extend(("", message or "↑/↓ jobs · l full log · x cancel · r refresh · b/Esc/q back"))
+        lines.extend(
+            (
+                "",
+                message
+                or "↑/↓ attempts · Enter/→ full log · ←/b/Esc/q back · "
+                "x cancel · d delete · D clear terminal history · r refresh",
+            )
+        )
         return _screen(lines, width=width, height=height)
 
     @staticmethod
@@ -533,7 +679,7 @@ class LogViewerRenderer:
                 "",
                 *(line[:width] for line in lines[start:end]),
                 "",
-                (message or "↑/↓ line · PgUp/PgDn page · Home/End · b/Esc/q back")[:width],
+                (message or "↑/↓ line · PgUp/PgDn page · Home/End · ←/b/Esc/q back")[:width],
             ]
         )
 
@@ -589,6 +735,29 @@ def _collect_snapshot(overview: OverviewService, connection: Connection) -> None
 def _collect_logs(jobs: JobService, job_id: str, connection: Connection) -> None:
     try:
         connection.send((jobs.logs(job_id), None))
+    except BaseException as error:
+        connection.send((None, f"{error.__class__.__name__}: {error}"))
+    finally:
+        connection.close()
+
+
+def _apply_history_action(
+    works: WorkService,
+    action: str,
+    selector: str,
+    connection: Connection,
+) -> None:
+    """Apply one confirmed destructive history operation outside the terminal loop."""
+    try:
+        if action == "delete-work":
+            result = works.delete(selector, apply=True)
+        elif action == "delete-job":
+            result = works.delete_job(selector, apply=True)
+        elif action == "clear-history":
+            result = works.clear_history(apply=True)
+        else:
+            raise ValueError(f"Unknown history action: {action}")
+        connection.send(({"action": action, "result": result}, None))
     except BaseException as error:
         connection.send((None, f"{error.__class__.__name__}: {error}"))
     finally:
@@ -664,6 +833,17 @@ class LogProcess(BackgroundProcess):
         super().__init__(_collect_logs, (jobs, job_id), "lambdaforge-top-logs")
 
 
+class HistoryActionProcess(BackgroundProcess):
+    """Apply confirmed history deletion without freezing keyboard handling."""
+
+    def __init__(self, works: WorkService, action: str, selector: str = "") -> None:
+        super().__init__(
+            _apply_history_action,
+            (works, action, selector),
+            "lambdaforge-top-history-action",
+        )
+
+
 class LiveJobMonitor:
     """Coordinate background observations and explicit interactive actions."""
 
@@ -675,21 +855,32 @@ class LiveJobMonitor:
         interval: float = 2,
         history_seconds: float = 60,
         stream: TextIO = sys.stdout,
+        works: WorkService | None = None,
     ) -> None:
         if interval < 0.2:
             raise ValueError("Live monitor interval must be at least 0.2 seconds.")
         self.overview, self.jobs, self.interval = overview, jobs, interval
         self.history_seconds, self.stream = history_seconds, stream
+        self.works = works
 
     def run(self) -> int:
         selected = selected_cluster = detail_selected = log_scroll = 0
-        focus, mode, log_job, log_text, message = "jobs", "jobs", "", "", ""
-        view = "research"
+        focus, mode, log_job, log_label, log_text, message = (
+            "jobs",
+            "overview",
+            "",
+            "",
+            "",
+            "",
+        )
         pending_cancel: str | None = None
-        return_mode = "jobs"
+        pending_history: tuple[str, str] | None = None
+        return_mode = "overview"
         payload: Mapping[str, Any] = {}
         history, dirty = ResourceHistory(self.history_seconds), True
-        poller, log_poller = SnapshotProcess(self.overview), None
+        poller = SnapshotProcess(self.overview)
+        log_poller: LogProcess | None = None
+        action_poller: HistoryActionProcess | None = None
         poller.start()
         next_refresh = time.monotonic() + self.interval
         try:
@@ -701,7 +892,12 @@ class LiveJobMonitor:
                         if isinstance(updated, Mapping):
                             payload = updated
                             history.record(payload)
-                            if mode != "logs" and pending_cancel is None:
+                            if (
+                                mode != "logs"
+                                and pending_cancel is None
+                                and pending_history is None
+                                and action_poller is None
+                            ):
                                 message = ""
                         elif mode != "logs":
                             message = f"Refresh failed: {error}"
@@ -719,12 +915,33 @@ class LiveJobMonitor:
                             None,
                             True,
                         )
+                    if action_poller is not None and (applied := action_poller.take()):
+                        value, error = applied
+                        if error:
+                            message = f"History action failed: {error}"
+                        else:
+                            result = value.get("result", {}) if isinstance(value, Mapping) else {}
+                            action = value.get("action") if isinstance(value, Mapping) else None
+                            if action == "clear-history":
+                                deleted = len(result.get("deleted_jobs", ()))
+                                active = len(result.get("active_jobs_preserved", ()))
+                                failed = len(result.get("failures", ()))
+                                message = (
+                                    f"History cleared: {deleted} terminal Jobs removed; "
+                                    f"{active} active preserved; {failed} failed."
+                                )
+                            else:
+                                message = "Selected history and owned workspace removed."
+                        action_poller = None
+                        if not poller.running:
+                            poller.start()
+                        dirty = True
                     if time.monotonic() >= next_refresh and not poller.running:
                         poller.start()
                         next_refresh = time.monotonic() + self.interval
                     raw_items = payload.get("jobs", {}).get("items", [])
                     work_items = payload.get("work", {}).get("items", [])
-                    items = work_items if view == "research" and work_items else raw_items
+                    items = work_items if work_items else raw_items
                     clusters = payload.get("clusters", [])
                     if focus == "jobs" and not items and clusters:
                         focus = "clusters"
@@ -734,11 +951,16 @@ class LiveJobMonitor:
                     selected_cluster = min(selected_cluster, max(0, len(clusters) - 1))
                     detail_items = ClusterDetailRenderer.jobs(payload, selected_cluster)
                     detail_selected = min(detail_selected, max(0, len(detail_items) - 1))
+                    _, attempt_items = WorkAttemptRenderer.attempts(payload, selected)
+                    if mode == "work":
+                        detail_selected = min(
+                            detail_selected, max(0, len(attempt_items) - 1)
+                        )
                     size = shutil.get_terminal_size((120, 30))
                     if dirty:
                         if mode == "logs":
                             rendered = LogViewerRenderer.render(
-                                log_job,
+                                log_label or log_job,
                                 log_text,
                                 scroll=log_scroll,
                                 message=message or ("Loading complete log…" if log_poller else ""),
@@ -755,6 +977,15 @@ class LiveJobMonitor:
                                 width=size.columns,
                                 height=size.lines,
                             )
+                        elif mode == "work":
+                            rendered = WorkAttemptRenderer.render(
+                                payload,
+                                selected,
+                                selected_attempt=detail_selected,
+                                message=message,
+                                width=size.columns,
+                                height=size.lines,
+                            )
                         else:
                             rendered = MonitorRenderer.render(
                                 payload,
@@ -765,7 +996,7 @@ class LiveJobMonitor:
                                 message=message or ("Loading providers…" if not payload else ""),
                                 width=size.columns,
                                 height=size.lines,
-                                view=view,
+                                view="research",
                             )
                         self.stream.write("\x1b[H\x1b[2J" + rendered)
                         self.stream.flush()
@@ -776,7 +1007,7 @@ class LiveJobMonitor:
                             max(1, size.lines - 5),
                             max(0, len(log_text.splitlines()) - max(1, size.lines - 4)),
                         )
-                        if key in {"q", "Q", "b", "B", "\x1b"}:
+                        if key in {"q", "Q", "b", "B", "\x1b", "\x1b[D"}:
                             if log_poller:
                                 log_poller.close()
                                 log_poller = None
@@ -815,9 +1046,82 @@ class LiveJobMonitor:
                             )
                             dirty = True
                         continue
+                    if pending_history is not None:
+                        action, selector = pending_history
+                        confirmation_key = "D" if action == "clear-history" else "d"
+                        if key in {confirmation_key, "y", "Y", "\r", "\n"}:
+                            action_poller = HistoryActionProcess(
+                                self._work_service(), action, selector
+                            )
+                            action_poller.start()
+                            message = (
+                                "Clearing terminal history in the background…"
+                                if action == "clear-history"
+                                else "Deleting selected history in the background…"
+                            )
+                            pending_history, dirty = None, True
+                        elif key in {"n", "N", "\x1b"}:
+                            pending_history, message, dirty = (
+                                None,
+                                "History deletion cancelled.",
+                                True,
+                            )
+                        elif key is not None:
+                            message = self._history_confirmation(action, selector)
+                            dirty = True
+                        continue
+                    if action_poller is not None:
+                        if key is not None:
+                            message = "The confirmed history operation is still running…"
+                            dirty = True
+                        continue
+                    if mode == "work":
+                        if key in {"q", "Q", "b", "B", "\x1b", "\x1b[D"}:
+                            mode, message, dirty = "overview", "", True
+                        elif key in {"j", "\x1b[B"}:
+                            detail_selected = min(
+                                max(0, len(attempt_items) - 1), detail_selected + 1
+                            )
+                            dirty = True
+                        elif key in {"k", "\x1b[A"}:
+                            detail_selected = max(0, detail_selected - 1)
+                            dirty = True
+                        elif key == "r":
+                            if not poller.running:
+                                poller.start()
+                            message = "Refreshing Work attempts in the background…"
+                            dirty = True
+                        elif key in {"\r", "\n", "\x1b[C"} and attempt_items:
+                            attempt = attempt_items[detail_selected]
+                            log_job = str(attempt.get("job_id", ""))
+                            work = items[selected]
+                            log_label = (
+                                f"{work.get('name', 'Work')} · "
+                                f"{attempt.get('attempt_label', f'Attempt {detail_selected + 1}')}"
+                            )
+                            log_text, log_scroll, message = "", 0, ""
+                            return_mode, mode = "work", "logs"
+                            log_poller = LogProcess(self.jobs, log_job)
+                            log_poller.start()
+                            dirty = True
+                        elif key in {"x", "X"} and attempt_items:
+                            pending_cancel = str(attempt_items[detail_selected].get("job_id", ""))
+                            message = (
+                                f"Cancel Attempt {detail_selected + 1}? Press x again, y or Enter "
+                                "to confirm; n/Esc keeps it running."
+                            )
+                            dirty = True
+                        elif key == "d" and attempt_items and action_poller is None:
+                            selector = str(attempt_items[detail_selected].get("job_id", ""))
+                            pending_history = ("delete-job", selector)
+                            message, dirty = self._history_confirmation(*pending_history), True
+                        elif key == "D" and action_poller is None:
+                            pending_history = ("clear-history", "")
+                            message, dirty = self._history_confirmation(*pending_history), True
+                        continue
                     if mode == "cluster":
-                        if key in {"q", "Q", "b", "B", "\x1b"}:
-                            mode, message, dirty = "jobs", "", True
+                        if key in {"q", "Q", "b", "B", "\x1b", "\x1b[D"}:
+                            mode, message, dirty = "overview", "", True
                         elif key in {"j", "\x1b[B"}:
                             detail_selected = min(
                                 max(0, len(detail_items) - 1), detail_selected + 1
@@ -831,8 +1135,10 @@ class LiveJobMonitor:
                                 poller.start()
                             message = "Refreshing cluster data in the background…"
                             dirty = True
-                        elif key == "l" and detail_items:
-                            log_job = str(detail_items[detail_selected]["job_id"])
+                        elif key in {"\r", "\n", "\x1b[C"} and detail_items:
+                            attempt = detail_items[detail_selected]
+                            log_job = str(attempt["job_id"])
+                            log_label = _job_label(payload, attempt)
                             log_text, log_scroll, message = "", 0, ""
                             return_mode, mode = "cluster", "logs"
                             log_poller = LogProcess(self.jobs, log_job)
@@ -845,20 +1151,36 @@ class LiveJobMonitor:
                                 "n/Esc keeps it running."
                             )
                             dirty = True
+                        elif key == "d" and detail_items and action_poller is None:
+                            selector = str(detail_items[detail_selected]["job_id"])
+                            pending_history = ("delete-job", selector)
+                            message, dirty = self._history_confirmation(*pending_history), True
+                        elif key == "D" and action_poller is None:
+                            pending_history = ("clear-history", "")
+                            message, dirty = self._history_confirmation(*pending_history), True
                         continue
                     if key in {"q", "Q"}:
                         return 0
-                    if key in {"v", "V"}:
-                        view = "jobs" if view == "research" else "research"
-                        selected, message, dirty = 0, f"View: {view}", True
-                    elif key == "\t":
+                    if key == "\t":
                         if focus == "jobs" and clusters:
                             focus, dirty = "clusters", True
                         elif focus == "clusters" and items:
                             focus, dirty = "jobs", True
-                    elif key in {"\r", "\n"} and focus == "clusters" and clusters:
-                        detail_selected = 0
-                        mode, message, dirty = "cluster", "", True
+                    elif key in {"\r", "\n", "\x1b[C"}:
+                        if focus == "clusters" and clusters:
+                            detail_selected = 0
+                            mode, message, dirty = "cluster", "", True
+                        elif items and work_items:
+                            detail_selected = 0
+                            mode, message, dirty = "work", "", True
+                        elif items:
+                            return_mode = "overview"
+                            log_job = _selected_job_id(items[selected])
+                            log_label = _job_label(payload, items[selected])
+                            log_text, log_scroll, message, mode = "", 0, "", "logs"
+                            log_poller = LogProcess(self.jobs, log_job)
+                            log_poller.start()
+                            dirty = True
                     elif key in {"j", "\x1b[B"}:
                         focus, selected, selected_cluster = _move_overview_selection(
                             focus,
@@ -883,18 +1205,6 @@ class LiveJobMonitor:
                         if not poller.running:
                             poller.start()
                         message, dirty = "Refreshing providers in the background…", True
-                    elif key == "l" and items:
-                        return_mode = "jobs"
-                        log_job, log_text, log_scroll, message, mode = (
-                            _selected_job_id(items[selected]),
-                            "",
-                            0,
-                            "",
-                            "logs",
-                        )
-                        log_poller = LogProcess(self.jobs, log_job)
-                        log_poller.start()
-                        dirty = True
                     elif key in {"x", "X"} and items:
                         pending_cancel = _selected_job_id(items[selected])
                         message = (
@@ -902,7 +1212,38 @@ class LiveJobMonitor:
                             "n/Esc keeps it running."
                         )
                         dirty = True
+                    elif key == "d" and focus == "jobs" and items and action_poller is None:
+                        item = items[selected]
+                        if work_items:
+                            pending_history = ("delete-work", str(item.get("work_id", "")))
+                        else:
+                            pending_history = ("delete-job", _selected_job_id(item))
+                        message, dirty = self._history_confirmation(*pending_history), True
+                    elif key == "D" and action_poller is None:
+                        pending_history = ("clear-history", "")
+                        message, dirty = self._history_confirmation(*pending_history), True
         finally:
             poller.close()
             if log_poller is not None:
                 log_poller.close()
+            if action_poller is not None:
+                action_poller.close()
+
+    def _work_service(self) -> WorkService:
+        if self.works is None:
+            catalog = getattr(self.jobs, "catalog", None)
+            self.works = WorkService(catalog, jobs=self.jobs)
+        return self.works
+
+    @staticmethod
+    def _history_confirmation(action: str, selector: str) -> str:
+        if action == "clear-history":
+            return (
+                "Clear every terminal Work/Job history entry and owned workspace? "
+                "Press D again, y or Enter; n/Esc preserves it. Active Jobs are never removed."
+            )
+        label = "Work" if action == "delete-work" else "Job"
+        return (
+            f"Permanently delete terminal {label} {selector} and its owned workspace? "
+            "Press d again, y or Enter; n/Esc preserves it."
+        )

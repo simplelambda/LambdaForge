@@ -10,12 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from lambdaforge.data.cache.CacheBackend import CacheBackend
-from lambdaforge.data.cache.CacheFileLock import CacheFileLock
 from lambdaforge.data.cache.CacheIntegrityError import CacheIntegrityError
 from lambdaforge.data.cache.CacheNamespaceManifest import CacheNamespaceManifest
 from lambdaforge.data.cache.CacheRecord import CacheRecord
 from lambdaforge.data.cache.CacheRecordCodec import CacheRecordCodec
 from lambdaforge.data.cache.CacheUsage import CacheUsage
+from lambdaforge.runtime import CrossProcessFileLock
 
 
 class DiskCacheBackend(CacheBackend):
@@ -228,8 +228,8 @@ class DiskCacheBackend(CacheBackend):
                 records.append(path)
         return records
 
-    def _file_lock(self, *, shared: bool) -> CacheFileLock:
-        return CacheFileLock(
+    def _file_lock(self, *, shared: bool) -> CrossProcessFileLock:
+        return CrossProcessFileLock(
             self.lock_path,
             shared=shared,
             timeout_seconds=self.lock_timeout_seconds,

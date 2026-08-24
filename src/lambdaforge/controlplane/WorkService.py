@@ -64,12 +64,21 @@ class WorkService:
                 "applied": apply,
                 "already_deleted": True,
             }
-        records = tuple(self.jobs.get(job_id, refresh=False) for job_id in work.job_ids)
+        records = tuple(self.jobs.get(job_id) for job_id in work.job_ids)
         active = tuple(record.job_id for record in records if not record.state.terminal)
         if active:
             raise ValueError(f"Cannot delete active work; cancel it first: {active}.")
         workspace_plans = [
-            self.storage.delete_job(record.cluster, record.job_id, apply=apply)
+            self.storage.delete_job(
+                record.cluster,
+                record.job_id,
+                apply=apply,
+                local_run_root=(
+                    self.jobs.job_root(record)
+                    if self.catalog.get(record.cluster).transport == "local"
+                    else None
+                ),
+            )
             for record in records
         ]
         if apply:
@@ -87,6 +96,65 @@ class WorkService:
                 "shared caches and environments",
                 "other Work and job records",
             ],
+        }
+
+    def delete_job(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
+        """Delete one terminal Job's exact workspace and local history record."""
+        job_id = self.jobs.resolve_selector(selector)
+        record = self.jobs.get(job_id)
+        if not record.state.terminal:
+            raise ValueError(f"Cannot delete active job {job_id}; cancel it first.")
+        local_root = (
+            self.jobs.job_root(record)
+            if self.catalog.get(record.cluster).transport == "local"
+            else None
+        )
+        workspace = self.storage.delete_job(
+            record.cluster,
+            record.job_id,
+            apply=apply,
+            local_run_root=local_root,
+        )
+        if apply:
+            self.jobs.delete(record.job_id)
+        return {
+            "job_id": record.job_id,
+            "cluster": record.cluster,
+            "state": record.state.value,
+            "workspace": workspace,
+            "applied": apply,
+            "preserved": ["published datasets", "shared caches and environments", "other Jobs"],
+        }
+
+    def clear_history(self, *, apply: bool = False) -> dict[str, Any]:
+        """Preview or remove every terminal Job while preserving all active work."""
+        records = self.jobs.list(refresh=True)
+        terminal = tuple(record for record in records if record.state.terminal)
+        active = tuple(record.job_id for record in records if not record.state.terminal)
+        deleted: list[str] = []
+        failures: list[dict[str, str]] = []
+        plans: list[dict[str, Any]] = []
+        for record in terminal:
+            try:
+                result = self.delete_job(record.job_id, apply=apply)
+            except Exception as error:
+                failures.append(
+                    {
+                        "job_id": record.job_id,
+                        "error": f"{error.__class__.__name__}: {error}",
+                    }
+                )
+                continue
+            plans.append(result)
+            if apply:
+                deleted.append(record.job_id)
+        return {
+            "applied": apply,
+            "terminal_jobs": [record.job_id for record in terminal],
+            "deleted_jobs": deleted,
+            "active_jobs_preserved": list(active),
+            "failures": failures,
+            "jobs": plans,
         }
 
     @property

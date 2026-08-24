@@ -26,6 +26,7 @@ class ProcessScheduler(Scheduler):
         self.transport = transport
         self.profile = profile
         self.storage = cast(ClusterStoragePolicy, profile.storage)
+        self._last_state: dict[str, dict[str, object]] = {}
 
     @property
     def capabilities(self) -> SchedulerCapabilities:
@@ -52,6 +53,7 @@ class ProcessScheduler(Scheduler):
             raise ValueError("Durable process submission requires a LambdaForge job id.")
         job_dir = PurePosixPath(self.storage.job_root) / job_id
         scientific_work = job_dir / "work"
+        source_work = PurePosixPath(str(work_dir))
         request_path = job_dir / "request.json"
         python = self._control_python(command)
         launch = (
@@ -83,10 +85,14 @@ class ProcessScheduler(Scheduler):
                 else str(value)
                 for value in command
             ],
-            "source_work_dir": str(work_dir),
-            "stage_source": self.profile.transport == "ssh",
+            "source_work_dir": str(source_work),
+            # ControlPlane already gives remote Jobs a mutable workspace copied from the
+            # immutable bundle.  Only stage when a caller supplies a genuinely different
+            # source directory; never copy ``job/work`` onto itself.
+            "stage_source": (self.profile.transport == "ssh" and source_work != scientific_work),
             "work_dir": str(scientific_work),
             "resources": resources.to_dict(),
+            "cache_root": self.storage.cache_root,
             "lease_root": str(PurePosixPath(self.storage.state_root) / "gpu-leases"),
             "resource_lease_root": str(PurePosixPath(self.storage.state_root) / "process-leases"),
             "dataset_registry": str(PurePosixPath(self.storage.state_root) / "datasets.json"),
@@ -109,17 +115,32 @@ class ProcessScheduler(Scheduler):
 
     def state(self, scheduler_id: str) -> JobState:
         value = self._state_payload(scheduler_id)
+        self._last_state[scheduler_id] = value
         return JobState(str(value.get("state", JobState.UNKNOWN.value)))
+
+    def details(self, scheduler_id: str) -> dict[str, object]:
+        """Return the durable supervisor state, reusing the current refresh read."""
+        return dict(self._last_state.get(scheduler_id) or self._state_payload(scheduler_id))
 
     def logs(self, scheduler_id: str, *, tail: int | None = None) -> str:
         job_dir = PurePosixPath(self.storage.job_root) / scheduler_id
-        command = (
-            ("tail", "-n", str(tail), str(job_dir / "stdout.log"), str(job_dir / "stderr.log"))
-            if tail is not None
-            else ("cat", str(job_dir / "stdout.log"), str(job_dir / "stderr.log"))
-        )
-        result = self.transport.run(command)
-        return result.stdout if result.returncode == 0 else result.stderr
+        streams: list[str] = []
+        errors: list[str] = []
+        for name in ("stdout.log", "stderr.log"):
+            path = str(job_dir / name)
+            if self.transport.run(("test", "-f", path), timeout=15.0).returncode != 0:
+                # Pre-0.12.0 supervisors could fail before creating the stream.  Absence means
+                # no scientific output, not a replacement error from ``cat``.
+                continue
+            command = ("tail", "-n", str(tail), path) if tail is not None else ("cat", path)
+            result = self.transport.run(command, timeout=30.0)
+            if result.returncode == 0:
+                streams.append(result.stdout)
+            elif result.stderr.strip():
+                errors.append(result.stderr.strip())
+        if streams:
+            return "".join(streams)
+        return "\n".join(errors)
 
     def cancel(self, scheduler_id: str) -> None:
         self._control(scheduler_id, "cancel")

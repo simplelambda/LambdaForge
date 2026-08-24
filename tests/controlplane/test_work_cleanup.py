@@ -12,6 +12,7 @@ from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.jobs import JobRecord, JobState
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.JobStore import JobStore
+from lambdaforge.controlplane.ResearchWork import aggregate_research_work
 from lambdaforge.controlplane.StorageService import StorageService
 from lambdaforge.controlplane.Transport import CommandResult, Transport
 from lambdaforge.controlplane.WorkService import WorkService
@@ -57,6 +58,36 @@ class FakeFactory:
     def transport(self, profile: ClusterProfile) -> Transport:
         del profile
         return self.transport_instance
+
+
+def test_research_work_exposes_numbered_attempt_history_for_machine_clients() -> None:
+    records = tuple(
+        JobRecord(
+            f"job-{number}",
+            "local",
+            "local",
+            f"provider-{number}",
+            state,
+            ("python", "work.py"),
+            "/tmp/work",
+            {},
+            f"2026-01-0{number}T00:00:00+00:00",
+            f"2026-01-0{number}T00:01:00+00:00",
+            retry_of="job-1" if number == 2 else None,
+            metadata={"name": "study", "scientific_identity": "sha256:same"},
+            job_type="work",
+        )
+        for number, state in ((1, JobState.FAILED), (2, JobState.RUNNING))
+    )
+
+    work = aggregate_research_work(records)[0].to_dict()
+
+    assert work["attempts"] == 2
+    assert [item["label"] for item in work["attempt_history"]] == [
+        "Attempt 1",
+        "Attempt 2",
+    ]
+    assert work["attempt_history"][1]["job_id"] == "job-2"
 
 
 def test_work_delete_previews_then_removes_only_exact_owned_job(tmp_path: Path) -> None:
@@ -171,3 +202,128 @@ def test_remote_work_delete_uses_the_bounded_storage_operation(tmp_path: Path) -
     repeated = service.delete("remote-work", apply=True)
     assert repeated["already_deleted"]
     assert len(factory.transport_instance.commands) == 2
+
+
+def test_local_legacy_relative_job_root_recovers_real_terminal_state(tmp_path: Path) -> None:
+    project = tmp_path / "consumer"
+    experiments = project / "experiments"
+    experiments.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname='consumer'\nversion='1'\n")
+    config = experiments / "dna_design.yaml"
+    config.write_text("name: dna-design\nrun: consumer.Design\n", encoding="utf-8")
+    profile = ClusterProfile("local")
+    catalog = ClusterCatalog({"local": profile})
+    store = JobStore(tmp_path / "history")
+    now = datetime.now(timezone.utc).isoformat()
+    job_id = "job-legacy-relative"
+    relative_work = Path(".lambdaforge/remote/.lambdaforge/jobs") / job_id / "work"
+    job_dir = experiments / relative_work.parent
+    job_dir.mkdir(parents=True)
+    (job_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "job_id": job_id,
+                "state": "failed",
+                "message": "Requested 36 CPU cores but only 16 are available.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.write(
+        JobRecord(
+            job_id,
+            "local",
+            "local",
+            job_id,
+            JobState.UNKNOWN,
+            ("python", "-m", "lambdaforge"),
+            str(relative_work),
+            {},
+            now,
+            now,
+            config_path=str(config),
+            metadata={"source_config_path": str(config), "unreachable_error": "old path"},
+            job_type="work",
+        )
+    )
+
+    recovered = JobService(catalog, store).get(job_id)
+
+    assert recovered.state is JobState.FAILED
+    assert recovered.metadata["remote_state"]["message"].startswith("Requested 36 CPU")
+    assert "unreachable_error" not in recovered.metadata
+
+
+def test_local_submission_storage_is_anchored_to_consumer_project(tmp_path: Path) -> None:
+    project = tmp_path / "consumer"
+    experiments = project / "experiments"
+    experiments.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname='consumer'\nversion='1'\n")
+    config = experiments / "work.yaml"
+    config.write_text("name: work\nrun: consumer.Work\n", encoding="utf-8")
+
+    resolved = JobService._submission_profile(
+        ClusterProfile("local"),
+        config_path=str(config),
+        work_dir=experiments,
+    )
+
+    assert Path(resolved.workspace) == project / ".lambdaforge/remote"
+    assert Path(resolved.storage.run_root) == (
+        project / ".lambdaforge/remote/.lambdaforge/jobs"
+    )
+
+
+def test_clear_history_removes_terminal_jobs_and_preserves_active(tmp_path: Path) -> None:
+    profile = ClusterProfile(
+        "local",
+        workspace=str(tmp_path),
+        storage={
+            "state_root": str(tmp_path / "state"),
+            "cache_root": str(tmp_path / "cache"),
+            "run_root": str(tmp_path / "jobs"),
+        },
+    )
+    catalog = ClusterCatalog({"local": profile})
+    store = JobStore(tmp_path / "history")
+    jobs = JobService(catalog, store)
+    now = datetime.now(timezone.utc).isoformat()
+    for job_id, state in (
+        ("job-succeeded", JobState.SUCCEEDED),
+        ("job-failed", JobState.FAILED),
+        ("job-running", JobState.RUNNING),
+    ):
+        work = tmp_path / "jobs" / job_id / "work"
+        work.mkdir(parents=True)
+        store.write(
+            JobRecord(
+                job_id,
+                "local",
+                "local",
+                None if state is JobState.RUNNING else job_id,
+                state,
+                ("python", "work.py"),
+                str(work),
+                {},
+                now,
+                now,
+                metadata={"name": job_id},
+            )
+        )
+        submission = store.root / "submissions" / job_id
+        submission.mkdir(parents=True)
+        (submission / "request.json").write_text("{}", encoding="utf-8")
+    service = WorkService(catalog, jobs=jobs, storage=StorageService(catalog))
+
+    preview = service.clear_history()
+    assert set(preview["terminal_jobs"]) == {"job-succeeded", "job-failed"}
+    assert preview["active_jobs_preserved"] == ["job-running"]
+    assert (tmp_path / "jobs/job-succeeded").is_dir()
+
+    applied = service.clear_history(apply=True)
+
+    assert set(applied["deleted_jobs"]) == {"job-succeeded", "job-failed"}
+    assert store.get("job-running",).state is JobState.RUNNING
+    assert (tmp_path / "jobs/job-running").is_dir()
+    assert not (tmp_path / "jobs/job-succeeded").exists()
+    assert not (store.root / "submissions/job-succeeded").exists()

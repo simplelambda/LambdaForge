@@ -19,11 +19,15 @@ def main() -> None:
         "share/lambdaforge/AGENTS.md",
         "share/lambdaforge/AGENTS.es.md",
         "share/lambdaforge/CHANGELOG.md",
+        "share/lambdaforge/CHANGELOG.es.md",
+        "share/lambdaforge/README.md",
         "share/lambdaforge/README.es.md",
         "share/lambdaforge/SECURITY.md",
+        "share/lambdaforge/SECURITY.es.md",
         "share/lambdaforge/examples/work.yaml",
         "share/lambdaforge/examples/sequence.yaml",
         "share/lambdaforge/docs/MANUAL.md",
+        "share/lambdaforge/docs/MANUAL.es.md",
     ):
         matches = tuple(
             item
@@ -37,7 +41,7 @@ def main() -> None:
         if entry.group == "console_scripts"
     }
     assert scripts["lf"] == scripts["lambdaforge"]
-    assert lambdaforge.__all__ == ["Work", "__version__"]
+    assert lambdaforge.__all__ == ["Work", "__version__", "clustering"]
     assert Work.__module__ == "lambdaforge.work.Work"
     print(lambdaforge.__version__)
 

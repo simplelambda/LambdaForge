@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
 
+from lambdaforge.cli.CommandLineInterface import CommandLineInterface
 from lambdaforge.cli.LiveJobMonitor import MonitorRenderer
 from lambdaforge.controlplane import (
     ClusterCatalog,
@@ -238,6 +241,124 @@ def test_remote_enqueue_returns_preparing_before_any_remote_work(
     assert cancelled.state is JobState.CANCELLED
 
 
+def test_local_enqueue_uses_the_same_non_blocking_durable_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = task_config(tmp_path / "task.yaml")
+    profile = ClusterProfile(
+        "local",
+        python=sys.executable,
+        storage={
+            "state_root": str(tmp_path / "state"),
+            "cache_root": str(tmp_path / "cache"),
+            "run_root": str(tmp_path / "runtime-jobs"),
+        },
+    )
+    catalog = ClusterCatalog({"local": profile})
+    jobs = JobService(catalog, JobStore(tmp_path / "jobs"))
+    launches: list[tuple[str, ...]] = []
+
+    class Process:
+        pid = 12345
+
+    def launch(command: Sequence[str], **kwargs: Any) -> Process:
+        assert kwargs["start_new_session"] is True
+        launches.append(tuple(command))
+        return Process()
+
+    monkeypatch.setattr("subprocess.Popen", launch)
+    monkeypatch.setattr(
+        CodeIdentity,
+        "capture",
+        classmethod(lambda cls, source_dir: cls("test", "local-submission-fixture")),
+    )
+
+    handle = SubmissionService(catalog, jobs).enqueue(config, cluster="local")
+
+    assert handle.state is JobState.PREPARING
+    assert launches and "lambdaforge.controlplane.SubmissionWorker" in launches[0]
+
+
+def test_top_level_local_run_enqueues_instead_of_running_inline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = task_config(tmp_path / "task.yaml")
+    calls: list[str] = []
+
+    class EnqueueOnly:
+        def __init__(self, catalog: ClusterCatalog) -> None:
+            del catalog
+
+        def enqueue(self, source: Path, *, cluster: str, **kwargs: Any) -> Any:
+            del source, kwargs
+            calls.append(cluster)
+            return SimpleNamespace(to_dict=lambda: {"job_id": "job-local-background"})
+
+    monkeypatch.delenv("LAMBDAFORGE_JOB_ID", raising=False)
+    monkeypatch.delenv("LAMBDAFORGE_EXECUTION_MODE", raising=False)
+    monkeypatch.setitem(CommandLineInterface._run.__globals__, "SubmissionService", EnqueueOnly)
+    monkeypatch.setattr(
+        CommandLineInterface._run.__globals__["WorkRunner"],
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not run inline")),
+    )
+    arguments = SimpleNamespace(
+        config=config,
+        on="local",
+        clusters=None,
+        dry_run=False,
+        wait_for_submit=False,
+        rerun=False,
+        restart=False,
+        allow_duplicate=False,
+        json=False,
+    )
+
+    assert CommandLineInterface._run(arguments) == 0
+    assert calls == ["local"]
+    assert "Submitted job-local-background" in capsys.readouterr().out
+
+
+def test_supervised_local_child_runs_inline_without_recursive_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = task_config(tmp_path / "task.yaml")
+    calls: list[str] = []
+
+    class NeverEnqueue:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            raise AssertionError("a supervised child must not enqueue another Job")
+
+    class Outcome:
+        @staticmethod
+        def to_dict() -> dict[str, str]:
+            return {"name": "queued-work", "status": "succeeded", "execution_id": "execution-1"}
+
+    def run(*args: Any, **kwargs: Any) -> Outcome:
+        del args, kwargs
+        calls.append("inline")
+        return Outcome()
+
+    monkeypatch.setenv("LAMBDAFORGE_EXECUTION_MODE", "worker")
+    monkeypatch.setitem(CommandLineInterface._run.__globals__, "SubmissionService", NeverEnqueue)
+    monkeypatch.setattr(CommandLineInterface._run.__globals__["WorkRunner"], "run", run)
+    arguments = SimpleNamespace(
+        config=config,
+        on="local",
+        clusters=None,
+        dry_run=False,
+        wait_for_submit=False,
+        rerun=False,
+        restart=False,
+        allow_duplicate=False,
+        json=False,
+    )
+
+    assert CommandLineInterface._run(arguments) == 0
+    assert calls == ["inline"]
+
+
 def test_submission_worker_persists_pre_scheduler_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -406,6 +527,7 @@ def test_tls_environment_reaches_the_scientific_scheduler_command(tmp_path: Path
     assert command[0] == "env"
     assert "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" in command
     assert "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt" in command
+    assert "LAMBDAFORGE_CACHE_ROOT=/work/user/.lambdaforge/cache" in command
     python_index = command.index("/managed/env/bin/python")
     assert command[python_index : python_index + 4] == (
         "/managed/env/bin/python",
@@ -446,13 +568,30 @@ def test_monitor_renderer_uses_the_same_machine_readable_job_items() -> None:
                 }
             ],
         },
+        "work": {
+            "items": [
+                {
+                    "work_id": "work-dna",
+                    "name": "dna",
+                    "kind": "work",
+                    "state": "preparing",
+                    "cluster": "gpu",
+                    "scientific_revision": "abc123",
+                    "progress": {"completed": None, "total": None, "unit": "runs"},
+                    "attempts": 1,
+                    "primary_job_id": "job-20260820120000-12345678",
+                    "job_ids": ["job-20260820120000-12345678"],
+                    "created_at_utc": "2026-08-20T11:59:00+00:00",
+                }
+            ]
+        },
     }
 
     rendered = MonitorRenderer.render(payload, width=160)
 
-    assert "job-20260820120000-12345678" in rendered
-    assert "dataset-build" in rendered
-    assert "phase=bundle" in rendered
+    assert "dna" in rendered
+    assert "job-20260820120000-12345678" not in rendered
+    assert "attempts=1" in rendered
     assert "80%" in rendered
 
 

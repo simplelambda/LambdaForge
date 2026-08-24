@@ -125,8 +125,15 @@ class CommandLineInterface:
 
     @staticmethod
     def _run(arguments: Any) -> int:
-        config = WorkConfig.from_yaml(arguments.config)
-        if arguments.on == "local":
+        # Scheduler children invoke the same public CLI.  They execute inline; an interactive
+        # top-level invocation is handed to the durable submission worker on every target,
+        # including local, so terminal latency does not depend on scientific execution.
+        supervised = os.environ.get("LAMBDAFORGE_EXECUTION_MODE") == "worker" or (
+            bool(os.environ.get("LAMBDAFORGE_JOB_ID"))
+            and os.environ.get("LAMBDAFORGE_BUNDLE") == "1"
+        )
+        if supervised or (arguments.on == "local" and arguments.dry_run):
+            config = WorkConfig.from_yaml(arguments.config)
             outcome = WorkRunner().run(
                 config,
                 dry_run=arguments.dry_run,
@@ -296,8 +303,7 @@ class CommandLineInterface:
             ]
             if len(selected) != 1:
                 raise ValueError(
-                    "Result selector must identify exactly one execution; "
-                    f"found {len(selected)}."
+                    f"Result selector must identify exactly one execution; found {len(selected)}."
                 )
             payload = selected[0]
         print(json.dumps(payload, indent=2))

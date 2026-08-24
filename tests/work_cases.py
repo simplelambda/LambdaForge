@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,7 @@ class CompleteWork(lf.Work):
     def run(self, source: Path, count: int = 2) -> dict[str, Any]:
         assert source == self.inputs["source"].path
         assert self.config.parameter("count") == count
-        mapped = self.map(range(count), lambda value: value * 2, key=str, workers=2)
+        mapped = self.map(range(count), lambda value: value * 2, workers=2)
         report = self.run_dir / "report.txt"
         report.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         self.outputs.value("numbers", mapped)
@@ -34,6 +36,14 @@ class CompleteWork(lf.Work):
         self.progress.update(completed=count, total=count, message="done")
         self.checkpoints.save_json("state.json", {"done": True})
         return {"count": count}
+
+
+class LoggingWork(lf.Work):
+    def run(self) -> dict[str, bool]:
+        print("ordinary print is captured")
+        self.log("managed message")
+        self.log("a warning", level="warning")
+        return {"logged": True}
 
 
 class Producer(lf.Work):
@@ -112,3 +122,90 @@ class CudaWork(lf.Work):
         score = float((value * value).cpu().item())
         self.metrics.log("cuda_score", score)
         return {"cuda_score": score}
+
+
+class ManagedInfrastructureWork(lf.Work):
+    def run(self) -> dict[str, Any]:
+        cached = self.cache.file(
+            "fixtures/source.txt",
+            build=lambda target: target.write_text("cache", encoding="utf-8"),
+            validate=lambda value: value.read_text() == "cache",
+        )
+        checkpoint = self.checkpoints.file(
+            "prepared/state.txt",
+            build=lambda target: target.write_text("ready", encoding="utf-8"),
+        )
+        report = self.outputs.file(
+            "report", filename="report.json", role="report", media_type="application/json"
+        )
+        report.write_json({"cache": cached.sha256, "checkpoint": checkpoint.read_text()})
+        directory = self.outputs.directory("evidence", role="evidence")
+        (directory / "value.txt").write_text("scientific evidence", encoding="utf-8")
+        python = self.tools.require(sys.executable, version_args=["--version"])
+        completed = self.tools.run(
+            [python, "-c", "print('external success')"],
+            name="Python fixture",
+            threads=1,
+        )
+        return {"returncode": completed.returncode, "cached": cached.read_text()}
+
+
+class PublishedOutputWork(lf.Work):
+    def run(self, destination: str, value: str = "published", overwrite: bool = False) -> None:
+        report = self.outputs.file(
+            "report",
+            filename="report.txt",
+            publish_to=destination,
+            overwrite=overwrite,
+        )
+        report.write_text(value)
+
+
+class PublishedDirectoryWork(lf.Work):
+    def run(self, destination: str, overwrite: bool = False) -> None:
+        directory = self.outputs.directory(
+            "evidence",
+            publish_to=destination,
+            overwrite=overwrite,
+        )
+        (directory / "summary.txt").write_text("complete", encoding="utf-8")
+
+
+class SelectiveMapWork(lf.Work):
+    def run(self) -> dict[str, Any]:
+        calls_path = self.checkpoints.path("map-calls.json")
+
+        def process(item: dict[str, str]) -> dict[str, Any]:
+            calls = json.loads(calls_path.read_text()) if calls_path.exists() else []
+            calls.append(item["id"])
+            self.checkpoints.save_json("map-calls.json", calls)
+            managed = self.cache.file(
+                f"items/{item['id']}.txt",
+                build=lambda target: target.write_text(item["id"], encoding="utf-8"),
+            )
+            return {
+                "id": item["id"],
+                "value": managed.read_text(),
+                "file": managed if item["id"] == "a" else None,
+            }
+
+        results = self.resume_map(
+            [{"id": "a"}, {"id": "b"}],
+            process,
+            key="id",
+            workers=1,
+            name="managed-items",
+        )
+        if not self.checkpoints.exists("failed-once.json"):
+            self.checkpoints.save_json("failed-once.json", True)
+            raise RuntimeError("retry after cache cleanup")
+        return {
+            "calls": self.checkpoints.load_json("map-calls.json"),
+            "values": [result["value"] for result in results],
+        }
+
+
+class MissingManagedOutputWork(lf.Work):
+    def run(self) -> dict[str, bool]:
+        self.outputs.file("missing", filename="missing.txt")
+        return {"declared": True}

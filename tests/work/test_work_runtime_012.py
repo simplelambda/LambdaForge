@@ -121,6 +121,20 @@ def test_runtime_outputs_metrics_inputs_and_immutable_views(tmp_path: Path) -> N
     }
 
 
+def test_print_and_managed_work_log_are_captured_and_flushed(tmp_path: Path) -> None:
+    result = WorkRunner().run(
+        WorkConfig.from_yaml(
+            _yaml(tmp_path, {"name": "logging", "run": "tests.work_cases.LoggingWork"})
+        )
+    )
+
+    assert result.status == "succeeded"
+    text = (result.runs[0].run_dir / "work.log").read_text(encoding="utf-8")
+    assert "ordinary print is captured" in text
+    assert "[INFO] managed message" in text
+    assert "[WARNING] a warning" in text
+
+
 def test_map_rejects_duplicate_stable_keys(tmp_path: Path) -> None:
     result = WorkRunner().run(
         WorkConfig.from_yaml(
@@ -257,9 +271,7 @@ def test_local_execution_delete_is_preview_first_idempotent_and_bounded(tmp_path
 
 
 def test_local_result_store_exposes_logs_source_and_corruption(tmp_path: Path) -> None:
-    config_path = _yaml(
-        tmp_path, {"name": "local-operations", "run": "tests.work_cases.Producer"}
-    )
+    config_path = _yaml(tmp_path, {"name": "local-operations", "run": "tests.work_cases.Producer"})
     result = WorkRunner().run(WorkConfig.from_yaml(config_path))
     store = ResultStore(tmp_path / ".lambdaforge" / "runs")
 

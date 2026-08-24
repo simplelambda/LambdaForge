@@ -199,6 +199,23 @@ class StorageOperations:
                     }
                     candidates.append(item)
                     candidate_paths.add(str(child.resolve()))
+        work_cache = roots["work_cache"]
+        if work_cache.is_dir() and not work_cache.is_symlink():
+            for child in sorted(work_cache.iterdir()):
+                if child.is_symlink() or not child.is_dir():
+                    continue
+                usage = cls._usage(child)
+                candidates.append(
+                    {
+                        "category": "work_cache",
+                        "name": child.name,
+                        "path": str(child),
+                        "bytes": usage["bytes"],
+                        "files": usage["files"],
+                        "reason": "reconstructible",
+                    }
+                )
+                candidate_paths.add(str(child.resolve()))
         temporary = roots["temporary"]
         if temporary.is_dir() and not temporary.is_symlink():
             for child in sorted(temporary.iterdir()):
@@ -227,6 +244,7 @@ class StorageOperations:
                 roots["runtime_packages"],
                 roots["package_cache"],
                 roots["stage_cache"],
+                roots["work_cache"],
                 roots["temporary"],
             )
             cache_bytes = sum(int(cls._usage(path)["bytes"]) for path in cache_roots)
@@ -304,6 +322,7 @@ class StorageOperations:
             "runtime_packages": cache / "runtime-packages",
             "package_cache": cache / "pip",
             "stage_cache": cache / "dataset-stages",
+            "work_cache": cache / "work",
             "job_workspaces": run,
             "temporary": cache / "tmp",
             "datasets": Path(str(dataset)).expanduser().resolve()

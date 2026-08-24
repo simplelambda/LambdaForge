@@ -87,6 +87,13 @@ class ProcessSupervisor:
                 "message": "Supervisor started.",
             },
         )
+        # Log files belong to the Job lifecycle, not only to the scientific child.  Create
+        # them before staging/resource admission so a pre-launch failure still has a stable,
+        # readable (possibly empty) scientific stream.
+        stdout_path = job_dir / "stdout.log"
+        stderr_path = job_dir / "stderr.log"
+        stdout_path.touch(exist_ok=True)
+        stderr_path.touch(exist_ok=True)
         leases: tuple[int, ...] = ()
         cpu_leases: tuple[int, ...] = ()
         process: subprocess.Popen[bytes] | None = None
@@ -95,7 +102,11 @@ class ProcessSupervisor:
                 source = Path(str(request["source_work_dir"])).resolve()
                 if not source.is_dir() or source.is_symlink():
                     raise RuntimeError(f"Unsafe or missing staged source: {source}")
-                shutil.copytree(source, work_dir, dirs_exist_ok=True)
+                # ControlPlane normally pre-stages an SSH workspace.  Older requests may still
+                # ask the supervisor to stage that exact directory; copying a directory onto
+                # itself makes shutil recurse into SameFileError noise instead of launching.
+                if source != work_dir.resolve():
+                    shutil.copytree(source, work_dir, dirs_exist_ok=True)
             resources = cls._required_mapping(request.get("resources", {}), "resources")
             cpu_leases = cls._wait_for_capacity(job_dir, request, supervisor)
             gpu_count = int(resources.get("gpu_count", 0))
@@ -106,15 +117,17 @@ class ProcessSupervisor:
             environment = os.environ.copy()
             environment["LAMBDAFORGE_CLUSTER"] = str(request.get("cluster", "local"))
             environment["LAMBDAFORGE_JOB_ID"] = job_id
+            environment["LAMBDAFORGE_EXECUTION_MODE"] = "worker"
             environment["LAMBDAFORGE_PROGRESS_PATH"] = str(job_dir / "progress.json")
+            cache_root = request.get("cache_root")
+            if cache_root:
+                environment["LAMBDAFORGE_CACHE_ROOT"] = str(cache_root)
             dataset_registry = request.get("dataset_registry")
             if dataset_registry is not None:
                 environment["LAMBDAFORGE_DATASET_REGISTRY"] = str(dataset_registry)
             if leases:
                 environment["CUDA_VISIBLE_DEVICES"] = ",".join(str(item) for item in leases)
             environment.setdefault("OMP_NUM_THREADS", str(max(1, len(cpu_leases))))
-            stdout_path = job_dir / "stdout.log"
-            stderr_path = job_dir / "stderr.log"
             with (
                 stdout_path.open("ab", buffering=0) as stdout,
                 stderr_path.open("ab", buffering=0) as stderr,

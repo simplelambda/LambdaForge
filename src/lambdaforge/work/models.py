@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import copy
-import json
-import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-from uuid import uuid4
+
+from lambdaforge.work.atomic import atomic_write_json
 
 
 def immutable_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -215,19 +214,7 @@ class WorkResult:
 
 def atomic_json(path: str | Path, value: Any) -> Path:
     """Write JSON atomically and never reinterpret corrupt prior state as empty."""
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    try:
-        with temporary.open("x", encoding="utf-8") as handle:
-            json.dump(_json_value(value), handle, indent=2, sort_keys=True, allow_nan=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
+    return atomic_write_json(Path(path), _json_value(value))
 
 
 def _json_value(value: Any) -> Any:
