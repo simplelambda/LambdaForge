@@ -9,7 +9,7 @@ import shutil
 import sys
 from collections.abc import Mapping
 from importlib.metadata import distribution
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
@@ -18,10 +18,12 @@ import yaml
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.EnvironmentIdentity import EnvironmentIdentity
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
+from lambdaforge.controlplane.NativeEnvironment import NativeEnvironmentSpecification
 from lambdaforge.controlplane.ProjectWheelBuilder import ProjectWheelBuilder
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.work import WorkConfig
+from lambdaforge.work.managed import fingerprint
 
 
 class ExecutionBundleBuilder:
@@ -50,21 +52,38 @@ class ExecutionBundleBuilder:
         config = WorkConfig.from_yaml(source)
         values = config.to_dict()
         staged: list[tuple[Path, str]] = []
+        shared_inputs: list[dict[str, Any]] = []
+        project_root = self._project_root(source.parent) or source.parent
+        path_context: dict[str, Any] | None = None
         if profile.name != "local":
-            values = self._stage_files(values, source.parent, staged)
+            values = self._stage_files(
+                values,
+                source.parent,
+                staged,
+                project_root=project_root,
+                remote_project_root=profile.project_root,
+                shared_inputs=shared_inputs,
+            )
+            if profile.project_root is not None:
+                path_context = {
+                    "path_context_version": 1,
+                    "project_root": profile.project_root,
+                    "source_relative": source.parent.relative_to(project_root).as_posix(),
+                }
         environment = self._prepare_environment(
             source, profile, staged, dependency_policy=dependency_policy
         )
-        project_root = self._project_root(source.parent) or source.parent
         code_identity = CodeIdentity.capture(project_root).to_dict()
         identity_payload = {
-            "bundle_version": 3,
+            "bundle_version": 4,
             "lambdaforge_version": LambdaForgeVersion.CURRENT,
             "cluster": profile.name,
             "config": values,
             "environment": environment.to_dict() if environment else None,
             "code_identity": code_identity,
             "staged": [(relative, self._fingerprint(path)) for path, relative in staged],
+            "shared_inputs": shared_inputs,
+            "path_context": path_context,
         }
         digest = hashlib.sha256(
             json.dumps(identity_payload, sort_keys=True, default=str).encode()
@@ -89,6 +108,16 @@ class ExecutionBundleBuilder:
                     json.dumps(code_identity, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
+                if path_context is not None:
+                    (temporary / ".lambdaforge-paths.json").write_text(
+                        json.dumps(path_context, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                if shared_inputs:
+                    (temporary / ".lambdaforge-shared-inputs.json").write_text(
+                        json.dumps(shared_inputs, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
                 (temporary / "manifest.json").write_text(
                     json.dumps(identity_payload, indent=2, sort_keys=True, default=str) + "\n",
                     encoding="utf-8",
@@ -114,6 +143,7 @@ class ExecutionBundleBuilder:
             package_names=packages,
             offline=environment.offline if environment else False,
             environment_policy=environment.dependency_policy if environment else None,
+            shared_inputs=tuple(shared_inputs),
         )
 
     def _stage_files(
@@ -121,6 +151,10 @@ class ExecutionBundleBuilder:
         values: Mapping[str, Any],
         source_dir: Path,
         staged: list[tuple[Path, str]],
+        *,
+        project_root: Path,
+        remote_project_root: str | None,
+        shared_inputs: list[dict[str, Any]],
     ) -> dict[str, Any]:
         counter = 0
 
@@ -136,11 +170,30 @@ class ExecutionBundleBuilder:
                     )
                     size = self._size(local)
                     if size > self.max_inline_bytes:
-                        raise ValueError(
-                            f"Typed file input {local} is {size} bytes; the automatic transfer "
-                            f"limit is {self.max_inline_bytes}. Publish/materialize it as a "
-                            "managed dataset or provide cluster-local storage."
+                        if remote_project_root is None or not local.is_relative_to(project_root):
+                            raise ValueError(
+                                f"Typed file input {local} is {size} bytes; the automatic "
+                                f"transfer limit is {self.max_inline_bytes}. Configure the "
+                                "cluster's project_root when this path belongs to the project "
+                                "mirror, or publish/materialize it as a managed dataset."
+                            )
+                        relative_to_project = local.relative_to(project_root)
+                        remote = str(
+                            PurePosixPath(remote_project_root)
+                            / PurePosixPath(relative_to_project.as_posix())
                         )
+                        digest, verified_size = fingerprint(local)
+                        shared_inputs.append(
+                            {
+                                "configured": str(item["file"]),
+                                "project_relative": relative_to_project.as_posix(),
+                                "remote_path": remote,
+                                "kind": "directory" if local.is_dir() else "file",
+                                "sha256": digest,
+                                "size_bytes": verified_size,
+                            }
+                        )
+                        return {"file": remote}
                     relative = f"inputs/{counter:04d}-{local.name}"
                     counter += 1
                     staged.append((local, relative))
@@ -191,6 +244,27 @@ class ExecutionBundleBuilder:
                 raise FileNotFoundError(f"Configured wheelhouse does not exist: {wheelhouse}")
             for wheel in sorted(wheelhouse.glob("*.whl")):
                 staged.append((wheel, f"wheelhouse/{wheel.name}"))
+                descriptors.append(
+                    {
+                        "name": f"wheelhouse/{wheel.name}",
+                        "sha256": self._fingerprint(wheel),
+                        "size_bytes": wheel.stat().st_size,
+                    }
+                )
+        native = NativeEnvironmentSpecification.discover(consumer)
+        native_policy = (dependency_policy or {}).get("native_environment")
+        if native is not None:
+            if not isinstance(native_policy, Mapping):
+                raise RuntimeError(
+                    "The project declares native dependencies, but no exact native package plan "
+                    "was resolved before bundle construction."
+                )
+            if native_policy.get("specification_sha256") != native.sha256:
+                raise RuntimeError(
+                    "The native environment changed after planning; retry to build a coherent "
+                    "content-addressed environment."
+                )
+            staged.append((native.source, f"native/{native.source.name}"))
         torch_policy = (dependency_policy or {}).get("pytorch", {})
         remote_python = (
             torch_policy.get("python_version") if isinstance(torch_policy, dict) else None

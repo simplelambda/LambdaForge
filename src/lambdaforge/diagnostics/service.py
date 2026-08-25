@@ -69,6 +69,13 @@ class DiagnosticClassifier:
     """Translate only semantics understood at the operational boundary."""
 
     _JOB = re.compile(r"\bjob-\d{14}-[a-z0-9]+\b", re.I)
+    _CONNECTION = re.compile(
+        r"\b(?:ssh|scp|sftp)\b|"
+        r"\bconnection (?:refused|reset|timed out)\b|"
+        r"\bnetwork (?:is )?(?:unreachable|down)\b|"
+        r"\bcould not resolve hostname\b|\bno route to host\b",
+        re.I,
+    )
 
     def classify(self, error: BaseException, context: DiagnosticContext) -> ErrorDiagnostic:
         """Return an actionable diagnosis while leaving unknown failures explicitly internal."""
@@ -83,6 +90,7 @@ class DiagnosticClassifier:
         from lambdaforge.controlplane.CudaCompatibilityResolver import (
             NoCompatibleTorchWheelError,
         )
+        from lambdaforge.controlplane.NativeEnvironment import NativeEnvironmentError
         from lambdaforge.controlplane.python_runtime import NoCompatiblePythonRuntimeError
         from lambdaforge.controlplane.RemoteCommandTimeout import RemoteCommandTimeout
         from lambdaforge.data.errors import (
@@ -175,6 +183,21 @@ class DiagnosticClassifier:
                 retryable=RetryDisposition.IMMEDIATE,
                 operation=context.operation,
                 job_id=job_id,
+            )
+        if isinstance(error, NativeEnvironmentError):
+            return diagnostic(
+                ErrorCategory.ENVIRONMENT,
+                "The project-native environment could not be prepared.",
+                message,
+                reason=(
+                    "The resolved Conda environment failed an exact inventory or executable "
+                    "verification check."
+                ),
+                impact=("The incomplete environment was not published or reused.",),
+                fixes=("Review the native environment declaration and rerun bootstrap.",),
+                commands=commands,
+                context={"cluster": context.cluster},
+                operation=context.operation,
             )
         if isinstance(error, MissingDatasetPlacementError):
             selector = error.selector
@@ -460,8 +483,25 @@ class DiagnosticClassifier:
             )
         if any(
             marker in lowered
-            for marker in ("ssh", "scp", "sftp", "connection refused", "unreachable", "network")
+            for marker in (
+                "native package inventory",
+                "native conda prefix",
+                "conda-meta",
+                "identity-bearing native inventory",
+            )
         ):
+            return diagnostic(
+                ErrorCategory.ENVIRONMENT,
+                "The project-native environment could not be prepared.",
+                message,
+                reason="The Conda prefix or its exact installed inventory failed verification.",
+                impact=("The incomplete environment was not published or reused.",),
+                fixes=("Review the native environment declaration and rerun bootstrap.",),
+                commands=commands,
+                context={"cluster": context.cluster},
+                operation=context.operation,
+            )
+        if self._CONNECTION.search(message):
             return diagnostic(
                 ErrorCategory.CONNECTION,
                 "LambdaForge could not complete the cluster connection operation.",

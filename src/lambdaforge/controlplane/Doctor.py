@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -43,7 +44,7 @@ class DoctorCheck:
             return "authentication"
         if self.name.startswith("dataset"):
             return "data"
-        if self.name in {"workspace", "bundle-cache"}:
+        if self.name in {"workspace", "bundle-cache", "project-root"}:
             return "storage"
         if self.name.startswith("scheduler"):
             return "resource"
@@ -227,6 +228,31 @@ class Doctor:
                 command=f"lf clusters bootstrap {cluster}",
             )
         )
+        if profile.project_root is not None:
+            project_root = transport.run(("test", "-d", profile.project_root))
+            checks.append(
+                DoctorCheck(
+                    "project-root",
+                    project_root.returncode == 0,
+                    (
+                        profile.project_root
+                        if project_root.returncode == 0
+                        else f"Configured project mirror is missing: {profile.project_root}"
+                    ),
+                    (
+                        "Create and synchronize the remote project mirror, or unset project_root "
+                        "and use managed datasets/absolute output paths."
+                    ),
+                    reason=(
+                        None
+                        if project_root.returncode == 0
+                        else (
+                            "Shared project inputs and relative remote publications need this root."
+                        )
+                    ),
+                    command=f"lf clusters show {cluster}",
+                )
+            )
         requirement = PythonRuntimeRequirements.framework()
         system_python = transport.run((*profile.command_prefix, profile.python, "--version"))
         system_message = (
@@ -420,6 +446,51 @@ class Doctor:
                         command=f"lf clusters bootstrap {cluster}" if not tls_ok else None,
                     )
                 )
+                receipt_path = (
+                    PurePosixPath(selected_python).parent.parent / ".lambdaforge-environment.json"
+                )
+                receipt = transport.run(("cat", str(receipt_path)))
+                if receipt.returncode == 0:
+                    try:
+                        receipt_value = json.loads(receipt.stdout)
+                        native_tools = receipt_value.get("native_tools", [])
+                    except (json.JSONDecodeError, AttributeError):
+                        native_tools = []
+                    if isinstance(native_tools, list):
+                        expected_bin = PurePosixPath(selected_python).parent
+                        for evidence in native_tools:
+                            if not isinstance(evidence, dict):
+                                continue
+                            name = str(evidence.get("name", "native-tool"))
+                            path = PurePosixPath(str(evidence.get("path", "")))
+                            safe = path.parent == expected_bin and path.name == name
+                            available = transport.run(("test", "-x", str(path))) if safe else None
+                            ok = available is not None and available.returncode == 0
+                            package = evidence.get("package")
+                            package_version = evidence.get("package_version")
+                            build = evidence.get("build")
+                            checks.append(
+                                DoctorCheck(
+                                    f"native-tool:{name}",
+                                    ok,
+                                    (
+                                        f"{path}; {evidence.get('version')}; provided by "
+                                        f"{package} {package_version} ({build})"
+                                    ),
+                                    f"Rerun 'lf clusters bootstrap {cluster} --project .'.",
+                                    reason=(
+                                        "The active environment receipt has an unsafe tool path."
+                                        if not safe
+                                        else "A required native executable disappeared from the "
+                                        "immutable managed prefix."
+                                    ),
+                                    command=(
+                                        f"lf clusters bootstrap {cluster} --project ."
+                                        if not ok
+                                        else None
+                                    ),
+                                )
+                            )
         if profile.project_module:
             project = transport.run(
                 (

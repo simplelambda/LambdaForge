@@ -121,6 +121,24 @@ def test_runtime_outputs_metrics_inputs_and_immutable_views(tmp_path: Path) -> N
     }
 
 
+def test_work_publishes_exact_job_level_result_for_control_plane_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_result = tmp_path / "job" / "result.json"
+    monkeypatch.setenv("LAMBDAFORGE_JOB_RESULT_PATH", str(job_result))
+    config = WorkConfig.from_mapping(
+        {"name": "job-result", "run": "tests.work_cases.Producer"},
+        source=tmp_path / "work.yaml",
+    )
+
+    result = WorkRunner().run(config)
+
+    persisted = json.loads(job_result.read_text(encoding="utf-8"))
+    assert result.status == "succeeded"
+    assert persisted["execution_id"] == result.execution_id
+    assert persisted["status"] == "succeeded"
+
+
 def test_print_and_managed_work_log_are_captured_and_flushed(tmp_path: Path) -> None:
     result = WorkRunner().run(
         WorkConfig.from_yaml(

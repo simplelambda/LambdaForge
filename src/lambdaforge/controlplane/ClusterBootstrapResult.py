@@ -18,6 +18,7 @@ class ClusterBootstrapResult:
     reused: bool
     pytorch: Mapping[str, Any] | None = None
     runtime: Mapping[str, Any] | None = None
+    native_environment: Mapping[str, Any] | None = None
     planned: bool = False
     pruned_environments: tuple[str, ...] = ()
     cleanup_blocked_reason: str | None = None
@@ -27,6 +28,12 @@ class ClusterBootstrapResult:
             object.__setattr__(self, "pytorch", FrozenJsonMapping(self.pytorch))
         if self.runtime is not None:
             object.__setattr__(self, "runtime", FrozenJsonMapping(self.runtime))
+        if self.native_environment is not None:
+            object.__setattr__(
+                self,
+                "native_environment",
+                FrozenJsonMapping(self.native_environment),
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a machine-readable result."""
@@ -37,6 +44,7 @@ class ClusterBootstrapResult:
             "reused": self.reused,
             "pytorch": copy.deepcopy(self.pytorch),
             "runtime": copy.deepcopy(self.runtime),
+            "native_environment": copy.deepcopy(self.native_environment),
             "planned": self.planned,
             "pruned_environments": list(self.pruned_environments),
             "cleanup_blocked_reason": self.cleanup_blocked_reason,

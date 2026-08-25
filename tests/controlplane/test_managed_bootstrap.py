@@ -16,6 +16,7 @@ from lambdaforge.controlplane import (
     ClusterProfile,
     ClusterService,
     CommandResult,
+    NativeEnvironmentPlan,
     PreparedEnvironment,
     ProjectWheelBuilder,
     PythonRuntime,
@@ -96,6 +97,10 @@ class BootstrapTransport(Transport):
 class BootstrapEnvironmentProvider:
     """Acknowledge the staged environment without running remote pip in this unit test."""
 
+    def __init__(self) -> None:
+        self.bundles: list[Any] = []
+        self.environment_ids: set[str] = set()
+
     def prepare(
         self,
         profile: ClusterProfile,
@@ -105,7 +110,10 @@ class BootstrapEnvironmentProvider:
         remote_bundle_dir: str | Path,
     ) -> PreparedEnvironment:
         del profile, transport, remote_bundle_dir
-        return PreparedEnvironment(bundle.environment_id, "/remote/env/bin/python", False)
+        self.bundles.append(bundle)
+        reused = bundle.environment_id in self.environment_ids
+        self.environment_ids.add(bundle.environment_id)
+        return PreparedEnvironment(bundle.environment_id, "/remote/env/bin/python", reused)
 
 
 class BootstrapFactory:
@@ -147,9 +155,11 @@ class BootstrapCudaResolver:
 class RecordingWheelBuilder:
     """Record that bootstrap resolves an installed distribution instead of a guessed root."""
 
-    def __init__(self, wheel: Path) -> None:
+    def __init__(self, wheel: Path, consumer_wheel: Path | None = None) -> None:
         self.wheel = wheel
+        self.consumer_wheel = consumer_wheel
         self.calls: list[tuple[str, Path | None]] = []
+        self.project_calls: list[Path] = []
 
     def build_installed(
         self, distribution_name: str, *, source_hint: str | Path | None = None
@@ -158,6 +168,17 @@ class RecordingWheelBuilder:
             (distribution_name, Path(source_hint).resolve() if source_hint is not None else None)
         )
         return self.wheel
+
+    def build(self, project_root: str | Path) -> Path:
+        self.project_calls.append(Path(project_root).resolve())
+        assert self.consumer_wheel is not None
+        return self.consumer_wheel
+
+    @staticmethod
+    def validate_framework_dependency(
+        wheel: Path, version: str, *, project_root: str | Path | None = None
+    ) -> None:
+        del wheel, version, project_root
 
 
 class BootstrapRuntimeResolver:
@@ -185,6 +206,74 @@ class BootstrapRuntimeResolver:
         self, profile: ClusterProfile, transport: Transport, runtime: PythonRuntime
     ) -> None:
         del profile, transport, runtime
+
+
+class BootstrapNativePlanner:
+    """Return an exact deterministic native solve for bootstrap integration."""
+
+    def __init__(self) -> None:
+        self.projects: list[Path] = []
+
+    def plan(
+        self,
+        specification: Any,
+        profile: ClusterProfile,
+        transport: Transport,
+        runtime: PythonRuntime,
+    ) -> NativeEnvironmentPlan:
+        del profile, transport, runtime
+        self.projects.append(specification.project_root)
+        inventory = (
+            {
+                "name": "python",
+                "version": "3.10.14",
+                "build": "h1",
+                "channel": "conda-forge",
+                "subdir": "linux-64",
+            },
+            {
+                "name": "pip",
+                "version": "25.1",
+                "build": "pyh",
+                "channel": "conda-forge",
+                "subdir": "noarch",
+            },
+            {
+                "name": "mmseqs2",
+                "version": "18",
+                "build": "h2",
+                "channel": "bioconda",
+                "subdir": "linux-64",
+            },
+            {
+                "name": "foldseek",
+                "version": "10",
+                "build": "h3",
+                "channel": "bioconda",
+                "subdir": "linux-64",
+            },
+        )
+        return NativeEnvironmentPlan(
+            specification.sha256,
+            specification.source.name,
+            specification.kind,
+            "linux-64",
+            "2.8.1-0",
+            specification.channels,
+            specification.dependencies,
+            tuple(
+                f"{item['channel']}::{item['name']}={item['version']}={item['build']}"
+                for item in inventory
+            ),
+            inventory,
+            specification.required_executables,
+            False,
+        )
+
+    @staticmethod
+    def cached_plan(specification: Any, runtime: PythonRuntime) -> None:
+        del specification, runtime
+        return None
 
 
 def test_installed_distribution_repacking_is_deterministic_and_installable(tmp_path: Path) -> None:
@@ -280,12 +369,16 @@ def test_cluster_bootstrap_requests_the_installed_framework_distribution(tmp_pat
         BootstrapRuntimeResolver(),  # type: ignore[arg-type]
     )
 
-    result = service.bootstrap("gpu")
+    progress: list[str] = []
+    result = service.bootstrap("gpu", progress=progress.append)
 
     assert result.python == "/remote/env/bin/python"
     assert result.pruned_environments == ("env-previous",)
     assert len(builder.calls) == 1
     assert builder.calls[0][0] == "lambdaforge"
+    assert progress[0] == "Inspecting the cluster profile and consumer project metadata."
+    assert "Creating or verifying the immutable managed environment." in progress
+    assert progress[-1] == "Bootstrap complete; the managed environment is ready."
 
 
 def test_cluster_bootstrap_dry_run_does_not_build_or_stage_wheels(tmp_path: Path) -> None:
@@ -314,3 +407,63 @@ def test_cluster_bootstrap_dry_run_does_not_build_or_stage_wheels(tmp_path: Path
     assert result.planned
     assert result.runtime is not None
     assert builder.calls == []
+
+
+def test_bootstrap_project_installs_consumer_wheel_and_native_plan(tmp_path: Path) -> None:
+    framework = tmp_path / "lambdaforge-0.12.0-py3-none-any.whl"
+    consumer = tmp_path / "wisdom-1.0-py3-none-any.whl"
+    framework.write_bytes(b"framework")
+    consumer.write_bytes(b"consumer")
+    project = tmp_path / "wisdom"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        "[project]\nname='wisdom'\nversion='1.0'\nrequires-python='>=3.10'\n\n"
+        "[tool.lambdaforge.environment]\nmanager='conda'\nfile='environment.yml'\n"
+        "required_executables=['mmseqs', 'foldseek']\n",
+        encoding="utf-8",
+    )
+    (project / "environment.yml").write_text(
+        "channels: [conda-forge, bioconda]\ndependencies: [python=3.10, pip, mmseqs2, foldseek]\n",
+        encoding="utf-8",
+    )
+    builder = RecordingWheelBuilder(framework, consumer)
+    native = BootstrapNativePlanner()
+    factory = BootstrapFactory()
+    profile = ClusterProfile(
+        "gpu",
+        transport="ssh",
+        host="gpu.example",
+        workspace="/work/user",
+        environment="managed",
+    )
+    service = ClusterService(
+        ClusterCatalog({"gpu": profile}),
+        factory,  # type: ignore[arg-type]
+        tmp_path / "control",
+        BootstrapCudaResolver(),  # type: ignore[arg-type]
+        builder,  # type: ignore[arg-type]
+        BootstrapRuntimeResolver(),  # type: ignore[arg-type]
+        native,  # type: ignore[arg-type]
+    )
+
+    result = service.bootstrap("gpu", project=project)
+
+    assert builder.project_calls == [project.resolve()]
+    assert native.projects == [project.resolve()]
+    assert result.native_environment is not None
+    assert result.native_environment["required_executables"] == ["mmseqs", "foldseek"]
+    bundle = factory.environment.bundles[-1]
+    assert set(bundle.package_names) == {framework.name, consumer.name}
+    assert (bundle.directory / "native/environment.yml").is_file()
+
+    repeated = service.bootstrap("gpu", project=project)
+    assert repeated.environment_id == result.environment_id
+    assert repeated.reused
+
+    before_calls = list(native.projects)
+    dry = service.bootstrap("gpu", project=project, dry_run=True)
+    assert dry.planned
+    assert dry.native_environment is not None
+    assert dry.native_environment["platform"] == "linux-64"
+    assert "connectivity" in dry.native_environment
+    assert native.projects == before_calls

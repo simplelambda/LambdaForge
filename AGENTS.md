@@ -97,8 +97,26 @@ serialize machine paths or arbitrary pickle as scientific state.
 
 `outputs.file/directory(..., publish_to=PATH)` optionally publishes a verified copy after successful
 finalization and refuses different existing content unless `overwrite=True`. Relative destinations
-use `source_dir`; on remote execution they are remote paths. Use an absolute persistent cluster path
-when the copy must outlive Job cleanup; never describe it as an automatic transfer to the controller.
+start at the authored YAML directory. Remotely they require the cluster `project_root` mirror and
+map to the same project-relative directory; otherwise use an explicit absolute remote path. Never
+describe publication as an automatic transfer back to the controller.
+
+For remote `{file: PATH}` inputs, content up to 10 MiB is bundled automatically. A larger path must
+belong to the local `pyproject.toml` project and have an exact counterpart below the cluster's
+absolute `project_root`; LambdaForge verifies kind/size/SHA-256 before submission and in the worker,
+and never syncs or deletes that researcher-owned mirror. Configure with
+`lf clusters set NAME project_root /absolute/remote/project`, then run `lf doctor --on NAME`.
+Missing/stale/symlinked content fails closed. Use managed datasets for reusable very large data,
+because exact mirror verification reads every byte on each submission.
+
+Project-native tools are declared once in `[tool.lambdaforge.environment]` with `manager="conda"`,
+exactly one project-contained `file` or `lockfile`, and bare `required_executables`. Use
+`lf clusters bootstrap NAME --project . --dry-run`, review, then apply. Environment files accept
+only name/channels/string dependencies; no pip mappings, variables, prefixes, hooks or Torch/CUDA.
+Offline native provisioning requires a platform-specific `@EXPLICIT` SHA-256 lock and matching
+`package_cache`; pip/Torch also needs the cluster wheelhouse to be fully offline. Managed creation
+uses one immutable Conda prefix, exact inventory and verified tools. `tools.require` checks that
+prefix and never installs. Pip-only and `environment: existing` behavior is unchanged.
 
 Use `tools.require(..., version_args=...)` and `tools.run(argv, ...)` for external executables.
 Commands are argv, never shell strings; child thread variables and environment overrides remain
@@ -122,6 +140,11 @@ selection and `D` clears confirmed terminal history while preserving active Jobs
 `lf overview --json` (`work.items[].attempt_history` retains Job IDs), ordinary `lf logs` and
 preview-first `lf jobs clear [--apply]` instead of parsing the TUI. Local provider paths belong to
 the durable Job and must never be recomputed from the observer's current directory.
+Attempt logs in `lf top` refresh automatically. Failed Work logs append persisted exception
+type/message/phase/result path after any requested tail; request `--verbose` or `--debug` for the
+traceback, or `--json` for structured `failure`/`failures`. Cache fetch retries incomplete HTTP/
+chunked/gzip transfers and transient statuses from clean unpublished temporaries; never add a
+consumer-side retry workaround. Human bootstrap progress is stderr-only and machine JSON is clean.
 
 ## YAML composition and studies
 

@@ -205,6 +205,31 @@ class SelectiveMapWork(lf.Work):
         }
 
 
+class FetchMapWork(lf.Work):
+    """Exercise retrying HTTP cache downloads from concurrent resumable items."""
+
+    def run(self, base_url: str, count: int = 4) -> dict[str, Any]:
+        def fetch(item: dict[str, str]) -> dict[str, str]:
+            selected = self.cache.fetch(
+                f"{base_url}/{item['id']}.gz",
+                key=f"downloads/{item['id']}.txt",
+                retries=2,
+                retry_backoff=0,
+                decompress="gzip",
+            )
+            return {"id": item["id"], "value": selected.read_text()}
+
+        return {
+            "items": self.resume_map(
+                [{"id": str(index)} for index in range(count)],
+                fetch,
+                key="id",
+                workers=min(4, count),
+                name="downloads",
+            )
+        }
+
+
 class MissingManagedOutputWork(lf.Work):
     def run(self) -> dict[str, bool]:
         self.outputs.file("missing", filename="missing.txt")

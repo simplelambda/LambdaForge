@@ -12,6 +12,26 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Prevented relative remote output publication from disappearing into hashed Job workspaces:
+  cluster profiles can now declare a persistent researcher-owned `project_root`, and relative
+  `publish_to` paths preserve the authored YAML layout locally and remotely.
+- Allowed typed project directories above the inline bundle limit to use an explicitly prepared
+  remote mirror. Exact kind, byte count and SHA-256 are verified before scheduler submission;
+  missing, stale, partial or symlinked content fails without launching scientific code.
+- Retried truncated chunked/gzip HTTP transfers, including `IncompleteRead`, from a clean private
+  temporary on every rate-limited attempt; permanent HTTP errors fail promptly and exhausted
+  downloads cannot publish partial cache bytes or records.
+- Preserved structured Work failures across remote Job logging: tailed human logs and `lf top` now
+  show the terminal exception and persisted result path, while JSON/debug views expose bounded
+  structured evidence without duplicating an existing traceback.
+
+- Reconciled installed native-package subdirectories from regular `conda-meta` records when
+  micromamba 2.8 omits `subdir` from `list --json`, while retaining exact version/build/channel/
+  subdir verification before publication, after pip and on reuse. Inventory failures now show a
+  bounded field-level diff instead of dumping the complete prefix.
+- Prevented package names such as `libssh2` in native inventory diagnostics from being mistaken for
+  SSH transport failures; typed native-preparation errors now take precedence and classify as
+  environment failures.
 - Prevented direct SSH supervisors from copying an already staged Job workspace onto itself, which
   failed before scientific launch with recursive `SameFileError` data.
 - Made pre-launch stdout/stderr streams stable and taught Job logs to distinguish absent legacy
@@ -22,6 +42,9 @@ metadata rather than invented release numbers.
   saved source path.
 
 ### Changed
+
+- Added phase and periodic liveness output to human cluster bootstrap and automatic, scroll-safe
+  refresh to the `lf top` Attempt log viewer; machine JSON output remains uncontaminated.
 
 - Made normal local `lf run` use the same durable, non-blocking Job handoff as remote execution;
   supervised children still execute inline and `--dry-run` remains read-only.
@@ -44,6 +67,9 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Added `clusters add --project-root`, mutable `clusters set NAME project_root ...` configuration,
+  `doctor` mirror checks and bilingual guidance distinguishing small bundle snapshots, shared
+  project mirrors and immutable managed datasets.
 - Added `Work.log(message, level=...)` for timestamped, immediately flushed messages while retaining
   normal `print()` and Python logging capture.
 - Added path-like `ManagedFile`, integrity-checked `Work.cache.file/fetch/rate_limit`, validated
@@ -66,6 +92,10 @@ metadata rather than invented release numbers.
   symlink traversal, type changes and self/owner directory replacement are refused.
 - Added `attempt_history` to the semantic Work read model so TUIs and external wrappers share the
   same numbered-attempt information.
+- Added optional project-owned native dependency declarations for managed clusters. Exact Conda
+  solves use LambdaForge's verified micromamba, platform/inventory-aware environment identity, one
+  immutable prefix, required-executable provenance, `bootstrap --project` dry-run explanations and
+  explicit SHA-256 offline locks/package caches without changing pip-only projects.
 
 ### Removed
 

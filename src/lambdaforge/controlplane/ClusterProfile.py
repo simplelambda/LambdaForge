@@ -44,6 +44,7 @@ class ClusterProfile:
     scheduler_options: Mapping[str, Any] = field(default_factory=dict)
     slurm_profile: SlurmProfile | Mapping[str, Any] | None = None
     python_runtime: PythonRuntimePolicy | None = None
+    project_root: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -95,6 +96,18 @@ class ClusterProfile:
             and re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", self.project_module) is None
         ):
             raise ValueError("project_module must be a fully qualified Python module name.")
+        if self.project_root is not None:
+            project_root = self.project_root.strip()
+            if (
+                self.transport != "ssh"
+                or not project_root.startswith("/")
+                or project_root == "/"
+                or "\n" in project_root
+            ):
+                raise ValueError(
+                    "project_root must be a non-root absolute remote path on SSH clusters."
+                )
+            object.__setattr__(self, "project_root", project_root.rstrip("/") or "/")
         object.__setattr__(self, "scheduler_options", FrozenJsonMapping(self.scheduler_options))
         auth = self.auth
         if not isinstance(auth, ClusterAuthentication):
@@ -145,6 +158,7 @@ class ClusterProfile:
             wheelhouse=(str(value["wheelhouse"]) if value.get("wheelhouse") else None),
             pytorch=TorchInstallationPolicy.from_mapping(value.get("pytorch")),
             project_module=(str(value["project_module"]) if value.get("project_module") else None),
+            project_root=(str(value["project_root"]) if value.get("project_root") else None),
             data_environment=(
                 str(value["data_environment"])
                 if value.get("data_environment") is not None
@@ -201,6 +215,7 @@ class ClusterProfile:
             "wheelhouse": self.wheelhouse,
             "pytorch": self.pytorch.to_dict(),
             "project_module": self.project_module,
+            "project_root": self.project_root,
             "data_environment": self.data_environment or self.name,
             "ssh_options": list(self.ssh_options),
             "command_prefix": list(self.command_prefix),

@@ -165,6 +165,7 @@ class StorageOperations:
             ("bundles", "bundles"),
             ("environments", "environments"),
             ("runtimes", "runtimes"),
+            ("native_packages", "native_packages"),
             ("stage_cache", "stage_cache"),
         ):
             root = roots[category]
@@ -242,6 +243,7 @@ class StorageOperations:
                 roots["runtime_managers"],
                 roots["conda_packages"],
                 roots["runtime_packages"],
+                roots["native_packages"],
                 roots["package_cache"],
                 roots["stage_cache"],
                 roots["work_cache"],
@@ -254,6 +256,7 @@ class StorageOperations:
                 ("bundles", "bundles"),
                 ("environments", "environments"),
                 ("runtimes", "runtimes"),
+                ("native_packages", "native_packages"),
                 ("stage_cache", "stage_cache"),
             ):
                 protected = (
@@ -320,6 +323,7 @@ class StorageOperations:
             "runtime_managers": cache / "runtime-managers",
             "conda_packages": cache / "conda-pkgs",
             "runtime_packages": cache / "runtime-packages",
+            "native_packages": cache / "native-packages",
             "package_cache": cache / "pip",
             "stage_cache": cache / "dataset-stages",
             "work_cache": cache / "work",
@@ -350,6 +354,8 @@ class StorageOperations:
             return any(candidate.is_file() for candidate in path.rglob("result.json"))
         if category == "runtimes":
             return (path / ".lambdaforge-python-runtime.json").is_file()
+        if category == "native_packages":
+            return (path / ".lambdaforge-native-cache.json").is_file()
         marker = "manifest.json" if category == "bundles" else ".lambdaforge-environment.json"
         return (path / marker).is_file()
 

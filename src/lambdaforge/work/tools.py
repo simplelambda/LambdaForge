@@ -6,6 +6,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -67,6 +68,11 @@ class ToolService:
         self._log = log
         self._tools: dict[str, Tool] = {}
         self._lock = Lock()
+        environment_bin = str(Path(sys.executable).resolve().parent)
+        inherited = os.environ.get("PATH", "")
+        self._search_path = os.pathsep.join(
+            value for value in (environment_bin, inherited) if value
+        )
 
     def require(
         self,
@@ -79,7 +85,7 @@ class ToolService:
         selected = str(executable).strip()
         if not selected:
             raise ValueError("Executable names cannot be empty.")
-        resolved = shutil.which(selected)
+        resolved = shutil.which(selected, path=self._search_path)
         if resolved is None:
             raise FileNotFoundError(
                 f"Required external tool {selected!r} was not found on PATH. "
@@ -141,12 +147,13 @@ class ToolService:
         ):
             raise ValueError("timeout must be a positive finite number or null.")
         arguments = tuple(os.fspath(value) for value in command)
-        executable = shutil.which(arguments[0])
+        executable = shutil.which(arguments[0], path=self._search_path)
         if executable is None:
             raise FileNotFoundError(f"External executable {arguments[0]!r} was not found on PATH.")
         arguments = (str(Path(executable).resolve()), *arguments[1:])
         selected_name = str(name or Path(arguments[0]).name)
         environment = dict(os.environ)
+        environment["PATH"] = self._search_path
         if threads is not None:
             environment.update({key: str(threads) for key in self.THREAD_VARIABLES})
         if env is not None:

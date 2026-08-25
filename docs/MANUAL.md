@@ -194,7 +194,12 @@ record = self.cache.fetch(
 
 `fetch` is deliberately not a generic HTTP client. It performs one HTTP(S) GET into the same cache
 publication path, with bounded timeout, retries after the initial attempt, exponential backoff and
-optional gzip decompression. Its rate limiter is thread-safe and shared only by one Work cache
+optional gzip decompression. Connection loss, incomplete chunked reads (including truncation while
+decoding gzip), 408/425/429 and 5xx responses are retryable; permanent HTTP errors such as 401 or
+404 fail immediately. Every attempt passes through the rate limiter and starts from an empty private
+temporary file. Exhaustion reports the URL, attempt count and final cause. Only a completely read,
+validated file is atomically published, so a retry never exposes partial bytes or a valid record for
+them. Its rate limiter is thread-safe and shared only by one Work cache
 instance; it is not a distributed rate limit across Jobs. The cache is identity-scoped and
 reconstructible. `lf clean` previews each Work cache identity, and `--apply` removes it only after
 obtaining an exclusive GC lock; a running Work holds the corresponding shared lease.
@@ -276,16 +281,20 @@ LambdaForge checks type/containment/symlinks for every declaration and registers
 If any declared output is missing or unsafe, finalization fails and no managed declaration from
 that set enters the result. Do not call `outputs.artifact` again for the same managed output.
 
-`publish_to` is optional on both `file` and `directory`. A relative destination is resolved from
-`self.source_dir`; an absolute path is used explicitly. LambdaForge first validates and fingerprints
-the Attempt-owned artifact, then publishes a per-destination atomic copy. An existing identical
-copy is reused, while different content is refused unless `overwrite=True`. The managed artifact
-remains authoritative even when a publication copy exists, and its result metadata records the
-physical `published_to` path. On a remote Job this is a remote-host path: use an absolute persistent
-cluster path when the copy must outlive Job cleanup. LambdaForge does not silently copy arbitrary
-large outputs back to the controller. Publication also refuses symbolic-link traversal, file versus
-directory type changes and any directory destination that contains (or is contained by) its managed
-source; `overwrite=True` is never permission to replace the project or Attempt root.
+`publish_to` is optional on both `file` and `directory`. A relative destination starts at the
+directory containing the authored YAML; an absolute path is explicit. For remote execution,
+relative publication requires the cluster's `project_root` and uses the equivalent YAML directory
+below that mirror. It never resolves below the bundle/Job hash directory. Without a mirror, use an
+absolute persistent remote path; LambdaForge rejects a remote relative destination rather than
+silently publishing into disposable internal storage.
+
+LambdaForge first validates and fingerprints the Attempt-owned artifact, then publishes a
+per-destination atomic copy. An existing identical copy is reused, while different content is
+refused unless `overwrite=True`. The managed artifact remains authoritative and its result metadata
+records `published_to`. LambdaForge does not silently copy arbitrary large outputs back to the
+controller. Publication also refuses symbolic-link traversal, type changes and any directory
+destination that contains (or is contained by) its managed source; `overwrite=True` is never
+permission to replace the project or Attempt root.
 
 ```python
 index = self.checkpoints.file(
@@ -359,10 +368,13 @@ with:
   corpus: {dataset: research-corpus@3}
 ```
 
-A file is resolved relative to YAML, checked, hashed and passed as `Path`. Remote bundles copy only
-files/directories below the configured small-input limit. A larger input produces a pre-submission
-error explaining that it must use durable cluster storage or a managed dataset. This makes transfer
-cost deliberate.
+A file or directory is resolved relative to YAML, checked, hashed and passed as `Path`. On remote
+execution, content up to the default 10 MiB inline limit is copied into the immutable control bundle.
+A larger project-owned path follows the mirror contract in section 10: the bundle preserves its
+project-relative name, the worker receives the matching absolute remote path, and exact kind, byte
+count and SHA-256 are checked before scheduler submission and again in the worker. Nothing is
+silently transferred. A large path outside the installable project is refused; use a managed
+dataset or an explicit, reviewable project/data layout.
 
 This marker is input-only: it describes content that must exist before scheduling. A new output is
 created in Python with `self.outputs.file/directory/value/dataset`; there is no second YAML output
@@ -500,19 +512,56 @@ explicit mean-based ranking without guessing metric direction.
 ## 10. Clusters and jobs
 
 ```bash
-lf clusters add gpu --host HOST --user USER --workspace /remote/work
+lf clusters add gpu --host HOST --user USER --workspace /remote/work \
+  --project-root /scratch/USER/my-project
 lf clusters bootstrap gpu --dry-run
 lf clusters bootstrap gpu
 lf doctor --on gpu
 lf run experiments/train.yaml --on gpu
 ```
 
+For an existing profile, the equivalent update is:
+
+```bash
+lf clusters set gpu project_root /scratch/USER/my-project
+lf clusters show gpu
+```
+
+`workspace` and `project_root` are deliberately different. `workspace` is LambdaForge-owned state:
+bundle cache, environments, Job directories and logs may be garbage-collected according to their
+ownership. `project_root` is a researcher-owned persistent partial mirror of the local directory
+containing `pyproject.toml`; LambdaForge never synchronizes or deletes it. It must be an absolute,
+non-root SSH path. `lf doctor` checks that a configured mirror directory exists.
+
+Path mapping preserves the authored layout. If the YAML is `PROJECT/experiments/design.yaml`, then
+`{file: ../data/dna/design}` maps to `REMOTE_PROJECT/data/dna/design`; a relative
+`publish_to="../data/results.json"` maps the same way. Absolute `publish_to` remains an explicit
+remote path and is not constrained to the mirror.
+
+There are three intentional data paths:
+
+1. Small input (up to 10 MiB): LambdaForge snapshots and transfers it in the bundle.
+2. Larger mirrored project input: the researcher/site transfer service places it at the matching
+   remote relative path; LambdaForge reads both sides and requires exact kind/size/SHA-256 before
+   submitting, so missing, stale, partial and symlinked data fail closed.
+3. Large reusable corpus: publish/materialize a managed dataset. This avoids re-hashing a TB-scale
+   mirror on every submission and gives immutable identity plus per-cluster placements.
+
+The mirror is intentionally not a hidden `rsync`. Copying hundreds of GB during `lf run` would make
+submission latency, quota use and network cost surprising, and many sites require a DTN or another
+approved transfer mechanism. Synchronize outside LambdaForge, then run `lf doctor` and `lf run`.
+
+Human bootstrap output reports each preparation phase on stderr and emits a periodic liveness line
+during a long solve/install. This does not pollute `--json`, whose stdout remains one
+machine-readable document.
+
 Every normal `lf run` validates and identifies locally, creates a durable preparation Job and
 returns; this is also true for the built-in `local` target. The detached controller then prepares
 the target and asks its scheduler, while `lf top`, `lf show` and `lf logs` remain authoritative.
 `--dry-run` is direct and read-only. `--wait-for-submit` keeps the terminal attached through
-preparation, not through scientific execution. For SSH, preparation resolves runtime,
-builds/cache-checks wheels and bounded-input bundles, and stages one mutable Job workspace.
+preparation, not through scientific execution. For SSH, preparation resolves runtime, verifies
+declared shared project inputs, builds/cache-checks wheels and bounded-input bundles, and stages one
+mutable Job workspace.
 OpenSSH uses normal keys, agent, known_hosts and ProxyJump and reuses a private ControlMaster for
 its idle persistence period. Password values live only in prompt/keyring/environment providers.
 
@@ -521,6 +570,99 @@ consumer, dependency, Python and Torch plans. Runtime discovery can reuse Conda-
 verified micromamba installation. LambdaForge never installs GPU drivers/system CUDA or silently
 falls back to CPU when CUDA is required.
 
+### Project-declared native packages
+
+Native command-line dependencies belong to the installable consumer project, not to each Work YAML.
+The optional declaration is strict:
+
+```toml
+[tool.lambdaforge.environment]
+manager = "conda"
+file = "environment.yml"
+required_executables = ["mmseqs", "foldseek"]
+```
+
+`manager` is currently exactly `conda`; LambdaForge still uses its pinned, checksum-verified
+micromamba and does not require a global Conda installation. `file` and `lockfile` are mutually
+exclusive paths below the project root. `required_executables` contains bare names, never paths or
+commands. `package_cache` is valid only with an explicit offline lock. Hyphenated TOML spellings of
+the two array/path options are accepted for compatibility, but underscore spelling is canonical.
+
+The supported `environment.yml` subset is intentionally small:
+
+```yaml
+name: wisdom                 # descriptive; it never selects a global named environment
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip
+  - biopython>=1.84
+  - foldseek
+  - mmseqs2
+```
+
+Only `name`, `channels` and string `dependencies` are accepted. Prefixes, variables, nested `pip:`
+sections and project hooks are rejected. PyTorch/CUDA packages are also rejected here because the
+cluster's reviewed Torch plan owns them. Missing baseline Python, pip, CA and OpenSSL packages are
+added to an online solve for the already selected Python minor. Consumer Python dependencies remain
+normal `pyproject.toml` wheel dependencies.
+
+```bash
+lf clusters bootstrap gpu --project . --dry-run
+lf clusters bootstrap gpu --project .
+lf doctor --on gpu
+lf run experiments/design.yaml --on gpu
+```
+
+Dry-run does not download a manager, solve channels, build wheels or mutate the cluster. It reports
+the specification hash, requested packages, target Conda subdir, required executables and whether
+first provisioning needs channel connectivity. If an exact solve receipt already exists it reports
+that solve. Actual bootstrap/automatic preparation resolves on the remote platform, normalizes the
+exact name/version/build/channel/subdir inventory and places it in `EnvironmentIdentity` together
+with specification bytes, platform, manager version, exact framework/consumer/wheelhouse bytes,
+Python requirement, Torch plan and online/offline policies.
+
+The final environment is one prefix, not an activated base plus an opaque PATH overlay. Micromamba
+creates a temporary Conda prefix from the exact solve; that prefix's Python then installs Torch and
+the exact wheels. LambdaForge runs `pip check`, rechecks Conda inventory, TLS, framework/Torch/CUDA
+and every required executable before writing a receipt and atomically renaming the prefix. The
+receipt records executable path/version plus its owning Conda package, package version, build,
+channel and subdir. Concurrent builders share a bounded per-identity lock; only a complete verified
+prefix is reusable. `ToolService` searches the active Python prefix first, so `self.tools.require()`
+remains a check rather than an installer.
+
+Installed inventory verification enriches `micromamba list --json` with the regular records under
+the prefix's `conda-meta`; this preserves the real `linux-*` versus `noarch` subdir even with manager
+versions that omit it from list output. Missing metadata is an environment error, while a genuine
+difference is reported as a bounded package/field summary rather than a dump of the whole prefix.
+
+For native offline provisioning use a Conda `@EXPLICIT` lock with one target platform and SHA-256
+on every URL, plus the exact package bytes in a project-owned cache:
+
+```toml
+[tool.lambdaforge.environment]
+manager = "conda"
+lockfile = "locks/linux-64.explicit"
+package_cache = "vendor/conda-linux-64"
+required_executables = ["mmseqs", "foldseek"]
+```
+
+```text
+# platform: linux-64
+@EXPLICIT
+https://repo.example/linux-64/python-3.11.9-h123.conda#sha256=<64 hex digits>
+```
+
+Every locked basename and checksum must match a regular cache file; links, duplicates, credentials,
+queries and mismatched platforms fail before transfer. The cache is content-addressed, staged once,
+used with `--offline`, and reconstructible after the immutable prefix is published. Fully offline
+installation of Python wheels and Torch additionally requires the existing reviewed `wheelhouse`
+cluster option. One lock is platform-specific; keep separate lock/cache pairs for `linux-64`,
+`linux-aarch64` or `linux-ppc64le`. `environment: existing` deliberately keeps its manual contract
+and does not install the project declaration.
+
 Every submitted Job receives its own mutable workspace copied from the immutable bundle cache;
 direct SSH jobs never execute in the shared cache. The embedded controller-side code identity keeps
 local and staged scientific fingerprints equal. On a remote Work, `source_dir` is this staged,
@@ -528,7 +670,9 @@ installable consumer source context rather than the controller's nonexistent phy
 
 `lf top` is the semantic interactive view. Up/down traverse clusters and Work rows as one list;
 Enter or right arrow drills forward (cluster detail, Work, numbered Attempt, then full logs), while
-left arrow goes back. Long operational Job IDs stay out of this primary path and remain available
+left arrow goes back. An open Attempt log refreshes automatically while preserving manual scroll;
+when positioned at the end it follows new output. Long operational Job IDs stay out of this primary
+path and remain available
 through `lf jobs` and the machine-readable overview. `self.progress.update` reaches the supervisor's durable
 state and therefore this view; active SLURM Jobs read the same bounded progress snapshot from their
 owned workspace. `lf overview --json` exposes equivalent machine data.
@@ -538,6 +682,15 @@ submission, later observation, logs and deletion remain independent of the calle
 directory. Old relative records are resolved from their recorded source configuration. Provider
 outage yields unknown/last-known state, not fake failure; once the provider is reachable the real
 state replaces unknown and the stale reachability error is removed.
+
+Each Work Job also publishes a bounded structured result at its exact Job root. `lf logs WORK` and
+`lf jobs logs JOB` append a `Scientific failure` section after the tailed stream when captured
+output does not already contain the diagnosis. The section keeps exception type, message,
+phase/location and the persisted `result.json` path; `--verbose` or `--debug` adds its traceback
+unless that traceback is already visible. `--tail N` limits captured streams, never this terminal
+cause. Add `--json` for structured `failure`, `failures` and `result_path` fields. `lf show` and
+`lf jobs show` expose the same failure. Pre-change 0.12 workspaces are read from their bounded legacy
+result location, while new Jobs use the exact Job-root copy.
 
 ## 11. Cleanup and safety
 
@@ -574,7 +727,7 @@ whole-history operation, reporting failures without discarding the affected loca
 | `top`, `overview` | human live and machine global control-plane views |
 | `show`, `logs`, `cancel`, `retry`, `delete` | semantic Work operations |
 | `jobs ...` | low-level Job control; `clear [--apply]` cleans terminal history |
-| `clusters ...`, `doctor`, `resources` | target setup and diagnosis |
+| `clusters ...`, `doctor`, `resources` | target setup and diagnosis; bootstrap accepts `--project` and read-only `--dry-run` |
 | `datasets ...` | inspect/verify/place/delete published dataset versions |
 | `results list/show/compare` | query Work Execution results |
 | `clean` | preview/apply shared reconstructible cache GC |
@@ -693,6 +846,8 @@ The concrete ownership map is:
 | `ToolService` | executable resolution, argv process lifecycle, logs, child env and used-tool ledger | scientific code chooses the command; framework owns safe execution mechanics |
 | `EnvironmentManifest` | one software/hardware/Git/plugin/tool provenance document | consumers need one source of environment truth, not copied fragments |
 | `SubmissionService`/`ControlPlane` | durable asynchronous preparation and target selection | terminal responsiveness and remote preparation are operational, not scientific |
+| `NativeEnvironmentSpecification`/`NativeEnvironmentPlanner` | strict project declaration, platform solve and exact Conda inventory | native software belongs to deployment identity, never Work parameters or runtime hooks |
+| `ManagedEnvironmentProvider` | verified temporary venv or unified Conda prefix, pip/Torch install and atomic publication | only this boundary can turn a complete dependency plan into an executable environment |
 | `Transport` | connection/file transfer | SSH/local transport must not decide scheduler semantics |
 | `Scheduler` | submit/observe/signal provider Jobs | direct processes and SLURM expose different authoritative lifecycle APIs |
 | `DatasetPublisher`/`DatasetRegistry` | immutable dataset bytes/index and logical placements | datasets outlive one Work Attempt and require an independent lifecycle |

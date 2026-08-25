@@ -8,13 +8,14 @@ import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 
-from lambdaforge.cli.common import age, job_resources
+from lambdaforge.cli.common import age, current_diagnostic_context, job_resources
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.JobGroupStore import JobGroupStore
 from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.WorkService import WorkService
 from lambdaforge.diagnostics import LambdaForgeError, job_failure_diagnostic
+from lambdaforge.work.failure import render_scientific_failures
 
 
 def run_job_command(arguments: argparse.Namespace) -> int:
@@ -51,6 +52,30 @@ def run_job_command(arguments: argparse.Namespace) -> int:
     )
     if arguments.job_command in {"status", "show"}:
         job_record = jobs.get(selected_job_id)
+        if arguments.job_command == "show":
+            scientific = jobs.scientific_result(selected_job_id)
+            payload = {
+                **job_record.to_dict(),
+                "scientific_result_path": scientific.get("path") if scientific else None,
+                "failure": scientific.get("failure") if scientific else None,
+                "failures": scientific.get("failures", []) if scientific else [],
+            }
+            if arguments.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"{job_record.job_id}: {job_record.state.value} on {job_record.cluster}")
+                failure = payload["failure"]
+                if isinstance(failure, Mapping):
+                    print(
+                        f"Scientific failure: {failure.get('type')}: {failure.get('message')}\n"
+                        f"Phase: {failure.get('phase')}\n"
+                        f"Location: {failure.get('location')}\n"
+                        f"Persisted result: {failure.get('result_path')}"
+                    )
+                    context = current_diagnostic_context()
+                    if (context.debug or context.verbose) and failure.get("traceback"):
+                        print(f"\n{failure['traceback']}", end="")
+            return 0
         if job_record.state in {JobState.FAILED, JobState.TIMEOUT, JobState.CANCELLED}:
             try:
                 job_logs = jobs.logs(selected_job_id, tail=300)
@@ -66,7 +91,13 @@ def run_job_command(arguments: argparse.Namespace) -> int:
     if arguments.job_command == "logs":
         if arguments.follow:
             return follow_job_logs(jobs, selected_job_id, tail=arguments.tail)
-        print(jobs.logs(selected_job_id, tail=arguments.tail), end="")
+        context = current_diagnostic_context()
+        report = jobs.log_report(
+            selected_job_id,
+            tail=arguments.tail,
+            include_traceback=context.debug or context.verbose,
+        )
+        print(json.dumps(report, indent=2) if arguments.json else report["text"], end="")
         return 0
     if arguments.job_command == "cancel":
         cancelled_job = jobs.cancel(selected_job_id)
@@ -165,6 +196,21 @@ def follow_job_logs(jobs: JobService, job_id: str, *, tail: int | None) -> int:
             last_status = now
         if record.state.terminal:
             if record.state in {JobState.FAILED, JobState.TIMEOUT, JobState.CANCELLED}:
-                raise LambdaForgeError(job_failure_diagnostic(record, current))
+                scientific = jobs.scientific_result(job_id)
+                failures = scientific.get("failures", ()) if scientific is not None else ()
+                context = current_diagnostic_context()
+                section = render_scientific_failures(
+                    tuple(value for value in failures if isinstance(value, Mapping)),
+                    existing_output=current,
+                    include_traceback=context.debug or context.verbose,
+                )
+                if section:
+                    print(section, flush=True)
+                raise LambdaForgeError(
+                    job_failure_diagnostic(
+                        record,
+                        f"{current}\n{section}" if section else current,
+                    )
+                )
             return 0
         time.sleep(2.0)

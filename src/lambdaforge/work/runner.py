@@ -42,6 +42,7 @@ from lambdaforge.work.models import (
     WorkTrial,
     atomic_json,
 )
+from lambdaforge.work.paths import WorkPathContext
 from lambdaforge.work.runtime import WorkRuntime
 
 
@@ -105,6 +106,7 @@ class WorkRunner:
     def plan(self, config: WorkConfig, *, rerun: bool = False) -> WorkExecutionPlan:
         """Resolve expansion/identity without constructing a Work or creating state."""
         source = self._source(config)
+        self._verify_shared_bundle_inputs(source)
         study_identity = self._study_identity(config)
         execution_id = self._execution_id(study_identity, rerun=rerun)
         execution_dir = self._execution_root(source, config.name) / execution_id
@@ -143,6 +145,46 @@ class WorkRunner:
             reusable,
         )
 
+    @staticmethod
+    def _verify_shared_bundle_inputs(source: Path) -> None:
+        """Recheck controller-declared shared bytes immediately before Work planning."""
+        marker = source.parent / ".lambdaforge-shared-inputs.json"
+        if not marker.exists():
+            return
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 1024 * 1024:
+            raise ValueError(f"Invalid shared-input identity file: {marker}")
+        try:
+            values = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"Invalid shared-input identity file: {marker}") from error
+        if not isinstance(values, list):
+            raise ValueError(f"Invalid shared-input identity file: {marker}")
+        for value in values:
+            if not isinstance(value, dict):
+                raise ValueError(f"Invalid shared-input identity file: {marker}")
+            path = Path(str(value.get("remote_path", "")))
+            if not path.is_absolute():
+                raise ValueError(f"Invalid shared-input identity file: {marker}")
+            try:
+                digest, size = fingerprint(path)
+            except (OSError, ValueError) as error:
+                raise ValueError(
+                    f"Shared project input {value.get('configured')!r} is not usable at {path}: "
+                    f"{error}"
+                ) from error
+            kind = "file" if path.is_file() else "directory"
+            observed = {"kind": kind, "sha256": digest, "size_bytes": size}
+            differences = [
+                f"{field} expected={value.get(field)!r} observed={observed[field]!r}"
+                for field in observed
+                if value.get(field) != observed[field]
+            ]
+            if differences:
+                raise ValueError(
+                    f"Shared project input {value.get('configured')!r} changed before execution "
+                    f"at {path}: {'; '.join(differences)}. Synchronize the mirror and retry."
+                )
+
     def run(
         self,
         config: WorkConfig,
@@ -160,6 +202,7 @@ class WorkRunner:
         if existing.is_file() and not rerun:
             prior_execution = self._read_execution(existing)
             if prior_execution.status == "succeeded":
+                self._publish_job_result(prior_execution)
                 return prior_execution
         execution_dir.mkdir(parents=True, exist_ok=True)
         atomic_json(
@@ -268,7 +311,15 @@ class WorkRunner:
             self._summary(config, outcomes),
         )
         atomic_json(existing, execution_result.to_dict())
+        self._publish_job_result(execution_result)
         return execution_result
+
+    @staticmethod
+    def _publish_job_result(result: WorkExecutionResult) -> None:
+        """Publish one exact Job-level copy for provider-independent diagnostics."""
+        configured = os.environ.get("LAMBDAFORGE_JOB_RESULT_PATH")
+        if configured:
+            atomic_json(Path(configured).expanduser().resolve(), result.to_dict())
 
     @staticmethod
     def _summary(config: WorkConfig, outcomes: Sequence[WorkResult]) -> Mapping[str, Any]:
@@ -509,6 +560,7 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
         str(specification["execution_id"]),
         run_id,
         attempt_id,
+        WorkPathContext.load(source),
     )
     created = datetime.now(timezone.utc)
     started = datetime.now(timezone.utc)

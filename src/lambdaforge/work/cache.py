@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import http.client
 import json
 import math
 import shutil
@@ -19,6 +20,14 @@ from typing import Any
 
 from lambdaforge.runtime import CrossProcessFileLock
 from lambdaforge.work.managed import ManagedFile, ManagedFileStore, owned_path
+
+_RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, *range(500, 600)})
+_RETRYABLE_HTTP_PROTOCOL_ERRORS = (
+    http.client.IncompleteRead,
+    http.client.RemoteDisconnected,
+    http.client.ResponseNotReady,
+    http.client.BadStatusLine,
+)
 
 
 class RateLimit:
@@ -178,6 +187,10 @@ class WorkCache:
         def download(target: Path) -> None:
             last_error: BaseException | None = None
             for attempt in range(retries + 1):
+                # ``ManagedFileStore`` gives this builder a private unpublished path.
+                # Remove any bytes left by the preceding attempt before rate limiting and
+                # opening a fresh response.
+                target.unlink(missing_ok=True)
                 if rate_limit is not None:
                     rate_limit.acquire()
                 try:
@@ -196,7 +209,18 @@ class WorkCache:
                             with target.open("wb") as sink:
                                 shutil.copyfileobj(response, sink, length=1024 * 1024)
                     return
-                except (OSError, EOFError, urllib.error.URLError) as error:
+                except urllib.error.HTTPError as error:
+                    last_error = error
+                    target.unlink(missing_ok=True)
+                    if error.code not in _RETRYABLE_HTTP_STATUS or attempt == retries:
+                        break
+                    time.sleep(float(retry_backoff) * (2**attempt))
+                except (
+                    *_RETRYABLE_HTTP_PROTOCOL_ERRORS,
+                    OSError,
+                    EOFError,
+                    urllib.error.URLError,
+                ) as error:
                     last_error = error
                     target.unlink(missing_ok=True)
                     if attempt == retries:
@@ -204,7 +228,8 @@ class WorkCache:
                     time.sleep(float(retry_backoff) * (2**attempt))
             assert last_error is not None
             raise RuntimeError(
-                f"Could not fetch {url!r} after {retries + 1} attempt(s): {last_error}"
+                f"Could not fetch {url!r} after {attempt + 1} attempt(s); final cause: "
+                f"{type(last_error).__name__}: {last_error}"
             ) from last_error
 
         return self.file(key, build=download, validate=validate)

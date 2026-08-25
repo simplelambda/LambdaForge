@@ -27,6 +27,29 @@ newer. A consumer project owns its scientific dependencies and its PyTorch build
 bootstrap resolves a compatible remote Python/Torch environment without changing system Python,
 drivers or CUDA.
 
+Projects that also need native executables can declare them once in `pyproject.toml`; ordinary
+pip-only projects do not need Conda or any additional configuration:
+
+```toml
+[tool.lambdaforge.environment]
+manager = "conda"
+file = "environment.yml"
+required_executables = ["mmseqs", "foldseek"]
+```
+
+```yml
+channels: [conda-forge, bioconda]
+dependencies: [python=3.11, pip, mmseqs2, foldseek]
+```
+
+Prepare that exact consumer project with `lf clusters bootstrap gpu --project . --dry-run`, review
+the detected packages/platform/connectivity, then omit `--dry-run`. LambdaForge uses its verified
+micromamba, creates one immutable Conda prefix, installs the exact LambdaForge and consumer wheels
+with that prefix's Python, verifies the tools and records package/build/channel provenance. A later
+`lf run ... --on gpu` discovers the same project declaration automatically. Inside the Work,
+`self.tools.require("mmseqs", version_args=["version"])` only verifies/resolves the prepared tool;
+it never installs software during scientific execution. See the manual for exact offline locks.
+
 ## First Work
 
 A YAML file executes only a class inheriting `lambdaforge.Work`. `run()` is its single lifecycle
@@ -64,8 +87,9 @@ resources:
 ```
 
 Only `{file: ...}`, `{dataset: ...}` and `{from: step.output}` have special meaning. A plain YAML
-string is always a string. Small typed files are hashed and automatically staged for remote work;
-large data should be published/materialized as an immutable dataset instead of being copied into
+string is always a string. Small typed files/directories are hashed and automatically staged for
+remote work. Large project inputs may instead use an explicit remote project mirror; stable shared
+corpora should normally be published/materialized as immutable datasets rather than copied into
 every bundle.
 
 Inputs and outputs deliberately use different APIs. `with: {source: {file: ...}}` declares bytes
@@ -83,6 +107,23 @@ lf run experiments/curate.yaml --dry-run
 lf run experiments/curate.yaml
 lf run experiments/curate.yaml --on gpu-cluster
 ```
+
+For a cluster that already has a partial project mirror, configure its absolute remote root once:
+
+```bash
+lf clusters set gpu-cluster project_root /scratch/USER/WISDOM
+lf doctor --on gpu-cluster
+```
+
+The same `../data/dna/design` marker then means `PROJECT/data/dna/design` locally and
+`/scratch/USER/WISDOM/data/dna/design` remotely. Inputs up to the 10 MiB bundle limit remain
+automatic immutable snapshots. A larger input is never copied implicitly: it must be inside the
+local project, the matching remote path must already exist, and LambdaForge compares kind, byte
+count and SHA-256 before submission and again in the worker. Missing or stale content fails safely.
+Synchronizing the mirror with the site's recommended transfer service remains an explicit
+researcher operation.
+For hundreds of GB/TB, prefer a managed dataset: exact mirror verification also reads all bytes,
+while a dataset gives reusable content identity and placements.
 
 Submission is asynchronous by default on every target, including `local`: the terminal returns
 after a durable preparation record is created, and `lf top`/`lf logs` reconnect to it. Use
@@ -187,16 +228,19 @@ def run(self, identifiers: list[dict[str, str]], workers: int = 8):
 exposing immutable `key`, `sha256`, `size_bytes` and metadata. Cache publication uses a per-key
 cross-process lock, a temporary sibling, validation, `fsync`, SHA-256 and atomic replacement.
 `cache.fetch` adds bounded timeout, exponential retry, optional gzip decoding and a thread-safe
-Work-local rate limit. No absolute cache path enters resumable-map state or scientific identity. `lf clean`
+Work-local rate limit. Truncated HTTP/chunked/gzip transfers and transient server responses retry
+from a clean unpublished temporary; permanent 4xx errors do not loop, and partial bytes are never
+registered. No absolute cache path enters resumable-map state or scientific identity. `lf clean`
 previews removal of these reconstructible entries and `--apply` removes them only while no Work
 holds the cache lease.
 
-`publish_to` is resolved relative to `self.source_dir`, or accepts an explicit absolute path. The
-managed artifact remains the authoritative result; publication happens only after `run()` returns
-successfully, is atomic per destination and refuses an existing different path unless
-`overwrite=True`. On a remote Job, paths belong to the remote execution host: use an absolute path
-on persistent cluster storage for a durable remote copy. LambdaForge never pretends a remote path
-is a controller-local path or silently transfers large output trees.
+Relative `publish_to` is resolved from the directory containing the authored YAML. With the cluster
+`project_root` above, `publish_to="../data/report.json"` therefore publishes below the equivalent
+remote project directory instead of an internal Job hash path. Without `project_root`, a remote
+relative publication is rejected; use an explicit absolute remote path. The managed artifact
+remains authoritative; publication happens only after `run()` returns successfully, is atomic per
+destination and refuses existing different content unless `overwrite=True`. LambdaForge never
+pretends a remote path is controller-local or silently transfers large output trees back.
 
 External command boilerplate follows the same rule:
 
@@ -313,12 +357,17 @@ lf clean --apply
 
 `lf top` leads with clusters and semantic Works and does not put long operational Job IDs in the
 researcher's primary path. Up/down selects; Enter/right drills from Work to numbered Attempts and
-then complete logs, while cluster detail also uses Work/Attempt labels. Left returns. Job IDs remain
+then complete logs, while cluster detail also uses Work/Attempt labels. Open logs refresh
+automatically, follow the end by default and preserve manual scroll. Left returns. Job IDs remain
 available through `lf jobs ...` and in `lf overview --json` for automation and low-level diagnosis.
 Press `d` to permanently delete the selected terminal Work/Job after confirmation; `D` clears all
 terminal history while always preserving active Jobs. Both operations remove exact owned
 workspaces and local history, never published datasets or shared caches/environments. The same
 whole-history operation is machine-accessible through preview-first `lf jobs clear [--apply]`.
+Failed Work logs append the structured scientific exception even when `--tail` removed its original
+stdout lines. `--verbose`/`--debug` includes the persisted traceback and `--json` returns structured
+failure fields plus the exact result path. Human cluster bootstrap prints phases and periodic
+liveness updates to stderr; JSON output remains clean.
 Normal execution reuses a verified successful scientific definition. `retry` creates a new Attempt
 of the same Run, checkpoints make it resumable, and `--rerun` deliberately creates a new Execution.
 Cleanup is preview-first and never treats published datasets, results or checkpoints as

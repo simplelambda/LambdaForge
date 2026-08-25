@@ -181,6 +181,15 @@ class PythonRuntimeResolver:
         pointer = PurePosixPath(profile.storage.state_root) / self.ACTIVE_POINTER
         self._write_json(transport, runtime.executable, pointer, runtime.to_dict())
 
+    def ensure_micromamba(
+        self,
+        profile: ClusterProfile,
+        transport: Transport,
+        platform_tag: str,
+    ) -> tuple[str, str, str]:
+        """Return LambdaForge's pinned user-space micromamba for native package planning."""
+        return self._install_manager(profile, transport, platform_tag)
+
     @staticmethod
     def platform_tag(system: str, architecture: str) -> str:
         """Map a bounded Linux platform probe to conda/micromamba subdir names."""

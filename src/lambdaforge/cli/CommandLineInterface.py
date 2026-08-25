@@ -229,11 +229,25 @@ class CommandLineInterface:
                 )
                 payload.pop("_manifest_path", None)
             except KeyError:
-                payload = (
-                    works.show(arguments.selector).to_dict()
-                    if arguments.command == "show"
-                    else works.delete(arguments.selector, apply=arguments.apply)
-                )
+                if arguments.command == "show":
+                    remote_work = works.show(arguments.selector)
+                    scientific = JobService(catalog).scientific_result(
+                        remote_work.primary_job_id
+                    )
+                    payload = {
+                        **remote_work.to_dict(),
+                        "scientific_result_path": (
+                            scientific.get("path") if scientific is not None else None
+                        ),
+                        "failure": (
+                            scientific.get("failure") if scientific is not None else None
+                        ),
+                        "failures": (
+                            scientific.get("failures", []) if scientific is not None else []
+                        ),
+                    }
+                else:
+                    payload = works.delete(arguments.selector, apply=arguments.apply)
         elif arguments.command in {"logs", "retry"}:
             try:
                 local_record = local.select(arguments.selector)
@@ -241,7 +255,16 @@ class CommandLineInterface:
                 local_record = None
             if local_record is not None:
                 if arguments.command == "logs":
-                    print(local.logs(arguments.selector, tail=arguments.tail), end="")
+                    context = current_diagnostic_context()
+                    report = local.log_report(
+                        arguments.selector,
+                        tail=arguments.tail,
+                        include_traceback=context.debug or context.verbose,
+                    )
+                    if arguments.json:
+                        print(json.dumps(report, indent=2))
+                    else:
+                        print(report["text"], end="")
                     return 0
                 if local_record.get("status") == "succeeded":
                     raise ValueError(
@@ -260,7 +283,16 @@ class CommandLineInterface:
                 if arguments.command == "logs":
                     if arguments.follow:
                         return follow_job_logs(jobs, job_id, tail=arguments.tail)
-                    print(jobs.logs(job_id, tail=arguments.tail), end="")
+                    context = current_diagnostic_context()
+                    report = jobs.log_report(
+                        job_id,
+                        tail=arguments.tail,
+                        include_traceback=context.debug or context.verbose,
+                    )
+                    if arguments.json:
+                        print(json.dumps(report, indent=2))
+                    else:
+                        print(report["text"], end="")
                     return 0
                 payload = jobs.retry(job_id, dry_run=arguments.dry_run).to_dict()
         else:

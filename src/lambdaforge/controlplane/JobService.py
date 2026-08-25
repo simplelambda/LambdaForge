@@ -27,6 +27,7 @@ from lambdaforge.diagnostics import (
     diagnostic,
 )
 from lambdaforge.execution.ResourceRequest import ResourceRequest
+from lambdaforge.work.failure import render_scientific_failures, scientific_failures
 
 
 class JobService:
@@ -528,8 +529,90 @@ class JobService:
         _profile, _transport, scheduler = self._provider(record)
         return scheduler.logs(record.scheduler_id, tail=tail)
 
-    def logs(self, job_id: str, *, tail: int | None = None) -> str:
-        """Return lifecycle, preparation and scientific logs as clearly labelled streams."""
+    def scientific_result(self, job_id: str) -> dict[str, Any] | None:
+        """Read the bounded structured Work result owned by one provider Job, if present."""
+        return self._scientific_result(self.get(job_id, refresh=False))
+
+    def _scientific_result(self, record: JobRecord) -> dict[str, Any] | None:
+        _profile, transport, _scheduler = self._provider(record)
+        exact = str(PurePosixPath(record.work_dir).parent / "result.json")
+
+        def load(path: str, *, require_job_match: bool) -> dict[str, Any] | None:
+            linked = transport.run(("test", "-L", path), timeout=15.0)
+            if linked.returncode == 0:
+                return None
+            loaded = transport.run(("cat", path), timeout=30.0)
+            if loaded.returncode != 0 or not loaded.stdout.strip():
+                return None
+            if len(loaded.stdout.encode("utf-8")) > 32 * 1024 * 1024:
+                raise RuntimeError(f"Scientific result exceeds the 32 MiB diagnostic limit: {path}")
+            try:
+                value = json.loads(loaded.stdout)
+            except (ValueError, TypeError) as error:
+                raise RuntimeError(
+                    f"Corrupt scientific result for {record.job_id}: {path}"
+                ) from error
+            if not isinstance(value, Mapping) or value.get("execution_result_version") != 1:
+                raise RuntimeError(f"Unsupported scientific result for {record.job_id}: {path}")
+            if require_job_match:
+                runs = value.get("runs", ())
+                if not isinstance(runs, Sequence) or not any(
+                    isinstance(run, Mapping) and run.get("job_id") == record.job_id
+                    for run in runs
+                ):
+                    return None
+            failures = scientific_failures(value, result_path=path)
+            return {
+                "path": path,
+                "status": value.get("status"),
+                "failure": failures[0] if failures else None,
+                "failures": list(failures),
+                "result": dict(value),
+            }
+
+        current = load(exact, require_job_match=False)
+        if current is not None:
+            return current
+        if not record.state.terminal:
+            # Legacy discovery is only needed once an old Work has finished. Avoid a remote
+            # directory scan on every live-log refresh while no aggregate result can exist yet.
+            return None
+
+        legacy_root = str(PurePosixPath(record.work_dir) / ".lambdaforge" / "runs")
+        discovered = transport.run(
+            (
+                "find",
+                legacy_root,
+                "-mindepth",
+                "3",
+                "-maxdepth",
+                "3",
+                "-type",
+                "f",
+                "-name",
+                "result.json",
+                "-print",
+            ),
+            timeout=15.0,
+        )
+        if discovered.returncode != 0:
+            return None
+        for path in discovered.stdout.splitlines()[:64]:
+            selected = path.strip()
+            if selected and selected != exact:
+                legacy = load(selected, require_job_match=True)
+                if legacy is not None:
+                    return legacy
+        return None
+
+    def log_report(
+        self,
+        job_id: str,
+        *,
+        tail: int | None = None,
+        include_traceback: bool = False,
+    ) -> dict[str, Any]:
+        """Return human log text plus its structured terminal scientific failure."""
         record = self.get(job_id)
         lifecycle = [self._format_event(value) for value in self.events(job_id)]
         remote = record.metadata.get("remote_state", {})
@@ -581,7 +664,47 @@ class JobService:
                 scientific.rstrip() or "No scientific output has been emitted yet.",
             )
         )
-        return "\n".join(parts).rstrip() + "\n"
+        result = (
+            self._scientific_result(record)
+            if record.scheduler_id is not None
+            and (record.state.terminal or record.state is JobState.UNKNOWN)
+            else None
+        )
+        failures = result.get("failures", ()) if result is not None else ()
+        if isinstance(failures, Sequence):
+            failure_section = render_scientific_failures(
+                tuple(value for value in failures if isinstance(value, Mapping)),
+                existing_output=scientific,
+                include_traceback=include_traceback,
+            )
+            if failure_section:
+                parts.extend(("", failure_section))
+        text = "\n".join(parts).rstrip() + "\n"
+        return {
+            "job_id": record.job_id,
+            "cluster": record.cluster,
+            "state": record.state.value,
+            "text": text,
+            "failure": result.get("failure") if result is not None else None,
+            "failures": list(failures) if isinstance(failures, Sequence) else [],
+            "result_path": result.get("path") if result is not None else None,
+        }
+
+    def logs(
+        self,
+        job_id: str,
+        *,
+        tail: int | None = None,
+        include_traceback: bool = False,
+    ) -> str:
+        """Return labelled lifecycle/science streams and any persisted terminal failure."""
+        return str(
+            self.log_report(
+                job_id,
+                tail=tail,
+                include_traceback=include_traceback,
+            )["text"]
+        )
 
     def cancel(self, job_id: str) -> JobRecord:
         """Cancel through the provider and persist the transition."""

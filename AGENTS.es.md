@@ -54,9 +54,28 @@ path-like, pero `resume_map` solo serializa key/SHA/tamaño; si `lf clean` elimi
 dependencia, se recalcula únicamente su elemento. Nunca serialices rutas de máquina ni pickle.
 
 `outputs.file/directory(..., publish_to=RUTA)` publica opcionalmente una copia verificada tras el
-éxito y no reemplaza contenido distinto salvo `overwrite=True`. Una ruta relativa parte de
-`source_dir`; en remoto sigue siendo remota. Usa almacenamiento persistente absoluto del clúster si
-debe sobrevivir al Job y no lo describas como una transferencia automática al controlador.
+éxito y no reemplaza contenido distinto salvo `overwrite=True`. Una ruta relativa parte del
+directorio del YAML original. En remoto requiere el mirror `project_root` del clúster y se mapea al
+mismo directorio relativo; sin él se usa una ruta remota absoluta explícita. No lo describas como
+una transferencia automática al controlador.
+
+Para inputs remotos `{file: RUTA}`, hasta 10 MiB se incluye automáticamente en el bundle. Una ruta
+mayor debe pertenecer al proyecto local con `pyproject.toml` y tener una copia exacta bajo el
+`project_root` absoluto del clúster; LambdaForge verifica tipo/tamaño/SHA-256 antes del envío y en
+el worker, y nunca sincroniza ni elimina ese mirror del investigador. Configura con
+`lf clusters set NOMBRE project_root /proyecto/remoto/absoluto` y después
+`lf doctor --on NOMBRE`. Contenido ausente, viejo o con symlinks falla de forma segura. Para datos
+muy grandes reutilizables usa datasets gestionados: verificar un mirror lee todos los bytes en cada
+envío.
+
+Las herramientas nativas se declaran una vez en `[tool.lambdaforge.environment]` con
+`manager="conda"`, exactamente un `file` o `lockfile` contenido en el proyecto y nombres simples en
+`required_executables`. Usa `lf clusters bootstrap NOMBRE --project . --dry-run`, revisa y aplica.
+El YAML solo admite name/channels/dependencias string: no pip anidado, variables, prefix, hooks ni
+Torch/CUDA. Offline exige lock `@EXPLICIT` por plataforma con SHA-256 y `package_cache` coincidente;
+pip/Torch necesita además wheelhouse para ser totalmente offline. Se publica un único prefijo Conda
+inmutable con inventario/tools verificados. `tools.require` comprueba, nunca instala. Pip-only y
+`environment: existing` no cambian.
 
 Las herramientas externas usan `tools.require(..., version_args=...)` y `tools.run(argv, ...)`.
 Nunca uses strings de shell. Los límites de threads/env pertenecen al hijo, stdout/stderr llegan a
@@ -104,3 +123,9 @@ Antes de finalizar: actualiza ambos manuales, READMEs y AGENTS, esquema/ejemplos
 changelog; ejecuta pruebas
 focalizadas, `ruff`, `mypy`, una suite local razonable, build de wheel y smoke instalado. Declara de
 forma explícita cualquier test CUDA no ejecutado.
+
+Los logs de Attempts en `lf top` se actualizan automáticamente. Un Work fallido añade tras cualquier
+tail el tipo/mensaje/fase/ruta del resultado persistido; usa `--verbose` o `--debug` para traceback y
+`--json` para `failure`/`failures` estructurados. `cache.fetch` reintenta cortes HTTP/chunked/gzip y
+estados transitorios desde temporales no publicados limpios; no añadas workarounds en el consumidor.
+El progreso humano de bootstrap solo usa stderr y no contamina JSON.

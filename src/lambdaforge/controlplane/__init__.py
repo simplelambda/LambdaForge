@@ -10,6 +10,12 @@ _PYTHON_RUNTIME_NAMES = (
     "PythonRuntimePolicy",
     "PythonRuntimeRequirements",
 )
+_NATIVE_ENVIRONMENT_NAMES = (
+    "NativeEnvironmentError",
+    "NativeEnvironmentPlan",
+    "NativeEnvironmentPlanner",
+    "NativeEnvironmentSpecification",
+)
 _NAMES = (
     "ClusterAuthentication",
     "ClusterBootstrapResult",
@@ -78,6 +84,10 @@ LazyExports.install(
             name: ("lambdaforge.controlplane.python_runtime", name)
             for name in _PYTHON_RUNTIME_NAMES
         },
+        **{
+            name: ("lambdaforge.controlplane.NativeEnvironment", name)
+            for name in _NATIVE_ENVIRONMENT_NAMES
+        },
         "MicromambaArtifactStore": (
             "lambdaforge.controlplane.MicromambaArtifactStore",
             "MicromambaArtifactStore",
@@ -97,6 +107,7 @@ __all__ = [
     "MicromambaArtifactStore",
     "PythonRuntimeResolver",
     *_PYTHON_RUNTIME_NAMES,
+    *_NATIVE_ENVIRONMENT_NAMES,
     *_TLS_NAMES,
     *_NAMES,
 ]

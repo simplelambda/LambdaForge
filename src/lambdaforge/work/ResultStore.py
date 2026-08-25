@@ -11,6 +11,7 @@ from statistics import fmean
 from typing import Any
 
 from lambdaforge.work.config import WorkConfig
+from lambdaforge.work.failure import render_scientific_failures, scientific_failures
 from lambdaforge.work.models import atomic_json
 
 
@@ -123,12 +124,19 @@ class ResultStore:
         source = Path(str(execution.get("source", ""))).expanduser().resolve()
         return WorkConfig.from_mapping(raw, source=source)
 
-    def logs(self, selector: str, *, tail: int | None = None) -> str:
-        """Read captured logs for a local Execution without trusting recorded paths blindly."""
+    def log_report(
+        self,
+        selector: str,
+        *,
+        tail: int | None = None,
+        include_traceback: bool = False,
+    ) -> dict[str, Any]:
+        """Return bounded local logs and the authoritative structured failure."""
         selected = self.select(selector)
         if selected.get("already_deleted"):
             raise ValueError(f"Work Execution {selector!r} was already deleted.")
-        execution_dir = self._execution_dir(Path(str(selected["_manifest_path"])).resolve())
+        manifest = Path(str(selected["_manifest_path"])).resolve()
+        execution_dir = self._execution_dir(manifest)
         chunks: list[str] = []
         for run in selected.get("runs", ()):
             if not isinstance(run, Mapping):
@@ -145,11 +153,49 @@ class ResultStore:
             if log_path.is_file():
                 chunks.append(log_path.read_text(encoding="utf-8", errors="replace"))
         text = "".join(chunks)
-        if tail is None:
-            return text
-        if tail < 0:
+        if tail is not None and tail < 0:
             raise ValueError("Log tail must be a non-negative integer.")
-        return "".join(text.splitlines(keepends=True)[-tail:]) if tail else ""
+        captured = (
+            text
+            if tail is None
+            else "".join(text.splitlines(keepends=True)[-tail:]) if tail else ""
+        )
+        failures = scientific_failures(selected, result_path=str(manifest))
+        section = render_scientific_failures(
+            failures,
+            existing_output=captured,
+            include_traceback=include_traceback,
+        )
+        rendered = captured.rstrip()
+        if section:
+            rendered = f"{rendered}\n\n{section}" if rendered else section
+        if rendered:
+            rendered += "\n"
+        return {
+            "execution_id": selected.get("execution_id"),
+            "name": selected.get("name"),
+            "status": selected.get("status"),
+            "text": rendered,
+            "failure": failures[0] if failures else None,
+            "failures": list(failures),
+            "result_path": str(manifest),
+        }
+
+    def logs(
+        self,
+        selector: str,
+        *,
+        tail: int | None = None,
+        include_traceback: bool = False,
+    ) -> str:
+        """Read captured logs and append persisted terminal failure evidence."""
+        return str(
+            self.log_report(
+                selector,
+                tail=tail,
+                include_traceback=include_traceback,
+            )["text"]
+        )
 
     def compare(
         self,

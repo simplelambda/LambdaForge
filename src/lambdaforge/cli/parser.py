@@ -128,6 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
     cuda.add_argument("--require-cuda", action="store_true")
     cuda.add_argument("--no-require-cuda", action="store_true")
     add.add_argument("--project-module")
+    add.add_argument(
+        "--project-root",
+        help="Absolute remote mirror of the consumer project for shared inputs/outputs.",
+    )
     add.add_argument("--data-environment")
     cluster_commands.add_parser("list").add_argument("--json", action="store_true")
     for operation in ("show", "inspect", "test", "resources", "storage"):
@@ -152,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap = cluster_commands.add_parser("bootstrap")
     bootstrap.add_argument("name")
     bootstrap.add_argument("--wheelhouse", type=Path)
+    bootstrap.add_argument(
+        "--project",
+        type=Path,
+        help="Consumer project whose wheel and declarative native environment are prepared.",
+    )
     bootstrap.add_argument("--dry-run", action="store_true")
     bootstrap.add_argument("--json", action="store_true")
 
@@ -172,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("job_id")
     logs.add_argument("--tail", type=int)
     logs.add_argument("--follow", action="store_true")
+    logs.add_argument("--json", action="store_true")
     retry = job_commands.add_parser("retry")
     retry.add_argument("job_id")
     retry.add_argument("--dry-run", action="store_true")

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import threading
+import time
 from dataclasses import replace
 
 import yaml
@@ -99,6 +102,7 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
                 (True if arguments.require_cuda else False if arguments.no_require_cuda else None),
             ),
             project_module=arguments.project_module,
+            project_root=arguments.project_root,
             data_environment=arguments.data_environment,
         )
         if arguments.store_password:
@@ -229,11 +233,20 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
             else cluster_report.summary()
         )
         return cluster_report.exit_code
-    bootstrapped = ClusterService(cluster_catalog).bootstrap(
-        cluster_profile.name,
-        wheelhouse=arguments.wheelhouse,
-        dry_run=arguments.dry_run,
-    )
+    progress = None if arguments.json else _BootstrapProgress(cluster_profile.name)
+    if progress is not None:
+        progress.start()
+    try:
+        bootstrapped = ClusterService(cluster_catalog).bootstrap(
+            cluster_profile.name,
+            wheelhouse=arguments.wheelhouse,
+            project=arguments.project,
+            dry_run=arguments.dry_run,
+            progress=progress.update if progress is not None else None,
+        )
+    finally:
+        if progress is not None:
+            progress.close()
     print(
         json.dumps(bootstrapped.to_dict(), indent=2)
         if arguments.json
@@ -245,6 +258,7 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
             f"Python: {bootstrapped.python}\n"
             f"Runtime: {dict(bootstrapped.runtime or {})}\n"
             f"PyTorch: {dict(bootstrapped.pytorch or {})}\n"
+            f"Native environment: {dict(bootstrapped.native_environment or {}) or 'none'}\n"
             f"Pruned environments: {bootstrapped.pruned_environments or 'none'}"
             + (
                 f"\nCleanup deferred: {bootstrapped.cleanup_blocked_reason}"
@@ -261,3 +275,46 @@ def bootstrap_action(planned: bool, reused: bool) -> str:
     if planned:
         return "planned"
     return "reused" if reused else "created"
+
+
+class _BootstrapProgress:
+    """Render phase changes and heartbeats without contaminating machine JSON."""
+
+    HEARTBEAT_SECONDS = 10.0
+
+    def __init__(self, cluster: str) -> None:
+        self.cluster = cluster
+        self._phase = "Starting bootstrap."
+        self._phase_started = time.monotonic()
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Start the quiet periodic liveness reporter."""
+        self._thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self._thread.start()
+
+    def update(self, message: str) -> None:
+        """Print one completed transition and reset its elapsed-time clock."""
+        with self._lock:
+            self._phase = message
+            self._phase_started = time.monotonic()
+        print(f"[bootstrap:{self.cluster}] {message}", file=sys.stderr, flush=True)
+
+    def close(self) -> None:
+        """Stop the reporter promptly on success, error or interruption."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def _heartbeat(self) -> None:
+        while not self._stop.wait(self.HEARTBEAT_SECONDS):
+            with self._lock:
+                phase = self._phase
+                elapsed = int(time.monotonic() - self._phase_started)
+            print(
+                f"[bootstrap:{self.cluster}] still working ({elapsed}s): {phase}",
+                file=sys.stderr,
+                flush=True,
+            )

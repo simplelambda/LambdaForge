@@ -23,6 +23,12 @@ mínima, impacto y si requiere entrada no confiable. Nunca adjuntes credenciales
 - Entradas, outputs, cache/checkpoints y limpieza comprueban containment y symlinks en su capa. Un
   dataset se elimina solo tras volver a verificar manifest, identidad y raíz exacta; inconsistencias
   o estado inaccesible fallan de forma cerrada.
+- El `project_root` de un clúster es almacenamiento persistente propiedad del investigador y queda
+  fuera de la limpieza de LambdaForge. Los inputs grandes solo se mapean por ruta relativa al
+  proyecto y deben coincidir en tipo, bytes y SHA-256 antes del envío y otra vez en el worker. Un
+  output relativo remoto exige este mirror y no puede escapar de él; una ruta absoluta es un escape
+  deliberado de código confiable. El hash aporta consistencia, no autentica al productor ni aísla de
+  otra cuenta maliciosa concurrente.
 - `outputs.file/directory` asigna storage del Attempt y solo registra un conjunto completamente
   finalizado. `outputs.artifact` copia de forma segura una ruta externa. `outputs.dataset` exige
   assets del Run o URI explícita, rechaza traversal/symlinks, hashea, verifica staging y publica
@@ -56,6 +62,13 @@ mínima, impacto y si requiere entrada no confiable. Nunca adjuntes credenciales
   verifica por SHA-256. Bootstrap no edita perfiles, Python/CUDA/drivers del sistema. El runtime solo
   reutiliza un bundle CA legible ya elegido por la confianza del host y nunca desactiva TLS, descarga
   roots arbitrarios ni modifica `/etc`.
+- Los entornos nativos son declaraciones de datos: rutas dentro del proyecto y sin variables,
+  prefix, pip anidado ni hooks; paquetes pasan como argv sin shell. Canales/paquetes online siguen
+  siendo supply chain confiable y pueden incluir metadata/scripts propios de Conda, por lo que deben
+  revisarse y fijarse. Locks offline rechazan credenciales/queries y exigen plataforma, SHA-256 y
+  bytes regulares coincidentes antes del envío. Prefijos temporales y caches se coordinan por
+  identidad; ownership/versión de ejecutables se valida antes de publicar. `tools.require()` nunca
+  autoriza instalar.
 - Tracking y S3 amplían la frontera de confianza a su SDK, credenciales, red y servicio. Son
   opcionales y lazy.
 

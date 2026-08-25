@@ -29,6 +29,9 @@ clusters:
     environment: managed
     pytorch: {channel: auto, require_cuda: auto}
     project_module: my_project
+    # Optional researcher-owned persistent mirror; LambdaForge verifies but never syncs/deletes it.
+    # Thus ../data from experiments/*.yaml maps to this root/data remotely.
+    project_root: /home/USER/my-project
     data_environment: atlas
     resource_mapping:
       gpu: {option: gres, value: "gpu:{gpus}"}

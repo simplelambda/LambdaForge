@@ -660,7 +660,7 @@ class ClusterDetailRenderer:
 
 
 class LogViewerRenderer:
-    """Render a complete, scrollable log document."""
+    """Render a complete, scrollable, automatically refreshed log document."""
 
     @staticmethod
     def render(
@@ -679,7 +679,10 @@ class LogViewerRenderer:
                 "",
                 *(line[:width] for line in lines[start:end]),
                 "",
-                (message or "↑/↓ line · PgUp/PgDn page · Home/End · ←/b/Esc/q back")[:width],
+                (
+                    message
+                    or "live refresh · ↑/↓ line · PgUp/PgDn page · Home/End · ←/b/Esc/q back"
+                )[:width],
             ]
         )
 
@@ -883,6 +886,7 @@ class LiveJobMonitor:
         action_poller: HistoryActionProcess | None = None
         poller.start()
         next_refresh = time.monotonic() + self.interval
+        next_log_refresh = float("inf")
         try:
             with _TerminalSession(self.stream) as terminal:
                 while True:
@@ -904,17 +908,23 @@ class LiveJobMonitor:
                         next_refresh, dirty = time.monotonic() + self.interval, True
                     if log_poller is not None and (loaded := log_poller.take()):
                         value, error = loaded
-                        log_text = str(value or "")
-                        log_scroll = max(
-                            0,
-                            len(log_text.splitlines())
-                            - max(1, shutil.get_terminal_size((120, 30)).lines - 4),
+                        new_text = str(value or "")
+                        capacity = max(
+                            1, shutil.get_terminal_size((120, 30)).lines - 4
+                        )
+                        old_maximum = max(0, len(log_text.splitlines()) - capacity)
+                        new_maximum = max(0, len(new_text.splitlines()) - capacity)
+                        following = not log_text or log_scroll >= old_maximum
+                        log_text = new_text
+                        log_scroll = (
+                            new_maximum if following else min(log_scroll, new_maximum)
                         )
                         message, log_poller, dirty = (
                             (f"Log load failed: {error}" if error else ""),
                             None,
                             True,
                         )
+                        next_log_refresh = time.monotonic() + self.interval
                     if action_poller is not None and (applied := action_poller.take()):
                         value, error = applied
                         if error:
@@ -939,6 +949,15 @@ class LiveJobMonitor:
                     if time.monotonic() >= next_refresh and not poller.running:
                         poller.start()
                         next_refresh = time.monotonic() + self.interval
+                    if (
+                        mode == "logs"
+                        and log_job
+                        and log_poller is None
+                        and time.monotonic() >= next_log_refresh
+                    ):
+                        log_poller = LogProcess(self.jobs, log_job)
+                        log_poller.start()
+                        next_log_refresh = time.monotonic() + self.interval
                     raw_items = payload.get("jobs", {}).get("items", [])
                     work_items = payload.get("work", {}).get("items", [])
                     items = work_items if work_items else raw_items
@@ -1011,6 +1030,7 @@ class LiveJobMonitor:
                             if log_poller:
                                 log_poller.close()
                                 log_poller = None
+                            next_log_refresh = float("inf")
                             mode, message, dirty = return_mode, "", True
                         elif key in {"j", "\x1b[B"}:
                             log_scroll, dirty = min(maximum, log_scroll + 1), True
@@ -1103,6 +1123,7 @@ class LiveJobMonitor:
                             return_mode, mode = "work", "logs"
                             log_poller = LogProcess(self.jobs, log_job)
                             log_poller.start()
+                            next_log_refresh = time.monotonic() + self.interval
                             dirty = True
                         elif key in {"x", "X"} and attempt_items:
                             pending_cancel = str(attempt_items[detail_selected].get("job_id", ""))
@@ -1143,6 +1164,7 @@ class LiveJobMonitor:
                             return_mode, mode = "cluster", "logs"
                             log_poller = LogProcess(self.jobs, log_job)
                             log_poller.start()
+                            next_log_refresh = time.monotonic() + self.interval
                             dirty = True
                         elif key in {"x", "X"} and detail_items:
                             pending_cancel = str(detail_items[detail_selected]["job_id"])
@@ -1180,6 +1202,7 @@ class LiveJobMonitor:
                             log_text, log_scroll, message, mode = "", 0, "", "logs"
                             log_poller = LogProcess(self.jobs, log_job)
                             log_poller.start()
+                            next_log_refresh = time.monotonic() + self.interval
                             dirty = True
                     elif key in {"j", "\x1b[B"}:
                         focus, selected, selected_cluster = _move_overview_selection(

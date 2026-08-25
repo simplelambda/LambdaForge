@@ -11,6 +11,11 @@ metadata empaquetada.
 
 ### Añadido
 
+- `project_root` remoto configurable mediante `clusters add --project-root` o `clusters set`, con
+  comprobación en `doctor` y documentación de snapshots pequeños, mirrors compartidos y datasets.
+- Progreso por fases y latidos periódicos en bootstrap humano, y refresco automático que conserva
+  el scroll en los logs de Attempts de `lf top`; JSON máquina permanece limpio.
+
 - `ManagedFile`, `Work.cache.file/fetch/rate_limit`, checkpoint files y
   `outputs.file/directory` con validación, huella y promoción atómica.
 - Reanudación selectiva de `Work.map` mediante dependencias lógicas, keys por campo, validador y
@@ -28,6 +33,9 @@ metadata empaquetada.
   autoridad y se publica además una copia atómica local o del host remoto; se rechazan enlaces
   simbólicos, cambios de tipo y sustituir el propio directorio o uno que lo contiene.
 - `attempt_history` en la vista máquina de Work para compartir Attempts numerados con TUI y wrappers.
+- Dependencias nativas opcionales declaradas por proyecto: solve Conda exacto con micromamba
+  verificado, identidad por plataforma/inventario, prefijo único inmutable, procedencia de
+  ejecutables, `bootstrap --project` explicable y locks/cache offline SHA-256 sin afectar pip-only.
 
 ### Cambiado
 
@@ -48,6 +56,22 @@ metadata empaquetada.
 
 ### Corregido
 
+- Las publicaciones `publish_to` relativas ya no terminan en workspaces de Job con hash: conservan
+  el layout del YAML en local y en el mirror remoto persistente. Entradas tipadas mayores que el
+  bundle pueden usar ese mirror, pero antes del scheduler deben coincidir exactamente en tipo,
+  bytes y SHA-256; contenido ausente, viejo, parcial o con symlinks no ejecuta código científico.
+- Las transferencias HTTP chunked/gzip truncadas, incluido `IncompleteRead`, se reintentan desde un
+  temporal privado limpio en cada intento limitado; los HTTP permanentes fallan pronto y nunca se
+  publican bytes o registros parciales.
+- Los logs remotos, `show` y `lf top` recuperan el fallo científico estructurado persistido incluso
+  con `--tail`; JSON/debug conserva la evidencia y evita duplicar un traceback ya visible.
+
+- Se recupera el subdir de paquetes nativos instalados desde los registros regulares `conda-meta`
+  cuando micromamba 2.8 lo omite en `list --json`, manteniendo verificación exacta de versión,
+  build, canal y subdir antes de publicar, después de pip y al reutilizar. Los fallos muestran ahora
+  un diff acotado por campos en vez del prefijo completo.
+- Los nombres de paquete como `libssh2` ya no se confunden con fallos del transporte SSH; los errores
+  tipados de preparación nativa tienen prioridad y se clasifican como entorno.
 - El supervisor SSH ya no copia un workspace staged sobre sí mismo y crea stdout/stderr antes de
   lanzar el cálculo; logs antiguos sin stream muestran la causa durable.
 - Los Jobs locales ya no pasan a `unknown` por resolver storage relativo desde distintos

@@ -29,6 +29,7 @@ from lambdaforge.work.models import (
     atomic_json,
 )
 from lambdaforge.work.outputs import OutputCollection
+from lambdaforge.work.paths import WorkPathContext
 from lambdaforge.work.tools import ToolService
 
 T = TypeVar("T")
@@ -162,6 +163,7 @@ class WorkRuntime:
     execution_id: str
     run_id: str
     attempt_id: str
+    path_context: WorkPathContext
     outputs: OutputCollection = field(init=False)
     metrics: MetricCollection = field(init=False)
     progress: ProgressReporter = field(init=False)

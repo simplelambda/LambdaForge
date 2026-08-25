@@ -307,9 +307,7 @@ class OutputCollection:
     def _publication_path(self, value: str | Path | None) -> Path:
         if value is None:
             raise ValueError("Output publication requires a destination path.")
-        raw = Path(value).expanduser()
-        unresolved = raw if raw.is_absolute() else self._runtime.source_dir / raw
-        return Path(os.path.abspath(unresolved))
+        return self._runtime.path_context.publication_path(value)
 
     @staticmethod
     def _validate_publication_options(

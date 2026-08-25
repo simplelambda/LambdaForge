@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from lambdaforge.configuration.ConfigurationDescriptor import ConfigurationDescriptor
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
+from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.CudaCompatibilityResolver import (
     CudaCompatibilityResolver,
@@ -17,6 +20,11 @@ from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
 from lambdaforge.controlplane.ExecutionBundleBuilder import ExecutionBundleBuilder
 from lambdaforge.controlplane.jobs import JobHandle
 from lambdaforge.controlplane.JobService import JobService
+from lambdaforge.controlplane.NativeEnvironment import (
+    NativeEnvironmentPlan,
+    NativeEnvironmentPlanner,
+    NativeEnvironmentSpecification,
+)
 from lambdaforge.controlplane.python_runtime import (
     NoCompatiblePythonRuntimeError,
     PythonRuntime,
@@ -25,6 +33,7 @@ from lambdaforge.controlplane.python_runtime import (
 )
 from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
 from lambdaforge.controlplane.TlsTrust import TlsTrust
+from lambdaforge.controlplane.Transport import Transport
 from lambdaforge.execution.ConfigurationResourceResolver import ConfigurationResourceResolver
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 
@@ -40,6 +49,7 @@ class ControlPlane:
         factory: ControlPlaneFactory | None = None,
         cuda_resolver: CudaCompatibilityResolver | None = None,
         runtime_resolver: PythonRuntimeResolver | None = None,
+        native_planner: NativeEnvironmentPlanner | None = None,
     ) -> None:
         self.catalog = catalog or ClusterCatalog.load()
         self.factory = factory or ControlPlaneFactory()
@@ -47,6 +57,9 @@ class ControlPlane:
         self.bundles = bundles or ExecutionBundleBuilder()
         self.cuda_resolver = cuda_resolver or CudaCompatibilityResolver()
         self.runtime_resolver = runtime_resolver or PythonRuntimeResolver()
+        self.native_planner = native_planner or NativeEnvironmentPlanner(
+            runtime_resolver=self.runtime_resolver
+        )
 
     def submit(
         self,
@@ -81,17 +94,31 @@ class ControlPlane:
         runtime: PythonRuntime | None = None
         effective_profile = profile
         torch_plan = None
+        native_plan: NativeEnvironmentPlan | None = None
+        project = self._project_root(Path(config_path).resolve().parent)
+        native_specification = NativeEnvironmentSpecification.discover(project)
         if transport is not None and profile.environment == "managed":
             notify("runtime")
-            project = self._project_root(Path(config_path).resolve().parent)
             requirement = PythonRuntimeRequirements.project(project)
+            requirements = tuple(
+                value
+                for value in (
+                    requirement,
+                    (
+                        native_specification.python_requirement
+                        if native_specification is not None
+                        else None
+                    ),
+                )
+                if value
+            )
             rejected: list[str] = []
             while True:
                 try:
                     runtime = self.runtime_resolver.resolve(
                         profile,
                         transport,
-                        requirements=((requirement,) if requirement else ()),
+                        requirements=requirements,
                         excluded_runtime_ids=rejected,
                         dry_run=dry_run,
                     )
@@ -123,6 +150,25 @@ class ControlPlane:
                 python=runtime.executable,
                 python_runtime=PythonRuntimePolicy("existing", runtime.executable),
             )
+            if native_specification is not None:
+                if dry_run:
+                    native_plan = self.native_planner.cached_plan(
+                        native_specification,
+                        runtime,
+                    )
+                    if native_plan is None:
+                        raise RuntimeError(
+                            "This read-only run plan needs an exact native package solve that has "
+                            f"not been prepared. Run 'lf clusters bootstrap {cluster} --project "
+                            f"{project} --dry-run', then bootstrap without --dry-run."
+                        )
+                else:
+                    native_plan = self.native_planner.plan(
+                        native_specification,
+                        profile,
+                        transport,
+                        runtime,
+                    )
         notify("bundle")
         bundle = self.bundles.build(
             config_path,
@@ -131,11 +177,19 @@ class ControlPlane:
                 {
                     "python_runtime": runtime.to_dict(),
                     "pytorch": torch_plan.to_dict(),
+                    **(
+                        {"native_environment": native_plan.to_dict()}
+                        if native_plan is not None
+                        else {}
+                    ),
                 }
                 if torch_plan is not None and runtime is not None
                 else None
             ),
         )
+        if transport is not None and bundle.shared_inputs:
+            notify("inputs")
+            self._verify_shared_inputs(transport, effective_profile, bundle.shared_inputs)
         work_dir: str | Path
         if cluster == "local":
             work_dir = Path(config_path).resolve().parent
@@ -206,6 +260,20 @@ class ControlPlane:
             trust = runtime.tls_trust if runtime is not None else None
             if isinstance(trust, TlsTrust):
                 environment_assignments.extend(trust.assignments())
+            if profile.environment == "managed":
+                inherited_path = transport.run(
+                    (*profile.command_prefix, "printenv", "PATH")
+                )
+                fallback_path = "/usr/local/bin:/usr/bin:/bin"
+                path_value = inherited_path.stdout.strip().splitlines()
+                selected_path = (
+                    path_value[0]
+                    if inherited_path.returncode == 0 and path_value
+                    else fallback_path
+                )
+                environment_assignments.append(
+                    f"PATH={PurePosixPath(remote_python).parent}:{selected_path}"
+                )
             environment_assignments.extend(
                 (
                     "LAMBDAFORGE_DATASET_REGISTRY="
@@ -218,6 +286,12 @@ class ControlPlane:
                     (
                         "LAMBDAFORGE_PROGRESS_PATH="
                         f"{PurePosixPath(str(work_dir)).parent / 'progress.json'}"
+                        if reserved_job_id
+                        else ""
+                    ),
+                    (
+                        "LAMBDAFORGE_JOB_RESULT_PATH="
+                        f"{PurePosixPath(str(work_dir)).parent / 'result.json'}"
                         if reserved_job_id
                         else ""
                     ),
@@ -252,12 +326,92 @@ class ControlPlane:
                 "remote_config_path": config,
                 "pytorch": torch_plan.to_dict() if torch_plan is not None else None,
                 "python_runtime_id": runtime.runtime_id if runtime is not None else None,
+                "native_environment": (native_plan.to_dict() if native_plan is not None else None),
             },
             job_id=reserved_job_id,
             group_id=group_id,
             job_type=self._configuration_type(config_path),
         )
         return handle, bundle
+
+    @staticmethod
+    def _verify_shared_inputs(
+        transport: Transport,
+        profile: ClusterProfile,
+        inputs: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Require an exact remote counterpart for every non-transferred project input."""
+        probe = r"""
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    if path.is_symlink() or (not path.is_file() and not path.is_dir()):
+        raise ValueError("path is missing, symbolic, or not a regular file/directory")
+    digest = hashlib.sha256()
+    size = 0
+    entries = (path,) if path.is_file() else tuple(sorted(path.rglob("*")))
+    for item in entries:
+        if item.is_symlink():
+            raise ValueError(f"content contains symbolic link: {item}")
+        if not item.is_file():
+            continue
+        relative = item.name if path.is_file() else item.relative_to(path).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        with item.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+    print(json.dumps({
+        "kind": "file" if path.is_file() else "directory",
+        "sha256": digest.hexdigest(),
+        "size_bytes": size,
+    }, sort_keys=True))
+except Exception as error:
+    print(f"{type(error).__name__}: {error}", file=sys.stderr)
+    raise SystemExit(2)
+"""
+        for expected in inputs:
+            remote_path = str(expected["remote_path"])
+            result = transport.run(
+                (*profile.command_prefix, profile.python, "-c", probe, remote_path),
+                timeout=None,
+            )
+            if result.returncode:
+                reason = (
+                    result.stderr.strip().splitlines()[-1]
+                    if result.stderr.strip()
+                    else "probe failed"
+                )
+                raise ValueError(
+                    f"Shared project input {expected['configured']!r} is not usable at "
+                    f"{remote_path}: {reason}. Synchronize that project-relative path to the "
+                    "cluster project_root, or use a managed dataset."
+                )
+            try:
+                observed = json.loads(result.stdout)
+            except (TypeError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    f"Could not read the remote identity of shared input {remote_path}."
+                ) from error
+            differences = [
+                f"{field} expected={expected[field]!r} observed={observed.get(field)!r}"
+                for field in ("kind", "sha256", "size_bytes")
+                if observed.get(field) != expected[field]
+            ]
+            if differences:
+                raise ValueError(
+                    f"Shared project input {expected['configured']!r} differs at {remote_path}: "
+                    f"{'; '.join(differences)}. Synchronize the remote mirror before retrying; "
+                    "LambdaForge will not run against stale or partial input data."
+                )
 
     @staticmethod
     def _project_root(start: Path) -> Path | None:

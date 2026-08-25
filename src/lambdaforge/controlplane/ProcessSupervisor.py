@@ -119,6 +119,7 @@ class ProcessSupervisor:
             environment["LAMBDAFORGE_JOB_ID"] = job_id
             environment["LAMBDAFORGE_EXECUTION_MODE"] = "worker"
             environment["LAMBDAFORGE_PROGRESS_PATH"] = str(job_dir / "progress.json")
+            environment["LAMBDAFORGE_JOB_RESULT_PATH"] = str(job_dir / "result.json")
             cache_root = request.get("cache_root")
             if cache_root:
                 environment["LAMBDAFORGE_CACHE_ROOT"] = str(cache_root)

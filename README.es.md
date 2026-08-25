@@ -21,6 +21,29 @@ python -m pip check
 
 `lf init mi-estudio` genera un proyecto instalable completo. Se requiere Python 3.10 o posterior.
 
+Un proyecto que además necesite ejecutables nativos los declara una sola vez; los proyectos solo
+pip no necesitan Conda ni configuración adicional:
+
+```toml
+[tool.lambdaforge.environment]
+manager = "conda"
+file = "environment.yml"
+required_executables = ["mmseqs", "foldseek"]
+```
+
+```yml
+channels: [conda-forge, bioconda]
+dependencies: [python=3.11, pip, mmseqs2, foldseek]
+```
+
+`lf clusters bootstrap gpu --project . --dry-run` explica declaración, paquetes, plataforma y
+conectividad; al repetir sin `--dry-run`, LambdaForge usa su micromamba verificado, crea un único
+prefijo Conda inmutable e instala ahí los wheels exactos de LambdaForge y del consumidor. También
+valida los ejecutables y registra paquete, versión, build, canal y plataforma. `lf run ... --on gpu`
+detecta después la declaración automáticamente. Dentro del Work,
+`self.tools.require("mmseqs", version_args=["version"])` comprueba la herramienta preparada, pero
+nunca instala durante el cálculo. El manual explica locks offline exactos.
+
 ## Primer Work
 
 ```python
@@ -53,8 +76,10 @@ La clase debe heredar `Work` y `run()` es su única entrada. La firma y el docst
 definen parámetros, tipos y valores por defecto. Solo `{file: ...}`, `{dataset: NOMBRE@VERSION}` y
 `{from: paso.salida}` tienen semántica especial; una cadena normal nunca se interpreta como ruta.
 `{file: ...}` declara una entrada que ya existe: LambdaForge la resuelve respecto al YAML, calcula
-su hash y la copia automáticamente al remoto si está bajo el límite configurado. Los resultados no
-se declaran en `with`; se crean dentro del Work mediante `self.outputs`.
+su hash y la copia automáticamente al remoto si está bajo el límite configurado. Las entradas
+grandes del proyecto pueden usar un mirror remoto explícito; los corpus compartidos estables
+deberían ser datasets gestionados. Los resultados no se declaran en `with`; se crean dentro del
+Work mediante `self.outputs`.
 
 ```bash
 lf validate experiments/resumen.yaml
@@ -63,6 +88,22 @@ lf run experiments/resumen.yaml --dry-run
 lf run experiments/resumen.yaml
 lf run experiments/resumen.yaml --on cluster-gpu
 ```
+
+Si el clúster contiene una copia parcial del proyecto, se declara una vez su raíz remota absoluta:
+
+```bash
+lf clusters set cluster-gpu project_root /scratch/USUARIO/WISDOM
+lf doctor --on cluster-gpu
+```
+
+El mismo `{file: ../data/dna/design}` apunta entonces a `PROYECTO/data/dna/design` local y a
+`/scratch/USUARIO/WISDOM/data/dna/design` remoto. Hasta 10 MiB sigue siendo un snapshot automático
+del bundle. Por encima del límite LambdaForge no copia implícitamente: la ruta debe estar dentro del
+proyecto local, su equivalente remoto debe existir y se comparan tipo, bytes y SHA-256 antes del
+scheduler y otra vez en el worker. Un mirror ausente o desactualizado falla de forma segura.
+Sincronizarlo mediante el servicio recomendado por el clúster es responsabilidad explícita del
+investigador. Para cientos de GB/TB es preferible un dataset gestionado: verificar el mirror también
+lee todos los bytes, mientras el dataset aporta identidad y placements reutilizables.
 
 Los envíos son asíncronos tanto en local como en remoto: la terminal vuelve tras crear un Job
 durable que puede seguirse con `lf top` o `lf logs`. `--wait-for-submit` espera expresamente a la
@@ -149,16 +190,18 @@ def run(self, identificadores: list[dict[str, str]], workers: int = 8):
 `ManagedFile` es compatible con `os.PathLike` y ofrece `str`, `open`, `read_text`, `read_bytes`,
 `key`, `sha256` y `size_bytes`. El cache usa un lock por clave entre procesos, destino temporal,
 validación, `fsync`, SHA-256 y promoción atómica. `fetch` añade timeout acotado, reintentos con
-backoff, descompresión gzip opcional y limitación de tasa local al Work. Los checkpoints de
+backoff, descompresión gzip opcional y limitación de tasa local al Work. Los cortes HTTP/chunked/gzip
+y respuestas transitorias se reintentan desde un temporal vacío; los 4xx permanentes no entran en
+bucles y nunca se registra contenido parcial. Los checkpoints de
 `self.map` guardan referencias lógicas, no rutas de la máquina: si `lf clean --apply` elimina un
 fichero referenciado, solo se recalcula ese elemento.
 
-`publish_to` relativo se resuelve respecto a `self.source_dir`; también admite una ruta absoluta.
-La copia solo se publica tras un `run()` correcto, cada destino se reemplaza atómicamente y una
-ruta distinta ya existente se rechaza salvo `overwrite=True`. En remoto la ruta pertenece al host
-remoto: para conservarla fuera del workspace del Job se usa una ruta absoluta de almacenamiento
-persistente del clúster. LambdaForge no confunde una ruta remota con una local ni transfiere árboles
-grandes implícitamente.
+`publish_to` relativo parte del directorio del YAML original. Con el `project_root` anterior,
+`publish_to="../data/informe.json"` publica en el directorio equivalente del proyecto remoto, no en
+una ruta interna con hash del Job. Sin `project_root`, una publicación relativa remota se rechaza y
+debe usarse una ruta remota absoluta. La copia solo aparece tras un `run()` correcto, es atómica y
+rechaza contenido distinto existente salvo `overwrite=True`. LambdaForge no confunde una ruta
+remota con una local ni transfiere árboles grandes implícitamente al controlador.
 
 Para programas científicos externos:
 
@@ -239,8 +282,12 @@ lf clean                    # vista previa de caché reconstruible
 
 En `lf top`, arriba/abajo recorren clústeres y Works como una sola lista sin mostrar IDs operativos
 largos en la ruta principal. Enter o derecha avanza de Work a `Attempt 1`, `Attempt 2`, etc. y de un
-Attempt a sus logs; el detalle de clúster usa las mismas etiquetas y la izquierda vuelve. Los IDs
-siguen disponibles en `lf jobs` y `lf overview --json`. `d` elimina el Work/Attempt terminal
+Attempt a sus logs; el detalle de clúster usa las mismas etiquetas y la izquierda vuelve. El log
+abierto se actualiza automáticamente, sigue el final por defecto y conserva el scroll manual.
+Los fallos añaden la excepción científica estructurada aunque `--tail` haya recortado las líneas;
+`--verbose`/`--debug` incluye traceback y `--json` devuelve el fallo y ruta exacta. El bootstrap
+humano muestra fases y latidos por stderr sin contaminar JSON. Los IDs siguen disponibles en
+`lf jobs` y `lf overview --json`. `d` elimina el Work/Attempt terminal
 seleccionado tras confirmación y `D` limpia todo el historial terminal, conservando siempre los Jobs
 activos. Se eliminan únicamente sus workspaces y registros propios; datasets, caches y entornos
 compartidos se preservan.

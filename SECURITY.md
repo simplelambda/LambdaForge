@@ -25,6 +25,12 @@ required. Do not include real credentials or private datasets.
   containment and symbolic-link boundaries at their owning layer. Managed dataset deletion also
   revalidates the exact immutable manifest identity inside the configured dataset root immediately
   before removing bytes; stale, conflicting or unreachable index state fails closed.
+- A cluster `project_root` is researcher-owned persistent storage, outside LambdaForge cleanup.
+  Large typed inputs map there only by project-relative path and must match local kind, byte count
+  and SHA-256 both before submission and again in the worker. Relative remote output publication
+  requires this explicit mirror and cannot escape it; an absolute output path is a deliberate
+  trusted-code escape. Checksums provide consistency, not producer authentication or filesystem
+  isolation against a concurrently malicious account.
 - Work-owned runtime services retain that boundary: `self.outputs.artifact` accepts only verified
   paths and owns an external artifact by safe copy; `self.outputs.dataset` accepts only run-owned
   local assets or explicit URIs, rejects
@@ -66,6 +72,14 @@ required. Do not include real credentials or private datasets.
 - Managed Python provisioning is unprivileged and confined to the configured cache root. The pinned
   micromamba fallback is downloaded over HTTPS on the controller and SHA-256 verified before and
   after transfer; bootstrap never edits shell profiles, system Python, drivers or system CUDA.
+- Project-native environments are data-only declarations: paths stay inside the project, YAML
+  variables/prefixes/nested pip sections and install hooks are rejected, and package names are
+  passed as argv without a shell. Online channels and Conda packages remain trusted supply-chain
+  inputs and can contain package-manager metadata/scripts; review and pin them accordingly. Offline
+  locks reject credentials/queries, require one supported platform plus SHA-256 for every URL, and
+  verify matching regular cache bytes before transfer. Temporary prefixes and package caches are
+  content-addressed/locked; required executable ownership and version are verified before atomic
+  publication. LambdaForge never treats `tools.require()` as authority to install software.
 - A LambdaForge-managed runtime reuses only a readable CA bundle already selected and locally
   validated through the host Python trust configuration. Its path is propagated to provisioning,
   pip/Requests and scientific jobs. LambdaForge never disables TLS verification, downloads

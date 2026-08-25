@@ -533,6 +533,127 @@ def test_right_opens_work_attempt_then_logs_and_left_walks_back(
     assert "LambdaForge advanced jobs" not in rendered
 
 
+def test_work_attempt_log_view_refreshes_without_reopening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "clusters": [],
+        "jobs": {
+            "items": [
+                {
+                    "job_id": "job-linked",
+                    "cluster": "local",
+                    "state": "failed",
+                    "created_at_utc": "",
+                    "metadata": {"name": "study"},
+                }
+            ],
+            "by_state": {"failed": 1},
+            "total": 1,
+        },
+        "work": {
+            "items": [
+                {
+                    "work_id": "work-study",
+                    "name": "study",
+                    "kind": "work",
+                    "state": "failed",
+                    "cluster": "local",
+                    "primary_job_id": "job-linked",
+                    "created_at_utc": "",
+                }
+            ]
+        },
+    }
+
+    class ImmediateSnapshots:
+        def __init__(self, overview: Any) -> None:
+            del overview
+            self.pending = False
+
+        @property
+        def running(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.pending = True
+
+        def take(self) -> tuple[dict[str, Any], None] | None:
+            if not self.pending:
+                return None
+            self.pending = False
+            return payload, None
+
+        def close(self) -> None:
+            pass
+
+    class RefreshingLogs:
+        loads = 0
+
+        def __init__(self, jobs: Any, job_id: str) -> None:
+            del jobs
+            assert job_id == "job-linked"
+            self.pending = False
+
+        @property
+        def running(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.pending = True
+
+        def take(self) -> tuple[str, None] | None:
+            if not self.pending:
+                return None
+            self.pending = False
+            type(self).loads += 1
+            if self.loads == 1:
+                return "preparing\n", None
+            return "preparing\n== Scientific failure ==\nIncompleteRead: truncated\n", None
+
+        def close(self) -> None:
+            pass
+
+    class ScriptedTerminal:
+        def __init__(self, stream: Any) -> None:
+            del stream
+            self.calls = 0
+
+        def __enter__(self) -> ScriptedTerminal:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def key(self, timeout: float) -> str | None:
+            del timeout
+            self.calls += 1
+            if self.calls == 1 or self.calls == 2:
+                return "\x1b[C"
+            if self.calls == 3:
+                time.sleep(0.22)
+                return None
+            if self.calls == 4:
+                time.sleep(0.02)
+                return None
+            if self.calls == 5:
+                return "\x1b[D"
+            return "q"
+
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor.SnapshotProcess", ImmediateSnapshots)
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor.LogProcess", RefreshingLogs)
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor._TerminalSession", ScriptedTerminal)
+    output = StringIO()
+
+    result = LiveJobMonitor(
+        cast(Any, object()), cast(Any, object()), interval=0.2, stream=output
+    ).run()
+
+    assert result == 0
+    assert RefreshingLogs.loads >= 2
+    assert "IncompleteRead: truncated" in output.getvalue()
+
+
 def test_cluster_detail_renders_history_personal_usage_and_only_cluster_jobs() -> None:
     history = ResourceHistory(30)
     clusters = [

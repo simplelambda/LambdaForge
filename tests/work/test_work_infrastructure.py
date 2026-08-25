@@ -211,6 +211,75 @@ def test_managed_output_can_publish_a_safe_explicit_copy(tmp_path: Path) -> None
     assert destination.read_text(encoding="utf-8") == "second"
 
 
+def test_relative_output_uses_yaml_directory_locally_and_remote_project_mirror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local_project = tmp_path / "local-project"
+    local_experiments = local_project / "experiments"
+    local_experiments.mkdir(parents=True)
+    (local_project / "pyproject.toml").write_text(
+        '[project]\nname = "paths-test"\nversion = "1"\n', encoding="utf-8"
+    )
+    local = WorkRunner().run(
+        WorkConfig.from_mapping(
+            {
+                "name": "local-relative-output",
+                "run": "tests.work_cases.PublishedOutputWork",
+                "with": {"destination": "../data/report.txt"},
+            },
+            source=local_experiments / "work.yaml",
+        )
+    )
+    assert local.status == "succeeded"
+    assert (local_project / "data/report.txt").read_text(encoding="utf-8") == "published"
+
+    bundle = tmp_path / "remote-job" / "work"
+    remote_project = tmp_path / "remote-project"
+    bundle.mkdir(parents=True)
+    (bundle / "pyproject.toml").write_text(
+        '[project]\nname = "paths-test"\nversion = "1"\n', encoding="utf-8"
+    )
+    (bundle / ".lambdaforge-paths.json").write_text(
+        json.dumps(
+            {
+                "path_context_version": 1,
+                "project_root": str(remote_project),
+                "source_relative": "experiments",
+            }
+        ),
+        encoding="utf-8",
+    )
+    remote = WorkRunner().run(
+        WorkConfig.from_mapping(
+            {
+                "name": "remote-relative-output",
+                "run": "tests.work_cases.PublishedOutputWork",
+                "with": {"destination": "../data/report.txt"},
+            },
+            source=bundle / "config.yaml",
+        )
+    )
+    assert remote.status == "succeeded"
+    assert (remote_project / "data/report.txt").read_text(encoding="utf-8") == "published"
+
+    marker = bundle / ".lambdaforge-paths.json"
+    marker.unlink()
+    monkeypatch.setenv("LAMBDAFORGE_BUNDLE", "1")
+    monkeypatch.setenv("LAMBDAFORGE_CLUSTER", "unmapped-remote")
+    unmapped = WorkRunner().run(
+        WorkConfig.from_mapping(
+            {
+                "name": "unmapped-relative-output",
+                "run": "tests.work_cases.PublishedOutputWork",
+                "with": {"destination": "relative/report.txt"},
+            },
+            source=bundle / "config.yaml",
+        )
+    )
+    assert unmapped.status == "failed"
+    assert "requires a cluster project_root" in unmapped.runs[0].failure["message"]
+
+
 def test_managed_directory_can_publish_a_safe_explicit_copy(tmp_path: Path) -> None:
     destination = tmp_path / "results" / "evidence"
     result = WorkRunner().run(

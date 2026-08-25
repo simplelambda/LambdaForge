@@ -172,7 +172,11 @@ fichero = self.cache.fetch(
 ```
 
 `fetch` hace un GET HTTP(S) cacheable, no sustituye a un cliente HTTP general. Añade timeout,
-reintentos después del intento inicial, backoff exponencial y gzip opcional. El limitador es seguro
+reintentos después del intento inicial, backoff exponencial y gzip opcional. Los cortes de conexión,
+lecturas chunked incompletas —también durante gzip—, estados 408/425/429 y 5xx se reintentan;
+errores permanentes como 401 o 404 fallan de inmediato. Cada intento pasa por el limitador y empieza
+con un temporal privado vacío. Al agotarlos, el error conserva URL, número de intentos y causa final.
+Solo se publica atómicamente un fichero completo y validado, nunca bytes parciales. El limitador es seguro
 entre threads de esa instancia de Work; no coordina Jobs distribuidos. `lf clean` muestra cada cache
 de Work y `--apply` lo elimina solo cuando obtiene el lock exclusivo; un Work activo mantiene una
 lease compartida.
@@ -249,15 +253,19 @@ conjunto y se registra automáticamente. Si una declaración falta o es insegura
 falla y ninguna declaración gestionada del conjunto entra en el resultado. No se llama además a
 `outputs.artifact`.
 
-`publish_to` es opcional para ficheros y directorios. Una ruta relativa parte de `self.source_dir`;
-una absoluta se usa de forma explícita. LambdaForge valida y hashea primero el artefacto gestionado
-y después publica una copia atómica por destino. Reutiliza contenido idéntico y rechaza contenido
-distinto ya existente salvo `overwrite=True`. El resultado gestionado sigue siendo la autoridad y
-su metadata registra `published_to`. En remoto es una ruta del host remoto: para sobrevivir a la
-limpieza del Job se elige almacenamiento persistente absoluto. No se copian árboles grandes al
-controlador de forma implícita. También se rechazan enlaces simbólicos, cambios entre fichero y
-directorio y cualquier destino de directorio que contenga su fuente gestionada o esté contenido en
-ella; `overwrite=True` nunca autoriza sustituir la raíz del proyecto o del Attempt.
+`publish_to` es opcional para ficheros y directorios. Una ruta relativa parte del directorio que
+contiene el YAML original; una absoluta se usa explícitamente. En remoto la publicación relativa
+requiere el `project_root` del clúster y usa el directorio YAML equivalente bajo ese mirror. Nunca
+resuelve bajo el hash del bundle/Job. Sin mirror se debe usar una ruta remota absoluta persistente;
+LambdaForge rechaza una relativa en vez de publicar silenciosamente en almacenamiento interno
+desechable.
+
+LambdaForge valida y hashea primero el artefacto gestionado y después publica una copia atómica por
+destino. Reutiliza contenido idéntico y rechaza contenido distinto existente salvo
+`overwrite=True`. El resultado gestionado sigue siendo la autoridad y registra `published_to`. No
+se copian árboles grandes al controlador implícitamente. También se rechazan symlinks, cambios de
+tipo y destinos de directorio que contienen su fuente o están contenidos en ella; `overwrite=True`
+nunca autoriza sustituir la raíz del proyecto o del Attempt.
 
 ```python
 indice = self.checkpoints.file(
@@ -326,9 +334,13 @@ with:
   corpus: {dataset: research-corpus@3}
 ```
 
-Un `file` se resuelve respecto al YAML, se comprueba/hashea y se pasa como `Path`. Un bundle remoto
-solo copia entradas por debajo del límite configurado; una entrada grande exige almacenamiento
-durable ya disponible o un dataset gestionado. Así el coste de transferencia es explícito.
+Un `file` o directorio se resuelve respecto al YAML, se comprueba/hashea y se pasa como `Path`. En
+remoto, hasta el límite inline por defecto de 10 MiB se copia al bundle inmutable. Una ruta mayor
+que pertenezca al proyecto sigue el contrato de mirror de la sección 10: se conserva su nombre
+relativo al proyecto, el worker recibe la ruta absoluta remota equivalente y se comprueban tipo,
+bytes y SHA-256 antes del scheduler y otra vez en el worker. No se transfiere nada grande
+implícitamente. Una ruta grande externa al proyecto se rechaza: debe ser un dataset gestionado o
+formar parte de un layout de proyecto/datos explícito y revisable.
 
 El marcador `file` solo describe una entrada que debe existir antes del envío. Un resultado nuevo
 se crea en Python con `outputs.file/directory/value/dataset`; no hay otro esquema YAML de outputs.
@@ -398,12 +410,47 @@ calcula count/media/min/max; una clasificación exige `--metric` y dirección ex
 ## 10. Clústeres y Jobs
 
 ```bash
-lf clusters add gpu --host HOST --user USER --workspace /remote/work
+lf clusters add gpu --host HOST --user USER --workspace /remote/work \
+  --project-root /scratch/USUARIO/mi-proyecto
 lf clusters bootstrap gpu --dry-run
 lf clusters bootstrap gpu
 lf doctor --on gpu
 lf run experiments/train.yaml --on gpu
 ```
+
+Para un perfil existente:
+
+```bash
+lf clusters set gpu project_root /scratch/USUARIO/mi-proyecto
+lf clusters show gpu
+```
+
+`workspace` y `project_root` tienen responsabilidades distintas. `workspace` es estado propiedad de
+LambdaForge: bundles, entornos, directorios de Job y logs se pueden limpiar según sus reglas.
+`project_root` es un mirror parcial persistente propiedad del investigador del directorio local que
+contiene `pyproject.toml`; LambdaForge nunca lo sincroniza ni elimina. Debe ser una ruta SSH absoluta
+distinta de `/`. `lf doctor` comprueba que exista el directorio configurado.
+
+Se conserva el layout original. Si el YAML es `PROYECTO/experiments/design.yaml`,
+`{file: ../data/dna/design}` corresponde a `PROYECTO_REMOTO/data/dna/design`; también
+`publish_to="../data/resultados.json"` se mapea así. Un `publish_to` absoluto sigue siendo una ruta
+remota explícita y puede quedar fuera del mirror.
+
+Hay tres vías deliberadas:
+
+1. Entrada pequeña (hasta 10 MiB): snapshot y transferencia automática en el bundle.
+2. Entrada mayor del mirror: el investigador o servicio de transferencia del centro la coloca en la
+   ruta relativa equivalente; LambdaForge lee ambos lados y exige tipo/tamaño/SHA-256 exactos, por
+   lo que datos ausentes, viejos, parciales o con symlinks fallan de forma segura.
+3. Corpus grande reutilizable: dataset gestionado/materializado, que evita rehashear un mirror de TB
+   en cada envío y aporta identidad inmutable y placements por clúster.
+
+El mirror no es un `rsync` oculto: copiar cientos de GB durante `lf run` haría impredecibles la
+latencia, cuota y red, y muchos centros exigen un DTN. Se sincroniza mediante el mecanismo aprobado
+por el centro y después se ejecutan `lf doctor` y `lf run`.
+
+El bootstrap humano informa cada fase por stderr y emite un latido periódico durante solves o
+instalaciones largas. Esto no ensucia `--json`, cuyo stdout sigue siendo un único documento máquina.
 
 `lf run` local/remoto crea un Job durable de preparación y devuelve control. `--wait-for-submit`
 espera preparación y aceptación del scheduler, no el cálculo; `--dry-run` es directo y sin efectos.
@@ -415,8 +462,72 @@ y plan Torch. Pueden reutilizar Conda o micromamba verificado, pero nunca modifi
 drivers del sistema ni hacen fallback silencioso a CPU. Cada Job tiene workspace mutable propio;
 no ejecuta sobre bundle cache. En remoto `source_dir` es el código consumidor staged.
 
+### Paquetes nativos declarados por el proyecto
+
+Los ejecutables nativos pertenecen al proyecto instalable, no a cada YAML. La declaración opcional
+es:
+
+```toml
+[tool.lambdaforge.environment]
+manager = "conda"
+file = "environment.yml"
+required_executables = ["mmseqs", "foldseek"]
+```
+
+`manager` solo admite `conda`, pero LambdaForge usa su micromamba fijado y verificado; no exige
+Conda global. `file` y `lockfile` son excluyentes y quedan bajo la raíz del proyecto. Los ejecutables
+son nombres simples. `package_cache` solo acompaña un lock offline. En `environment.yml` solo se
+admiten `name`, `channels` y `dependencies` como strings. Se rechazan prefix, variables, secciones
+`pip:` anidadas, hooks y paquetes Torch/CUDA, cuyo plan pertenece al clúster.
+
+```yaml
+name: wisdom
+channels: [conda-forge, bioconda]
+dependencies: [python=3.11, pip, biopython>=1.84, foldseek, mmseqs2]
+```
+
+```bash
+lf clusters bootstrap gpu --project . --dry-run
+lf clusters bootstrap gpu --project .
+lf doctor --on gpu
+lf run experiments/design.yaml --on gpu
+```
+
+El dry-run no descarga, resuelve canales, construye wheels ni modifica el clúster: explica hash,
+paquetes, plataforma/subdir, ejecutables, conectividad y un solve exacto ya cacheado si existe. La
+preparación real resuelve inventario name/version/build/channel/subdir y lo incorpora a la identidad
+junto con bytes de especificación y wheels, plataforma, Python, Torch y política offline.
+
+El resultado es un solo prefijo: micromamba crea un temporal exacto y su propio Python instala Torch
+y wheels. Antes del rename atómico se comprueban `pip check`, inventario Conda, TLS, framework,
+Torch/CUDA y ejecutables. El recibo registra path/versión y paquete propietario con versión, build,
+canal y subdir. Builds concurrentes comparten lock por identidad. `tools.require()` busca primero el
+`bin` de ese Python y sigue siendo comprobación, nunca instalador.
+
+La verificación enriquece `micromamba list --json` con los registros regulares `conda-meta` del
+prefijo, conservando el subdir real `linux-*` o `noarch` aunque esa versión del gestor lo omita. La
+metadata ausente es un error de entorno y una diferencia real se resume por paquete/campo sin volcar
+el prefijo completo.
+
+Offline requiere lock Conda `@EXPLICIT` específico de plataforma, SHA-256 en cada URL y sus bytes:
+
+```toml
+[tool.lambdaforge.environment]
+manager = "conda"
+lockfile = "locks/linux-64.explicit"
+package_cache = "vendor/conda-linux-64"
+required_executables = ["mmseqs", "foldseek"]
+```
+
+Cada basename/hash debe corresponder a un fichero regular; links, duplicados, credenciales, queries
+y plataforma distinta fallan antes del envío. El cache es content-addressed y reconstruible tras
+publicar el prefijo. Para que también pip/Torch sea offline se mantiene además el `wheelhouse` del
+perfil. Cada plataforma (`linux-64`, `linux-aarch64`, `linux-ppc64le`) necesita su lock/cache.
+`environment: existing` conserva intencionadamente su contrato manual y no instala esta declaración.
+
 `lf top` muestra Works y clústeres semánticos: arriba/abajo recorre, Enter/derecha avanza de Work a
-Attempts numerados y después a logs; izquierda vuelve. Los IDs operativos largos se reservan para
+Attempts numerados y después a logs; izquierda vuelve. El log abierto se actualiza solo y conserva
+el scroll manual; situado al final sigue líneas nuevas. Los IDs operativos largos se reservan para
 `lf jobs` y la vista máquina. `lf overview --json` expone Works, `attempt_history` y Jobs para
 herramientas. `lf jobs ...` conserva el
 control avanzado de IDs, scheduler, logs, cancelación y reconciliación. Cada Job local conserva sus
@@ -424,6 +535,14 @@ raíces absolutas, por lo que envío detached, observación, logs y borrado no d
 actual; los registros relativos antiguos se resuelven desde la configuración fuente guardada. Un
 proveedor inaccesible es estado unknown/last-known, no un falso fallo científico; al recuperarse se
 restaura el estado real y desaparece el error de conexión obsoleto.
+
+Cada Job Work publica además un resultado estructurado acotado en la raíz exacta del Job.
+`lf logs WORK` y `lf jobs logs JOB` añaden `Scientific failure` después del stream recortado si los
+logs no contenían el diagnóstico. Siempre conserva tipo, mensaje, fase/ubicación y ruta del
+`result.json`; `--verbose` o `--debug` añade el traceback salvo que ya esté visible. `--tail N` solo
+recorta stdout/stderr, nunca la causa terminal. `--json` devuelve `failure`, `failures` y
+`result_path`. `lf show` y `lf jobs show` exponen el mismo fallo. Workspaces 0.12 anteriores se leen
+de su ubicación legacy acotada; los nuevos usan la copia exacta de la raíz del Job.
 
 ## 11. Limpieza y seguridad
 
@@ -456,7 +575,7 @@ datasets publicados, caches, entornos y Jobs ajenos. `lf jobs clear` presenta la
 | `top`, `overview` | vista humana viva y vista máquina |
 | `show`, `logs`, `cancel`, `retry`, `delete` | operaciones semánticas de Work |
 | `jobs ...` | control de bajo nivel; `clear [--apply]` limpia historial terminal |
-| `clusters ...`, `doctor`, `resources` | configuración y diagnóstico de destinos |
+| `clusters ...`, `doctor`, `resources` | destinos; bootstrap admite `--project` y `--dry-run` sin efectos |
 | `datasets ...` | inspección/verificación/placement/borrado de versiones |
 | `results list/show/compare` | consultar resultados de Execution |
 | `clean` | preview/aplicación de GC reconstruible |
@@ -554,6 +673,8 @@ storage conservan ownership durable independiente.
 | `ToolService` | resolución, proceso argv, logs, env hijo y ledger | el proyecto elige comando; framework ejecuta seguro |
 | `EnvironmentManifest` | procedencia software/hardware/Git/plugin/tool | una sola fuente de verdad |
 | `SubmissionService`/`ControlPlane` | preparación asíncrona y destino | responsabilidad operacional |
+| `NativeEnvironmentSpecification`/`NativeEnvironmentPlanner` | declaración estricta, solve de plataforma e inventario Conda | software nativo pertenece al despliegue, no a parámetros/hooks del Work |
+| `ManagedEnvironmentProvider` | venv o prefijo Conda temporal verificado, pip/Torch y publicación atómica | convierte un plan completo en entorno ejecutable |
 | `Transport` | conexión y transferencia | no decide semántica del scheduler |
 | `Scheduler` | submit/observe/signals de Jobs | proceso directo y SLURM tienen autoridades distintas |
 | `DatasetPublisher`/`DatasetRegistry` | bytes/índice inmutable y placements | dataset sobrevive al Attempt |
