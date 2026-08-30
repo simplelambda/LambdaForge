@@ -20,7 +20,7 @@ def _cluster_selector(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the only supported 0.12 command grammar."""
+    """Build the only supported 0.13 command grammar."""
     parser = _Parser(
         prog="lf",
         description="Run reproducible scientific Work locally or on managed clusters.",
@@ -133,6 +133,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Absolute remote mirror of the consumer project for shared inputs/outputs.",
     )
     add.add_argument("--data-environment")
+    add.add_argument(
+        "--gpu-access",
+        choices=("auto", "exclusive", "shared", "command", "scheduler"),
+        default="auto",
+        help="GPU admission policy; SLURM defaults to scheduler and direct hosts to exclusive.",
+    )
+    add.add_argument(
+        "--gpu-command-prefix",
+        nargs="+",
+        help="argv prepended to GPU work when --gpu-access command (for example: gpu run).",
+    )
     cluster_commands.add_parser("list").add_argument("--json", action="store_true")
     for operation in ("show", "inspect", "test", "resources", "storage"):
         item = cluster_commands.add_parser(operation)
@@ -201,6 +212,13 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--follow", action="store_true")
         item.add_argument("--dry-run", action="store_true")
         item.add_argument("--json", action="store_true")
+        if operation in {"show", "logs"}:
+            item.add_argument(
+                "--run",
+                dest="study_run",
+                help="Exact study Run key shown by lf top/overview (candidate plus seed).",
+            )
+            item.add_argument("--curve-points", type=int, default=80)
 
     datasets = commands.add_parser("datasets", help="Inspect immutable dataset versions.")
     datasets.add_argument("--clusters", type=Path)

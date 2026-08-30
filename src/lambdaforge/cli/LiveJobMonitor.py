@@ -9,7 +9,7 @@ import shutil
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from multiprocessing.connection import Connection
 from typing import Any, TextIO
@@ -150,6 +150,11 @@ def _selected_job_id(item: Mapping[str, Any]) -> str:
     """Resolve a semantic work row or an advanced job row to its operational job."""
     value = item.get("primary_job_id", item.get("job_id", ""))
     return str(value)
+
+
+def _is_study_work(item: Mapping[str, Any]) -> bool:
+    """Recognize a declared parameter study before its live telemetry exists."""
+    return item.get("study_expected") is True
 
 
 def _work_attempt_jobs(
@@ -492,6 +497,276 @@ class WorkAttemptRenderer:
         return _screen(lines, width=width, height=height)
 
 
+class StudyRenderer:
+    """Render adaptive/exhaustive candidates and their isolated seed Runs."""
+
+    @staticmethod
+    def study(
+        payload: Mapping[str, Any], work_index: int
+    ) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]]]:
+        work = payload.get("work", {})
+        work = work if isinstance(work, Mapping) else {}
+        items = [item for item in work.get("items", ()) if isinstance(item, Mapping)]
+        if not items:
+            return None, []
+        selected = items[min(work_index, len(items) - 1)]
+        study = selected.get("study")
+        study = study if isinstance(study, Mapping) else None
+        candidates = (
+            [value for value in study.get("candidates", ()) if isinstance(value, Mapping)]
+            if study is not None
+            else []
+        )
+        return study, candidates
+
+    @classmethod
+    def render_candidates(
+        cls,
+        payload: Mapping[str, Any],
+        work_index: int,
+        *,
+        selected_candidate: int,
+        message: str,
+        width: int,
+        height: int,
+    ) -> str:
+        study, candidates = cls.study(payload, work_index)
+        if study is None:
+            return (
+                "LambdaForge study\n\n"
+                "Run telemetry is not available yet. The Work may still be preparing, or it "
+                "may have been launched with an older worker runtime.\n\n"
+                "The view refreshes automatically · a scheduler Attempts · ←/b/Esc/q back"
+            )
+        counts = study.get("counts", {})
+        counts = counts if isinstance(counts, Mapping) else {}
+        objective = study.get("objective", {})
+        objective = objective if isinstance(objective, Mapping) else {}
+        metric = str(objective.get("metric", ""))
+        lines = [
+            f"LambdaForge study · {study.get('name', '-')} · {study.get('strategy', '-')}",
+            (
+                f"candidates={counts.get('candidates', len(candidates))}  "
+                f"scheduled={counts.get('scheduled_runs', 0)}  "
+                f"active={counts.get('active_runs', 0)}  "
+                f"completed={counts.get('completed_runs', 0)}  "
+                f"pruned={counts.get('pruned_runs', 0)}  failed={counts.get('failed_runs', 0)}"
+            ),
+            (
+                f"objective: {metric or '-'} ({objective.get('mode', '-')})  |  "
+                "each row is one hyperparameter combination"
+            ),
+            "",
+            "  CANDIDATE   STATE       RUNS     OBJECTIVE     PARAMETERS",
+        ]
+        selected_candidate = min(selected_candidate, max(0, len(candidates) - 1))
+        capacity = max(1, height - len(lines) - 3)
+        start = max(0, selected_candidate - capacity + 1)
+        for offset, candidate in enumerate(candidates[start : start + capacity]):
+            index = start + offset
+            runs = [value for value in candidate.get("runs", ()) if isinstance(value, Mapping)]
+            terminal = sum(
+                value.get("state") in {"succeeded", "failed", "pruned"} for value in runs
+            )
+            latest = candidate.get("latest_metrics", {})
+            latest = latest if isinstance(latest, Mapping) else {}
+            score = latest.get(metric) if metric else None
+            score_text = f"{float(score):.5g}" if isinstance(score, int | float) else "-"
+            parameters = json_compact(candidate.get("parameters", {}), width=48)
+            lines.append(
+                f"{'▶' if index == selected_candidate else ' '} "
+                f"Trial {int(candidate.get('trial', index + 1)):<5} "
+                f"{str(candidate.get('state', 'pending')):<11.11} "
+                f"{terminal:>2}/{len(runs):<4} {score_text:<13.13} {parameters}"
+            )
+        lines.extend(
+            (
+                "",
+                message
+                or "↑/↓ candidates · Enter/→ seed Runs · a scheduler Attempts · "
+                "←/b/Esc/q back · x cancel",
+            )
+        )
+        return _screen(lines, width=width, height=height)
+
+    @classmethod
+    def candidate_runs(
+        cls, payload: Mapping[str, Any], work_index: int, candidate_index: int
+    ) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]]]:
+        _study, candidates = cls.study(payload, work_index)
+        if not candidates:
+            return None, []
+        candidate = candidates[min(candidate_index, len(candidates) - 1)]
+        return candidate, [
+            value for value in candidate.get("runs", ()) if isinstance(value, Mapping)
+        ]
+
+    @classmethod
+    def render_runs(
+        cls,
+        payload: Mapping[str, Any],
+        work_index: int,
+        candidate_index: int,
+        *,
+        selected_run: int,
+        message: str,
+        width: int,
+        height: int,
+    ) -> str:
+        candidate, runs = cls.candidate_runs(payload, work_index, candidate_index)
+        if candidate is None:
+            return "LambdaForge candidate\n\nNo candidate is available.\n\n←/b/Esc/q back"
+        lines = [
+            f"LambdaForge candidate · Trial {candidate.get('trial', '-')} · "
+            f"{candidate.get('state', '-')}",
+            "parameters: "
+            + json_compact(candidate.get("parameters", {}), width=max(20, width - 12)),
+            "",
+            "  RUN / SEED                 STATE       EPOCH   TIME       LATEST METRICS",
+        ]
+        selected_run = min(selected_run, max(0, len(runs) - 1))
+        capacity = max(1, height - len(lines) - 3)
+        start = max(0, selected_run - capacity + 1)
+        for offset, run in enumerate(runs[start : start + capacity]):
+            index = start + offset
+            latest = run.get("latest_metrics", {})
+            latest = latest if isinstance(latest, Mapping) else {}
+            epoch = cls._latest_step(run)
+            summary = ", ".join(
+                f"{name}={float(value):.4g}"
+                for name, value in list(latest.items())[:3]
+                if isinstance(value, int | float)
+            )
+            seed = run.get("seed")
+            lines.append(
+                f"{'▶' if index == selected_run else ' '} "
+                f"Seed {str(seed if seed is not None else 'none'):<20.20} "
+                f"{str(run.get('state', 'scheduled')):<11.11} "
+                f"{str(epoch if epoch is not None else '-'):<7.7} "
+                f"{_seconds(run.get('duration_seconds')):<10.10} {summary or '-'}"
+            )
+        lines.extend(
+            (
+                "",
+                message
+                or "↑/↓ Runs · Enter/→ curves, statistics and isolated log · "
+                "←/b/Esc/q candidates · x cancel",
+            )
+        )
+        return _screen(lines, width=width, height=height)
+
+    @staticmethod
+    def _latest_step(run: Mapping[str, Any]) -> int | None:
+        value = run.get("latest_step")
+        return int(value) if isinstance(value, int) else None
+
+
+class StudyRunRenderer:
+    """Render bounded learning curves, timing and the exclusive Run log."""
+
+    _SPARK = "▁▂▃▄▅▆▇█"
+
+    @classmethod
+    def render(
+        cls,
+        detail: Mapping[str, Any] | None,
+        *,
+        scroll: int,
+        message: str,
+        width: int,
+        height: int,
+    ) -> str:
+        if detail is None:
+            return "LambdaForge study Run\n\nLoading isolated telemetry…\n\n←/b/Esc/q back"
+        curves = detail.get("curves", {})
+        curves = curves if isinstance(curves, Mapping) else {}
+        latest = detail.get("latest_metrics", {})
+        latest = latest if isinstance(latest, Mapping) else {}
+        parameters = detail.get("parameters", {})
+        failure = detail.get("failure")
+        failure = failure if isinstance(failure, Mapping) else {}
+        lines = [
+            f"LambdaForge Run · Trial {detail.get('trial', '-')} · Seed {detail.get('seed', '-')} "
+            f"· {detail.get('state', '-')}",
+            f"parameters: {json_compact(parameters, width=max(20, width - 12))}",
+            (
+                f"duration: {_seconds(detail.get('duration_seconds'))}  |  "
+                f"epoch time: {cls._latest_value(latest, 'epoch_time_s')}s  |  "
+                f"validation: {cls._latest_value(latest, 'validation_time_s')}s"
+            ),
+        ]
+        if failure:
+            lines.append(
+                f"failure: {failure.get('type', 'Error')}: {failure.get('message', '')}"
+            )
+        preferred = cls._curve_order(curves)
+        for name in preferred[: min(6, max(1, (height - 12) // 2))]:
+            values = curves.get(name, ())
+            values = values if isinstance(values, (list, tuple)) else ()
+            lines.append(
+                f"{name:<24.24} {cls._spark(values, max(8, min(42, width - 43)))} "
+                f"last={cls._latest_value(latest, name)}"
+            )
+        lines.extend(("", "ISOLATED RUN LOG"))
+        log_lines = str(detail.get("log", "")).splitlines()
+        capacity = max(1, height - len(lines) - 3)
+        maximum = max(0, len(log_lines) - capacity)
+        start = min(maximum, max(0, scroll))
+        lines.extend(log_lines[start : start + capacity] or ["No Run output has been emitted yet."])
+        suffix = " · source truncated safely" if detail.get("log_truncated") else ""
+        lines.extend(
+            (
+                "",
+                message
+                or f"live refresh · ↑/↓ log · PgUp/PgDn · Home/End · ←/b/Esc/q back{suffix}",
+            )
+        )
+        return _screen(lines, width=width, height=height)
+
+    @classmethod
+    def _spark(cls, values: Sequence[Any], width: int) -> str:
+        points = [
+            float(value["value"])
+            for value in values
+            if isinstance(value, Mapping) and isinstance(value.get("value"), int | float)
+        ]
+        if not points:
+            return "·"
+        selected = points[-width:]
+        low, high = min(selected), max(selected)
+        if high == low:
+            return cls._SPARK[3] * len(selected)
+        return "".join(
+            cls._SPARK[min(7, max(0, round((value - low) * 7 / (high - low))))]
+            for value in selected
+        )
+
+    @staticmethod
+    def _curve_order(curves: Mapping[str, Any]) -> list[str]:
+        names = [str(value) for value in curves]
+        priority = ("val_", "train_", "epoch_time_s", "validation_time_s")
+        return sorted(
+            names,
+            key=lambda name: next(
+                (index for index, prefix in enumerate(priority) if name.startswith(prefix)),
+                len(priority),
+            ),
+        )
+
+    @staticmethod
+    def _latest_value(values: Mapping[str, Any], name: str) -> str:
+        value = values.get(name)
+        return f"{float(value):.5g}" if isinstance(value, int | float) else "-"
+
+
+def json_compact(value: Any, *, width: int) -> str:
+    """Render deterministic compact JSON without allowing one row to flood the screen."""
+    import json
+
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return text if len(text) <= width else text[: max(1, width - 1)] + "…"
+
+
 class HistoryChart:
     """Render paired vertical time bars with an explicit scale and legend."""
 
@@ -744,6 +1019,23 @@ def _collect_logs(jobs: JobService, job_id: str, connection: Connection) -> None
         connection.close()
 
 
+def _collect_study_run(
+    jobs: JobService,
+    job_id: str,
+    run_key: str,
+    connection: Connection,
+) -> None:
+    """Load bounded per-Run curves and logs without blocking terminal input."""
+    try:
+        connection.send(
+            (jobs.study_run(job_id, run_key, tail=2_000, curve_points=80), None)
+        )
+    except BaseException as error:
+        connection.send((None, f"{error.__class__.__name__}: {error}"))
+    finally:
+        connection.close()
+
+
 def _apply_history_action(
     works: WorkService,
     action: str,
@@ -836,6 +1128,17 @@ class LogProcess(BackgroundProcess):
         super().__init__(_collect_logs, (jobs, job_id), "lambdaforge-top-logs")
 
 
+class StudyRunProcess(BackgroundProcess):
+    """Load one isolated scientific Run dashboard in the background."""
+
+    def __init__(self, jobs: JobService, job_id: str, run_key: str) -> None:
+        super().__init__(
+            _collect_study_run,
+            (jobs, job_id, run_key),
+            "lambdaforge-top-study-run",
+        )
+
+
 class HistoryActionProcess(BackgroundProcess):
     """Apply confirmed history deletion without freezing keyboard handling."""
 
@@ -868,6 +1171,7 @@ class LiveJobMonitor:
 
     def run(self) -> int:
         selected = selected_cluster = detail_selected = log_scroll = 0
+        selected_candidate = selected_study_run = study_log_scroll = 0
         focus, mode, log_job, log_label, log_text, message = (
             "jobs",
             "overview",
@@ -876,17 +1180,21 @@ class LiveJobMonitor:
             "",
             "",
         )
-        pending_cancel: str | None = None
+        pending_cancel: tuple[str, str] | None = None
         pending_history: tuple[str, str] | None = None
         return_mode = "overview"
         payload: Mapping[str, Any] = {}
         history, dirty = ResourceHistory(self.history_seconds), True
         poller = SnapshotProcess(self.overview)
         log_poller: LogProcess | None = None
+        study_poller: StudyRunProcess | None = None
+        study_detail: Mapping[str, Any] | None = None
+        study_job = study_key = ""
         action_poller: HistoryActionProcess | None = None
         poller.start()
         next_refresh = time.monotonic() + self.interval
         next_log_refresh = float("inf")
+        next_study_refresh = float("inf")
         try:
             with _TerminalSession(self.stream) as terminal:
                 while True:
@@ -925,6 +1233,13 @@ class LiveJobMonitor:
                             True,
                         )
                         next_log_refresh = time.monotonic() + self.interval
+                    if study_poller is not None and (loaded := study_poller.take()):
+                        value, error = loaded
+                        if isinstance(value, Mapping):
+                            study_detail = value
+                        message = f"Run telemetry failed: {error}" if error else ""
+                        study_poller, dirty = None, True
+                        next_study_refresh = time.monotonic() + self.interval
                     if action_poller is not None and (applied := action_poller.take()):
                         value, error = applied
                         if error:
@@ -958,6 +1273,16 @@ class LiveJobMonitor:
                         log_poller = LogProcess(self.jobs, log_job)
                         log_poller.start()
                         next_log_refresh = time.monotonic() + self.interval
+                    if (
+                        mode == "study-run"
+                        and study_job
+                        and study_key
+                        and study_poller is None
+                        and time.monotonic() >= next_study_refresh
+                    ):
+                        study_poller = StudyRunProcess(self.jobs, study_job, study_key)
+                        study_poller.start()
+                        next_study_refresh = time.monotonic() + self.interval
                     raw_items = payload.get("jobs", {}).get("items", [])
                     work_items = payload.get("work", {}).get("items", [])
                     items = work_items if work_items else raw_items
@@ -971,6 +1296,16 @@ class LiveJobMonitor:
                     detail_items = ClusterDetailRenderer.jobs(payload, selected_cluster)
                     detail_selected = min(detail_selected, max(0, len(detail_items) - 1))
                     _, attempt_items = WorkAttemptRenderer.attempts(payload, selected)
+                    _, candidate_items = StudyRenderer.study(payload, selected)
+                    selected_candidate = min(
+                        selected_candidate, max(0, len(candidate_items) - 1)
+                    )
+                    _, study_run_items = StudyRenderer.candidate_runs(
+                        payload, selected, selected_candidate
+                    )
+                    selected_study_run = min(
+                        selected_study_run, max(0, len(study_run_items) - 1)
+                    )
                     if mode == "work":
                         detail_selected = min(
                             detail_selected, max(0, len(attempt_items) - 1)
@@ -983,6 +1318,34 @@ class LiveJobMonitor:
                                 log_text,
                                 scroll=log_scroll,
                                 message=message or ("Loading complete log…" if log_poller else ""),
+                                width=size.columns,
+                                height=size.lines,
+                            )
+                        elif mode == "study":
+                            rendered = StudyRenderer.render_candidates(
+                                payload,
+                                selected,
+                                selected_candidate=selected_candidate,
+                                message=message,
+                                width=size.columns,
+                                height=size.lines,
+                            )
+                        elif mode == "study-candidate":
+                            rendered = StudyRenderer.render_runs(
+                                payload,
+                                selected,
+                                selected_candidate,
+                                selected_run=selected_study_run,
+                                message=message,
+                                width=size.columns,
+                                height=size.lines,
+                            )
+                        elif mode == "study-run":
+                            rendered = StudyRunRenderer.render(
+                                study_detail,
+                                scroll=study_log_scroll,
+                                message=message
+                                or ("Refreshing Run telemetry…" if study_poller else ""),
                                 width=size.columns,
                                 height=size.lines,
                             )
@@ -1045,11 +1408,60 @@ class LiveJobMonitor:
                         elif key in {"G", "\x1b[F", "\x1b[4~"}:
                             log_scroll, dirty = maximum, True
                         continue
+                    if mode == "study-run":
+                        log_lines = (
+                            str(study_detail.get("log", "")).splitlines()
+                            if isinstance(study_detail, Mapping)
+                            else []
+                        )
+                        page = max(1, size.lines - 12)
+                        maximum = max(0, len(log_lines) - page)
+                        if key in {"q", "Q", "b", "B", "\x1b", "\x1b[D"}:
+                            if study_poller is not None:
+                                study_poller.close()
+                                study_poller = None
+                            mode, message, dirty = "study-candidate", "", True
+                            next_study_refresh = float("inf")
+                        elif key in {"j", "\x1b[B"}:
+                            study_log_scroll, dirty = min(
+                                maximum, study_log_scroll + 1
+                            ), True
+                        elif key in {"k", "\x1b[A"}:
+                            study_log_scroll, dirty = max(0, study_log_scroll - 1), True
+                        elif key == "\x1b[6~":
+                            study_log_scroll, dirty = min(
+                                maximum, study_log_scroll + page
+                            ), True
+                        elif key == "\x1b[5~":
+                            study_log_scroll, dirty = max(0, study_log_scroll - page), True
+                        elif key in {"g", "\x1b[H", "\x1b[1~"}:
+                            study_log_scroll, dirty = 0, True
+                        elif key in {"G", "\x1b[F", "\x1b[4~"}:
+                            study_log_scroll, dirty = maximum, True
+                        elif key == "r" and study_poller is None:
+                            study_poller = StudyRunProcess(
+                                self.jobs, study_job, study_key
+                            )
+                            study_poller.start()
+                            message, dirty = "Refreshing Run telemetry…", True
+                        continue
                     if pending_cancel is not None:
+                        cancel_scope, cancel_selector = pending_cancel
                         if key in {"x", "X", "y", "Y", "\r", "\n"}:
                             try:
-                                record = self.jobs.cancel(pending_cancel)
-                                message = f"{record.job_id}: {record.state.value}"
+                                if cancel_scope == "work":
+                                    result = self._work_service().cancel(cancel_selector)
+                                    stopped_count = len(result["cancelled_jobs"])
+                                    reconciled_count = len(
+                                        result.get("reconciled_cancelled_jobs", ())
+                                    )
+                                    message = (
+                                        f"Work cancelled: {stopped_count} active Job(s) stopped; "
+                                        f"{reconciled_count} prior cancellation(s) reconciled."
+                                    )
+                                else:
+                                    record = self.jobs.cancel(cancel_selector)
+                                    message = f"{record.job_id}: {record.state.value}"
                                 if not poller.running:
                                     poller.start()
                             except Exception as error:
@@ -1061,7 +1473,8 @@ class LiveJobMonitor:
                             pending_cancel, message, dirty = None, "Cancellation aborted.", True
                         elif key is not None:
                             message = (
-                                f"Cancel {pending_cancel}? Press x again, y or Enter to confirm; "
+                                f"Cancel {cancel_scope} {cancel_selector}? Press x again, y or "
+                                "Enter to confirm; "
                                 "n/Esc keeps it running."
                             )
                             dirty = True
@@ -1095,6 +1508,84 @@ class LiveJobMonitor:
                             message = "The confirmed history operation is still running…"
                             dirty = True
                         continue
+                    if mode == "study":
+                        if key in {"q", "Q", "b", "B", "\x1b", "\x1b[D"}:
+                            mode, message, dirty = "overview", "", True
+                        elif key in {"j", "\x1b[B"}:
+                            selected_candidate = min(
+                                max(0, len(candidate_items) - 1),
+                                selected_candidate + 1,
+                            )
+                            selected_study_run, dirty = 0, True
+                        elif key in {"k", "\x1b[A"}:
+                            selected_candidate = max(0, selected_candidate - 1)
+                            selected_study_run, dirty = 0, True
+                        elif key in {"\r", "\n", "\x1b[C"} and candidate_items:
+                            mode, selected_study_run, message, dirty = (
+                                "study-candidate",
+                                0,
+                                "",
+                                True,
+                            )
+                        elif key in {"a", "A"}:
+                            mode, detail_selected, message, dirty = "work", 0, "", True
+                        elif key == "r":
+                            if not poller.running:
+                                poller.start()
+                            message, dirty = "Refreshing study state…", True
+                        elif key in {"x", "X"} and items:
+                            selected_work = items[selected]
+                            pending_cancel = (
+                                "work",
+                                str(
+                                    selected_work.get("work_id")
+                                    or _selected_job_id(selected_work)
+                                ),
+                            )
+                            message = (
+                                "Cancel this Work and every active Job/process it owns? Press x "
+                                "again, y or Enter to confirm; n/Esc keeps it running."
+                            )
+                            dirty = True
+                        continue
+                    if mode == "study-candidate":
+                        if key in {"q", "Q", "b", "B", "\x1b", "\x1b[D"}:
+                            mode, message, dirty = "study", "", True
+                        elif key in {"j", "\x1b[B"}:
+                            selected_study_run = min(
+                                max(0, len(study_run_items) - 1),
+                                selected_study_run + 1,
+                            )
+                            dirty = True
+                        elif key in {"k", "\x1b[A"}:
+                            selected_study_run = max(0, selected_study_run - 1)
+                            dirty = True
+                        elif key in {"\r", "\n", "\x1b[C"} and study_run_items:
+                            selected_run = study_run_items[selected_study_run]
+                            study_job = _selected_job_id(items[selected])
+                            study_key = str(selected_run.get("key", ""))
+                            study_detail, study_log_scroll, message = None, 0, ""
+                            mode, dirty = "study-run", True
+                            study_poller = StudyRunProcess(
+                                self.jobs, study_job, study_key
+                            )
+                            study_poller.start()
+                            next_study_refresh = time.monotonic() + self.interval
+                        elif key in {"x", "X"} and items:
+                            selected_work = items[selected]
+                            pending_cancel = (
+                                "work",
+                                str(
+                                    selected_work.get("work_id")
+                                    or _selected_job_id(selected_work)
+                                ),
+                            )
+                            message = (
+                                "Cancel this Work and every active Job/process it owns? Press x "
+                                "again, y or Enter to confirm; n/Esc keeps it running."
+                            )
+                            dirty = True
+                        continue
                     if mode == "work":
                         if key in {"q", "Q", "b", "B", "\x1b", "\x1b[D"}:
                             mode, message, dirty = "overview", "", True
@@ -1126,7 +1617,10 @@ class LiveJobMonitor:
                             next_log_refresh = time.monotonic() + self.interval
                             dirty = True
                         elif key in {"x", "X"} and attempt_items:
-                            pending_cancel = str(attempt_items[detail_selected].get("job_id", ""))
+                            pending_cancel = (
+                                "job",
+                                str(attempt_items[detail_selected].get("job_id", "")),
+                            )
                             message = (
                                 f"Cancel Attempt {detail_selected + 1}? Press x again, y or Enter "
                                 "to confirm; n/Esc keeps it running."
@@ -1167,9 +1661,13 @@ class LiveJobMonitor:
                             next_log_refresh = time.monotonic() + self.interval
                             dirty = True
                         elif key in {"x", "X"} and detail_items:
-                            pending_cancel = str(detail_items[detail_selected]["job_id"])
+                            pending_cancel = (
+                                "job",
+                                str(detail_items[detail_selected]["job_id"]),
+                            )
                             message = (
-                                f"Cancel {pending_cancel}? Press x again, y or Enter to confirm; "
+                                f"Cancel Job {pending_cancel[1]}? Press x again, y or Enter to "
+                                "confirm; "
                                 "n/Esc keeps it running."
                             )
                             dirty = True
@@ -1194,7 +1692,10 @@ class LiveJobMonitor:
                             mode, message, dirty = "cluster", "", True
                         elif items and work_items:
                             detail_selected = 0
-                            mode, message, dirty = "work", "", True
+                            selected_work = items[selected]
+                            mode = "study" if _is_study_work(selected_work) else "work"
+                            selected_candidate = selected_study_run = 0
+                            message, dirty = "", True
                         elif items:
                             return_mode = "overview"
                             log_job = _selected_job_id(items[selected])
@@ -1229,9 +1730,21 @@ class LiveJobMonitor:
                             poller.start()
                         message, dirty = "Refreshing providers in the background…", True
                     elif key in {"x", "X"} and items:
-                        pending_cancel = _selected_job_id(items[selected])
+                        selected_item = items[selected]
+                        pending_cancel = (
+                            (
+                                "work",
+                                str(
+                                    selected_item.get("work_id")
+                                    or _selected_job_id(selected_item)
+                                ),
+                            )
+                            if work_items
+                            else ("job", _selected_job_id(selected_item))
+                        )
                         message = (
-                            f"Cancel {pending_cancel}? Press x again, y or Enter to confirm; "
+                            f"Cancel {pending_cancel[0]} {pending_cancel[1]}? Press x again, y or "
+                            "Enter to confirm; "
                             "n/Esc keeps it running."
                         )
                         dirty = True
@@ -1249,6 +1762,8 @@ class LiveJobMonitor:
             poller.close()
             if log_poller is not None:
                 log_poller.close()
+            if study_poller is not None:
+                study_poller.close()
             if action_poller is not None:
                 action_poller.close()
 

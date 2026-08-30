@@ -257,3 +257,68 @@ def test_detached_supervisor_cancels_the_scientific_child_tree(tmp_path: Path) -
     while psutil.pid_exists(child_pid) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not psutil.pid_exists(child_pid)
+
+
+def test_cancel_stops_multiple_owned_workers_even_when_they_open_new_sessions(
+    tmp_path: Path,
+) -> None:
+    value = scheduler(tmp_path)
+    job_id = "job-012-cancel-owned-sessions"
+    child_pid_file = tmp_path / "children.json"
+    child_code = "import time; time.sleep(60)"
+    code = (
+        "import json,pathlib,subprocess,sys,time; "
+        f"children=[subprocess.Popen([sys.executable,'-c',{child_code!r}],"
+        "start_new_session=True) for _ in range(2)]; "
+        f"pathlib.Path({str(child_pid_file)!r}).write_text(json.dumps([p.pid for p in children])); "
+        "time.sleep(60)"
+    )
+    value.submit(
+        (sys.executable, "-c", code),
+        ResourceRequest(),
+        work_dir=tmp_path,
+        job_id=job_id,
+    )
+    wait_for(value, job_id, {JobState.RUNNING})
+    deadline = time.monotonic() + 5
+    while not child_pid_file.is_file() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    child_pids = json.loads(child_pid_file.read_text(encoding="utf-8"))
+    assert all(psutil.pid_exists(pid) for pid in child_pids)
+
+    value.cancel(job_id)
+    wait_for(value, job_id, {JobState.CANCELLED})
+
+    deadline = time.monotonic() + 5
+    while any(psutil.pid_exists(pid) for pid in child_pids) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not any(psutil.pid_exists(pid) for pid in child_pids)
+    cancellation = value.details(job_id)["cancellation"]
+    assert cancellation["observed_processes"] >= 3
+    assert cancellation["remaining_processes"] == 0
+    value.cancel(job_id)
+    assert value.details(job_id)["cancellation"]["remaining_processes"] == 0
+
+
+def test_supervisor_reaps_owned_workers_left_after_main_process_exits(tmp_path: Path) -> None:
+    value = scheduler(tmp_path)
+    job_id = "job-012-finish-owned-session"
+    child_pid_file = tmp_path / "orphan.pid"
+    child_code = "import time; time.sleep(60)"
+    code = (
+        "import pathlib,subprocess,sys; "
+        f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}],start_new_session=True); "
+        f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid))"
+    )
+    value.submit(
+        (sys.executable, "-c", code),
+        ResourceRequest(),
+        work_dir=tmp_path,
+        job_id=job_id,
+    )
+    assert wait_for(value, job_id, {JobState.SUCCEEDED}) is JobState.SUCCEEDED
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while psutil.pid_exists(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not psutil.pid_exists(child_pid)

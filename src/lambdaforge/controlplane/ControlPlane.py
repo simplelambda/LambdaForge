@@ -32,6 +32,7 @@ from lambdaforge.controlplane.python_runtime import (
     PythonRuntimeRequirements,
 )
 from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
+from lambdaforge.controlplane.StorageService import StorageService
 from lambdaforge.controlplane.TlsTrust import TlsTrust
 from lambdaforge.controlplane.Transport import Transport
 from lambdaforge.execution.ConfigurationResourceResolver import ConfigurationResourceResolver
@@ -95,6 +96,7 @@ class ControlPlane:
         effective_profile = profile
         torch_plan = None
         native_plan: NativeEnvironmentPlan | None = None
+        environment_cleanup: Mapping[str, Any] | None = None
         project = self._project_root(Path(config_path).resolve().parent)
         native_specification = NativeEnvironmentSpecification.discover(project)
         if transport is not None and profile.environment == "managed":
@@ -237,6 +239,22 @@ class ControlPlane:
                 remote_python = prepared.python
                 if runtime is not None:
                     self.runtime_resolver.activate(profile, transport, runtime)
+                if prepared.environment_id not in {None, "existing"}:
+                    notify("cleanup")
+                    try:
+                        environment_cleanup = StorageService(
+                            self.catalog, self.factory, jobs=self.jobs
+                        ).prune_environments(
+                            cluster,
+                            keep=(str(prepared.environment_id),),
+                            apply=True,
+                        )
+                    except Exception as error:
+                        # A collector problem must not invalidate a verified environment or
+                        # prevent scientific work. Preserve it for operator diagnosis instead.
+                        environment_cleanup = {
+                            "warning": f"{type(error).__name__}: {error}"
+                        }
             work_dir = remote_dir
             config = str(PurePosixPath(remote_dir) / "config.yaml")
             if not dry_run:
@@ -295,6 +313,12 @@ class ControlPlane:
                         if reserved_job_id
                         else ""
                     ),
+                    (
+                        "LAMBDAFORGE_STUDY_PATH="
+                        f"{PurePosixPath(str(work_dir)).parent / 'study'}"
+                        if reserved_job_id
+                        else ""
+                    ),
                 )
             )
             environment_assignments = [value for value in environment_assignments if value]
@@ -309,6 +333,9 @@ class ControlPlane:
                 config,
                 run_arguments,
             )
+        gpu_mode = profile.gpu_access.effective_mode(profile.scheduler)
+        if request.gpu_count > 0 and gpu_mode == "command":
+            command = (*profile.gpu_access.command_prefix, *command)
         notify("scheduler")
         handle = self.jobs.submit(
             command,
@@ -327,6 +354,7 @@ class ControlPlane:
                 "pytorch": torch_plan.to_dict() if torch_plan is not None else None,
                 "python_runtime_id": runtime.runtime_id if runtime is not None else None,
                 "native_environment": (native_plan.to_dict() if native_plan is not None else None),
+                "environment_cleanup": environment_cleanup,
             },
             job_id=reserved_job_id,
             group_id=group_id,

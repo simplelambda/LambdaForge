@@ -1,6 +1,6 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.12.0. Spanish is
+This is the low-token source of truth for agents using or modifying LambdaForge 0.13.0. Spanish is
 in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
 then inspect the public signature or implementation being changed. Current tests and code override
 assumptions.
@@ -27,12 +27,12 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Execute | `lf run CONFIG [--on CLUSTER]` |
 | Deliberate new execution | `lf run CONFIG --rerun` |
 | Monitor semantic work | `lf top`; `lf overview --json` |
-| Work operations | `lf show/logs/cancel/retry/delete SELECTOR` |
+| Work operations | `lf show/logs/cancel/retry/delete SELECTOR`; study Run: `show/logs WORK --run KEY` |
 | Low-level jobs | `lf jobs list/show/logs/cancel/retry/delete`; `lf jobs clear [--apply]` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
 | Results | `lf results list/show/compare` |
 | Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
-| Preview cache cleanup | `lf clean [--on CLUSTER]`; add `--apply` after review |
+| Preview safe storage cleanup | `lf clean [--on CLUSTER]`; add `--apply` after review |
 | Scaffold | `lf init DIRECTORY` |
 
 Append `--json` for automation and consume stable fields; use `--debug` only for framework
@@ -95,8 +95,11 @@ code. A `ManagedFile` is path-like but resumable-map state stores only its logic
 `resume_map` must validate those dependencies and selectively rerun an invalid item after cache cleanup. Never
 serialize machine paths or arbitrary pickle as scientific state.
 
-`outputs.file/directory(..., publish_to=PATH)` optionally publishes a verified copy after successful
-finalization and refuses different existing content unless `overwrite=True`. Relative destinations
+`outputs.file/directory(..., publish_to=PATH)` publishes a verified result after successful
+finalization and refuses different existing content unless `overwrite=True`. After the Execution
+record is durable, redundant internal bytes are removed by default; `retain_internal=True` keeps
+both. Failed/interrupted managed `artifacts/` are compacted but logs, result, metrics, provenance
+and checkpoints remain. Never put disposable bulk bytes directly in `run_dir`. Relative destinations
 start at the authored YAML directory. Remotely they require the cluster `project_root` mirror and
 map to the same project-relative directory; otherwise use an explicit absolute remote path. Never
 describe publication as an automatic transfer back to the controller.
@@ -134,8 +137,9 @@ scaling, imputation, PCA, thresholds or stability policy in clusterer defaults.
 
 `print()` and standard Python logging are captured by Job logs. Use `self.log()` for timestamped,
 immediately flushed human narration, `self.progress.update()` for completion and `metrics.log()` for
-scientific numeric evidence. In `lf top`, Enter/right drills from Work to numbered Attempt to logs
-and left backs out; the primary TUI hides long Job IDs. `d` deletes one confirmed terminal
+scientific numeric evidence. In `lf top`, a study drills Work -> Trial candidate -> seed Run ->
+curves/timing/isolated live log; `a` opens its outer scheduler Attempts. Other Works drill directly
+to numbered Attempts/logs and left backs out; the primary TUI hides long Job IDs. `d` deletes one confirmed terminal
 selection and `D` clears confirmed terminal history while preserving active Jobs. Automation uses
 `lf overview --json` (`work.items[].attempt_history` retains Job IDs), ordinary `lf logs` and
 preview-first `lf jobs clear [--apply]` instead of parsing the TUI. Local provider paths belong to
@@ -145,6 +149,11 @@ type/message/phase/result path after any requested tail; request `--verbose` or 
 traceback, or `--json` for structured `failure`/`failures`. Cache fetch retries incomplete HTTP/
 chunked/gzip transfers and transient statuses from clean unpublished temporaries; never add a
 consumer-side retry workaround. Human bootstrap progress is stderr-only and machine JSON is clean.
+Parameter studies are ordinary Works declaring `search` or multiple `seeds`, not a
+training-specific kind. `work.items[].study_expected` is available before execution telemetry;
+`study` becomes non-null
+when the current worker publishes its bounded index. Steps, parallel composition and `self.map()`
+alone remain ordinary Attempt/log Works and must not create study telemetry.
 
 ## YAML composition and studies
 
@@ -152,12 +161,25 @@ consumer-side retry workaround. Human bootstrap progress is stderr-only and mach
 all members. Cross-step outputs reference `step.output` and are invalid when the producer has
 multiple seeds/trials. `seeds` creates separate Runs and does not inject a `seed` argument.
 `search` parameters override normal `with` values and are passed normally to `run()`. The objective
-must name a scalar logged through `self.metrics`; variants with several seeds are ranked by their
-mean, never by the best individual seed.
+must name a scalar logged through `self.metrics`. Objective plus multiple seeds defaults to adaptive
+successive halving; use `strategy: exhaustive` deliberately. Adaptive ranking uses mean plus a
+conservative standard-error bound, allocates `min_seeds` first and promotes only the top
+`1/reduction_factor`. `runs_per_gpu` packs independent spawned Runs inside the fixed outer
+reservation; values >1 require per-Run `resources.gpu_memory`. Repeated objective observations need
+`step=` for early stopping. `LightningRunner` bridges them automatically; custom loops return at a
+safe boundary when `self.stop_requested` is true.
+
+Study telemetry is a bounded read model, not another result store. It references per-Run logs and
+scalar JSONL, never copies checkpoints/outputs, and exposes exact keys under
+`overview --json` → `work.items[].study`. `lf show WORK --run KEY --json` returns parameters,
+down-sampled curves/timing/failure/log; `lf logs WORK --run KEY` isolates output. Lightning scalar
+callback metrics plus epoch/validation time are automatic. Custom trainers log curves with
+`self.metrics.log(name, value, step=epoch)`; use `progress.update` for coarse progress and
+`self.log`/print only for human narration.
 
 Do not confuse `self.map` concurrency inside one Work with a YAML parallel group. A parallel group
-uses isolated spawned Work processes inside the enclosing Job's aggregate fixed allocation;
-seed/search members of each Work definition remain serial.
+uses isolated spawned Work processes inside the enclosing Job's aggregate fixed allocation.
+Exhaustive seed/search is serial; adaptive search owns its allocation and schedules child Runs.
 
 ## Neural component route
 
@@ -190,9 +212,20 @@ and never enter argv, YAML, bundles, state or logs. Managed Python environments 
 user-space and wheel-identified; do not modify system Python, CUDA, drivers or shell startup files.
 CUDA usability requires an actual tensor probe, not `nvidia-smi` alone.
 
+Cluster `gpu_access.mode` is `auto|scheduler|exclusive|shared|command`. Auto selects scheduler for
+SLURM and exclusive cooperative leases for direct hosts. Shared admits external occupancy only when
+the operator explicitly accepts that risk. Command requires an argv `command_prefix` for a site
+claim wrapper; never encode it as shell. Superseded managed environments are pruned only after a
+verified replacement is active and live-Job references are protected.
+
 Direct/SLURM jobs retain durable state, heartbeat, logs, usage, cancellation and identity checks.
 Provider outage is unknown state, not scientific failure. Do not contact a real cluster or run a
 real scientific dataset while testing repository changes.
+Work-level cancel must attempt every active Job in the semantic Work. Direct cancellation must
+terminate and verify the full owned process set, including reparented/new-session workers identified
+by the inherited exact Job marker; normal main-process exit enforces the same cleanup. Job/Attempt
+cancel stays deliberately narrower. Never let consumer environment overrides replace framework
+ownership markers.
 
 ## Modification checklist
 

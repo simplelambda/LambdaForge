@@ -166,6 +166,8 @@ class WorkResult:
     failure: Mapping[str, Any] | None = None
     resumed_from_checkpoint: bool = False
     job_id: str | None = None
+    pruned: bool = False
+    prune_reason: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -205,6 +207,8 @@ class WorkResult:
             "failure": copy.deepcopy(dict(self.failure)) if self.failure is not None else None,
             "resumed_from_checkpoint": self.resumed_from_checkpoint,
             "job_id": self.job_id,
+            "pruned": self.pruned,
+            "prune_reason": self.prune_reason,
         }
 
     def write(self, path: str | Path) -> Path:

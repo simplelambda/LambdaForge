@@ -9,6 +9,50 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+## [0.13.0] - 2026-08-30
+
+### Añadido
+
+- Observabilidad viva y acotada de estudios: `lf top` avanza de Work a Trials de parámetros y Runs
+  de seed con logs aislados autorrefrescados, curvas, resúmenes escalares/de tiempos y fallos.
+  `overview --json`, `show WORK --run CLAVE --json` y `logs WORK --run CLAVE` exponen la misma
+  lectura sin duplicar checkpoints ni outputs pesados; `LightningRunner` emite automáticamente
+  curvas escalares y tiempos de época/validación.
+- Modos de acceso GPU por clúster: reserva del scheduler, lease exclusivo directo, host compartido
+  deliberado y wrapper de claim del centro expresado como argv.
+- `retain_internal=True` para conservar expresamente una segunda copia física publicada,
+  `retention.json` con bytes recuperados y `Work.stop_requested` para loops adaptativos propios;
+  `LightningRunner` aplica automáticamente el mismo contrato.
+
+### Cambiado
+
+- Las búsquedas con objective y varias seeds son adaptativas por defecto: successive halving asigna
+  seeds progresivamente con media/error estándar conservador y early stopping cooperativo por step;
+  `strategy: exhaustive` conserva el estudio completo explícito.
+- `runs_per_gpu` empaqueta procesos de entreno independientes por cada GPU de la reserva externa,
+  exige límite de memoria por Run cuando es mayor que uno y reparte CPU/RAM/storage entre hijos.
+
+### Corregido
+
+- Corregido el cierre de `lf top` al deserializar listas inmutables anidadas del snapshot en segundo
+  plano. La intención de estudio se persiste antes del envío, por lo que un Work con `search` o
+  varias `seeds` abre el panel de estudio durante la preparación en vez de caer en el log
+  del Attempt ordinario.
+- Se deja de tratar como entreno cualquier Work con un fichero de telemetría o varios Runs de
+  workflow. Solo búsquedas/seeds repetidas publican el índice de estudio; preprocesado, composición
+  y Works con map abren coherentemente su log de Attempt normal desde la vista principal.
+- La cancelación de Work pasa a ser jerárquica en vez de afectar solo al Job primario: intenta cada
+  Job activo, el supervisor directo termina y verifica grupo más workers reparentados/con sesión
+  nueva mediante la identidad heredada exacta, y la salida normal recoge hijos supervivientes.
+- Los Jobs terminales ya no acumulan outputs gestionados parciales ni duplicados pesados:
+  Attempts fallidos/interrumpidos compactan artefactos conservando evidencia ligera, y una copia
+  interna publicada solo se elimina tras verificar hash y tamaño del destino; `lf clean` aplica la
+  misma política, con vista previa, a Jobs históricos conservados.
+- Los entornos gestionados sustituidos se podan después de bootstrap y de preparación automática,
+  protegiendo el entorno activo y todas las referencias de Jobs vivos.
+
+## [0.12.1] - 2026-08-25
+
 ### Añadido
 
 - `project_root` remoto configurable mediante `clusters add --project-root` o `clusters set`, con

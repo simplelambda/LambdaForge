@@ -69,6 +69,14 @@ class SeedWork(lf.Work):
         return {"seed": self.seed, "score": score}
 
 
+class AdaptiveScoreWork(lf.Work):
+    """Deterministic objective fixture for adaptive seed allocation tests."""
+
+    def run(self, quality: float = 0.0) -> dict[str, float]:
+        self.metrics.log("score", quality, step=1)
+        return {"score": quality}
+
+
 class ResumeWork(lf.Work):
     def run(self) -> dict[str, bool]:
         if not self.resuming:
@@ -151,12 +159,19 @@ class ManagedInfrastructureWork(lf.Work):
 
 
 class PublishedOutputWork(lf.Work):
-    def run(self, destination: str, value: str = "published", overwrite: bool = False) -> None:
+    def run(
+        self,
+        destination: str,
+        value: str = "published",
+        overwrite: bool = False,
+        retain_internal: bool = False,
+    ) -> None:
         report = self.outputs.file(
             "report",
             filename="report.txt",
             publish_to=destination,
             overwrite=overwrite,
+            retain_internal=retain_internal,
         )
         report.write_text(value)
 

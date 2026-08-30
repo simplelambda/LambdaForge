@@ -6,6 +6,17 @@ LambdaForge es un runtime gestionado para investigación científica reproducibl
 escribe Python normal en una clase `lambdaforge.Work`; el framework se ocupa de ejecución local o
 remota, recursos, reintentos, métricas, artefactos, datasets, procedencia, resultados y limpieza.
 
+## Índice
+
+1. [Instalación](#instalación)
+2. [Primer Work](#primer-work)
+3. [Servicios y operación](#servicios-y-operación)
+4. [Infraestructura científica gestionada](#infraestructura-científica-gestionada)
+5. [Clustering](#clustering)
+6. [Modelos neuronales reutilizables](#modelos-neuronales-reutilizables)
+7. [Composición y experimentos adaptativos](#composición-y-experimentos-adaptativos)
+8. [Observación y operación](#observación-y-operación)
+
 ## Instalación
 
 El proyecto científico y LambdaForge son paquetes independientes instalados en el entorno del
@@ -14,7 +25,7 @@ proyecto:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.12.0
+python -m pip install lambdaforge==0.13.0
 python -m pip install -e .
 python -m pip check
 ```
@@ -135,7 +146,8 @@ Hay tres almacenamientos con responsabilidades diferentes:
   mismo Run;
 - `self.outputs.file/directory(...)` declara resultados científicos durables, que se verifican,
   hashean y registran automáticamente cuando `run()` termina correctamente; `publish_to=...`
-  publica además una copia explícita fuera del almacenamiento gestionado.
+  publica en una ruta del investigador y elimina por defecto los bytes internos redundantes después
+  de registrar toda la Execution. `retain_internal=True` conserva deliberadamente ambas copias.
 
 El uso normal no necesita crear directorios, nombres `.part`, locks, `fsync` ni llamar después a
 `outputs.artifact`:
@@ -199,9 +211,14 @@ fichero referenciado, solo se recalcula ese elemento.
 `publish_to` relativo parte del directorio del YAML original. Con el `project_root` anterior,
 `publish_to="../data/informe.json"` publica en el directorio equivalente del proyecto remoto, no en
 una ruta interna con hash del Job. Sin `project_root`, una publicación relativa remota se rechaza y
-debe usarse una ruta remota absoluta. La copia solo aparece tras un `run()` correcto, es atómica y
-rechaza contenido distinto existente salvo `overwrite=True`. LambdaForge no confunde una ruta
-remota con una local ni transfiere árboles grandes implícitamente al controlador.
+debe usarse una ruta remota absoluta. La publicación solo aparece tras un `run()` correcto, es
+atómica y rechaza contenido distinto existente salvo `overwrite=True`. El resultado conserva
+nombre, hash, tamaño y ruta publicada, pero la copia interna se compacta únicamente tras volver a
+verificar que el destino coincide. Un Attempt fallido o interrumpido elimina `artifacts/` parciales
+y conserva logs, métricas, procedencia, checkpoints y fallo. Un output correcto sin `publish_to`
+se conserva internamente porque es su única copia; las escrituras directas mediante el escape
+avanzado `run_dir` no se adivinan ni borran. LambdaForge no confunde una ruta remota con una local
+ni transfiere árboles grandes implícitamente al controlador.
 
 Para programas científicos externos:
 
@@ -223,7 +240,7 @@ produce un error claro. La ruta y la versión consultada se registran una sola v
 ## Clustering
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.12.0"
+python -m pip install "lambdaforge[clustering]==0.13.0"
 ```
 
 ```python
@@ -260,10 +277,91 @@ y SIREN. Losses, métricas, activaciones, normalizaciones, pooling, distancias, 
 incertidumbre viven en los namespaces correspondientes. El manual contiene el mapa completo. No se
 añade una clase vaga `GNN`: topología, agregación y equivariancia son decisiones científicas.
 
+## Composición y experimentos adaptativos
+
 `steps` expresa una secuencia y `{parallel: [...]}` un grupo paralelo aislado por procesos. `seeds`
 crea Runs independientes; `search` expande variantes y `objective` selecciona la métrica escalar
-exacta registrada por el Work, promediándola entre las seeds de cada variante. Los recursos YAML
-son la reserva absoluta.
+exacta registrada por el Work. Con objective y varias seeds, la estrategia por defecto es halving
+adaptativo: primero asigna `min_seeds` a cada candidato, promociona solo la fracción prometedora y
+ordena mediante media y error estándar conservador, nunca por la seed más afortunada. Usa
+`strategy: exhaustive` cuando necesites todas las parejas variante/seed.
+
+```yaml
+name: entreno-adaptativo
+run: mi_proyecto.Training
+seeds: [4, 7, 32, 54, 65, 94, 109, 124]
+search:
+  strategy: adaptive
+  trials: 40
+  min_seeds: 1
+  reduction_factor: 2
+  runs_per_gpu: 4
+  early_stopping: {enabled: true, min_step: 5}
+  learning_rate: {range: [0.00001, 0.003], scale: log}
+  hidden_dim: {values: [64, 128, 256]}
+objective: {metric: val_auprc, mode: max}
+resources:
+  gpu: 2
+  gpu_memory: 16GiB  # límite por Run independiente
+  cpu: 16            # reserva total repartida entre Runs activos
+  memory: 32GiB      # reserva total repartida entre Runs activos
+```
+
+El ejemplo permite ocho entrenos simultáneos: cuatro en cada una de dos GPUs. Seis GPUs con
+`runs_per_gpu: 2` permiten doce, y `runs_per_gpu: 1` da aislamiento uno-a-uno. Empaquetar más de uno
+exige `gpu_memory`; LambdaForge comprueba `runs_per_gpu × gpu_memory` contra memoria actualmente
+libre antes de lanzar hijos. En CPU puede limitarse con `max_parallel`.
+`self.metrics.log("val_auprc", valor, step=epoch)` permite parar Runs poco prometedores;
+`LightningRunner` enlaza automáticamente la métrica de validación y la petición de parada. Un loop
+propio debe registrar `step=` y retornar en un checkpoint seguro al detectar `self.stop_requested`.
+Con una métrica solo final se adaptan seeds, pero no puede pararse el entreno actual.
+
+No es necesario leer un único stream mezclado cuando hay entrenos concurrentes. Un estudio no es
+un tipo especial de Work: cualquier Work normal con `search` o varias `seeds` queda marcado
+durante la validación local, por lo que `lf top` abre su vista de estudio incluso mientras continúa
+la preparación remota. Permite avanzar como `Work → Trial (combinación de parámetros) → Run de seed → panel
+vivo`. La pantalla de Trial distingue combinaciones pendientes, activas, promocionadas, eliminadas
+o terminadas. Cada Run muestra solo sus parámetros y log, los actualiza automáticamente y dibuja
+curvas acotadas junto con las últimas métricas, tiempo de época y tiempo de validación.
+`LightningRunner` publica automáticamente sus métricas escalares de callback y esos tiempos. Un
+loop propio usa la API genérica:
+
+Un Work de preprocesado, un workflow con varios pasos o un Work que usa `self.map()` sigue siendo
+ordinario salvo que su YAML declare realmente una búsqueda de parámetros o varias seeds.
+Enter/derecha abre por tanto su Attempt numerado y el log combinado normal. No hay un “tipo de
+entreno” manual que pueda quedar desincronizado.
+
+```python
+for epoch in range(epochs):
+    train_loss, val_score = train_one_epoch(epoch)
+    self.metrics.log("train_loss", train_loss, step=epoch + 1)
+    self.metrics.log("val_auprc", val_score, step=epoch + 1)
+    self.progress.update(epoch + 1, epochs, message="entrenando")
+    self.log(f"época {epoch + 1} completada")  # narración humana opcional
+```
+
+`print`, el logging de Python y `self.log()` siguen siendo evidencia local a cada proceso, por lo
+que el panel no mezcla las líneas de las demás seeds. Las mismas observaciones están disponibles
+para automatización mediante `lf overview --json`, `lf show WORK --json`,
+`lf show WORK --run trial-00001-seed-4 --json` y
+`lf logs WORK --run trial-00001-seed-4 --tail 300`. El índice vivo conserva solo estado compacto y
+JSONL escalar; referencia los logs/resultados existentes y reduce las curvas al leerlas, sin
+duplicar checkpoints, modelos ni outputs pesados.
+
+El acceso físico a GPU pertenece al perfil del clúster. `gpu_access.mode=auto` usa SLURM en un
+clúster SLURM y leases exclusivos conservadores en hosts directos. Para un host deliberadamente
+compartido o un centro con comando de claim:
+
+```bash
+lf clusters set gpu-libre gpu_access.mode shared
+lf clusters set gpu-claim gpu_access '{mode: command, command_prefix: [gpu, run, --]}'
+```
+
+`shared` admite ocupación externa pero coordina Jobs de LambdaForge entre sí; no equivale a una
+reserva dura y la ocupación puede cambiar después del preflight. El prefijo `command` es argv, no
+un fragmento de shell. Los recursos YAML siguen siendo la reserva externa absoluta.
+
+## Observación y operación
 
 ```bash
 lf top
@@ -277,13 +375,15 @@ lf jobs clear               # vista previa del historial terminal
 lf jobs clear --apply
 lf datasets list
 lf results list
-lf clean                    # vista previa de caché reconstruible
+lf clean                    # vista previa de limpieza segura
 ```
 
 En `lf top`, arriba/abajo recorren clústeres y Works como una sola lista sin mostrar IDs operativos
-largos en la ruta principal. Enter o derecha avanza de Work a `Attempt 1`, `Attempt 2`, etc. y de un
-Attempt a sus logs; el detalle de clúster usa las mismas etiquetas y la izquierda vuelve. El log
-abierto se actualiza automáticamente, sigue el final por defecto y conserva el scroll manual.
+largos en la ruta principal. Enter o derecha entra en Trials, Runs de seed, curvas y log vivo
+aislado cuando el Work es un estudio. Un Work normal avanza a `Attempt 1`, `Attempt 2`, etc. y a su
+log completo; `a` abre esos Attempts externos desde un estudio. El detalle de clúster usa las mismas
+etiquetas y la izquierda vuelve. El log abierto se actualiza automáticamente, sigue el final por
+defecto y conserva el scroll manual.
 Los fallos añaden la excepción científica estructurada aunque `--tail` haya recortado las líneas;
 `--verbose`/`--debug` incluye traceback y `--json` devuelve el fallo y ruta exacta. El bootstrap
 humano muestra fases y latidos por stderr sin contaminar JSON. Los IDs siguen disponibles en
@@ -291,6 +391,22 @@ humano muestra fases y latidos por stderr sin contaminar JSON. Los IDs siguen di
 seleccionado tras confirmación y `D` limpia todo el historial terminal, conservando siempre los Jobs
 activos. Se eliminan únicamente sus workspaces y registros propios; datasets, caches y entornos
 compartidos se preservan.
+
+`lf cancel WORK` y `x` sobre un Work son cancelación semántica: se contacta cada Job activo agrupado
+en ese Work, y cada supervisor directo detiene tanto su grupo de procesos verificado como procesos
+reparentados o con sesión propia que conserven la identidad única del Job. Solo termina con éxito
+cuando no queda ninguno. Cancelar un Attempt seleccionado o `lf jobs cancel JOB` mantiene el
+alcance más estrecho de bajo nivel. En SLURM se delega la asignación completa al comando de
+cancelación configurado. Repetir `lf cancel WORK` también reconcilia Jobs directos que ya figuren
+como cancelados, limpiando con seguridad huérfanos dejados por versiones anteriores.
+
+`lf clean` también presenta cache reconstruible y artefactos gestionados parciales o duplicados de
+Attempts terminales que pueden eliminarse con prueba exacta. Nunca incluye un Job activo, un output
+correcto no publicado, resultados, métricas, checkpoints ni datasets.
+
+Los entornos gestionados obsoletos se eliminan automáticamente tras activar un reemplazo verificado,
+salvo los referenciados por Jobs vivos. Así se conserva la inmutabilidad sin acumular un prefijo de
+varios GB por cada identidad histórica.
 
 La creación de datasets se realiza con `self.outputs.dataset(...)`; `lf datasets` inspecciona,
 verifica, materializa o elimina versiones inmutables. La guía completa de YAML, estudios, clústeres,

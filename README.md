@@ -8,6 +8,17 @@ SSH, or through SLURM. It records inputs, code, parameters, resources, metrics, 
 datasets, attempts, logs and environment provenance without putting infrastructure in scientific
 code.
 
+## Contents
+
+1. [Install](#install)
+2. [First Work](#first-work)
+3. [Runtime services](#runtime-services)
+4. [Managed scientific infrastructure](#managed-scientific-infrastructure)
+5. [Clustering](#clustering)
+6. [Reusable neural models](#reusable-neural-models)
+7. [Composition and adaptive experiments](#composition-and-adaptive-experiments)
+8. [Observe and operate](#observe-and-operate)
+
 ## Install
 
 Use a virtual environment owned by the research project. Install a release wheel in reproducible
@@ -16,7 +27,7 @@ projects, or an editable checkout while developing LambdaForge:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.12.0
+python -m pip install lambdaforge==0.13.0
 python -m pip install -e .
 python -m pip check
 lf --version
@@ -140,8 +151,10 @@ services are `self.outputs`, `self.metrics`, `self.checkpoints`, `self.cache`, `
 
 - `self.outputs.value(name, value)` stores small JSON evidence.
 - `self.outputs.file/directory(...)` allocates, verifies, hashes and automatically registers durable
-  artifacts. `publish_to=...` optionally copies the verified result to a researcher-owned path;
-  `artifact(...)` remains an advanced importer for an existing path.
+  artifacts. `publish_to=...` publishes the verified result to a researcher-owned path. Once the
+  whole Execution is safely recorded, redundant internal bytes are removed by default;
+  `retain_internal=True` deliberately keeps both copies. `artifact(...)` remains an advanced
+  importer for an existing path.
 - `self.outputs.dataset(name=..., version=..., members=...)` streams and atomically publishes an
   immutable dataset version.
 - `self.metrics.log(...)` and `log_many(...)` append scalar histories used by results and search
@@ -238,9 +251,15 @@ Relative `publish_to` is resolved from the directory containing the authored YAM
 `project_root` above, `publish_to="../data/report.json"` therefore publishes below the equivalent
 remote project directory instead of an internal Job hash path. Without `project_root`, a remote
 relative publication is rejected; use an explicit absolute remote path. The managed artifact
-remains authoritative; publication happens only after `run()` returns successfully, is atomic per
-destination and refuses existing different content unless `overwrite=True`. LambdaForge never
-pretends a remote path is controller-local or silently transfers large output trees back.
+is registered before compaction; publication happens only after `run()` returns successfully, is
+atomic per destination and refuses existing different content unless `overwrite=True`. The result
+envelope keeps name, hash, size and published path, but the Job-owned duplicate is removed only
+after that external copy is re-verified. Set `retain_internal=True` only when two copies are
+intentional. Failed or interrupted Attempts discard partial managed `artifacts/` while retaining
+logs, metrics, provenance, checkpoints and failure records. Unpublished successful artifacts stay
+internal because they have no other durable copy. Direct writes through the advanced `run_dir`
+escape are not guessed or deleted. LambdaForge never pretends a remote path is controller-local or
+silently transfers large output trees back.
 
 External command boilerplate follows the same rule:
 
@@ -264,7 +283,7 @@ version probes live once in `environment.json`.
 Install the optional mature backend and use the uniform Python contract:
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.12.0"
+python -m pip install "lambdaforge[clustering]==0.13.0"
 ```
 
 ```python
@@ -307,7 +326,7 @@ matching `lambdaforge.nn` namespaces. The manual gives the family/import map; La
 add a vague generic `GNN` alias because graph topology, aggregation and equivariance are scientific
 choices.
 
-## Composition and experiments
+## Composition and adaptive experiments
 
 YAML supports a sequence plus explicit parallel groups. The next level waits for the complete prior
 level. Each member of a parallel group uses an isolated spawned process inside the enclosing Job;
@@ -334,8 +353,91 @@ steps:
 
 `seeds: [7, 17, 27]` creates independent Runs and exposes each value as `self.seed`. `search`
 expands finite values or reproducible numeric ranges; `objective: {metric: val_score, mode: max}`
-ranks the exact metric logged by the Work, averaging all seeds of the same variant. Resource fields
-in YAML are the scheduler request, not capacity hints.
+ranks the exact metric logged by the Work. With an objective and several seeds, the default strategy
+is adaptive successive halving: every candidate first receives `min_seeds`, only the most promising
+fraction receives more seeds, and ranking uses a conservative mean/standard-error score instead of
+the luckiest seed. Use `strategy: exhaustive` when every variant/seed pair is required.
+
+One scheduler Job owns the fixed resource reservation. Adaptive Runs are independent spawned
+processes inside it. `resources.gpu` is the number of GPUs reserved for the whole study and
+`runs_per_gpu` is the explicit packing factor:
+
+```yaml
+name: adaptive-training
+run: my_project.Training
+seeds: [4, 7, 32, 54, 65, 94, 109, 124]
+search:
+  strategy: adaptive
+  trials: 40
+  min_seeds: 1
+  reduction_factor: 2
+  runs_per_gpu: 4
+  early_stopping: {enabled: true, min_step: 5}
+  learning_rate: {range: [0.00001, 0.003], scale: log}
+  hidden_dim: {values: [64, 128, 256]}
+objective: {metric: val_auprc, mode: max}
+resources:
+  gpu: 2
+  gpu_memory: 16GiB  # bound for each independent Run
+  cpu: 16            # total reservation, divided among active Runs
+  memory: 32GiB      # total reservation, divided among active Runs
+```
+
+This permits at most eight simultaneous trainings, four on each of two GPUs. Six GPUs with
+`runs_per_gpu: 2` permit twelve; `runs_per_gpu: 1` gives one-Run-per-GPU isolation. Packing above
+one requires `gpu_memory`; LambdaForge checks `runs_per_gpu × gpu_memory` against currently free
+memory before launching children. CPU-only adaptive studies can bound concurrency with
+`max_parallel`. Repeated `self.metrics.log("val_auprc", value, step=epoch)` observations enable
+in-training pruning; `LightningRunner` bridges its validation metric and stop request automatically.
+A custom loop must log the objective with `step=` and return at a safe checkpoint boundary when
+`self.stop_requested` becomes true. With only a final metric, seed allocation remains adaptive but
+the current training cannot stop early.
+
+Concurrent training does not require reading one interleaved Job stream. A study is not a special
+Work type: any normal Work declaring `search` or multiple `seeds` is marked as a study during local
+validation, so `lf top` exposes its study screen even while remote preparation is still running.
+It drills down as `Work → Trial (parameter combination) → Seed Run → live dashboard`. The Trial
+screen shows which combinations are pending, active, promoted, eliminated or complete. The Run
+screen isolates that process's parameters and log, follows it automatically, and renders bounded
+learning curves plus latest scalar, epoch-time and validation-time observations. `LightningRunner`
+publishes its scalar callback metrics and timing automatically. A custom training loop uses the same
+generic API:
+
+A preprocessing Work, a multi-step workflow or a Work using `self.map()` remains an ordinary Work
+unless its YAML actually declares a parameter search or repeated seeds. Enter/right therefore opens
+its numbered Attempt and normal combined log. There is no manual “training type” to keep in sync.
+
+```python
+for epoch in range(epochs):
+    train_loss, val_score = train_one_epoch(epoch)
+    self.metrics.log("train_loss", train_loss, step=epoch + 1)
+    self.metrics.log("val_auprc", val_score, step=epoch + 1)
+    self.progress.update(epoch + 1, epochs, message="training")
+    self.log(f"epoch {epoch + 1} completed")  # optional human narration
+```
+
+`print`, Python logging and `self.log()` remain process-local evidence; the Run dashboard therefore
+shows only the selected seed even when many children run simultaneously. Automation reads the same
+facts through `lf overview --json`, `lf show WORK --json`,
+`lf show WORK --run trial-00001-seed-4 --json` and
+`lf logs WORK --run trial-00001-seed-4 --tail 300`. The live index stores only compact state and
+scalar JSONL; it references existing Run logs/results and down-samples curves when reading them, so
+it does not duplicate checkpoints, models or large outputs.
+
+GPU admission belongs to the cluster profile, not scientific YAML. `gpu_access.mode=auto` uses
+SLURM allocation on SLURM clusters and conservative exclusive LambdaForge leases on direct hosts.
+Use `shared` only on a deliberately permissive direct host, or `command` with an argv prefix when
+the site requires a claim wrapper:
+
+```bash
+lf clusters set free-gpu gpu_access.mode shared
+lf clusters set claimed-gpu gpu_access '{mode: command, command_prefix: [gpu, run, --]}'
+```
+
+The shared mode admits external occupancy while LambdaForge Jobs still coordinate with each other.
+Because occupancy can change after preflight, `gpu_memory` reduces risk but cannot turn a shared
+site into hard isolation. Resource fields in YAML remain the absolute outer scheduler request, not
+capacity hints.
 
 ## Observe and operate
 
@@ -356,22 +458,33 @@ lf clean --apply
 ```
 
 `lf top` leads with clusters and semantic Works and does not put long operational Job IDs in the
-researcher's primary path. Up/down selects; Enter/right drills from Work to numbered Attempts and
-then complete logs, while cluster detail also uses Work/Attempt labels. Open logs refresh
+researcher's primary path. Up/down selects; Enter/right drills into a study's Trials, seed Runs,
+curves and isolated live log. A non-study Work drills into numbered scheduler Attempts and then its
+complete log; press `a` from a study to inspect those outer Attempts. Open logs refresh
 automatically, follow the end by default and preserve manual scroll. Left returns. Job IDs remain
 available through `lf jobs ...` and in `lf overview --json` for automation and low-level diagnosis.
 Press `d` to permanently delete the selected terminal Work/Job after confirmation; `D` clears all
 terminal history while always preserving active Jobs. Both operations remove exact owned
 workspaces and local history, never published datasets or shared caches/environments. The same
 whole-history operation is machine-accessible through preview-first `lf jobs clear [--apply]`.
+`lf cancel WORK` and `x` on a Work are semantic cancellation: every active scheduler Job grouped
+under that Work is contacted, and each direct supervisor stops the verified process group plus
+reparented/session-owning processes carrying its unique Job identity. Cancellation succeeds only
+after no such process remains. Cancelling one explicitly selected Attempt or `lf jobs cancel JOB`
+keeps the narrower low-level meaning. SLURM cancellation delegates the complete allocation to its
+configured scheduler command. Repeating `lf cancel WORK` also reconciles direct Jobs already marked
+cancelled, which safely cleans orphan workers left by older LambdaForge releases.
 Failed Work logs append the structured scientific exception even when `--tail` removed its original
 stdout lines. `--verbose`/`--debug` includes the persisted traceback and `--json` returns structured
 failure fields plus the exact result path. Human cluster bootstrap prints phases and periodic
 liveness updates to stderr; JSON output remains clean.
 Normal execution reuses a verified successful scientific definition. `retry` creates a new Attempt
 of the same Run, checkpoints make it resumable, and `--rerun` deliberately creates a new Execution.
-Cleanup is preview-first and never treats published datasets, results or checkpoints as
-reconstructible cache.
+Cleanup is preview-first. `lf clean` includes reconstructible cache and hash-verified redundant or
+partial managed artifacts from terminal Attempts, but never published datasets, results,
+checkpoints, active work or an unpublished successful output. Superseded managed environments are removed automatically after a verified
+replacement becomes active, except environments referenced by live Jobs. This preserves immutable
+reuse without accumulating one multi-gigabyte prefix per historical dependency identity.
 
 For clusters, datasets, search, result metadata, cleanup ownership and the complete CLI, read
 [the manual](docs/MANUAL.md) ([Spanish](docs/MANUAL.es.md)). Agent-assisted projects should give

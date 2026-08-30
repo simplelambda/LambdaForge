@@ -117,6 +117,10 @@ class FrozenJsonList(list[Any]):
     def __deepcopy__(self, memo: dict[int, Any]) -> list[Any]:
         return [copy.deepcopy(value, memo) for value in list.__iter__(self)]
 
+    def __reduce__(self) -> tuple[type[FrozenJsonList], tuple[list[Any]]]:
+        """Rebuild through the constructor instead of pickle's mutating list protocol."""
+        return (type(self), (list(self),))
+
     @staticmethod
     def _reject() -> NoReturn:
         raise TypeError("FrozenJsonList is immutable.")

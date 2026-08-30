@@ -97,6 +97,7 @@ class ProcessSupervisor:
         leases: tuple[int, ...] = ()
         cpu_leases: tuple[int, ...] = ()
         process: subprocess.Popen[bytes] | None = None
+        identity: ProcessIdentity | None = None
         try:
             if bool(request.get("stage_source", False)):
                 source = Path(str(request["source_work_dir"])).resolve()
@@ -110,7 +111,21 @@ class ProcessSupervisor:
             resources = cls._required_mapping(request.get("resources", {}), "resources")
             cpu_leases = cls._wait_for_capacity(job_dir, request, supervisor)
             gpu_count = int(resources.get("gpu_count", 0))
-            leases = cls._wait_for_gpus(job_dir, request, supervisor, gpu_count)
+            gpu_access = cls._required_mapping(request.get("gpu_access", {}), "gpu_access")
+            gpu_mode = str(gpu_access.get("mode", "exclusive"))
+            if gpu_mode == "auto":
+                gpu_mode = "exclusive"
+            leases = (
+                ()
+                if gpu_mode == "command"
+                else cls._wait_for_gpus(
+                    job_dir,
+                    request,
+                    supervisor,
+                    gpu_count,
+                    allow_external_use=gpu_mode == "shared",
+                )
+            )
             current = cls._read_json(job_dir / "state.json") or {}
             if current.get("state") == JobState.CANCELLED.value:
                 return 0
@@ -120,6 +135,7 @@ class ProcessSupervisor:
             environment["LAMBDAFORGE_EXECUTION_MODE"] = "worker"
             environment["LAMBDAFORGE_PROGRESS_PATH"] = str(job_dir / "progress.json")
             environment["LAMBDAFORGE_JOB_RESULT_PATH"] = str(job_dir / "result.json")
+            environment["LAMBDAFORGE_STUDY_PATH"] = str(job_dir / "study")
             cache_root = request.get("cache_root")
             if cache_root:
                 environment["LAMBDAFORGE_CACHE_ROOT"] = str(cache_root)
@@ -179,14 +195,37 @@ class ProcessSupervisor:
                 )
             return 1
         finally:
-            if process is not None and process.poll() is None:
-                cls._terminate(
-                    ProcessIdentity.create(process.pid, os.getpgid(process.pid), command, job_id)
-                )
+            # A successful/failed main process may still leave multiprocessing, trainer or
+            # dataloader descendants behind.  Always enforce the Job ownership boundary, not
+            # only while the original parent PID is alive.
+            if identity is not None:
+                try:
+                    cls._terminate(identity)
+                except Exception as error:
+                    cls._update_state(
+                        job_dir,
+                        {
+                            "process_cleanup_warning": (
+                                f"{type(error).__name__}: {error}"
+                            )
+                        },
+                    )
             cls._release_gpus(Path(str(request["lease_root"])), job_id, leases)
             resource_root = request.get("resource_lease_root")
             if resource_root is not None:
                 cls._release_capacity(Path(str(resource_root)), job_id)
+            storage = request.get("storage")
+            if isinstance(storage, Mapping):
+                try:
+                    from lambdaforge.controlplane.StorageOperations import StorageOperations
+
+                    StorageOperations.compact_job(storage, job_id, apply=True)
+                except Exception as error:
+                    # Retention must never replace the authoritative scientific exit state.
+                    cls._update_state(
+                        job_dir,
+                        {"retention_warning": f"{type(error).__name__}: {error}"},
+                    )
 
     @classmethod
     def control(cls, operation: str, job_dir: str | Path) -> dict[str, Any]:
@@ -195,7 +234,10 @@ class ProcessSupervisor:
         state = cls._required_mapping(cls._read_json(directory / "state.json"), "state")
         job_state = JobState(str(state["state"]))
         if operation == "cancel":
-            if job_state.terminal:
+            # Re-run cancellation for an already-cancelled direct Job.  Older versions could
+            # persist CANCELLED after signalling only the primary process, so idempotent control
+            # must converge any surviving owned workers after an upgrade.
+            if job_state.terminal and job_state is not JobState.CANCELLED:
                 return dict(state)
             cls._update_state(
                 directory,
@@ -207,7 +249,15 @@ class ProcessSupervisor:
             )
             identity = state.get("process_identity")
             if isinstance(identity, Mapping):
-                cls._terminate(ProcessIdentity.from_mapping(identity))
+                outcome = cls._terminate(ProcessIdentity.from_mapping(identity))
+                cls._update_state(
+                    directory,
+                    {
+                        "updated_at_utc": cls._now(),
+                        "message": "Cancellation completed; owned processes were stopped.",
+                        "cancellation": outcome,
+                    },
+                )
             return cls._read_json(directory / "state.json") or {}
         if operation not in {"pause", "resume"}:
             raise ValueError(f"Unknown process control operation: {operation}.")
@@ -399,6 +449,8 @@ class ProcessSupervisor:
         request: Mapping[str, Any],
         supervisor: ProcessIdentity,
         count: int,
+        *,
+        allow_external_use: bool = False,
     ) -> tuple[int, ...]:
         if count <= 0:
             return ()
@@ -407,7 +459,9 @@ class ProcessSupervisor:
             state = cls._read_json(job_dir / "state.json") or {}
             if state.get("state") == JobState.CANCELLED.value:
                 return ()
-            allocated = cls._acquire_gpus(lease_root, supervisor, count)
+            allocated = cls._acquire_gpus(
+                lease_root, supervisor, count, allow_external_use=allow_external_use
+            )
             if allocated is not None:
                 return allocated
             cls._update_state(
@@ -525,7 +579,12 @@ class ProcessSupervisor:
 
     @classmethod
     def _acquire_gpus(
-        cls, root: Path, supervisor: ProcessIdentity, count: int
+        cls,
+        root: Path,
+        supervisor: ProcessIdentity,
+        count: int,
+        *,
+        allow_external_use: bool = False,
     ) -> tuple[int, ...] | None:
         root.mkdir(parents=True, exist_ok=True)
         with CrossProcessFileLock(
@@ -539,7 +598,7 @@ class ProcessSupervisor:
                 raise RuntimeError(
                     f"Requested {count} GPUs but only {len(gpu_indices)} are visible."
                 )
-            occupied = cls._externally_occupied_gpus()
+            occupied = set() if allow_external_use else cls._externally_occupied_gpus()
             available = []
             for index in gpu_indices:
                 path = root / f"gpu-{index}.json"
@@ -627,26 +686,79 @@ class ProcessSupervisor:
         }
 
     @classmethod
-    def _terminate(cls, identity: ProcessIdentity, grace_seconds: float = 5.0) -> None:
-        if not identity.matches():
-            return
-        ProcessGuard().terminate_process_tree(
-            identity.pid, grace_seconds=grace_seconds, include_parent=False
-        )
-        try:
-            os.killpg(identity.process_group, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        deadline = time.monotonic() + grace_seconds
-        while time.monotonic() < deadline:
-            if not identity.matches():
-                return
-            time.sleep(0.05)
-        if identity.matches():
+    def _terminate(
+        cls, identity: ProcessIdentity, grace_seconds: float = 5.0
+    ) -> dict[str, Any]:
+        """Stop every observable process owned by one Job and verify convergence.
+
+        Process-group signalling handles ordinary descendants atomically.  The inherited,
+        collision-resistant Job marker additionally finds workers that reparented themselves or
+        opened another session.  PID identity is still checked before the recorded primary group
+        is signalled, so an old state file can never target a reused unrelated PID.
+        """
+        primary_matches = identity.matches()
+        owned = cls._job_processes(identity.job_id)
+        initial_pids = {process.pid for process in owned}
+        if primary_matches:
+            initial_pids.add(identity.pid)
             try:
-                os.killpg(identity.process_group, signal.SIGKILL)
+                os.killpg(identity.process_group, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+        ProcessGuard().terminate_process_trees(
+            tuple(sorted(initial_pids)),
+            grace_seconds=grace_seconds,
+            include_parents=True,
+        )
+
+        # Close races where a worker spawned another child while termination began.  Only exact
+        # processes still carrying this Job's marker are eligible for the forced pass.
+        remaining = cls._job_processes(identity.job_id)
+        for process in remaining:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        if remaining:
+            try:
+                import psutil
+
+                psutil.wait_procs(remaining, timeout=1.0)
+            except Exception:
+                pass
+        survivors = cls._job_processes(identity.job_id)
+        if survivors:
+            raise RuntimeError(
+                "Cancellation could not stop every process owned by Job "
+                f"{identity.job_id}: {[process.pid for process in survivors]}."
+            )
+        return {
+            "requested_at_utc": cls._now(),
+            "observed_processes": len(initial_pids),
+            "forced_processes": len(remaining),
+            "remaining_processes": 0,
+        }
+
+    @staticmethod
+    def _job_processes(job_id: str) -> list[Any]:
+        """Find same-user processes carrying one exact inherited Job marker."""
+        try:
+            import psutil
+        except Exception:
+            return []
+        current = os.getpid()
+        processes: list[Any] = []
+        for process in psutil.process_iter(("pid", "status")):
+            if process.pid == current:
+                continue
+            try:
+                if process.status() == psutil.STATUS_ZOMBIE:
+                    continue
+                if process.environ().get("LAMBDAFORGE_JOB_ID") == job_id:
+                    processes.append(process)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                continue
+        return processes
 
     @classmethod
     def _update_state(cls, job_dir: Path, changes: Mapping[str, Any]) -> None:

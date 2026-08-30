@@ -90,6 +90,59 @@ def test_research_work_exposes_numbered_attempt_history_for_machine_clients() ->
     assert work["attempt_history"][1]["job_id"] == "job-2"
 
 
+def test_research_work_ignores_legacy_single_run_telemetry_for_normal_work() -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    normal = JobRecord(
+        "job-normal",
+        "local",
+        "local",
+        "provider-normal",
+        JobState.RUNNING,
+        ("python", "work.py"),
+        "/tmp/work",
+        {},
+        now,
+        now,
+        metadata={
+            "name": "preprocessing",
+            "scientific_identity": "sha256:normal",
+            "study_expected": False,
+            "remote_state": {
+                "study": {
+                    "study_telemetry_version": 1,
+                    "planned_runs": 1,
+                    "candidates": [{"trial": 1, "runs": [{"seed": None}]}],
+                }
+            },
+        },
+        job_type="work",
+    )
+    legacy_study = normal.with_updates(
+        job_id="job-study",
+        scheduler_id="provider-study",
+        metadata={
+            "name": "training",
+            "scientific_identity": "sha256:study",
+            "remote_state": {
+                "study": {
+                    "study_telemetry_version": 1,
+                    "planned_runs": 2,
+                    "candidates": [
+                        {"trial": 1, "runs": [{"seed": 4}, {"seed": 7}]}
+                    ],
+                }
+            },
+        },
+    )
+
+    works = {work.name: work.to_dict() for work in aggregate_research_work((normal, legacy_study))}
+
+    assert works["preprocessing"]["study_expected"] is False
+    assert works["preprocessing"]["study"] is None
+    assert works["training"]["study_expected"] is True
+    assert works["training"]["study"] is not None
+
+
 def test_work_delete_previews_then_removes_only_exact_owned_job(tmp_path: Path) -> None:
     profile = ClusterProfile(
         "local",

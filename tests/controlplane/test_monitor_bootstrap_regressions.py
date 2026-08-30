@@ -31,6 +31,7 @@ from lambdaforge.controlplane.ManagedEnvironmentProvider import ManagedEnvironme
 from lambdaforge.controlplane.ProjectWheelBuilder import ProjectWheelBuilder
 from lambdaforge.controlplane.StorageOperations import StorageOperations
 from lambdaforge.controlplane.Transport import Transport
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
 class BlockingOverview:
@@ -74,6 +75,40 @@ def test_snapshot_process_returns_completed_machine_data() -> None:
     payload, error = result
     assert error is None
     assert payload is not None and payload["snapshot_version"] == 1
+
+
+def test_snapshot_process_round_trips_nested_immutable_study_lists() -> None:
+    """Regression for multiprocessing rebuilding FrozenJsonList through extend()."""
+
+    class FrozenOverview:
+        @staticmethod
+        def snapshot() -> dict[str, Any]:
+            return {
+                "snapshot_version": 1,
+                "work": {
+                    "items": [
+                        {
+                            "study": FrozenJsonMapping(
+                                {"candidates": [{"trial": 1, "runs": [{"seed": 4}]}]}
+                            )
+                        }
+                    ]
+                },
+            }
+
+    poller = SnapshotProcess(cast(Any, FrozenOverview()))
+    poller.start()
+    deadline = time.monotonic() + 2.0
+    result = None
+    while result is None and time.monotonic() < deadline:
+        result = poller.take()
+        time.sleep(0.01)
+
+    assert result is not None
+    payload, error = result
+    assert error is None
+    assert payload is not None
+    assert payload["work"]["items"][0]["study"]["candidates"][0]["trial"] == 1
 
 
 def test_renderer_scrolls_to_keep_keyboard_selection_visible(
@@ -420,7 +455,7 @@ def test_monitor_renders_confirmation_before_cancelling(
 
     assert result == 0
     assert jobs.cancelled == ["job-1"]
-    assert "Cancel job-1? Press x again, y or Enter to confirm" in output.getvalue()
+    assert "Cancel job job-1? Press x again, y or Enter to confirm" in output.getvalue()
 
 
 def test_right_opens_work_attempt_then_logs_and_left_walks_back(
@@ -531,6 +566,78 @@ def test_right_opens_work_attempt_then_logs_and_left_walks_back(
     assert "LambdaForge log · study · Attempt 1" in rendered
     assert "complete scientific log" in rendered
     assert "LambdaForge advanced jobs" not in rendered
+
+
+def test_declared_study_opens_before_live_telemetry_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "clusters": [],
+        "jobs": {"items": [], "by_state": {"preparing": 1}, "total": 1},
+        "work": {
+            "items": [
+                {
+                    "work_id": "work-study",
+                    "name": "study",
+                    "kind": "work",
+                    "state": "preparing",
+                    "cluster": "remote",
+                    "primary_job_id": "job-study",
+                    "created_at_utc": "",
+                    "study": None,
+                    "study_expected": True,
+                }
+            ]
+        },
+    }
+
+    class ImmediateSnapshots:
+        def __init__(self, overview: Any) -> None:
+            del overview
+            self.pending = False
+
+        @property
+        def running(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.pending = True
+
+        def take(self) -> tuple[dict[str, Any], None] | None:
+            if not self.pending:
+                return None
+            self.pending = False
+            return payload, None
+
+        def close(self) -> None:
+            pass
+
+    class ScriptedTerminal:
+        def __init__(self, stream: Any) -> None:
+            del stream
+            self.keys = iter(("\x1b[C", "\x1b[D", "q"))
+
+        def __enter__(self) -> ScriptedTerminal:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def key(self, timeout: float) -> str:
+            del timeout
+            return next(self.keys)
+
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor.SnapshotProcess", ImmediateSnapshots)
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor._TerminalSession", ScriptedTerminal)
+    output = StringIO()
+
+    result = LiveJobMonitor(
+        cast(Any, object()), cast(Any, object()), interval=1, stream=output
+    ).run()
+
+    assert result == 0
+    assert "LambdaForge study" in output.getvalue()
+    assert "Run telemetry is not available yet" in output.getvalue()
 
 
 def test_work_attempt_log_view_refreshes_without_reopening(

@@ -8,7 +8,7 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class StorageGcPlan:
-    """Describe exact reconstructible cache candidates without hiding application state."""
+    """Describe exact reconstructible or safely redundant storage candidates."""
 
     cluster: str
     candidates: tuple[dict[str, Any], ...]
@@ -30,5 +30,6 @@ class StorageGcPlan:
                 "active job workspaces",
                 "Python runtimes referenced by active jobs or retained environments",
                 "stage cache while a dataset build is active",
+                "logs, metrics, checkpoints and unpublished successful artifacts",
             ],
         }

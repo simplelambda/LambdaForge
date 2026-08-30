@@ -50,6 +50,52 @@ class WorkService:
             )
         return matches[0]
 
+    def cancel(self, selector: str) -> dict[str, Any]:
+        """Cancel every active scheduler Job belonging to one semantic Work."""
+        work = self.show(selector)
+        cancelled: list[dict[str, Any]] = []
+        reconciled: list[dict[str, Any]] = []
+        terminal: list[dict[str, str]] = []
+        failures: list[dict[str, str]] = []
+        for job_id in work.job_ids:
+            try:
+                record = self.jobs.get(job_id)
+                reconcilable = (
+                    record.state.value == "cancelled"
+                    and record.scheduler == "local"
+                    and record.scheduler_id is not None
+                )
+                if record.state.terminal and not reconcilable:
+                    terminal.append({"job_id": job_id, "state": record.state.value})
+                    continue
+                stopped = self.jobs.cancel(job_id)
+                selected = {"job_id": stopped.job_id, "state": stopped.state.value}
+                (reconciled if reconcilable else cancelled).append(selected)
+            except Exception as error:
+                failures.append(
+                    {
+                        "job_id": job_id,
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                )
+        if failures:
+            details = "; ".join(
+                f"{failure['job_id']}: {failure['error']}" for failure in failures
+            )
+            raise RuntimeError(
+                f"Work cancellation was incomplete after attempting every active Job: {details}"
+            )
+        return {
+            "work_id": work.work_id,
+            "name": work.name,
+            "cancelled_jobs": cancelled,
+            "reconciled_cancelled_jobs": reconciled,
+            "already_terminal": terminal,
+            "status": (
+                "cancelled" if cancelled else "reconciled" if reconciled else "already-terminal"
+            ),
+        }
+
     def delete(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
         """Preview or delete only terminal attempts and their exact owned workspaces."""
         try:

@@ -23,11 +23,12 @@ class StorageService:
         catalog: ClusterCatalog | None = None,
         factory: ControlPlaneFactory | None = None,
         *,
+        jobs: JobService | None = None,
         max_parallel: int = 4,
     ) -> None:
         self.catalog = catalog or ClusterCatalog.load()
         self.factory = factory or ControlPlaneFactory()
-        self.jobs = JobService(self.catalog, factory=self.factory)
+        self.jobs = jobs or JobService(self.catalog, factory=self.factory)
         self.max_parallel = max(1, int(max_parallel))
 
     def status(self, cluster: str = "local") -> StorageReport:
@@ -51,11 +52,8 @@ class StorageService:
     def gc(self, cluster: str = "local", *, apply: bool = False) -> StorageGcPlan:
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
-        active = tuple(
-            record
-            for record in self.jobs.list(cluster=cluster, refresh=False)
-            if not record.state.terminal
-        )
+        records = self.jobs.list(cluster=cluster, refresh=False)
+        active = tuple(record for record in records if not record.state.terminal)
         references = {
             "bundles": [record.bundle_id for record in active if record.bundle_id],
             "environments": [
@@ -69,6 +67,11 @@ class StorageService:
                 if record.metadata.get("python_runtime_id")
             ],
             "stage_cache": [],
+            "terminal_jobs": [
+                record.job_id
+                for record in records
+                if record.state.terminal and record.state.value != "planned"
+            ],
         }
         payload = self._invoke(
             cluster, "gc", profile.storage.to_dict(), references=references, apply=apply
@@ -154,6 +157,18 @@ class StorageService:
             apply=apply,
         )
 
+    def compact_job(self, cluster: str, job_id: str, *, apply: bool = False) -> dict[str, Any]:
+        """Compact bulk Attempt data for one terminal Job and preserve its evidence."""
+        profile = self.catalog.get(cluster)
+        assert profile.storage is not None
+        return self._invoke(
+            cluster,
+            "compact-job",
+            profile.storage.to_dict(),
+            references={"job_id": job_id},
+            apply=apply,
+        )
+
     def _invoke(
         self,
         cluster: str,
@@ -176,6 +191,10 @@ class StorageService:
                 return StorageOperations.delete_job(
                     descriptor, str((references or {})["job_id"]), apply=apply
                 )
+            if operation == "compact-job":
+                return StorageOperations.compact_job(
+                    descriptor, str((references or {})["job_id"]), apply=apply
+                )
             return StorageOperations.gc(descriptor, references or {}, apply=apply)
         profile = self.catalog.get(cluster)
         transport = self.factory.transport(profile)
@@ -186,7 +205,7 @@ class StorageService:
             operation,
             json.dumps(descriptor, separators=(",", ":")),
         ]
-        if operation in {"gc", "prune-environments", "delete-job"}:
+        if operation in {"gc", "prune-environments", "delete-job", "compact-job"}:
             arguments.extend(
                 (json.dumps(references or {}, separators=(",", ":")), str(apply).lower())
             )

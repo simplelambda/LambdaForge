@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
+import math
 import multiprocessing
 import os
 import random
 import shutil
+import statistics
 import sys
 import time
 import traceback
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from contextlib import redirect_stderr, redirect_stdout
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, as_completed, wait
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import metadata
@@ -28,6 +30,7 @@ from lambdaforge.data.DatasetRegistry import DatasetRegistry
 from lambdaforge.data.DatasetResolver import DatasetResolver
 from lambdaforge.EnvironmentManifest import EnvironmentManifest
 from lambdaforge.execution.ResourceRequest import ResourceRequest
+from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
 from lambdaforge.work.cache import WorkCache
@@ -43,7 +46,9 @@ from lambdaforge.work.models import (
     atomic_json,
 )
 from lambdaforge.work.paths import WorkPathContext
+from lambdaforge.work.retention import compact_attempt
 from lambdaforge.work.runtime import WorkRuntime
+from lambdaforge.work.study import StudyTelemetry
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +128,11 @@ class WorkRunner:
                             "trial": index,
                             "parameters": {**dict(definition.parameters), **dict(variant)},
                             "resources": definition.resources.to_dict(),
+                            "search": (
+                                definition.search_policy.to_dict()
+                                if definition.search_policy is not None
+                                else {"strategy": "exhaustive"}
+                            ),
                         }
                     )
             levels.append(tuple(planned))
@@ -203,6 +213,7 @@ class WorkRunner:
             prior_execution = self._read_execution(existing)
             if prior_execution.status == "succeeded":
                 self._publish_job_result(prior_execution)
+                self._compact_outcomes(prior_execution.runs)
                 return prior_execution
         execution_dir.mkdir(parents=True, exist_ok=True)
         atomic_json(
@@ -246,6 +257,12 @@ class WorkRunner:
                                 "resources": definition.resources.to_dict(),
                                 "variants": [dict(item) for item in definition.variants],
                                 "objective": dict(definition.objective or {}),
+                                "search_policy": (
+                                    definition.search_policy.to_dict()
+                                    if definition.search_policy is not None
+                                    else None
+                                ),
+                                "study_expected": definition.study_expected,
                             },
                             "parameters": {**parameters, **dict(variant)},
                             "trial_parameters": dict(variant),
@@ -312,7 +329,22 @@ class WorkRunner:
         )
         atomic_json(existing, execution_result.to_dict())
         self._publish_job_result(execution_result)
+        self._compact_outcomes(outcomes)
         return execution_result
+
+    @staticmethod
+    def _compact_outcomes(outcomes: Sequence[WorkResult]) -> None:
+        """Compact only content proven redundant after its result is durable."""
+        for outcome in outcomes:
+            try:
+                compact_attempt(outcome)
+            except Exception as error:
+                print(
+                    f"[retention] Could not compact {outcome.attempt_id}: "
+                    f"{type(error).__name__}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     @staticmethod
     def _publish_job_result(result: WorkExecutionResult) -> None:
@@ -333,6 +365,7 @@ class WorkRunner:
             "planned_runs": config.planned_runs,
             "completed_runs": sum(result.ok for result in outcomes),
             "failed_runs": sum(not result.ok for result in outcomes),
+            "pruned_runs": sum(result.pruned for result in outcomes),
         }
         if not objectives:
             return summary
@@ -340,7 +373,7 @@ class WorkRunner:
         assert objective is not None
         metric, mode = objective["metric"], objective["mode"]
         objective_runs = [result for result in outcomes if result.name == objective_name]
-        successful = [result for result in objective_runs if result.ok]
+        successful = [result for result in objective_runs if result.ok and not result.pruned]
         if any(metric not in result.metrics for result in successful):
             missing = [result.run_id for result in successful if metric not in result.metrics]
             summary["objective"] = dict(objective)
@@ -417,6 +450,11 @@ class WorkRunner:
                         "seeds": definition.seeds,
                         "variants": [dict(variant) for variant in definition.variants],
                         "objective": dict(definition.objective or {}),
+                        "search_policy": (
+                            definition.search_policy.to_dict()
+                            if definition.search_policy is not None
+                            else None
+                        ),
                     }
                     for definition in level.runs
                 ]
@@ -474,18 +512,86 @@ class WorkRunner:
 
 
 def _execute_group(specifications: Sequence[Mapping[str, Any]]) -> tuple[WorkResult, ...]:
-    """Execute one Work definition's seed/trial Runs serially inside its allocation."""
+    """Execute one Work definition serially or through its adaptive controller."""
+    if specifications:
+        raw = specifications[0]["definition"].get("search_policy")
+        if isinstance(raw, Mapping):
+            return _execute_adaptive_group(specifications, AdaptiveSearchPolicy.from_search(raw))
+    definition = specifications[0]["definition"] if specifications else {}
+    telemetry = (
+        StudyTelemetry.from_environment()
+        if definition.get("study_expected") is True
+        else None
+    )
+    if telemetry is not None and specifications:
+        telemetry.initialize(
+            name=str(definition["name"]),
+            execution_id=str(specifications[0]["execution_id"]),
+            strategy="exhaustive",
+            objective=definition.get("objective"),
+            specifications=specifications,
+        )
     outcomes: list[WorkResult] = []
     for specification in specifications:
+        if telemetry is not None:
+            telemetry.schedule((specification,))
         result = _execute_run(specification)
         outcomes.append(result)
+        if telemetry is not None:
+            telemetry.refresh()
         if not result.ok:
             break
+    if telemetry is not None:
+        telemetry.candidate_states(
+            active=tuple(
+                int(value["trial_index"])
+                for value in specifications[: len(outcomes)]
+            ),
+            ranked=tuple(int(value["trial_index"]) for value in specifications),
+            finished=True,
+        )
     return tuple(outcomes)
 
 
 def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
+    """Apply process-local HPO/GPU context and execute one isolated Run."""
+    environment: dict[str, str] = {}
+    gpu_slot = specification.get("gpu_slot")
+    if gpu_slot is not None:
+        environment["CUDA_VISIBLE_DEVICES"] = str(gpu_slot)
+    metrics_path = specification.get("hpo_metrics_path")
+    stop_path = specification.get("hpo_stop_path")
+    objective = specification.get("hpo_objective")
+    if metrics_path is not None:
+        environment["LAMBDAFORGE_HPO_METRICS_PATH"] = str(metrics_path)
+    if stop_path is not None:
+        environment["LAMBDAFORGE_STOP_REQUEST_PATH"] = str(stop_path)
+    if objective is not None:
+        environment["LAMBDAFORGE_HPO_OBJECTIVE"] = str(objective)
+    semaphore = specification.get("gpu_semaphore")
+    if semaphore is not None:
+        semaphore.acquire()
+    try:
+        with _scoped_environment(environment):
+            try:
+                return _execute_run_inner(specification)
+            except BaseException as error:
+                telemetry = (
+                    StudyTelemetry.from_environment()
+                    if specification["definition"].get("study_expected") is True
+                    else None
+                )
+                if telemetry is not None:
+                    telemetry.run_crashed(specification, error)
+                raise
+    finally:
+        if semaphore is not None:
+            semaphore.release()
+
+
+def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
     definition_value = specification["definition"]
+    raw_policy = definition_value.get("search_policy")
     definition = RunDefinition(
         str(definition_value["name"]),
         str(definition_value["work_class"]),
@@ -493,6 +599,12 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
         ResourceRequest.from_mapping(definition_value["resources"]),
         variants=tuple(definition_value["variants"]),
         objective=definition_value.get("objective") or None,
+        search_policy=(
+            AdaptiveSearchPolicy.from_search(raw_policy)
+            if isinstance(raw_policy, Mapping)
+            else None
+        ),
+        study_expected=bool(definition_value.get("study_expected", False)),
     )
     source = Path(specification["source"])
     execution_dir = Path(specification["execution_dir"])
@@ -562,6 +674,19 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
         attempt_id,
         WorkPathContext.load(source),
     )
+    training_metrics_path = run_dir / "training-metrics.jsonl"
+    telemetry = (
+        StudyTelemetry.from_environment()
+        if definition.study_expected
+        else None
+    )
+    if telemetry is not None:
+        telemetry.run_started(
+            specification,
+            run_dir=run_dir,
+            metrics_path=run_dir / "metrics.jsonl",
+            training_metrics_path=training_metrics_path,
+        )
     created = datetime.now(timezone.utc)
     started = datetime.now(timezone.utc)
     started_clock = time.perf_counter()
@@ -569,16 +694,26 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
     primary: Any = None
     failure: Mapping[str, Any] | None = None
     try:
-        environment = EnvironmentManifest.capture(project_root)
-        environment.write(run_dir / "environment.json")
-        target = import_work_class(definition.work_class)
-        instance = target()
-        instance._bind(runtime)
-        _seed(seed)
-        with (run_dir / "work.log").open("a", encoding="utf-8", buffering=1) as log:
-            with redirect_stdout(_Tee(log, sys.stdout)), redirect_stderr(_Tee(log, sys.stderr)):
-                primary = instance.run(**parameters)
+        with _scoped_environment(
+            {
+                "LAMBDAFORGE_TRAINING_METRICS_PATH": str(training_metrics_path),
+                "LAMBDAFORGE_PROGRESS_PATH": str(run_dir / "progress.json"),
+            }
+        ):
+            environment = EnvironmentManifest.capture(project_root)
+            environment.write(run_dir / "environment.json")
+            target = import_work_class(definition.work_class)
+            instance = target()
+            instance._bind(runtime)
+            _seed(seed)
+            with (run_dir / "work.log").open("a", encoding="utf-8", buffering=1) as log:
+                with redirect_stdout(_Tee(log, sys.stdout)), redirect_stderr(
+                    _Tee(log, sys.stderr)
+                ):
+                    primary = instance.run(**parameters)
         json.dumps(primary, allow_nan=False)
+        _adopt_training_metrics(runtime, training_metrics_path)
+        _adopt_hpo_objective(runtime)
         runtime.outputs.finalize()
     except BaseException as error:
         status = "failed"
@@ -643,10 +778,392 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
         failure=failure,
         resumed_from_checkpoint=resuming,
         job_id=os.environ.get("LAMBDAFORGE_JOB_ID"),
+        pruned=bool(
+            specification.get("hpo_stop_path")
+            and Path(str(specification["hpo_stop_path"])).is_file()
+        ),
+        prune_reason=(
+            "adaptive-early-stopping"
+            if specification.get("hpo_stop_path")
+            and Path(str(specification["hpo_stop_path"])).is_file()
+            else None
+        ),
     )
     result.write(run_dir / "result.json")
     atomic_json(run_root / "result.json", result.to_dict())
+    if telemetry is not None:
+        telemetry.run_finished(specification, result)
     return result
+
+
+def _execute_adaptive_group(
+    specifications: Sequence[Mapping[str, Any]], policy: AdaptiveSearchPolicy
+) -> tuple[WorkResult, ...]:
+    """Allocate seeds progressively and run independent candidates concurrently."""
+    if not specifications:
+        return ()
+    definition = specifications[0]["definition"]
+    resources = ResourceRequest.from_mapping(definition["resources"])
+    objective = definition.get("objective") or {}
+    metric = str(objective["metric"])
+    mode = str(objective["mode"])
+    parallelism = _adaptive_parallelism(resources, policy)
+    by_trial: dict[int, list[Mapping[str, Any]]] = {}
+    for specification in specifications:
+        by_trial.setdefault(int(specification["trial_index"]), []).append(specification)
+    active = sorted(by_trial)
+    seed_count = max(len(values) for values in by_trial.values())
+    budget = min(policy.min_seeds, seed_count)
+    completed: dict[int, list[WorkResult]] = {trial: [] for trial in active}
+    outcomes: list[WorkResult] = []
+    telemetry = StudyTelemetry.from_environment()
+    if telemetry is not None:
+        telemetry.initialize(
+            name=str(definition["name"]),
+            execution_id=str(specifications[0]["execution_id"]),
+            strategy="adaptive",
+            objective=objective,
+            specifications=specifications,
+        )
+    print(
+        f"[hpo] adaptive successive halving: candidates={len(active)} seeds={seed_count} "
+        f"parallel={parallelism} runs_per_gpu={policy.runs_per_gpu}",
+        flush=True,
+    )
+    while active:
+        scheduled: list[dict[str, Any]] = []
+        for trial in active:
+            already = len(completed[trial])
+            for specification in by_trial[trial][already:budget]:
+                scheduled.append(dict(specification))
+        if telemetry is not None:
+            telemetry.schedule(scheduled)
+        round_results = _execute_adaptive_round(
+            scheduled,
+            resources=resources,
+            policy=policy,
+            objective_metric=metric,
+            objective_mode=mode,
+            parallelism=parallelism,
+            telemetry=telemetry,
+        )
+        for result in round_results:
+            trial = int((result.trial or {"index": 0})["index"])
+            completed[trial].append(result)
+            outcomes.append(result)
+        ranked: list[tuple[int, float]] = []
+        for trial in active:
+            score = _candidate_score(completed[trial], metric, mode, policy.confidence)
+            if score is not None:
+                ranked.append((trial, score))
+        if not ranked:
+            break
+        ranked.sort(key=lambda item: item[1], reverse=mode == "max")
+        if budget >= seed_count:
+            break
+        keep = max(1, math.ceil(len(ranked) / policy.reduction_factor))
+        active = [trial for trial, _ in ranked[:keep]]
+        if telemetry is not None:
+            telemetry.candidate_states(
+                active=active,
+                ranked=tuple(trial for trial, _ in ranked),
+                finished=False,
+            )
+        previous = budget
+        budget = min(seed_count, max(previous + 1, previous * policy.reduction_factor))
+        print(
+            f"[hpo] promoted {len(active)}/{len(ranked)} candidates from "
+            f"{previous} to {budget} seed(s)",
+            flush=True,
+        )
+    if telemetry is not None:
+        telemetry.candidate_states(
+            active=active,
+            ranked=tuple(completed),
+            finished=True,
+        )
+    return tuple(outcomes)
+
+
+def _execute_adaptive_round(
+    specifications: Sequence[dict[str, Any]],
+    *,
+    resources: ResourceRequest,
+    policy: AdaptiveSearchPolicy,
+    objective_metric: str,
+    objective_mode: str,
+    parallelism: int,
+    telemetry: StudyTelemetry | None = None,
+) -> tuple[WorkResult, ...]:
+    if not specifications:
+        return ()
+    control_root = Path(specifications[0]["execution_dir"]) / "hpo-control"
+    prepared: list[dict[str, Any]] = []
+    per_run = _adaptive_run_resources(resources, parallelism)
+    inherited_visible = tuple(
+        value.strip()
+        for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        if value.strip()
+    )
+    visible_gpus = (
+        inherited_visible
+        if len(inherited_visible) >= resources.gpu_count
+        else tuple(str(index) for index in range(resources.gpu_count))
+    )
+    gpu_capacities = (
+        _gpu_worker_capacities(resources.gpu_count, parallelism, policy.runs_per_gpu)
+        if resources.gpu_count
+        else ()
+    )
+    gpu_schedule = tuple(
+        slot
+        for slot, capacity in zip(visible_gpus, gpu_capacities, strict=True)
+        for _ in range(capacity)
+    )
+    for index, specification in enumerate(specifications):
+        trial = int(specification["trial_index"])
+        seed = specification.get("seed")
+        token = f"trial-{trial:05d}-seed-{seed if seed is not None else 'none'}"
+        metrics = control_root / f"{token}.metrics.jsonl"
+        stop = control_root / f"{token}.stop"
+        metrics.unlink(missing_ok=True)
+        stop.unlink(missing_ok=True)
+        value = dict(specification)
+        definition = dict(value["definition"])
+        definition["resources"] = per_run.to_dict()
+        value.update(
+            {
+                "definition": definition,
+                "gpu_slot": (
+                    gpu_schedule[index % len(gpu_schedule)] if resources.gpu_count else None
+                ),
+                "hpo_metrics_path": metrics,
+                "hpo_stop_path": stop,
+                "hpo_objective": objective_metric,
+            }
+        )
+        prepared.append(value)
+    results: list[WorkResult] = []
+    executors: list[ProcessPoolExecutor] = []
+    try:
+        pending: dict[Any, dict[str, Any]] = {}
+        if resources.gpu_count:
+            for slot, capacity in zip(visible_gpus, gpu_capacities, strict=True):
+                selected = [value for value in prepared if value["gpu_slot"] == slot]
+                if not selected:
+                    continue
+                pool = ProcessPoolExecutor(
+                    max_workers=min(capacity, len(selected)),
+                    mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_initialize_gpu_worker,
+                    initargs=(slot,),
+                )
+                executors.append(pool)
+                pending.update({pool.submit(_execute_run, value): value for value in selected})
+        else:
+            pool = ProcessPoolExecutor(
+                max_workers=min(parallelism, len(prepared)),
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+            executors.append(pool)
+            pending.update({pool.submit(_execute_run, value): value for value in prepared})
+        while pending:
+            done, _ = wait(tuple(pending), timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in done:
+                pending.pop(future)
+                results.append(future.result())
+            if policy.early_stopping and pending:
+                _request_early_stops(
+                    tuple(pending.values()),
+                    metric=objective_metric,
+                    mode=objective_mode,
+                    min_step=policy.early_stopping_min_step,
+                    reduction_factor=policy.reduction_factor,
+                )
+            if telemetry is not None:
+                telemetry.refresh()
+    finally:
+        for pool in executors:
+            pool.shutdown(wait=True, cancel_futures=True)
+        if telemetry is not None:
+            telemetry.refresh()
+    return tuple(results)
+
+
+def _adaptive_parallelism(resources: ResourceRequest, policy: AdaptiveSearchPolicy) -> int:
+    derived = (
+        resources.gpu_count * policy.runs_per_gpu
+        if resources.gpu_count
+        else policy.max_parallel or resources.cpu_cores
+    )
+    maximum = min(int(derived), policy.max_parallel) if policy.max_parallel else int(derived)
+    if resources.gpu_count and resources.gpu_memory_bytes > 0:
+        required = resources.gpu_memory_bytes * policy.runs_per_gpu
+        try:
+            import torch
+
+            available = [
+                torch.cuda.mem_get_info(index)[0]
+                for index in range(resources.gpu_count)
+            ]
+        except Exception as error:
+            raise RuntimeError(
+                "Could not validate packed GPU memory before adaptive HPO."
+            ) from error
+        if len(available) < resources.gpu_count or any(required > free for free in available):
+            raise RuntimeError(
+                f"Unsafe adaptive GPU packing: {policy.runs_per_gpu} × "
+                f"{resources.gpu_memory_bytes} bytes exceeds currently free memory on at least "
+                "one allocated GPU. Reduce runs_per_gpu or gpu_memory."
+            )
+    return max(1, maximum)
+
+
+def _gpu_worker_capacities(
+    gpu_count: int, parallelism: int, runs_per_gpu: int
+) -> tuple[int, ...]:
+    """Distribute a global worker cap without exceeding any per-GPU packing limit."""
+    capacities = [0] * gpu_count
+    for index in range(parallelism):
+        slot = index % gpu_count
+        if capacities[slot] >= runs_per_gpu:
+            raise RuntimeError("Internal adaptive GPU capacity calculation exceeded its bound.")
+        capacities[slot] += 1
+    return tuple(capacities)
+
+
+def _initialize_gpu_worker(slot: str) -> None:
+    """Pin one reusable spawned worker before consumer modules can initialize CUDA."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = slot
+
+
+def _adaptive_run_resources(resources: ResourceRequest, parallelism: int) -> ResourceRequest:
+    cpu = max(1, resources.cpu_cores // parallelism)
+    return ResourceRequest(
+        cpu_cores=cpu,
+        ram_bytes=resources.ram_bytes // parallelism,
+        gpu_count=1 if resources.gpu_count else 0,
+        gpu_memory_bytes=resources.gpu_memory_bytes,
+        runtime_seconds=resources.runtime_seconds,
+        storage_bytes=resources.storage_bytes // parallelism,
+        processes=min(cpu, resources.processes),
+    )
+
+
+def _candidate_score(
+    results: Sequence[WorkResult], metric: str, mode: str, confidence: float
+) -> float | None:
+    values = [
+        float(result.metrics[metric])
+        for result in results
+        if result.ok and not result.pruned and metric in result.metrics
+    ]
+    if not values:
+        return None
+    mean = statistics.fmean(values)
+    if len(values) < 2 or confidence == 0:
+        return mean
+    standard_error = statistics.stdev(values) / math.sqrt(len(values))
+    return (
+        mean - confidence * standard_error
+        if mode == "max"
+        else mean + confidence * standard_error
+    )
+
+
+def _request_early_stops(
+    specifications: Sequence[Mapping[str, Any]],
+    *,
+    metric: str,
+    mode: str,
+    min_step: int,
+    reduction_factor: int,
+) -> None:
+    histories: list[tuple[Mapping[str, Any], tuple[tuple[int, float], ...]]] = []
+    for specification in specifications:
+        history = _objective_history(Path(str(specification["hpo_metrics_path"])), metric)
+        if history and history[-1][0] >= min_step:
+            histories.append((specification, history))
+    if len(histories) < reduction_factor:
+        return
+    common_step = min(history[-1][0] for _, history in histories)
+    observed: list[tuple[Mapping[str, Any], float]] = []
+    for specification, history in histories:
+        comparable = [value for step, value in history if step <= common_step]
+        if comparable:
+            observed.append((specification, comparable[-1]))
+    if len(observed) < reduction_factor:
+        return
+    observed.sort(key=lambda item: item[1], reverse=mode == "max")
+    keep = max(1, math.ceil(len(observed) / reduction_factor))
+    for specification, _ in observed[keep:]:
+        stop = Path(str(specification["hpo_stop_path"]))
+        if not stop.exists():
+            stop.parent.mkdir(parents=True, exist_ok=True)
+            stop.write_text("adaptive objective pruning requested\n", encoding="utf-8")
+
+
+def _objective_history(path: Path, metric: str) -> tuple[tuple[int, float], ...]:
+    if not path.is_file() or path.is_symlink():
+        return ()
+    history: list[tuple[int, float]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            value = json.loads(line)
+            key = f"{value['split']}_{value['name']}" if value.get("split") else str(value["name"])
+            step = value.get("step")
+            if key == metric and isinstance(step, int):
+                history.append((step, float(value["value"])))
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return ()
+    return tuple(sorted(history))
+
+
+def _adopt_hpo_objective(runtime: WorkRuntime) -> None:
+    """Bring a Lightning-bridged objective into the canonical Work metric result."""
+    metric = os.environ.get("LAMBDAFORGE_HPO_OBJECTIVE")
+    path = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
+    if not metric or not path or metric in runtime.metrics.latest:
+        return
+    history = _objective_history(Path(path), metric)
+    if history:
+        step, value = history[-1]
+        runtime.metrics.log(metric, value, step=step)
+
+
+def _adopt_training_metrics(runtime: WorkRuntime, path: Path) -> None:
+    """Copy only final training scalars into the canonical result summary."""
+    if not path.is_file() or path.is_symlink():
+        return
+    latest: dict[str, float] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            value = json.loads(line)
+            metric = value.get("value")
+            if not isinstance(metric, int | float) or isinstance(metric, bool):
+                continue
+            name = str(value["name"])
+            key = f"{value['split']}_{name}" if value.get("split") else name
+            latest[key] = float(metric)
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return
+    for name, value in latest.items():
+        if name not in runtime.metrics.latest:
+            runtime.metrics.log(name, value)
+
+
+@contextmanager
+def _scoped_environment(values: Mapping[str, str]) -> Any:
+    prior = {name: os.environ.get(name) for name in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for name, value in prior.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _resolve_inputs(
@@ -855,6 +1372,8 @@ def _work_result_from_mapping(value: Mapping[str, Any]) -> WorkResult:
         value.get("failure"),
         bool(value.get("resumed_from_checkpoint", False)),
         str(value["job_id"]) if value.get("job_id") is not None else None,
+        bool(value.get("pruned", False)),
+        str(value["prune_reason"]) if value.get("prune_reason") is not None else None,
     )
 
 

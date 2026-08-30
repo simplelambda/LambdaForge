@@ -10,6 +10,52 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-30
+
+### Fixed
+
+- Fixed `lf top` crashing while unpickling nested immutable study lists from its background
+  snapshot process. Parameter-study intent is now persisted before submission, so Works declaring
+  `search` or multiple `seeds` open the study dashboard during preparation instead of falling
+  through to the ordinary Attempt log.
+- Stopped treating every Work with a telemetry file or several workflow Runs as a training study.
+  Only declared search/repeated-seed studies publish the compact study index; preprocessing,
+  composition and mapped Works consistently open their ordinary Attempt log from the main view.
+- Made Work cancellation hierarchical instead of cancelling only its primary Job. Every active Job
+  is attempted, direct supervisors terminate and verify process-group plus reparented/new-session
+  workers by exact inherited Job identity, and normal main-process exit reaps surviving children.
+- Prevented terminal Jobs and repeated failures from retaining unbounded partial managed outputs:
+  failed/interrupted Attempt artifacts are compacted while logs, metrics, results, provenance and
+  checkpoints remain, and verified `publish_to` duplicates are removed after durable publication;
+  `lf clean` previews/applies the same policy to retained historical Jobs.
+- Prevented managed environments from accumulating one multi-gigabyte immutable prefix per
+  historical dependency identity by pruning superseded prefixes after both bootstrap and automatic
+  run preparation, while protecting the active prefix and every live-Job reference.
+
+### Changed
+
+- Made objective searches with multiple seeds adaptive by default. Successive halving allocates
+  seeds progressively using conservative mean/standard-error ranking, supports cooperative
+  step-based early stopping and retains explicit `strategy: exhaustive` for complete studies.
+- Made adaptive study concurrency an explicit outer-allocation policy: `runs_per_gpu` packs
+  independent spawned trainings per reserved GPU, requires a per-Run GPU-memory bound above one,
+  checks current free memory and divides CPU/RAM/storage among active children.
+
+### Added
+
+- Added bounded live study observability: `lf top` drills from a Work into parameter Trials and
+  individual seed Runs with isolated auto-refreshing logs, learning curves, scalar/timing summaries
+  and terminal failures. `overview --json`, `show WORK --run KEY --json` and
+  `logs WORK --run KEY` expose the same read model without duplicating checkpoints or large outputs;
+  `LightningRunner` emits scalar callback curves plus epoch/validation timing automatically.
+- Added per-cluster GPU admission modes for scheduler allocation, conservative direct exclusive
+  leases, deliberately shared direct hosts and argv-only site claim wrappers.
+- Added `retain_internal=True` as the explicit opt-in to preserve a second physical copy of a
+  published managed output, terminal `retention.json` receipts and `Work.stop_requested` for custom
+  adaptive training loops; `LightningRunner` handles the same stop contract automatically.
+
+## [0.12.1] - 2026-08-25
+
 ### Fixed
 
 - Prevented relative remote output publication from disappearing into hashed Job workspaces:
@@ -779,7 +825,11 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/simplelambda/LambdaForge/compare/v0.12.1...v0.13.0
+[0.12.1]: https://github.com/simplelambda/LambdaForge/compare/v0.12.0...v0.12.1
+[0.12.0]: https://github.com/simplelambda/LambdaForge/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/simplelambda/LambdaForge/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/simplelambda/LambdaForge/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/simplelambda/LambdaForge/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/simplelambda/LambdaForge/compare/v0.9.1...v0.9.2

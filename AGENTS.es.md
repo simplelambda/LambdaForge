@@ -1,6 +1,6 @@
 # Guía de LambdaForge para agentes
 
-Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.12.0. Consulta solo la
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.13.0. Consulta solo la
 sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
 
 ## Arquitectura no negociable
@@ -23,11 +23,11 @@ runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada 
 | Ejecutar | `lf run CONFIG [--on CLUSTER]` |
 | Nueva Execution deliberada | `lf run CONFIG --rerun` |
 | Monitorizar | `lf top`; `lf overview --json` |
-| Operar Work | `lf show/logs/cancel/retry/delete SELECTOR` |
+| Operar Work | `lf show/logs/cancel/retry/delete SELECTOR`; Run: `show/logs WORK --run CLAVE` |
 | Jobs de bajo nivel | `lf jobs list/show/logs/cancel/retry/delete/clear`; `lf doctor --on CLUSTER` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
 | Resultados | `lf results list/show/compare` |
-| Limpiar caché | `lf clean`; aplicar con `--apply` |
+| Limpiar almacenamiento seguro | `lf clean`; aplicar con `--apply` |
 
 Usa `--json` para automatización y `--debug` solo para traceback interno. Los envíos locales y
 remotos devuelven control tras crear el registro durable de preparación salvo que se solicite
@@ -53,8 +53,11 @@ checkpoint files y outputs gestionados. `cache.path`, `checkpoints.path`,
 path-like, pero `resume_map` solo serializa key/SHA/tamaño; si `lf clean` elimina o corrompe una
 dependencia, se recalcula únicamente su elemento. Nunca serialices rutas de máquina ni pickle.
 
-`outputs.file/directory(..., publish_to=RUTA)` publica opcionalmente una copia verificada tras el
-éxito y no reemplaza contenido distinto salvo `overwrite=True`. Una ruta relativa parte del
+`outputs.file/directory(..., publish_to=RUTA)` publica un resultado verificado tras el éxito y no
+reemplaza contenido distinto salvo `overwrite=True`. Tras persistir la Execution elimina por
+defecto los bytes internos redundantes; `retain_internal=True` conserva ambos. Un Attempt fallido o
+interrumpido compacta `artifacts/`, pero mantiene logs, resultado, métricas, procedencia y
+checkpoints. No pongas bulk desechable directamente en `run_dir`. Una ruta relativa parte del
 directorio del YAML original. En remoto requiere el mirror `project_root` del clúster y se mapea al
 mismo directorio relativo; sin él se usa una ruta remota absoluta explícita. No lo describas como
 una transferencia automática al controlador.
@@ -83,21 +86,52 @@ los logs y la procedencia se guarda exclusivamente en `environment.json`.
 
 `print()` y el `logging` estándar aparecen en los logs del Job. Usa `self.log()` para narración
 humana con fecha y vaciado inmediato, `self.progress.update()` para avance y `metrics.log()` para
-evidencia numérica. En `lf top`, Enter/derecha avanza de Work a Attempt numerado y logs o abre un
-clúster; izquierda vuelve y la vista principal no muestra IDs largos. `d` borra una selección
+evidencia numérica. En `lf top`, un estudio avanza Work -> Trial candidato -> Run de seed ->
+curvas/tiempos/log vivo aislado y `a` abre sus Attempts externos. Los demás Works avanzan a Attempt
+numerado/logs o abren un clúster; izquierda vuelve y la vista principal no muestra IDs largos. `d` borra una selección
 terminal confirmada y `D` limpia el historial terminal
 confirmado sin tocar Jobs activos. Los agentes usan `lf overview --json`, `lf logs` y
 `lf jobs clear [--apply]`, nunca parsean el TUI; `work.items[].attempt_history` conserva los IDs
 para automatización. Las rutas del proveedor local pertenecen al Job
 durable y no se recalculan desde el directorio actual del observador.
+Los estudios de parámetros son Works ordinarios con `search` o varias `seeds`, no un tipo
+específico de entreno. `work.items[].study_expected` existe antes de la telemetría de ejecución y
+`study` deja de ser nulo cuando el worker actual publica su índice acotado. Los pasos, la
+composición paralela y `self.map()` por sí solos siguen la navegación ordinaria Attempt/log y no
+deben crear telemetría de estudio.
 
-`search` pasa sus variantes como parámetros normales y `objective` debe nombrar una métrica escalar
-registrada. Si una variante tiene varias seeds, se ordena por su media, no por su mejor seed.
+`search` pasa variantes como parámetros normales y `objective` nombra una métrica escalar. Objective
+más varias seeds usa por defecto halving adaptativo; `strategy: exhaustive` es explícito. Se ordena
+por media y cota conservadora de error estándar, asigna primero `min_seeds` y solo promociona la
+fracción `1/reduction_factor`. `runs_per_gpu` empaqueta Runs spawn independientes dentro de una
+reserva fija y valores >1 exigen `resources.gpu_memory` por Run. Para early stopping registra la
+métrica repetida con `step=`; `LightningRunner` lo enlaza, y un loop propio retorna en un límite
+seguro al detectar `self.stop_requested`.
+
+La telemetría de estudio es un modelo de lectura acotado, no otro almacén de resultados. Referencia
+logs y JSONL escalares por Run, nunca copia checkpoints/outputs, y expone claves exactas en
+`overview --json` → `work.items[].study`. `lf show WORK --run CLAVE --json` devuelve parámetros,
+curvas reducidas/tiempos/fallo/log; `lf logs WORK --run CLAVE` aísla la salida. Lightning publica
+automáticamente escalares de callback y tiempos de época/validación. Un trainer propio registra
+curvas con `self.metrics.log(nombre, valor, step=epoch)`; `progress.update` es progreso grueso y
+`self.log`/print solo narración humana.
 
 La jerarquía conceptual es Work → Execution → Run → Attempt → Job. La identidad científica incluye
 clase, código consumidor, parámetros, hashes de ficheros, IDs de contenido de datasets, seed y
 variante; excluye clúster, rutas, IDs operacionales y tiempo. Retry crea otro Attempt; resume usa
 checkpoint compatible; rerun crea otra Execution.
+
+`gpu_access.mode` es `auto|scheduler|exclusive|shared|command`: auto elige scheduler en SLURM y
+leases exclusivos en hosts directos; shared admite ocupación externa solo por decisión explícita;
+command exige `command_prefix` argv del claim del centro, nunca shell. Los entornos gestionados
+obsoletos se podan únicamente tras activar un reemplazo verificado y proteger referencias de Jobs
+vivos.
+
+Cancelar un Work debe intentar todos sus Jobs activos. La cancelación directa termina y verifica el
+conjunto completo de procesos propios, incluidos workers reparentados/con sesión nueva identificados
+por el marcador exacto heredado; la salida normal del proceso principal aplica la misma limpieza.
+Cancelar Job/Attempt conserva alcance estrecho. Nunca permitas que overrides del consumidor
+sustituyan marcadores de ownership del framework.
 
 Antes de añadir un modelo consulta `lambdaforge.nn.models` y la sección 14 del manual. Ya existen
 familias MLP/CNN, grafos/equivariantes, secuencias/Transformer/Conformer, conjuntos, tabular, visión,

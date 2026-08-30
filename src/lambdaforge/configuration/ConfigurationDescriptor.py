@@ -20,6 +20,7 @@ class ConfigurationDescriptor:
     datasets: tuple[str, ...]
     planned_units: int
     materialized: Mapping[str, Any]
+    study_expected: bool = False
     job_type: str = "work"
     unit: str = "runs"
 
@@ -36,6 +37,7 @@ class ConfigurationDescriptor:
             cls.dataset_references(config.raw),
             config.planned_runs,
             config.to_dict(),
+            config.has_parameter_study,
         )
 
     @staticmethod
@@ -74,4 +76,5 @@ class ConfigurationDescriptor:
             "datasets": list(self.datasets),
             "planned_units": self.planned_units,
             "unit": self.unit,
+            "study_expected": self.study_expected,
         }

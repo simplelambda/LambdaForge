@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from lambdaforge.controlplane.ClusterAuthentication import ClusterAuthentication
 from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
+from lambdaforge.controlplane.GpuAccessPolicy import GpuAccessPolicy
 from lambdaforge.controlplane.python_runtime import PythonRuntimePolicy
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
@@ -45,6 +46,7 @@ class ClusterProfile:
     slurm_profile: SlurmProfile | Mapping[str, Any] | None = None
     python_runtime: PythonRuntimePolicy | None = None
     project_root: str | None = None
+    gpu_access: GpuAccessPolicy = field(default_factory=GpuAccessPolicy)
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -108,6 +110,18 @@ class ClusterProfile:
                     "project_root must be a non-root absolute remote path on SSH clusters."
                 )
             object.__setattr__(self, "project_root", project_root.rstrip("/") or "/")
+        gpu_access = self.gpu_access
+        if not isinstance(gpu_access, GpuAccessPolicy):
+            gpu_access = GpuAccessPolicy.from_mapping(gpu_access)
+            object.__setattr__(self, "gpu_access", gpu_access)
+        effective_gpu_access = gpu_access.effective_mode(self.scheduler)
+        if self.scheduler == "slurm" and effective_gpu_access in {"exclusive", "shared"}:
+            raise ValueError(
+                "SLURM clusters must use gpu_access mode 'scheduler' or 'command'; "
+                "direct-process exclusive/shared leases are not scheduler allocations."
+            )
+        if self.scheduler == "local" and effective_gpu_access == "scheduler":
+            raise ValueError("Local process clusters cannot use gpu_access mode 'scheduler'.")
         object.__setattr__(self, "scheduler_options", FrozenJsonMapping(self.scheduler_options))
         auth = self.auth
         if not isinstance(auth, ClusterAuthentication):
@@ -159,6 +173,7 @@ class ClusterProfile:
             pytorch=TorchInstallationPolicy.from_mapping(value.get("pytorch")),
             project_module=(str(value["project_module"]) if value.get("project_module") else None),
             project_root=(str(value["project_root"]) if value.get("project_root") else None),
+            gpu_access=GpuAccessPolicy.from_mapping(value.get("gpu_access")),
             data_environment=(
                 str(value["data_environment"])
                 if value.get("data_environment") is not None
@@ -216,6 +231,7 @@ class ClusterProfile:
             "pytorch": self.pytorch.to_dict(),
             "project_module": self.project_module,
             "project_root": self.project_root,
+            "gpu_access": self.gpu_access.to_dict(),
             "data_environment": self.data_environment or self.name,
             "ssh_options": list(self.ssh_options),
             "command_prefix": list(self.command_prefix),

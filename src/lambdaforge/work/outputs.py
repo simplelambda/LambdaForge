@@ -30,6 +30,7 @@ class _PendingOutput:
     metadata: Mapping[str, Any]
     publish_to: str | Path | None
     overwrite: bool
+    retain_internal: bool
 
 
 class OutputCollection:
@@ -109,9 +110,14 @@ class OutputCollection:
         metadata: Mapping[str, Any] | None = None,
         publish_to: str | Path | None = None,
         overwrite: bool = False,
+        retain_internal: bool = False,
     ) -> ManagedOutput:
-        """Declare a managed file and optionally publish a verified external copy."""
-        self._validate_publication_options(publish_to, overwrite)
+        """Declare a managed file and optionally publish a verified external copy.
+
+        Published outputs default to one durable external copy. Set
+        ``retain_internal=True`` only when a second Job-owned copy is deliberately needed.
+        """
+        self._validate_publication_options(publish_to, overwrite, retain_internal)
         selected = self._new_name(name)
         root = owned_path(
             self._runtime.run_dir,
@@ -128,6 +134,7 @@ class OutputCollection:
             dict(metadata or {}),
             publish_to,
             bool(overwrite),
+            bool(retain_internal),
         )
         return output
 
@@ -140,9 +147,10 @@ class OutputCollection:
         metadata: Mapping[str, Any] | None = None,
         publish_to: str | Path | None = None,
         overwrite: bool = False,
+        retain_internal: bool = False,
     ) -> ManagedOutput:
-        """Declare a managed directory and optionally publish a verified external copy."""
-        self._validate_publication_options(publish_to, overwrite)
+        """Declare a managed directory and optionally publish one durable external copy."""
+        self._validate_publication_options(publish_to, overwrite, retain_internal)
         selected = self._new_name(name)
         destination = owned_path(
             self._runtime.run_dir,
@@ -157,6 +165,7 @@ class OutputCollection:
             dict(metadata or {}),
             publish_to,
             bool(overwrite),
+            bool(retain_internal),
         )
         return output
 
@@ -193,6 +202,9 @@ class OutputCollection:
             if pending.publish_to is not None:
                 published = self._publish(path, pending)
                 metadata["published_to"] = str(published)
+                metadata["retention"] = (
+                    "published-and-internal" if pending.retain_internal else "published-only"
+                )
             finalized[name] = WorkArtifact(
                 name,
                 path.relative_to(self._runtime.run_dir).as_posix(),
@@ -313,12 +325,17 @@ class OutputCollection:
     def _validate_publication_options(
         publish_to: str | Path | None,
         overwrite: bool,
+        retain_internal: bool,
     ) -> None:
         if not isinstance(overwrite, bool):
             raise TypeError("Output overwrite must be true or false.")
+        if not isinstance(retain_internal, bool):
+            raise TypeError("Output retain_internal must be true or false.")
         if publish_to is None:
             if overwrite:
                 raise ValueError("Output overwrite=True requires publish_to.")
+            if retain_internal:
+                raise ValueError("Output retain_internal=True requires publish_to.")
             return
         if not isinstance(publish_to, str | Path) or not str(publish_to).strip():
             raise ValueError("Output publish_to must be a non-empty path.")

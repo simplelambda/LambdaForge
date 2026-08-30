@@ -1,5 +1,6 @@
 """Logging, statistics and cooperative-stop callbacks."""
 
+from lambdaforge.training.callbacks.AdaptiveHpoCallback import AdaptiveHpoCallback
 from lambdaforge.training.callbacks.EpochLogPrinter import EpochLogPrinter
 from lambdaforge.training.callbacks.EpochMetricsCSV import EpochMetricsCSV
 from lambdaforge.training.callbacks.EpochStats import EpochStats
@@ -12,4 +13,5 @@ __all__ = [
     "EpochStats",
     "LogKeyFilter",
     "StopEventCallback",
+    "AdaptiveHpoCallback",
 ]

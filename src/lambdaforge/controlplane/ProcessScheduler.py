@@ -92,6 +92,8 @@ class ProcessScheduler(Scheduler):
             "stage_source": (self.profile.transport == "ssh" and source_work != scientific_work),
             "work_dir": str(scientific_work),
             "resources": resources.to_dict(),
+            "gpu_access": self.profile.gpu_access.to_dict(),
+            "storage": self.storage.to_dict(),
             "cache_root": self.storage.cache_root,
             "lease_root": str(PurePosixPath(self.storage.state_root) / "gpu-leases"),
             "resource_lease_root": str(PurePosixPath(self.storage.state_root) / "process-leases"),

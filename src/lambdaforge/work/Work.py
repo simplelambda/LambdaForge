@@ -143,6 +143,15 @@ class Work:
         """Whether compatible checkpoints existed when this Attempt began."""
         return self._bound().resuming
 
+    @property
+    def stop_requested(self) -> bool:
+        """Whether adaptive HPO requested a safe cooperative stop for this Run.
+
+        Long custom loops should check this at a natural checkpoint boundary and return
+        normally after saving any desired checkpoint. ``LightningRunner`` does it automatically.
+        """
+        return self._bound().stop_requested
+
     def map(
         self,
         items: Iterable[T],

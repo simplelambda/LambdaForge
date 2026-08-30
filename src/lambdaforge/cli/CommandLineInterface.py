@@ -222,6 +222,8 @@ class CommandLineInterface:
         local = ResultStore()
         if arguments.command in {"show", "delete"}:
             try:
+                if arguments.command == "show" and arguments.study_run:
+                    raise KeyError(arguments.selector)
                 payload = (
                     local.select(arguments.selector)
                     if arguments.command == "show"
@@ -231,11 +233,20 @@ class CommandLineInterface:
             except KeyError:
                 if arguments.command == "show":
                     remote_work = works.show(arguments.selector)
-                    scientific = JobService(catalog).scientific_result(
-                        remote_work.primary_job_id
-                    )
+                    jobs = JobService(catalog)
+                    if arguments.study_run:
+                        payload = jobs.study_run(
+                            remote_work.primary_job_id,
+                            arguments.study_run,
+                            tail=arguments.tail,
+                            curve_points=arguments.curve_points,
+                        )
+                        print(json.dumps(payload, indent=2))
+                        return 0
+                    scientific = jobs.scientific_result(remote_work.primary_job_id)
                     payload = {
                         **remote_work.to_dict(),
+                        "study": jobs.study(remote_work.primary_job_id),
                         "scientific_result_path": (
                             scientific.get("path") if scientific is not None else None
                         ),
@@ -255,6 +266,25 @@ class CommandLineInterface:
                 local_record = None
             if local_record is not None:
                 if arguments.command == "logs":
+                    if arguments.study_run:
+                        if arguments.follow:
+                            raise ValueError(
+                                "Use lf top for live per-Run logs; machine clients can poll "
+                                "'lf show WORK --run KEY --json'."
+                            )
+                        selected = works.show(arguments.selector)
+                        detail = JobService(catalog).study_run(
+                            selected.primary_job_id,
+                            arguments.study_run,
+                            tail=arguments.tail,
+                            curve_points=arguments.curve_points,
+                        )
+                        if arguments.json:
+                            print(json.dumps(detail, indent=2))
+                        else:
+                            log = str(detail["log"])
+                            print(log, end="" if log.endswith("\n") else "\n")
+                        return 0
                     context = current_diagnostic_context()
                     report = local.log_report(
                         arguments.selector,
@@ -281,6 +311,24 @@ class CommandLineInterface:
                 job_id = selected.primary_job_id
                 jobs = JobService(catalog)
                 if arguments.command == "logs":
+                    if arguments.study_run:
+                        if arguments.follow:
+                            raise ValueError(
+                                "Use lf top for live per-Run logs; machine clients can poll "
+                                "'lf show WORK --run KEY --json'."
+                            )
+                        detail = jobs.study_run(
+                            job_id,
+                            arguments.study_run,
+                            tail=arguments.tail,
+                            curve_points=arguments.curve_points,
+                        )
+                        if arguments.json:
+                            print(json.dumps(detail, indent=2))
+                        else:
+                            log = str(detail["log"])
+                            print(log, end="" if log.endswith("\n") else "\n")
+                        return 0
                     if arguments.follow:
                         return follow_job_logs(jobs, job_id, tail=arguments.tail)
                     context = current_diagnostic_context()
@@ -296,8 +344,7 @@ class CommandLineInterface:
                     return 0
                 payload = jobs.retry(job_id, dry_run=arguments.dry_run).to_dict()
         else:
-            selected = works.show(arguments.selector)
-            payload = JobService(catalog).cancel(selected.primary_job_id).to_dict()
+            payload = works.cancel(arguments.selector)
         print(json.dumps(payload, indent=2) if arguments.json else json.dumps(payload, indent=2))
         return 0
 
@@ -364,4 +411,4 @@ class CommandLineInterface:
         verb = "Removed" if payload.get("applied") else "Would remove"
         count = len(payload.get("candidates", []))
         reclaimable = payload.get("reclaimable_bytes", 0)
-        return f"{verb} {count} cache entries ({reclaimable} bytes)."
+        return f"{verb} {count} safe storage entries ({reclaimable} bytes)."

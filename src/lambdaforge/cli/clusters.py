@@ -25,6 +25,7 @@ from lambdaforge.controlplane.ClusterService import ClusterService
 from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
 from lambdaforge.controlplane.CredentialService import CredentialService
 from lambdaforge.controlplane.Doctor import Doctor
+from lambdaforge.controlplane.GpuAccessPolicy import GpuAccessPolicy
 from lambdaforge.controlplane.python_runtime import PythonRuntimePolicy
 from lambdaforge.controlplane.ResourceService import ResourceService
 from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
@@ -104,6 +105,10 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
             project_module=arguments.project_module,
             project_root=arguments.project_root,
             data_environment=arguments.data_environment,
+            gpu_access=GpuAccessPolicy(
+                arguments.gpu_access,
+                tuple(arguments.gpu_command_prefix or ()),
+            ),
         )
         if arguments.store_password:
             secret = credentials.interactive.get(

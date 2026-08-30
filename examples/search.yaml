@@ -2,6 +2,10 @@ name: search-example
 run: examples.work.Train
 seeds: [7, 17]
 search:
+  strategy: adaptive
+  min_seeds: 1
+  reduction_factor: 2
+  max_parallel: 1
   learning_rate: {values: [0.001, 0.01]}
 objective: {metric: score, mode: max}
 resources:

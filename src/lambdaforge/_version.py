@@ -1,3 +1,3 @@
 """Canonical LambdaForge release version consumed by packaging and runtime code."""
 
-VERSION = "0.12.0"
+VERSION = "0.13.0"

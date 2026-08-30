@@ -17,6 +17,7 @@ from lambdaforge.integrations.Lightning import (
     TrainerType,
 )
 from lambdaforge.metrics.Metric import Metric
+from lambdaforge.training.callbacks.AdaptiveHpoCallback import AdaptiveHpoCallback
 from lambdaforge.training.callbacks.EpochLogPrinter import EpochLogPrinter
 from lambdaforge.training.callbacks.EpochMetricsCSV import EpochMetricsCSV
 from lambdaforge.training.callbacks.EpochStats import EpochStats
@@ -140,6 +141,9 @@ class LightningRunner:
 
         if stop_event is not None:
             callbacks.append(StopEventCallback(stop_event))
+        adaptive_hpo = AdaptiveHpoCallback.from_environment()
+        if adaptive_hpo is not None:
+            callbacks.append(adaptive_hpo)
 
         callbacks.extend(self.extra_callbacks)
 

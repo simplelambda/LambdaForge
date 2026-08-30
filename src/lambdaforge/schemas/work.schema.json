@@ -16,16 +16,8 @@
       "uniqueItems": true,
       "items": {"type": "integer"}
     },
-    "search": {"type": "object", "minProperties": 1},
-    "objective": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["metric", "mode"],
-      "properties": {
-        "metric": {"type": "string", "minLength": 1},
-        "mode": {"enum": ["min", "max"]}
-      }
-    },
+    "search": {"$ref": "#/$defs/search"},
+    "objective": {"$ref": "#/$defs/objective"},
     "steps": {
       "type": "array",
       "minItems": 1,
@@ -63,9 +55,69 @@
         "with": {"type": "object"},
         "resources": {"$ref": "#/$defs/resources"},
         "seeds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer"}},
-        "search": {"type": "object", "minProperties": 1},
-        "objective": {"type": "object"}
+        "search": {"$ref": "#/$defs/search"},
+        "objective": {"$ref": "#/$defs/objective"}
       }
+    },
+    "objective": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric", "mode"],
+      "properties": {
+        "metric": {"type": "string", "minLength": 1},
+        "mode": {"enum": ["min", "max"]}
+      }
+    },
+    "searchDimension": {
+      "oneOf": [
+        {"type": "array", "minItems": 1},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "values": {"type": "array", "minItems": 1},
+            "range": {
+              "type": "array",
+              "prefixItems": [{"type": "number"}, {"type": "number"}],
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "type": {"enum": ["uniform", "float", "loguniform", "int"]},
+            "scale": {"enum": ["linear", "log"]}
+          },
+          "oneOf": [
+            {"required": ["values"], "not": {"required": ["range"]}},
+            {"required": ["range"], "not": {"required": ["values"]}}
+          ]
+        }
+      ]
+    },
+    "search": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "strategy": {"enum": ["adaptive", "exhaustive"]},
+        "trials": {"type": "integer", "minimum": 1},
+        "runs_per_gpu": {"type": "integer", "minimum": 1},
+        "max_parallel": {"type": "integer", "minimum": 1},
+        "min_seeds": {"type": "integer", "minimum": 1},
+        "reduction_factor": {"type": "integer", "minimum": 2},
+        "confidence": {"type": "number", "minimum": 0},
+        "early_stopping": {
+          "oneOf": [
+            {"type": "boolean"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "min_step": {"type": "integer", "minimum": 1}
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": {"$ref": "#/$defs/searchDimension"}
     },
     "resources": {
       "type": "object",

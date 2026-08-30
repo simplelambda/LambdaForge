@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import shlex
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -458,6 +459,12 @@ class JobService:
                     remote_state = dict(remote_state) if isinstance(remote_state, Mapping) else {}
                     remote_state["progress"] = dict(progress)
                     metadata["remote_state"] = remote_state
+        study = self._load_study_summary(record, transport)
+        if study is not None:
+            remote_state = metadata.get("remote_state", {})
+            remote_state = dict(remote_state) if isinstance(remote_state, Mapping) else {}
+            remote_state["study"] = study
+            metadata["remote_state"] = remote_state
         if state is not record.state or metadata != record.metadata:
             previous_state = record.state
             record = record.with_updates(
@@ -475,6 +482,29 @@ class JobService:
                     ),
                     source="scheduler",
                 )
+                if state.terminal and state is not JobState.PLANNED:
+                    try:
+                        from lambdaforge.controlplane.StorageService import StorageService
+
+                        compacted = StorageService(
+                            self.catalog, self.factory, jobs=self
+                        ).compact_job(
+                            record.cluster, record.job_id, apply=True
+                        )
+                        metadata = {
+                            **dict(record.metadata),
+                            "workspace_compaction": {
+                                "reclaimed_bytes": int(compacted["reclaimed_bytes"]),
+                                "preserved": list(compacted["preserved"]),
+                            },
+                        }
+                    except Exception as error:
+                        metadata = {
+                            **dict(record.metadata),
+                            "workspace_compaction_warning": f"{type(error).__name__}: {error}",
+                        }
+                    record = record.with_updates(metadata=metadata)
+                    self.store.write(record)
         return record
 
     def list(
@@ -532,6 +562,202 @@ class JobService:
     def scientific_result(self, job_id: str) -> dict[str, Any] | None:
         """Read the bounded structured Work result owned by one provider Job, if present."""
         return self._scientific_result(self.get(job_id, refresh=False))
+
+    def study(self, job_id: str) -> dict[str, Any] | None:
+        """Return one bounded live/terminal study snapshot for machine clients and the TUI."""
+        record = self.get(job_id, refresh=False)
+        _profile, transport, _scheduler = self._provider(record)
+        return self._load_study_summary(record, transport)
+
+    def study_run(
+        self,
+        job_id: str,
+        run_key: str,
+        *,
+        tail: int | None = None,
+        curve_points: int = 80,
+    ) -> dict[str, Any]:
+        """Read one internal Run's isolated log and bounded scalar learning curves."""
+        if re.fullmatch(r"trial-\d{5}-seed-(?:none|n?\d+)", run_key) is None:
+            raise ValueError("Invalid study Run key.")
+        if tail is not None and tail < 1:
+            raise ValueError("Run log tail must be positive or null.")
+        if not 10 <= curve_points <= 500:
+            raise ValueError("curve_points must be between 10 and 500.")
+        record = self.get(job_id, refresh=False)
+        _profile, transport, _scheduler = self._provider(record)
+        summary = self._load_study_summary(record, transport)
+        if summary is None:
+            raise KeyError(f"Job {job_id} has no study telemetry.")
+        selected: dict[str, Any] | None = None
+        candidate_parameters: dict[str, Any] = {}
+        for candidate in summary.get("candidates", ()):
+            if not isinstance(candidate, Mapping):
+                continue
+            for run in candidate.get("runs", ()):
+                if isinstance(run, Mapping) and run.get("key") == run_key:
+                    selected = dict(run)
+                    candidate_parameters = dict(candidate.get("parameters", {}))
+                    break
+            if selected is not None:
+                break
+        if selected is None:
+            raise KeyError(f"Unknown study Run {run_key!r} in Job {job_id}.")
+        log_path = self._owned_study_path(record, selected.get("log_path"))
+        metric_paths = tuple(
+            path
+            for path in (
+                self._owned_study_path(record, selected.get("metrics_path")),
+                self._owned_study_path(record, selected.get("training_metrics_path")),
+            )
+            if path is not None
+        )
+        log_text, log_truncated = self._read_study_log(transport, log_path, tail=tail)
+        observations: list[dict[str, Any]] = []
+        metrics_truncated = False
+        for path in metric_paths:
+            text, truncated = self._read_bounded_file(transport, path, limit=16 * 1024 * 1024)
+            metrics_truncated = metrics_truncated or truncated
+            for line in text.splitlines():
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(value, Mapping):
+                    continue
+                metric = value.get("value")
+                step = value.get("step")
+                if (
+                    isinstance(metric, int | float)
+                    and not isinstance(metric, bool)
+                    and isinstance(step, int)
+                ):
+                    name = str(value.get("name", ""))
+                    key = f"{value['split']}_{name}" if value.get("split") else name
+                    observations.append({"name": key, "step": step, "value": float(metric)})
+        series: dict[str, list[dict[str, float | int]]] = {}
+        for observation in observations:
+            series.setdefault(str(observation["name"]), []).append(
+                {"step": int(observation["step"]), "value": float(observation["value"])}
+            )
+        normalized_series: dict[str, Sequence[dict[str, float | int]]] = {
+            name: self._downsample_curve(values, curve_points)
+            for name, values in sorted(series.items())
+        }
+        latest = {
+            name: values[-1]["value"] for name, values in normalized_series.items() if values
+        }
+        return {
+            "study_run_version": 1,
+            "job_id": job_id,
+            "cluster": record.cluster,
+            "key": run_key,
+            "trial": selected.get("trial"),
+            "seed": selected.get("seed"),
+            "state": selected.get("state"),
+            "parameters": candidate_parameters or dict(selected.get("parameters", {})),
+            "started_at_utc": selected.get("started_at_utc"),
+            "finished_at_utc": selected.get("finished_at_utc"),
+            "duration_seconds": selected.get("duration_seconds"),
+            "failure": selected.get("failure"),
+            "prune_reason": selected.get("prune_reason"),
+            "latest_metrics": {**dict(selected.get("latest_metrics", {})), **latest},
+            "curves": normalized_series,
+            "log": log_text,
+            "log_truncated": log_truncated,
+            "metrics_truncated": metrics_truncated,
+            "paths": {
+                "run_dir": selected.get("run_dir"),
+                "log": str(log_path) if log_path is not None else None,
+                "metrics": [str(value) for value in metric_paths],
+            },
+        }
+
+    @staticmethod
+    def _load_study_summary(record: JobRecord, transport: Any) -> dict[str, Any] | None:
+        path = str(PurePosixPath(record.work_dir).parent / "study" / "summary.json")
+        linked = transport.run(("test", "-L", path), timeout=10.0)
+        if linked.returncode == 0:
+            return None
+        loaded = transport.run(("cat", path), timeout=15.0)
+        if loaded.returncode != 0 or not loaded.stdout.strip():
+            return None
+        if len(loaded.stdout.encode("utf-8")) > 8 * 1024 * 1024:
+            raise RuntimeError(f"Study telemetry exceeds the 8 MiB summary limit: {path}")
+        try:
+            value = json.loads(loaded.stdout)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise RuntimeError(f"Corrupt study telemetry for {record.job_id}: {path}") from error
+        if not isinstance(value, dict) or value.get("study_telemetry_version") != 1:
+            raise RuntimeError(f"Unsupported study telemetry for {record.job_id}: {path}")
+        return value
+
+    @staticmethod
+    def _owned_study_path(record: JobRecord, value: Any) -> PurePosixPath | None:
+        if not isinstance(value, str) or not value:
+            return None
+        root = PurePosixPath(record.work_dir)
+        path = PurePosixPath(value)
+        if not path.is_absolute() or ".." in path.parts:
+            raise RuntimeError(f"Unsafe study evidence path for {record.job_id}.")
+        try:
+            path.relative_to(root)
+        except ValueError as error:
+            raise RuntimeError(
+                f"Study evidence escaped the Job work root for {record.job_id}."
+            ) from error
+        return path
+
+    @staticmethod
+    def _read_study_log(
+        transport: Any, path: PurePosixPath | None, *, tail: int | None
+    ) -> tuple[str, bool]:
+        if path is None:
+            return "", False
+        if tail is not None:
+            result = transport.run(("tail", "-n", str(tail), str(path)), timeout=30.0)
+            return (result.stdout if result.returncode == 0 else ""), False
+        return JobService._read_bounded_file(transport, path, limit=8 * 1024 * 1024)
+
+    @staticmethod
+    def _read_bounded_file(
+        transport: Any, path: PurePosixPath, *, limit: int
+    ) -> tuple[str, bool]:
+        linked = transport.run(("test", "-L", str(path)), timeout=10.0)
+        if linked.returncode == 0:
+            return "", False
+        size_result = transport.run(("wc", "-c", str(path)), timeout=10.0)
+        if size_result.returncode != 0:
+            return "", False
+        try:
+            size = int(size_result.stdout.strip().split()[0])
+        except (ValueError, IndexError):
+            return "", False
+        command = (
+            ("cat", str(path))
+            if size <= limit
+            else ("tail", "-c", str(limit), str(path))
+        )
+        result = transport.run(command, timeout=30.0)
+        return (result.stdout if result.returncode == 0 else ""), size > limit
+
+    @staticmethod
+    def _downsample_curve(
+        values: Sequence[Mapping[str, Any]], maximum: int
+    ) -> Sequence[dict[str, float | int]]:
+        ordered = sorted(
+            ({"step": int(value["step"]), "value": float(value["value"])} for value in values),
+            key=lambda value: value["step"],
+        )
+        # Last writer wins for duplicate metric/step observations (for example final adoption).
+        unique = {int(value["step"]): value for value in ordered}
+        compact = [unique[key] for key in sorted(unique)]
+        if len(compact) <= maximum:
+            return compact
+        indices = {
+            round(index * (len(compact) - 1) / (maximum - 1)) for index in range(maximum)
+        }
+        return [compact[index] for index in sorted(indices)]
 
     def _scientific_result(self, record: JobRecord) -> dict[str, Any] | None:
         _profile, transport, _scheduler = self._provider(record)
@@ -709,7 +935,12 @@ class JobService:
     def cancel(self, job_id: str) -> JobRecord:
         """Cancel through the provider and persist the transition."""
         record = self.get(job_id)
-        if record.state.terminal:
+        reconciling_cancelled = (
+            record.state is JobState.CANCELLED
+            and record.scheduler == "local"
+            and record.scheduler_id is not None
+        )
+        if record.state.terminal and not reconciling_cancelled:
             return record
         if record.scheduler_id is None:
             record = record.with_updates(

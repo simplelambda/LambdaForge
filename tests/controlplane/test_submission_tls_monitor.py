@@ -535,6 +535,8 @@ def test_tls_environment_reaches_the_scientific_scheduler_command(tmp_path: Path
         "lambdaforge",
         "run",
     )
+    cleanup = store.records()[0].metadata["environment_cleanup"]
+    assert "warning" in cleanup
 
 
 def test_monitor_renderer_uses_the_same_machine_readable_job_items() -> None:

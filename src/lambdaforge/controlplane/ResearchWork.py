@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,6 +64,8 @@ class ResearchWork:
     attempt_history: tuple[ResearchAttempt, ...]
     created_at_utc: str
     updated_at_utc: str
+    study: Mapping[str, Any] | None = None
+    study_expected: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stable additive read-model payload used by TUI and wrappers."""
@@ -85,7 +88,28 @@ class ResearchWork:
             "attempt_history": [attempt.to_dict() for attempt in self.attempt_history],
             "created_at_utc": self.created_at_utc,
             "updated_at_utc": self.updated_at_utc,
+            "study": copy.deepcopy(self.study) if self.study is not None else None,
+            "study_expected": self.study_expected,
         }
+
+
+def _is_parameter_study_summary(value: Mapping[str, Any] | None) -> bool:
+    """Distinguish comparable Runs from legacy one-Run telemetry."""
+    if value is None:
+        return False
+    planned = value.get("planned_runs")
+    if isinstance(planned, int) and not isinstance(planned, bool) and planned > 1:
+        return True
+    candidates = value.get("candidates", ())
+    if not isinstance(candidates, Sequence) or isinstance(candidates, str | bytes):
+        return False
+    mapped = [candidate for candidate in candidates if isinstance(candidate, Mapping)]
+    return len(mapped) > 1 or any(
+        isinstance(candidate.get("runs"), Sequence)
+        and not isinstance(candidate.get("runs"), str | bytes)
+        and len(candidate.get("runs", ())) > 1
+        for candidate in mapped
+    )
 
 
 def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork, ...]:
@@ -111,6 +135,15 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
         )
         remote = primary.metadata.get("remote_state", {})
         remote = remote if isinstance(remote, dict) else {}
+        study_value = remote.get("study")
+        observed_study = dict(study_value) if isinstance(study_value, Mapping) else None
+        declared_study = primary.metadata.get("study_expected")
+        study_expected = (
+            declared_study
+            if isinstance(declared_study, bool)
+            else _is_parameter_study_summary(observed_study)
+        )
+        study = observed_study if study_expected else None
         progress = remote.get("progress", {})
         progress = progress if isinstance(progress, dict) else {}
         planned_raw = progress.get("total", primary.metadata.get("planned_units"))
@@ -153,6 +186,8 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
                 ),
                 ordered[0].created_at_utc,
                 max(record.updated_at_utc for record in ordered),
+                study,
+                study_expected,
             )
         )
     return tuple(sorted(output, key=lambda value: value.updated_at_utc, reverse=True))

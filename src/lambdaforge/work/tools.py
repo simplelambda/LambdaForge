@@ -157,6 +157,14 @@ class ToolService:
         if threads is not None:
             environment.update({key: str(threads) for key in self.THREAD_VARIABLES})
         if env is not None:
+            reserved = sorted(
+                str(key) for key in env if str(key).upper().startswith("LAMBDAFORGE_")
+            )
+            if reserved:
+                raise ValueError(
+                    "External tool environment cannot override framework-owned variables: "
+                    + ", ".join(reserved)
+                )
             environment.update({str(key): str(value) for key, value in env.items()})
         self._log.emit(f"Starting external tool {selected_name}: {arguments!r}")
         started = time.perf_counter()

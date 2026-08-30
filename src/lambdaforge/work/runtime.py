@@ -44,6 +44,8 @@ class MetricCollection:
         self._lock = Lock()
         self._latest: dict[str, int | float] = {}
         self._count = 0
+        mirror = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
+        self._mirror = Path(mirror).resolve() if mirror else None
 
     def log(
         self,
@@ -73,6 +75,12 @@ class MetricCollection:
                 handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            if self._mirror is not None:
+                self._mirror.parent.mkdir(parents=True, exist_ok=True)
+                with self._mirror.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
             self._latest[key] = value
             self._count += 1
 
@@ -178,6 +186,12 @@ class WorkRuntime:
         self.progress = ProgressReporter(self.run_dir)
         self.log = WorkLog()
         self.tools = ToolService(self.log)
+
+    @property
+    def stop_requested(self) -> bool:
+        """Return whether an adaptive controller requested cooperative early stopping."""
+        configured = os.environ.get("LAMBDAFORGE_STOP_REQUEST_PATH")
+        return bool(configured and Path(configured).is_file())
 
     def map(
         self,

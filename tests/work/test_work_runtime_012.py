@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from lambdaforge import Work
+from lambdaforge.configuration.ConfigurationDescriptor import ConfigurationDescriptor
 from lambdaforge.work import ResultStore, WorkConfig, WorkRunner
 
 
@@ -26,6 +27,52 @@ def test_only_work_subclasses_are_executable(tmp_path: Path) -> None:
         report = WorkConfig.validate_file(_yaml(tmp_path, {"name": "bad", "run": target}))
         assert not report.valid
         assert message in " ".join(report.errors)
+
+
+def test_parameter_study_intent_is_available_before_execution(tmp_path: Path) -> None:
+    source = _yaml(
+        tmp_path,
+        {
+            "name": "seed-study",
+            "run": "tests.work_cases.SeedWork",
+            "seeds": [4, 7],
+            "objective": {"metric": "score", "mode": "max"},
+        },
+    )
+
+    config = WorkConfig.from_yaml(source)
+    descriptor = ConfigurationDescriptor.from_path(source)
+
+    assert config.has_parameter_study
+    assert descriptor.metadata()["study_expected"] is True
+
+    workflow = WorkConfig.from_mapping(
+        {
+            "name": "preprocessing",
+            "steps": [
+                {"name": "first", "run": "tests.work_cases.Producer"},
+                {"name": "second", "run": "tests.work_cases.Producer"},
+            ],
+        },
+        source=tmp_path / "workflow.yaml",
+    )
+    assert workflow.planned_runs == 2
+    assert not workflow.has_parameter_study
+
+
+def test_normal_work_does_not_publish_study_telemetry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    study_root = tmp_path / "job-study"
+    monkeypatch.setenv("LAMBDAFORGE_STUDY_PATH", str(study_root))
+    config = WorkConfig.from_yaml(
+        _yaml(tmp_path, {"name": "preprocessing", "run": "tests.work_cases.Producer"})
+    )
+
+    result = WorkRunner().run(config)
+
+    assert result.status == "succeeded"
+    assert not study_root.exists()
 
 
 def test_required_constructor_is_rejected_at_class_definition() -> None:
@@ -97,7 +144,7 @@ def test_runtime_outputs_metrics_inputs_and_immutable_views(tmp_path: Path) -> N
         "name": "work-test-project",
         "version": "1.2.3",
     }
-    assert execution["lambdaforge_version"] == "0.12.0"
+    assert execution["lambdaforge_version"] == "0.13.0"
     with pytest.raises(TypeError):
         config.raw["name"] = "changed"  # type: ignore[index]
 
@@ -190,7 +237,10 @@ def test_sequence_parallel_references_seeds_and_hpo(tmp_path: Path) -> None:
                                 "name": "seeds",
                                 "run": "tests.work_cases.SeedWork",
                                 "seeds": [2, 3],
-                                "search": {"scale": {"values": [1.0, 2.0]}},
+                                "search": {
+                                    "strategy": "exhaustive",
+                                    "scale": {"values": [1.0, 2.0]},
+                                },
                                 "objective": {"metric": "score", "mode": "max"},
                             },
                         ]

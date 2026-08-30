@@ -16,6 +16,7 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 import yaml
 
 from lambdaforge.execution.ResourceRequest import ResourceRequest
+from lambdaforge.hpo.AdaptiveSearch import SEARCH_POLICY_FIELDS, AdaptiveSearchPolicy
 from lambdaforge.work.models import immutable_mapping
 from lambdaforge.work.Work import Work
 
@@ -64,6 +65,8 @@ class RunDefinition:
     seeds: tuple[int | None, ...] = (None,)
     variants: tuple[Mapping[str, Any], ...] = ({},)
     objective: Mapping[str, str] | None = None
+    search_policy: AdaptiveSearchPolicy | None = None
+    study_expected: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parameters", immutable_mapping(self.parameters))
@@ -176,6 +179,12 @@ class WorkConfig:
                 seen.update(run.name for run in definitions)
                 levels_list.append(WorkLevel(definitions))
             levels = tuple(levels_list)
+        for level in levels:
+            if len(level.runs) > 1 and any(run.search_policy is not None for run in level.runs):
+                raise ValueError(
+                    "Adaptive search cannot be nested in a YAML parallel level. One adaptive "
+                    "Work already owns and schedules its fixed resource allocation."
+                )
         config = cls(name, levels, source_path, data)
         errors = config.validation_errors(check_inputs=True)
         if errors:
@@ -300,6 +309,11 @@ class WorkConfig:
     def planned_runs(self) -> int:
         return sum(run.run_count for level in self.levels for run in level.runs)
 
+    @property
+    def has_parameter_study(self) -> bool:
+        """Return whether search or repeated seeds declare comparable Runs."""
+        return any(run.study_expected for level in self.levels for run in level.runs)
+
     def to_dict(self) -> dict[str, Any]:
         """Return the authored current-schema representation without internal IR."""
         return _plain(self.raw)
@@ -339,6 +353,11 @@ class WorkConfig:
                         "resources": definition.resources.to_dict(),
                         "runs": definition.run_count,
                         "objective": dict(definition.objective or {}),
+                        "search": (
+                            definition.search_policy.to_dict()
+                            if definition.search_policy is not None
+                            else {"strategy": "exhaustive"}
+                        ),
                     }
                 )
             levels.append(current)
@@ -404,14 +423,20 @@ def _run_definition(
         if "resources" in data
         else inherited_resources or ResourceRequest()
     )
+    seeds = _seeds(data.get("seeds"))
+    objective = _objective(data.get("objective"))
+    search = data.get("search")
+    policy = _search_policy(search, seeds=seeds, objective=objective, resources=resources)
     return RunDefinition(
         name,
         work_class,
         dict(parameters),
         resources,
-        _seeds(data.get("seeds")),
-        _variants(data.get("search")),
-        _objective(data.get("objective")),
+        seeds,
+        _variants(search),
+        objective,
+        policy,
+        search is not None or len(seeds) > 1,
     )
 
 
@@ -451,6 +476,8 @@ def _variants(value: Any) -> tuple[Mapping[str, Any], ...]:
     random_count = 20
     for raw_name, raw_descriptor in value.items():
         name = str(raw_name)
+        if name in SEARCH_POLICY_FIELDS:
+            continue
         if name == "trials":
             random_count = int(raw_descriptor)
             continue
@@ -493,6 +520,45 @@ def _variants(value: Any) -> tuple[Mapping[str, Any], ...]:
         dict(zip(finite_names, combination, strict=True))
         for combination in itertools.product(*finite_values)
     )
+
+
+def _search_policy(
+    value: Any,
+    *,
+    seeds: tuple[int | None, ...],
+    objective: Mapping[str, str] | None,
+    resources: ResourceRequest,
+) -> AdaptiveSearchPolicy | None:
+    if value is None:
+        return None
+    assert isinstance(value, Mapping)
+    raw_strategy = value.get("strategy")
+    strategy = (
+        str(raw_strategy).lower()
+        if raw_strategy is not None
+        else ("adaptive" if objective is not None and len(seeds) > 1 else "exhaustive")
+    )
+    if strategy not in {"adaptive", "exhaustive"}:
+        raise ValueError("search.strategy must be adaptive or exhaustive.")
+    if strategy == "exhaustive":
+        unexpected = SEARCH_POLICY_FIELDS.intersection(value) - {"strategy"}
+        if unexpected:
+            raise ValueError(
+                "Adaptive search options require search.strategy=adaptive: "
+                f"{sorted(unexpected)}."
+            )
+        return None
+    if objective is None:
+        raise ValueError("Adaptive search requires objective.metric and objective.mode.")
+    policy = AdaptiveSearchPolicy.from_search(value)
+    if policy.min_seeds > len(seeds):
+        raise ValueError("search.min_seeds cannot exceed the number of configured seeds.")
+    if policy.runs_per_gpu > 1 and resources.gpu_memory_bytes <= 0:
+        raise ValueError(
+            "search.runs_per_gpu > 1 requires resources.gpu_memory so LambdaForge can "
+            "reject an unsafe per-GPU packing plan before training."
+        )
+    return policy
 
 
 def _objective(value: Any) -> Mapping[str, str] | None:

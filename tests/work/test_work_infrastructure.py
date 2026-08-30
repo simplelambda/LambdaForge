@@ -181,6 +181,12 @@ def test_managed_output_can_publish_a_safe_explicit_copy(tmp_path: Path) -> None
     assert first.status == "succeeded"
     assert destination.read_text(encoding="utf-8") == "first"
     assert first.runs[0].artifacts[0].metadata["published_to"] == str(destination)
+    assert first.runs[0].artifacts[0].metadata["retention"] == "published-only"
+    assert not (first.runs[0].run_dir / first.runs[0].artifacts[0].path).exists()
+    receipt = json.loads(
+        (first.runs[0].run_dir / "retention.json").read_text(encoding="utf-8")
+    )
+    assert receipt["reclaimed_bytes"] == len("first")
 
     changed = WorkConfig.from_mapping(
         {
@@ -209,6 +215,90 @@ def test_managed_output_can_publish_a_safe_explicit_copy(tmp_path: Path) -> None
     )
     assert WorkRunner().run(replaced).status == "succeeded"
     assert destination.read_text(encoding="utf-8") == "second"
+
+
+def test_published_output_can_explicitly_retain_a_second_internal_copy(tmp_path: Path) -> None:
+    config = WorkConfig.from_mapping(
+        {
+            "name": "retained-published-output",
+            "run": "tests.work_cases.PublishedOutputWork",
+            "with": {
+                "destination": "results/report.txt",
+                "retain_internal": True,
+            },
+        },
+        source=tmp_path / "work.yaml",
+    )
+
+    result = WorkRunner().run(config)
+    artifact = result.runs[0].artifacts[0]
+
+    assert artifact.metadata["retention"] == "published-and-internal"
+    assert (result.runs[0].run_dir / artifact.path).read_text(encoding="utf-8") == "published"
+
+
+def test_terminal_job_compaction_removes_interrupted_partial_artifacts_only(
+    tmp_path: Path,
+) -> None:
+    job_id = "job-interrupted"
+    attempt = (
+        tmp_path
+        / "jobs"
+        / job_id
+        / "work/.lambdaforge/runs/study/execution-one/runs/run-one/attempts/attempt-0001"
+    )
+    (attempt / "artifacts").mkdir(parents=True)
+    (attempt / "artifacts/partial.bin").write_bytes(b"x" * 32)
+    (attempt / "checkpoints").mkdir()
+    (attempt / "checkpoints/state.json").write_text("{}", encoding="utf-8")
+    (attempt / "work.log").write_text("failure evidence", encoding="utf-8")
+    descriptor = {
+        "state_root": str(tmp_path / "state"),
+        "cache_root": str(tmp_path / "cache"),
+        "run_root": str(tmp_path / "jobs"),
+    }
+
+    preview = StorageOperations.compact_job(descriptor, job_id)
+    assert preview["reclaimable_bytes"] == 32
+    assert (attempt / "artifacts/partial.bin").is_file()
+
+    historical_preview = StorageOperations.gc(
+        descriptor, {"terminal_jobs": [job_id]}, apply=False
+    )
+    assert historical_preview["candidates"][0]["job_id"] == job_id
+    assert historical_preview["reclaimable_bytes"] == 32
+
+    applied = StorageOperations.gc(descriptor, {"terminal_jobs": [job_id]}, apply=True)
+    assert applied["reclaimable_bytes"] == 32
+    assert not (attempt / "artifacts").exists()
+    assert (attempt / "checkpoints/state.json").is_file()
+    assert (attempt / "work.log").read_text(encoding="utf-8") == "failure evidence"
+
+
+def test_terminal_job_compaction_fails_closed_for_corrupt_result_evidence(
+    tmp_path: Path,
+) -> None:
+    job_id = "job-corrupt-evidence"
+    attempt = (
+        tmp_path
+        / "jobs"
+        / job_id
+        / "work/.lambdaforge/runs/study/execution-one/runs/run-one/attempts/attempt-0001"
+    )
+    (attempt / "artifacts").mkdir(parents=True)
+    only_copy = attempt / "artifacts/result.bin"
+    only_copy.write_bytes(b"scientific evidence")
+    (attempt / "result.json").write_text("{broken", encoding="utf-8")
+    descriptor = {
+        "state_root": str(tmp_path / "state"),
+        "cache_root": str(tmp_path / "cache"),
+        "run_root": str(tmp_path / "jobs"),
+    }
+
+    result = StorageOperations.compact_job(descriptor, job_id, apply=True)
+
+    assert result["candidates"] == []
+    assert only_copy.read_bytes() == b"scientific evidence"
 
 
 def test_relative_output_uses_yaml_directory_locally_and_remote_project_mirror(
@@ -370,6 +460,11 @@ def test_tool_service_streams_bounded_output_and_scopes_threads() -> None:
     assert os.environ.get("EXPLICIT") is None
     assert ("info", "3") in messages
     assert ("warning", "yes") in messages
+    with pytest.raises(ValueError, match="framework-owned variables"):
+        service.run(
+            [python, "-c", "pass"],
+            env={"LAMBDAFORGE_JOB_ID": "not-the-owned-job"},
+        )
     with pytest.raises(ToolExecutionError, match="exited with code 4"):
         service.run([python, "-c", "raise SystemExit(4)"])
 

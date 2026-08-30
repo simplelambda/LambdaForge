@@ -136,6 +136,112 @@ class StorageOperations:
         }
 
     @classmethod
+    def compact_job(
+        cls, descriptor: Mapping[str, Any], job_id: str, *, apply: bool = False
+    ) -> dict[str, Any]:
+        """Discard only terminal Attempt bulk outputs below one exact Job workspace.
+
+        A successful published-only artifact is removed only after its published copy
+        still matches the persisted SHA-256 and size.  Failed or interrupted Attempts
+        lose their partial ``artifacts`` tree, while logs, result envelopes, metrics,
+        provenance and checkpoints remain available to ``lf top`` and ``lf logs``.
+        """
+        if not job_id.startswith("job-") or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in job_id
+        ):
+            raise ValueError("Invalid LambdaForge job id.")
+        root = cls._roots(descriptor)["job_workspaces"].resolve()
+        job = (root / job_id).resolve(strict=False)
+        if job.parent != root or job.name != job_id or job.is_symlink():
+            raise RuntimeError("Job compaction target escaped the configured job root.")
+        work = job / "work"
+        candidates: list[dict[str, Any]] = []
+        reclaimed = 0
+        if work.is_dir() and not work.is_symlink():
+            from lambdaforge.work.retention import (
+                compact_attempt,
+                compact_incomplete_attempt,
+                load_work_result,
+                retention_plan,
+            )
+
+            for attempt in sorted(
+                work.glob(".lambdaforge/runs/*/execution-*/runs/run-*/attempts/attempt-*")
+            ):
+                if (
+                    attempt.is_symlink()
+                    or not attempt.is_dir()
+                    or not attempt.resolve().is_relative_to(work.resolve())
+                ):
+                    continue
+                result_path = attempt / "result.json"
+                result = load_work_result(result_path)
+                if result is not None and result.run_dir.resolve() != attempt.resolve():
+                    result = None
+                # Existing but unreadable evidence is not proof of an interrupted Attempt.
+                # Fail closed: the only copy of a successful unpublished artifact may live here.
+                if result is None and result_path.exists():
+                    continue
+                artifacts = attempt / "artifacts"
+                plan: dict[str, Any]
+                if result is not None:
+                    plan = retention_plan(result)
+                else:
+                    plan = {
+                        "paths": ("artifacts",) if artifacts.exists() else (),
+                        "reclaimable_bytes": int(cls._usage(artifacts)["bytes"]),
+                        "reason": "interrupted-attempt",
+                    }
+                reclaimable = int(plan["reclaimable_bytes"])
+                if reclaimable <= 0:
+                    continue
+                planned_paths = tuple(str(value) for value in plan.get("paths", ()))
+                planned_candidates: list[dict[str, Any]] = []
+                for relative in planned_paths:
+                    target = (attempt / relative).resolve(strict=False)
+                    if not target.is_relative_to(attempt.resolve()):
+                        raise RuntimeError(f"Attempt cleanup target escaped its root: {target}")
+                    usage = cls._usage(target)
+                    if not usage["exists"]:
+                        continue
+                    planned_candidates.append(
+                        {
+                            "category": "attempt_artifacts",
+                            "job_id": job_id,
+                            "attempt": attempt.name,
+                            "path": str(target),
+                            "bytes": int(usage["bytes"]),
+                            "files": int(usage["files"]),
+                            "reason": str(plan["reason"]),
+                        }
+                    )
+                if apply:
+                    receipt = (
+                        compact_attempt(result)
+                        if result is not None
+                        else compact_incomplete_attempt(attempt)
+                    )
+                    removed = int(receipt["reclaimed_bytes"])
+                    if removed <= 0:
+                        continue
+                    reclaimed += removed
+                candidates.extend(planned_candidates)
+        return {
+            "job_id": job_id,
+            "candidates": candidates,
+            "reclaimable_bytes": sum(int(item["bytes"]) for item in candidates),
+            "reclaimed_bytes": reclaimed,
+            "applied": apply,
+            "preserved": [
+                "job state and logs",
+                "result envelopes",
+                "metrics and provenance",
+                "checkpoints",
+                "unpublished successful artifacts",
+            ],
+        }
+
+    @classmethod
     def _gc(
         cls,
         descriptor: Mapping[str, Any],
@@ -158,6 +264,11 @@ class StorageOperations:
             }
         candidates: list[dict[str, Any]] = []
         candidate_paths: set[str] = set()
+        for job_id in sorted(set(str(value) for value in references.get("terminal_jobs", ()))):
+            compacted = cls.compact_job(descriptor, job_id, apply=apply)
+            candidates.extend(
+                item for item in compacted["candidates"] if isinstance(item, dict)
+            )
         now = time.time()
         maximum_age = descriptor.get("cache_max_age")
         runtime_references = cls._runtime_references(roots, references.get("runtimes", ()))
@@ -295,6 +406,11 @@ class StorageOperations:
         if apply:
             allowed = tuple(path.resolve() for path in roots.values())
             for item in candidates:
+                if item.get("category") == "attempt_artifacts":
+                    # ``compact_job`` already performed its hash-aware mutation. Repeating
+                    # it here would lose the distinction between a whole artifact tree and
+                    # one verified published-only member.
+                    continue
                 path = Path(str(item["path"])).resolve()
                 if not any(path != root and path.is_relative_to(root) for root in allowed):
                     raise RuntimeError(f"GC target escaped configured internal roots: {path}")
@@ -436,7 +552,7 @@ class StorageOperations:
             raise SystemExit(
                 "Usage: StorageOperations status DESCRIPTOR | "
                 "gc DESCRIPTOR REFS APPLY | prune-environments DESCRIPTOR REFS APPLY | "
-                "delete-job DESCRIPTOR REFS APPLY"
+                "delete-job DESCRIPTOR REFS APPLY | compact-job DESCRIPTOR REFS APPLY"
             )
         descriptor = json.loads(values[1])
         if values[0] == "status":
@@ -453,6 +569,13 @@ class StorageOperations:
         elif values[0] == "delete-job" and len(values) == 4:
             references = json.loads(values[2])
             payload = cls.delete_job(
+                descriptor,
+                str(references["job_id"]),
+                apply=values[3] == "true",
+            )
+        elif values[0] == "compact-job" and len(values) == 4:
+            references = json.loads(values[2])
+            payload = cls.compact_job(
                 descriptor,
                 str(references["job_id"]),
                 apply=values[3] == "true",
