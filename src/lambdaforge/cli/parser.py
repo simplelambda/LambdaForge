@@ -70,7 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
     top.add_argument("--follow", action="store_true")
     top.add_argument("--once", action="store_true")
     top.add_argument("--interval", type=float, default=2.0)
-    top.add_argument("--history", type=float, default=60.0)
+    top.add_argument(
+        "--history",
+        type=float,
+        default=60.0,
+        help="Seconds retained in cluster resource time-series charts (default: 60).",
+    )
     top.add_argument("--json", action="store_true")
 
     resources = commands.add_parser("resources", help="Inspect cluster resources.")
@@ -89,7 +94,22 @@ def build_parser() -> argparse.ArgumentParser:
     clusters = commands.add_parser("clusters", help="Manage execution targets.")
     clusters.add_argument("--catalog", type=Path)
     cluster_commands = clusters.add_subparsers(dest="cluster_command", required=True)
-    add = cluster_commands.add_parser("add")
+    setup = cluster_commands.add_parser(
+        "setup",
+        help="Interactively create a complete cluster profile.",
+        description=(
+            "Guided terminal setup using the same clusters add/set/credentials operations "
+            "available for automation."
+        ),
+    )
+    setup.add_argument("--no-test", action="store_true", help="Do not offer lf doctor afterward.")
+    modify = cluster_commands.add_parser(
+        "modify",
+        help="Interactively inspect and edit an existing cluster profile.",
+        description="Guided editor backed by clusters set/unset/credentials operations.",
+    )
+    modify.add_argument("name", nargs="?")
+    add = cluster_commands.add_parser("add", help="Create a cluster profile non-interactively.")
     add.add_argument("name")
     add.add_argument("--host")
     add.add_argument("--user")
@@ -142,7 +162,20 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument(
         "--gpu-command-prefix",
         nargs="+",
-        help="argv prepended to GPU work when --gpu-access command (for example: gpu run).",
+        help="argv prepended to GPU work when --gpu-access command (for example: gpu exec).",
+    )
+    add.add_argument(
+        "--gpu-claim-command",
+        nargs="+",
+        help=(
+            "optional argv run before each GPU submission; {gpu_count} expands to the requested "
+            "count (for example: gpu claim {gpu_count})"
+        ),
+    )
+    add.add_argument(
+        "--gpu-release-command",
+        nargs="+",
+        help="cleanup argv paired with --gpu-claim-command (for example: gpu release)",
     )
     cluster_commands.add_parser("list").add_argument("--json", action="store_true")
     for operation in ("show", "inspect", "test", "resources", "storage"):

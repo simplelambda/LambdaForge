@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,10 @@ def test_runtime_outputs_metrics_inputs_and_immutable_views(tmp_path: Path) -> N
     assert run.metrics == {"score": 6.0}
     assert run.inputs[0].sha256
     assert (run.run_dir / run.artifacts[0].path).read_text(encoding="utf-8") == "evidence"
+    # Adaptive studies return WorkResult across a spawned process boundary. Immutable
+    # metadata must therefore remain pickle-safe even when an artifact is present.
+    transported = pickle.loads(pickle.dumps(run))
+    assert transported.artifacts[0].to_dict() == run.artifacts[0].to_dict()
     execution = json.loads((result.execution_dir / "execution.json").read_text(encoding="utf-8"))
     assert execution["consumer_package"] == {
         "name": "work-test-project",
@@ -184,6 +189,39 @@ def test_work_publishes_exact_job_level_result_for_control_plane_logs(
     assert result.status == "succeeded"
     assert persisted["execution_id"] == result.execution_id
     assert persisted["status"] == "succeeded"
+
+
+def test_adaptive_process_returns_artifact_results_without_mappingproxy_failure(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "input.txt").write_text("evidence", encoding="utf-8")
+    config = WorkConfig.from_yaml(
+        _yaml(
+            tmp_path,
+            {
+                "name": "artifact-study",
+                "run": "tests.work_cases.CompleteWork",
+                "with": {"source": {"file": "input.txt"}},
+                "search": {
+                    "strategy": "adaptive",
+                    "startup_trials": 2,
+                    "min_seeds": 1,
+                    "confirmation_seeds": [],
+                    "max_parallel": 2,
+                    "early_stopping": False,
+                    "count": {"values": [2, 3]},
+                },
+                "objective": {"metric": "score", "mode": "max"},
+                "resources": {"cpu": 2},
+            },
+        )
+    )
+
+    result = WorkRunner().run(config)
+
+    assert result.status == "succeeded"
+    assert len(result.runs) == 2
+    assert all(run.artifacts and run.artifacts[0].name == "report" for run in result.runs)
 
 
 def test_print_and_managed_work_log_are_captured_and_flushed(tmp_path: Path) -> None:

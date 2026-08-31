@@ -27,6 +27,25 @@ def test_invalid_work_is_local_configuration_error(
 
 
 @pytest.mark.parametrize(
+    ("arguments", "expected"),
+    (
+        (("--help",), "Run reproducible scientific Work"),
+        (("help",), "Run reproducible scientific Work"),
+        (("help", "clusters", "add"), "--gpu-claim-command"),
+        (("clusters", "add", "help"), "--gpu-claim-command"),
+        (("clusters", "help"), "setup"),
+    ),
+)
+def test_help_is_a_successful_cli_operation(
+    arguments: tuple[str, ...], expected: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert CommandLineInterface.main(arguments) == 0
+    captured = capsys.readouterr()
+    assert expected in captured.out
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
     ("message", "category"),
     (
         ("Permission denied (publickey).", ErrorCategory.AUTHENTICATION),
@@ -80,3 +99,32 @@ def test_connection_markers_require_transport_semantics(message: str) -> None:
     )
 
     assert value.category is ErrorCategory.CONNECTION
+
+
+def test_gpu_admission_failures_are_never_reported_as_internal_framework_bugs() -> None:
+    context = DiagnosticContext(("run", "study.yaml", "--on", "atlas"), "run", "atlas")
+
+    impossible = DiagnosticClassifier().classify(
+        ValueError(
+            "resources.gpu_memory=90.0GiB exceeds total memory on every allocated GPU; "
+            "no Run can ever be admitted."
+        ),
+        context,
+    )
+    probe = DiagnosticClassifier().classify(
+        RuntimeError("CUDA GPU admission could not read current device memory safely."),
+        context,
+    )
+
+    assert impossible.category is ErrorCategory.CONFIGURATION
+    assert probe.category is ErrorCategory.ENVIRONMENT
+
+
+def test_immutable_model_pickle_failure_is_classified_as_internal() -> None:
+    value = DiagnosticClassifier().classify(
+        TypeError("cannot pickle 'mappingproxy' object"),
+        DiagnosticContext(("run", "study.yaml"), "run"),
+    )
+
+    assert value.category is ErrorCategory.INTERNAL
+    assert "lambdaforge bug" in " ".join(value.details).lower()

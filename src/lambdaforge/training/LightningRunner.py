@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -79,11 +80,17 @@ class LightningRunner:
         stop_event: Any | None = None,
     ) -> TrainerType:
         """Run ``trainer.fit`` and return the trainer."""
+        selected_checkpoint = ckpt_path
+        if selected_checkpoint is None:
+            managed = os.environ.get("LAMBDAFORGE_HPO_CHECKPOINT_DIR")
+            last = Path(managed) / "last.ckpt" if managed else None
+            if last is not None and last.is_file() and not last.is_symlink():
+                selected_checkpoint = last
         trainer = self.build_trainer(
             stop_event=stop_event,
-            continue_epoch_metrics=ckpt_path is not None,
+            continue_epoch_metrics=selected_checkpoint is not None,
         )
-        trainer.fit(model=module, datamodule=datamodule, ckpt_path=ckpt_path)
+        trainer.fit(model=module, datamodule=datamodule, ckpt_path=selected_checkpoint)
         return trainer
 
     def test(
@@ -141,14 +148,17 @@ class LightningRunner:
 
         if stop_event is not None:
             callbacks.append(StopEventCallback(stop_event))
-        adaptive_hpo = AdaptiveHpoCallback.from_environment()
+        adaptive_hpo = AdaptiveHpoCallback.from_environment(
+            chart_include=self.config.epoch_chart_include,
+            chart_exclude=self.config.epoch_chart_exclude,
+        )
         if adaptive_hpo is not None:
             callbacks.append(adaptive_hpo)
 
         callbacks.extend(self.extra_callbacks)
 
         framework_kwargs: dict[str, Any] = {
-            "max_epochs": self.config.max_epochs,
+            "max_epochs": self._max_epochs(),
             "accelerator": self.config.accelerator,
             "devices": self.config.devices,
             "strategy": self.config.strategy,
@@ -160,7 +170,10 @@ class LightningRunner:
             "log_every_n_steps": self.config.log_every_n_steps,
             "logger": self._build_logger(),
             "callbacks": callbacks,
-            "enable_checkpointing": (self.config.checkpoint_policy != CheckpointPolicy.NONE.value),
+            "enable_checkpointing": (
+                self.config.checkpoint_policy != CheckpointPolicy.NONE.value
+                or bool(os.environ.get("LAMBDAFORGE_HPO_CHECKPOINT_DIR"))
+            ),
             "num_sanity_val_steps": self.config.num_sanity_val_steps,
             "enable_progress_bar": self.config.enable_progress_bar,
             "deterministic": self.config.deterministic,
@@ -199,9 +212,17 @@ class LightningRunner:
 
     def _build_checkpoint_callbacks(self) -> list[CallbackBase]:
         policy = self.config.checkpoint_policy
+        managed = os.environ.get("LAMBDAFORGE_HPO_CHECKPOINT_DIR")
+        fidelity_callback = (
+            ModelCheckpoint(
+                dirpath=Path(managed), filename="last", save_last=True, save_top_k=0
+            )
+            if managed
+            else None
+        )
 
         if policy == CheckpointPolicy.NONE.value:
-            return []
+            return [fidelity_callback] if fidelity_callback is not None else []
 
         monitor, mode = self._resolve_monitor(
             self.checkpoint_metric,
@@ -212,10 +233,12 @@ class LightningRunner:
         dirpath = Path(self.config.default_root_dir) / "checkpoints"
 
         if policy == CheckpointPolicy.LAST.value:
+            if fidelity_callback is not None:
+                return [fidelity_callback]
             return [ModelCheckpoint(dirpath=dirpath, filename="last", save_last=True, save_top_k=0)]
 
         if policy == CheckpointPolicy.BEST.value:
-            return [
+            callbacks: list[CallbackBase] = [
                 ModelCheckpoint(
                     dirpath=dirpath,
                     filename="best-{epoch:03d}",
@@ -225,9 +248,10 @@ class LightningRunner:
                     save_last=False,
                 )
             ]
+            return ([fidelity_callback] if fidelity_callback is not None else []) + callbacks
 
         if policy == CheckpointPolicy.LAST_AND_BEST.value:
-            return [
+            callbacks = [
                 ModelCheckpoint(
                     dirpath=dirpath,
                     filename="best-{epoch:03d}",
@@ -237,9 +261,10 @@ class LightningRunner:
                     save_last=True,
                 )
             ]
+            return ([fidelity_callback] if fidelity_callback is not None else []) + callbacks
 
         if policy == CheckpointPolicy.ALL.value:
-            return [
+            callbacks = [
                 ModelCheckpoint(
                     dirpath=dirpath,
                     filename="epoch-{epoch:03d}",
@@ -247,8 +272,19 @@ class LightningRunner:
                     save_last=False,
                 )
             ]
+            return ([fidelity_callback] if fidelity_callback is not None else []) + callbacks
 
         raise ValueError(f"Unknown checkpoint_policy: {policy!r}")
+
+    def _max_epochs(self) -> int:
+        """Apply an explicit LambdaForge fidelity target without changing normal training."""
+        raw = os.environ.get("LAMBDAFORGE_FIDELITY_TARGET")
+        if raw is None:
+            return self.config.max_epochs
+        target = int(raw)
+        if target < 1:
+            raise ValueError("LAMBDAFORGE_FIDELITY_TARGET must be positive.")
+        return min(self.config.max_epochs, target)
 
     def _build_early_stopping_callbacks(self) -> list[CallbackBase]:
         if self.config.early_stopping_patience is None:

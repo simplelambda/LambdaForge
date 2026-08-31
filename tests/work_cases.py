@@ -77,6 +77,27 @@ class AdaptiveScoreWork(lf.Work):
         return {"score": quality}
 
 
+class ConditionalSweepWork(lf.Work):
+    """Signature fixture for exact finite conditional sweep expansion."""
+
+    def run(self, model: str, depth: int | None = None) -> dict[str, str | int | None]:
+        return {"model": model, "depth": depth}
+
+
+class FidelityScoreWork(lf.Work):
+    """Cooperative cumulative-budget fixture for adaptive continuation tests."""
+
+    def run(self, quality: float = 0.0) -> dict[str, float | int]:
+        assert self.fidelity is not None
+        if self.resuming:
+            previous = self.checkpoints.load_json("fidelity.json")
+            assert previous["completed"] == self.fidelity.current
+        self.checkpoints.save_json("fidelity.json", {"completed": self.fidelity.target})
+        score = quality + self.fidelity.target / self.fidelity.maximum
+        self.metrics.log("score", score, step=self.fidelity.target)
+        return {"score": score, "budget": self.fidelity.target}
+
+
 class ResumeWork(lf.Work):
     def run(self) -> dict[str, bool]:
         if not self.resuming:

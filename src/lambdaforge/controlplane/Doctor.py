@@ -604,10 +604,12 @@ class Doctor:
             )
         )
         nvidia = transport.run(
-            (
-                "nvidia-smi",
-                "--query-gpu=name,driver_version,compute_cap",
-                "--format=csv,noheader,nounits",
+            profile.gpu_access.wrap(
+                (
+                    "nvidia-smi",
+                    "--query-gpu=name,driver_version,compute_cap",
+                    "--format=csv,noheader,nounits",
+                )
             )
         )
         gpu_visible = nvidia.returncode == 0 and bool(nvidia.stdout.strip())
@@ -628,19 +630,21 @@ class Doctor:
             )
         )
         cuda = transport.run(
-            (
-                *profile.command_prefix,
-                selected_python,
-                "-c",
+            profile.gpu_access.wrap(
                 (
-                    "import sys, torch; available=torch.cuda.is_available(); error=''; "
-                    "\nif not available:\n"
-                    " try: torch.cuda.init()\n"
-                    " except Exception as exc: error=f'{type(exc).__name__}: {exc}'\n"
-                    "print('available=', available, 'runtime=', torch.version.cuda, "
-                    "'devices=', torch.cuda.device_count(), 'error=', error); "
-                    f"sys.exit(0 if available or {not cuda_expected!r} else 2)"
-                ),
+                    *profile.command_prefix,
+                    selected_python,
+                    "-c",
+                    (
+                        "import sys, torch; available=torch.cuda.is_available(); error=''; "
+                        "\nif not available:\n"
+                        " try: torch.cuda.init()\n"
+                        " except Exception as exc: error=f'{type(exc).__name__}: {exc}'\n"
+                        "print('available=', available, 'runtime=', torch.version.cuda, "
+                        "'devices=', torch.cuda.device_count(), 'error=', error); "
+                        f"sys.exit(0 if available or {not cuda_expected!r} else 2)"
+                    ),
+                )
             )
         )
         checks.append(

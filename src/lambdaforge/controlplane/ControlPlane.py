@@ -83,6 +83,7 @@ class ControlPlane:
         storage = profile.storage
         descriptor = ConfigurationDescriptor.from_path(config_path)
         request = resources or ConfigurationResourceResolver.resolve(config_path)
+        gpu_mode = profile.gpu_access.effective_mode(profile.scheduler)
         if not dry_run and not allow_duplicate:
             self.jobs.refuse_active_execution(
                 descriptor.scientific_identity,
@@ -252,9 +253,7 @@ class ControlPlane:
                     except Exception as error:
                         # A collector problem must not invalidate a verified environment or
                         # prevent scientific work. Preserve it for operator diagnosis instead.
-                        environment_cleanup = {
-                            "warning": f"{type(error).__name__}: {error}"
-                        }
+                        environment_cleanup = {"warning": f"{type(error).__name__}: {error}"}
             work_dir = remote_dir
             config = str(PurePosixPath(remote_dir) / "config.yaml")
             if not dry_run:
@@ -279,9 +278,7 @@ class ControlPlane:
             if isinstance(trust, TlsTrust):
                 environment_assignments.extend(trust.assignments())
             if profile.environment == "managed":
-                inherited_path = transport.run(
-                    (*profile.command_prefix, "printenv", "PATH")
-                )
+                inherited_path = transport.run((*profile.command_prefix, "printenv", "PATH"))
                 fallback_path = "/usr/local/bin:/usr/bin:/bin"
                 path_value = inherited_path.stdout.strip().splitlines()
                 selected_path = (
@@ -298,6 +295,8 @@ class ControlPlane:
                     f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
                     f"LAMBDAFORGE_CACHE_ROOT={storage.cache_root}",
                     f"LAMBDAFORGE_CLUSTER={cluster}",
+                    f"LAMBDAFORGE_GPU_ACCESS_MODE={gpu_mode}",
+                    f"LAMBDAFORGE_REQUESTED_GPUS={request.gpu_count}",
                     "LAMBDAFORGE_BUNDLE=1",
                     "LAMBDAFORGE_EXECUTION_MODE=worker",
                     f"LAMBDAFORGE_JOB_ID={reserved_job_id}" if reserved_job_id else "",
@@ -314,8 +313,7 @@ class ControlPlane:
                         else ""
                     ),
                     (
-                        "LAMBDAFORGE_STUDY_PATH="
-                        f"{PurePosixPath(str(work_dir)).parent / 'study'}"
+                        f"LAMBDAFORGE_STUDY_PATH={PurePosixPath(str(work_dir)).parent / 'study'}"
                         if reserved_job_id
                         else ""
                     ),
@@ -333,33 +331,59 @@ class ControlPlane:
                 config,
                 run_arguments,
             )
-        gpu_mode = profile.gpu_access.effective_mode(profile.scheduler)
+        external_claimed = False
         if request.gpu_count > 0 and gpu_mode == "command":
-            command = (*profile.gpu_access.command_prefix, *command)
+            claim = profile.gpu_access.claim(request.gpu_count)
+            if claim and not dry_run:
+                if transport is None:
+                    raise RuntimeError(
+                        "A configured GPU claim command requires a remote transport."
+                    )
+                notify("gpu-claim")
+                claimed = transport.run(claim)
+                if claimed.returncode:
+                    raise RuntimeError(
+                        "GPU claim command failed before scientific submission: "
+                        f"{claimed.stderr.strip() or claimed.stdout.strip()}"
+                    )
+                external_claimed = True
+            command = profile.gpu_access.wrap(command)
         notify("scheduler")
-        handle = self.jobs.submit(
-            command,
-            cluster=cluster,
-            resources=request,
-            work_dir=work_dir,
-            dry_run=dry_run,
-            bundle_id=bundle.bundle_id,
-            config_path=config,
-            metadata={
-                "bundle_size_bytes": bundle.size_bytes,
-                "environment_id": bundle.environment_id or "existing",
-                **descriptor.metadata(),
-                "execution_identity": f"{cluster}:{bundle.bundle_id}",
-                "remote_config_path": config,
-                "pytorch": torch_plan.to_dict() if torch_plan is not None else None,
-                "python_runtime_id": runtime.runtime_id if runtime is not None else None,
-                "native_environment": (native_plan.to_dict() if native_plan is not None else None),
-                "environment_cleanup": environment_cleanup,
-            },
-            job_id=reserved_job_id,
-            group_id=group_id,
-            job_type=self._configuration_type(config_path),
-        )
+        try:
+            handle = self.jobs.submit(
+                command,
+                cluster=cluster,
+                resources=request,
+                work_dir=work_dir,
+                dry_run=dry_run,
+                bundle_id=bundle.bundle_id,
+                config_path=config,
+                metadata={
+                    "bundle_size_bytes": bundle.size_bytes,
+                    "environment_id": bundle.environment_id or "existing",
+                    **descriptor.metadata(),
+                    "execution_identity": f"{cluster}:{bundle.bundle_id}",
+                    "remote_config_path": config,
+                    "pytorch": torch_plan.to_dict() if torch_plan is not None else None,
+                    "python_runtime_id": runtime.runtime_id if runtime is not None else None,
+                    "native_environment": (
+                        native_plan.to_dict() if native_plan is not None else None
+                    ),
+                    "environment_cleanup": environment_cleanup,
+                },
+                job_id=reserved_job_id,
+                group_id=group_id,
+                job_type=self._configuration_type(config_path),
+            )
+        except Exception as submission_error:
+            release = profile.gpu_access.release() if external_claimed else ()
+            released = transport.run(release) if release and transport is not None else None
+            if released is not None and released.returncode:
+                raise RuntimeError(
+                    "Scientific submission failed and the paired GPU release command also "
+                    f"failed: {released.stderr.strip() or released.stdout.strip()}"
+                ) from submission_error
+            raise
         return handle, bundle
 
     @staticmethod

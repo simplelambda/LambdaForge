@@ -360,6 +360,9 @@ def test_monitor_scrolls_clusters_without_always_showing_personal_usage() -> Non
         height=18,
     )
 
+    assert "CPU + HISTORY" not in rendered
+    assert "RAM + HISTORY" not in rendered
+    assert "GPU + HISTORY" not in rendered
     assert "▶ gpu-5" in rendered
     assert "↳ me" not in rendered
     assert "mine requested" not in rendered
@@ -513,8 +516,11 @@ def test_right_opens_work_attempt_then_logs_and_left_walks_back(
             pass
 
     class ImmediateLogs:
-        def __init__(self, jobs: Any, job_id: str) -> None:
+        def __init__(
+            self, jobs: Any, job_id: str, *, include_traceback: bool = False
+        ) -> None:
             del jobs
+            del include_traceback
             assert job_id == "job-linked"
             self.pending = False
 
@@ -640,6 +646,92 @@ def test_declared_study_opens_before_live_telemetry_exists(
     assert "Run telemetry is not available yet" in output.getvalue()
 
 
+def test_failed_study_without_telemetry_opens_attempt_logs_instead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "clusters": [],
+        "jobs": {
+            "items": [
+                {
+                    "job_id": "job-failed",
+                    "cluster": "remote",
+                    "state": "failed",
+                    "created_at_utc": "",
+                    "metadata": {"name": "study"},
+                }
+            ],
+            "by_state": {"failed": 1},
+            "total": 1,
+        },
+        "work": {
+            "items": [
+                {
+                    "work_id": "work-study",
+                    "name": "study",
+                    "kind": "work",
+                    "state": "failed",
+                    "cluster": "remote",
+                    "primary_job_id": "job-failed",
+                    "job_ids": ["job-failed"],
+                    "created_at_utc": "",
+                    "study": None,
+                    "study_expected": True,
+                }
+            ]
+        },
+    }
+
+    class ImmediateSnapshots:
+        def __init__(self, overview: Any) -> None:
+            del overview
+            self.pending = False
+
+        @property
+        def running(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.pending = True
+
+        def take(self) -> tuple[dict[str, Any], None] | None:
+            if not self.pending:
+                return None
+            self.pending = False
+            return payload, None
+
+        def close(self) -> None:
+            pass
+
+    class ScriptedTerminal:
+        def __init__(self, stream: Any) -> None:
+            del stream
+            self.keys = iter(("\x1b[C", "\x1b[D", "q"))
+
+        def __enter__(self) -> ScriptedTerminal:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def key(self, timeout: float) -> str:
+            del timeout
+            return next(self.keys)
+
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor.SnapshotProcess", ImmediateSnapshots)
+    monkeypatch.setattr("lambdaforge.cli.LiveJobMonitor._TerminalSession", ScriptedTerminal)
+    output = StringIO()
+
+    result = LiveJobMonitor(
+        cast(Any, object()), cast(Any, object()), interval=1, stream=output
+    ).run()
+
+    assert result == 0
+    assert "LambdaForge Work · study · failed" in output.getvalue()
+    assert "Attempt 1" in output.getvalue()
+    assert "Run telemetry is not available yet" not in output.getvalue()
+
+
 def test_work_attempt_log_view_refreshes_without_reopening(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -697,8 +789,11 @@ def test_work_attempt_log_view_refreshes_without_reopening(
     class RefreshingLogs:
         loads = 0
 
-        def __init__(self, jobs: Any, job_id: str) -> None:
+        def __init__(
+            self, jobs: Any, job_id: str, *, include_traceback: bool = False
+        ) -> None:
             del jobs
+            del include_traceback
             assert job_id == "job-linked"
             self.pending = False
 
@@ -816,7 +911,9 @@ def test_cluster_detail_renders_history_personal_usage_and_only_cluster_jobs() -
 
     assert "mine requested: C2" in rendered
     assert "mine observed: C2.0 cores" in rendered
-    assert "█ cluster  ▓ mine" in rendered
+    assert "CPU load · whole cluster" in rendered
+    assert "GPU memory · whole cluster" in rendered
+    assert "30s history" in rendered
     assert "Work · Attempt 1" in rendered
     assert "job-on-a" not in rendered
     assert "job-on-b" not in rendered
@@ -886,6 +983,24 @@ def test_complete_log_viewer_pages_over_the_same_document() -> None:
     assert "lines 11-14 of 20" in rendered
     assert "line-10" in rendered
     assert "line-14" not in rendered
+
+
+def test_log_viewer_can_pan_long_lines_without_changing_vertical_tail() -> None:
+    text = "prefix-" + "0123456789" * 10
+
+    rendered = LogViewerRenderer.render(
+        "job-1",
+        text,
+        scroll=0,
+        horizontal=20,
+        message="",
+        width=80,
+        height=8,
+    )
+
+    assert "column 21" in rendered
+    assert "prefix-" not in rendered
+    assert "Shift+←/→ columns" in rendered
 
 
 def _consumer_wheel(path: Path, requirement: str) -> Path:

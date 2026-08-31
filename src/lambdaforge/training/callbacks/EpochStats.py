@@ -28,7 +28,12 @@ class EpochStats(CallbackBase):
     ``epoch_time_s``
         Wall-clock seconds of the training epoch.
     ``gpu_mem_mb``
-        Peak CUDA memory allocated during the epoch, in MiB. ``0`` on CPU.
+        Peak live tensor allocation during the epoch, in MiB. This compatibility
+        key is intentionally *allocated*, not allocator-reserved memory.
+    ``gpu_reserved_mb`` / ``gpu_peak_reserved_mb``
+        Current and peak PyTorch caching-allocator pools. Reserved bytes include
+        reusable cache and therefore may be much larger than live tensors; they
+        are diagnostic evidence, not a scheduler reservation.
     ``cpu_rss_mb``
         Process resident memory in MiB when available. Uses ``psutil`` if
         installed, otherwise falls back to ``resource`` on Unix-like systems.
@@ -56,12 +61,26 @@ class EpochStats(CallbackBase):
                 sync_dist=True,
             )
 
-        gpu_mem_mb = 0.0
+        gpu_mem_mb = gpu_reserved_mb = gpu_peak_reserved_mb = 0.0
         if torch.cuda.is_available():
             gpu_mem_mb = torch.cuda.max_memory_allocated() / (1024**2)
+            gpu_reserved_mb = torch.cuda.memory_reserved() / (1024**2)
+            gpu_peak_reserved_mb = torch.cuda.max_memory_reserved() / (1024**2)
         pl_module.log(
             "gpu_mem_mb",
             gpu_mem_mb,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        pl_module.log(
+            "gpu_reserved_mb",
+            gpu_reserved_mb,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        pl_module.log(
+            "gpu_peak_reserved_mb",
+            gpu_peak_reserved_mb,
             on_epoch=True,
             sync_dist=True,
         )

@@ -9,6 +9,116 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+### Corregido
+
+- Hecha útil la evidencia HPO temprana: respuesta marginal y cobertura por pares se muestran desde
+  dos candidatos comparables, la ganancia predictiva empieza con tres manteniendo confianza baja y
+  un `lf top` nuevo reconstruye localmente análisis remotos antiguos. Los Runs podados aportan tasas
+  visibles por región y evitación suave de vecindad censurada sin fingir objetivos completos.
+- Eliminados los contextos CUDA persistentes por GPU del probe del controlador HPO. La VRAM libre
+  se observa en un hijo efímero que hereda el grant, por lo que monitorizar no ocupa una plaza
+  científica ni retiene memoria que impida admitir el último Run de `runs_per_gpu`.
+- Un Trial con todas sus seeds podadas queda ahora terminal `pruned`, no `failed`; sus curvas
+  parciales se conservan como evidencia censurada sin contaminar estadísticas de objetivos
+  completos, y streams métricos duplicados ya no mezclan objective actual y óptimo terminal.
+- Reservadas al menos tres filas de seed con alturas comunes de terminal acotando previews de
+  parámetros/métricas; el detalle completo queda a un nivel de navegación.
+- Separada la evidencia actual y óptima en todo estudio adaptativo. HPO terminado clasifica ahora
+  la media del mejor checkpoint de cada seed mientras las curvas actuales al mismo step siguen
+  decidiendo pruning; `lf top` muestra ambos valores y la seed/época ganadora sin mezclarlos.
+- Aclarado que Direct/SLURM decide cómo lanzar procesos, no el tipo de GPU, y permitida salida
+  limpia desde cada pregunta del asistente mediante `0`, `q`, `quit` o `exit`.
+- Hechos pickle-safe los metadatos inmutables de resultados/artefactos al cruzar workers spawn. Un
+  Run completado con artefactos ya no puede fallar después con `cannot pickle 'mappingproxy'`; esa
+  firma se clasifica además como fallo interno y no como configuración del usuario.
+- Los estudios terminales sin índice de telemetría caen ahora a Attempts numerados y logs normales
+  en `lf top`, conservando el fallo real en vez de una pantalla de datos no disponibles.
+- Aislado cada Run adaptativo CPU/GPU en su propio worker: un proceso matado ya no rompe un pool
+  compartido ni aborta entrenos ajenos. Workers perdidos y OOM CUDA tienen reintento acotado con
+  checkpoints; si el fallo se repite queda como evidencia terminal mientras los demás continúan.
+- Sustituida la comprobación fatal global `runs_per_gpu × gpu_memory` por admisión dinámica por
+  Run. Las GPU temporalmente ocupadas esperan y se sondean, las disponibles continúan a capacidad
+  parcial, los lanzamientos en el mismo dispositivo se escalonan y solo falla como configuración un
+  umbral físicamente imposible en todas las GPU asignadas.
+- Evitado el deadlock tras terminar un Run GPU: cada Run empaquetado usa ahora un proceso nuevo de
+  un worker que termina con resultado o error y libera su contexto CUDA, en vez de dejar pools
+  ociosos reteniendo VRAM mientras la cola espera indefinidamente.
+- Evitada la carrera entre el refresco del estudio y el cierre del worker que podía devolver un Run
+  terminal a `running`: las observaciones de mejor época del controlador tienen ahora un registro
+  atómico separado, por lo que los contadores finales y la admisión no quedan bloqueados.
+- Corregidos `lf help`, ayuda anidada en forma natural y `--help` convencional para terminar con
+  éxito, también cuando otra aplicación llama directamente al entry point.
+
+### Añadido
+
+- Guardas de resultado explícitas mediante `objective.constraints`: se evalúan en la mejor época
+  del objetivo primario y se promedian entre seeds; evidencia ausente/incumplida hace al candidato
+  no factible y lo excluye del ajuste/selección sin ocultar su registro.
+- Relleno de adquisición asíncrono acotado: uno o dos candidatos de anticipación del posterior
+  actualizado pueden ocupar recursos antes de terminar un lote lento, qLogNEI condiciona en todos
+  los pendientes y cada decisión queda auditada sin cancelación especulativa masiva.
+- Detalle visual por hiperparámetro en `lf top` con curvas de respuesta, barras categóricas y tabla
+  de calor de ganancia predictiva conjunta. Puntos y matriz acotados también aparecen en JSON con
+  semántica explícitamente no causal.
+- Añadida una consola de evidencia HPO con `i` en estudios adaptativos de `lf top`. Explica por
+  parámetro dirección/posible umbral numérico o contraste categórico con cobertura, efecto,
+  confianza conservadora, sugerencia de siguiente evidencia y última acción real del controlador.
+  El mismo modelo acotado y explícitamente no causal está disponible en el JSON de overview.
+- Toda `search` con objective activa ahora por defecto la política adaptativa completa: inicio Sobol
+  scrambled, adquisición mixta dependiente de resultados, asignación probabilística de seeds
+  compartidas, pruning conservador, límites de convergencia y confirmación con seeds nuevas.
+  BoTorch qLogNEI mixto y sensible al ruido sigue opcional y aislado, con fallback k-NN determinista.
+- Añadida promoción acumulativa explícita `search.fidelity` mediante `self.fidelity` y checkpoints
+  gestionados; Lightning reanuda automáticamente presupuestos crecientes de epochs y la
+  confirmación final usa fidelidad completa.
+- Añadida evidencia compacta de replay/auditoría en `hpo-control/state.json` y el diario append-only
+  `decisions.jsonl`, con backend/fallback, `START_NEW`, `ADD_SEED`, `RESUME`, parada y confirmación.
+  Los resúmenes enlazan estos registros e informan incertidumbre/fidelidad.
+- `strategy: exhaustive` es ahora un contrato de sweep exacto para `values` finitos y ramas `when`;
+  se rechazan rangos continuos y límites de candidatos en vez de muestrearlos silenciosamente.
+- Evidencia ampliable para Runs fallidos en `lf top`: `e` alterna el traceback persistido tanto en
+  paneles de seed como en logs de Attempts, incluida fase y ruta exacta del resultado.
+- Propuesta secuencial dependiente de resultados: un conjunto inicial que cubre el espacio precede
+  lotes de adquisición k-NN numérica/categórica, y `lf top` solo publica parámetros al proponer
+  realmente el Trial en vez de presentar todo el pool determinista como ya decidido.
+- Procedencia de índice/token GPU por seed en resultados, detalle JSON y `lf top`.
+- Sustituidos los sparklines de recursos/estudios de `lf top` por series temporales Unicode
+  enmarcadas de alta resolución inspiradas en nvtop, sin dependencia nueva de plotting.
+- Desplazamiento horizontal de logs largos y selección de curvas Lightning mediante
+  `epoch_chart_include`/`epoch_chart_exclude`.
+- Color semántico con soporte `NO_COLOR`, historiales compactos de clúster, parámetros completos del
+  Trial seleccionado, páginas de cuatro curvas, tabla de épocas seleccionable, marcador en las
+  curvas, detalle escalar por época y selector explícito de salida bruta.
+- Simplificadas las tablas de estudio eliminando resúmenes truncados redundantes, añadiendo un panel
+  completo de métricas de la seed seleccionada y usando `n`/`p` para páginas de curvas.
+- Navegación de estudio consciente del objective: Trials nombran métrica/dirección, las seeds
+  separan época última y óptima, y tablas/gráficas conservan marcador verde de óptimo junto al rojo
+  seleccionado incluso tras reducir curvas.
+- `lf clusters setup` y `lf clusters modify` como flujos de terminal explicados y ligeros sobre los
+  comandos nativos existentes; cubren credenciales, rutas, runtimes, storage, scheduler y GPU sin
+  duplicar el backend de configuración.
+- Navegación con flechas/Enter y explicación enfocada de consecuencias/riesgos en las opciones del
+  setup, manteniendo fallback numerado igual de documentado y salida segura en cada pregunta.
+- Claim/release GPU argv atómicos por clúster. Se prefieren wrappers autocontenidos como CITIUS
+  `gpu exec`; un claim persistente se libera tras éxito, fallo, cancelación o submit fallido y se
+  rechaza con SLURM.
+
+### Cambiado
+
+- Las propuestas bayesianas usan ahora mejora esperada conjunta con ruido, error estándar entre
+  seeds y miembros pendientes del lote. La confianza del panel HPO exige tamaños de muestra
+  conservadores, separa explicación marginal de decisión conjunta e informa podas censuradas. El
+  pruning requiere por defecto dos steps comunes desfavorables distintos.
+- La telemetría distingue el pico de tensores CUDA vivos de la caché actual/máxima del allocator,
+  prioriza tiempos de época/validación y libera caché CUDA no usada entre Runs empaquetados. La
+  admisión HPO sigue usando memoria por Run explícita y memoria libre del driver, no la caché
+  reservada observada.
+- Los Runs activos muestran duración viva y tiempos medidos según llegan, usando una estimación
+  media por época claramente etiquetada solo mientras no exista telemetría explícita.
+- En command/scheduler, `CUDA_VISIBLE_DEVICES` heredado se trata como grants opacos del centro
+  (incluidos UUID/MIG), solo se estrecha por hijo y se falla cerrado en vez de inventar o ampliar
+  una asignación ausente/insuficiente. Los probes CUDA usan el mismo wrapper del centro.
+
 ## [0.13.0] - 2026-08-30
 
 ### Añadido

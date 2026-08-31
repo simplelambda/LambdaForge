@@ -9,7 +9,13 @@ from typing import Any, TypeVar
 
 from lambdaforge.work.cache import WorkCache
 from lambdaforge.work.checkpoints import CheckpointCollection
-from lambdaforge.work.models import WorkConfiguration, WorkInput, WorkResources, WorkTrial
+from lambdaforge.work.models import (
+    WorkConfiguration,
+    WorkFidelity,
+    WorkInput,
+    WorkResources,
+    WorkTrial,
+)
 from lambdaforge.work.outputs import OutputCollection
 from lambdaforge.work.runtime import (
     MetricCollection,
@@ -122,6 +128,15 @@ class Work:
     def trial(self) -> WorkTrial | None:
         """Immutable parameter-study member metadata, without controller internals."""
         return self._bound().trial
+
+    @property
+    def fidelity(self) -> WorkFidelity | None:
+        """Cumulative adaptive budget, or ``None`` when multi-fidelity is not declared.
+
+        A custom trainer must continue from ``current`` to ``target`` using managed checkpoints.
+        The unit (epochs, steps or samples) belongs to the Work and is never guessed by LambdaForge.
+        """
+        return self._bound().fidelity
 
     @property
     def run_dir(self) -> Path:

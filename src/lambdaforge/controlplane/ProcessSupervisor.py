@@ -98,6 +98,8 @@ class ProcessSupervisor:
         cpu_leases: tuple[int, ...] = ()
         process: subprocess.Popen[bytes] | None = None
         identity: ProcessIdentity | None = None
+        gpu_access: Mapping[str, Any] = {}
+        gpu_mode = "exclusive"
         try:
             if bool(request.get("stage_source", False)):
                 source = Path(str(request["source_work_dir"])).resolve()
@@ -136,6 +138,8 @@ class ProcessSupervisor:
             environment["LAMBDAFORGE_PROGRESS_PATH"] = str(job_dir / "progress.json")
             environment["LAMBDAFORGE_JOB_RESULT_PATH"] = str(job_dir / "result.json")
             environment["LAMBDAFORGE_STUDY_PATH"] = str(job_dir / "study")
+            environment["LAMBDAFORGE_GPU_ACCESS_MODE"] = gpu_mode
+            environment["LAMBDAFORGE_REQUESTED_GPUS"] = str(gpu_count)
             cache_root = request.get("cache_root")
             if cache_root:
                 environment["LAMBDAFORGE_CACHE_ROOT"] = str(cache_root)
@@ -204,13 +208,11 @@ class ProcessSupervisor:
                 except Exception as error:
                     cls._update_state(
                         job_dir,
-                        {
-                            "process_cleanup_warning": (
-                                f"{type(error).__name__}: {error}"
-                            )
-                        },
+                        {"process_cleanup_warning": (f"{type(error).__name__}: {error}")},
                     )
             cls._release_gpus(Path(str(request["lease_root"])), job_id, leases)
+            if gpu_mode == "command" and gpu_access.get("claim_command"):
+                cls._release_external_gpu(job_dir, work_dir, gpu_access)
             resource_root = request.get("resource_lease_root")
             if resource_root is not None:
                 cls._release_capacity(Path(str(resource_root)), job_id)
@@ -226,6 +228,46 @@ class ProcessSupervisor:
                         job_dir,
                         {"retention_warning": f"{type(error).__name__}: {error}"},
                     )
+
+    @classmethod
+    def _release_external_gpu(
+        cls, job_dir: Path, work_dir: Path, policy: Mapping[str, Any]
+    ) -> None:
+        """Release an explicitly claimed site GPU without replacing scientific state."""
+        raw = policy.get("release_command", ())
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+            cls._update_state(job_dir, {"gpu_release_warning": "Invalid release_command argv."})
+            return
+        command = tuple(str(item) for item in raw)
+        if not command:
+            cls._update_state(job_dir, {"gpu_release_warning": "Missing release_command argv."})
+            return
+        try:
+            released = subprocess.run(
+                command,
+                cwd=work_dir,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=60.0,
+                check=False,
+            )
+            if released.returncode:
+                cls._update_state(
+                    job_dir,
+                    {
+                        "gpu_release_warning": (
+                            released.stderr.strip()
+                            or released.stdout.strip()
+                            or f"release exited {released.returncode}"
+                        )
+                    },
+                )
+        except Exception as error:
+            cls._update_state(
+                job_dir,
+                {"gpu_release_warning": f"{type(error).__name__}: {error}"},
+            )
 
     @classmethod
     def control(cls, operation: str, job_dir: str | Path) -> dict[str, Any]:
@@ -686,9 +728,7 @@ class ProcessSupervisor:
         }
 
     @classmethod
-    def _terminate(
-        cls, identity: ProcessIdentity, grace_seconds: float = 5.0
-    ) -> dict[str, Any]:
+    def _terminate(cls, identity: ProcessIdentity, grace_seconds: float = 5.0) -> dict[str, Any]:
         """Stop every observable process owned by one Job and verify convergence.
 
         Process-group signalling handles ordinary descendants atomically.  The inherited,

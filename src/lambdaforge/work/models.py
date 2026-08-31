@@ -6,9 +6,9 @@ import copy
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 from lambdaforge.work.atomic import atomic_write_json
 
 
@@ -17,7 +17,9 @@ def immutable_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
 
     def freeze(item: Any) -> Any:
         if isinstance(item, Mapping):
-            return MappingProxyType({str(key): freeze(nested) for key, nested in item.items()})
+            return FrozenJsonMapping(
+                {str(key): freeze(nested) for key, nested in item.items()}
+            )
         if isinstance(item, list | tuple):
             return tuple(freeze(nested) for nested in item)
         return item
@@ -86,6 +88,20 @@ class WorkTrial:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parameters", immutable_mapping(self.parameters))
+
+
+@dataclass(frozen=True, slots=True)
+class WorkFidelity:
+    """Cumulative budget requested for the current adaptive Attempt."""
+
+    current: int
+    target: int
+    maximum: int
+
+    @property
+    def final(self) -> bool:
+        """Return whether this Attempt targets the authored maximum budget."""
+        return self.target >= self.maximum
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +184,11 @@ class WorkResult:
     job_id: str | None = None
     pruned: bool = False
     prune_reason: str | None = None
+    gpu_index: int | None = None
+    gpu_token: str | None = None
+    study_phase: str | None = None
+    fidelity: Mapping[str, int] | None = None
+    objective_observation: Mapping[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -209,6 +230,15 @@ class WorkResult:
             "job_id": self.job_id,
             "pruned": self.pruned,
             "prune_reason": self.prune_reason,
+            "gpu_index": self.gpu_index,
+            "gpu_token": self.gpu_token,
+            "study_phase": self.study_phase,
+            "fidelity": dict(self.fidelity) if self.fidelity is not None else None,
+            "objective_observation": (
+                copy.deepcopy(dict(self.objective_observation))
+                if self.objective_observation is not None
+                else None
+            ),
         }
 
     def write(self, path: str | Path) -> Path:

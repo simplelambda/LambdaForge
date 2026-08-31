@@ -258,7 +258,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
                     "Pip installation changed the identity-bearing native inventory: "
                     f"{inventory.stderr.strip()}"
                 )
-        verified = self._verify(transport, str(temporary_python), plan, trust, native)
+        verified = self._verify(profile, transport, str(temporary_python), plan, trust, native)
         if verified.returncode:
             self._cleanup(transport, temporary)
             raise RuntimeError(
@@ -333,6 +333,7 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
 
     @staticmethod
     def _verify(
+        profile: ClusterProfile,
         transport: Transport,
         python: str,
         plan: TorchInstallationPlan | None,
@@ -357,7 +358,8 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
             "   assert probe.item() == 2\n"
             "print(lambdaforge.__version__, torch.__version__, torch.version.cuda, available)\n"
         )
-        verified = transport.run((*(() if trust is None else trust.prefix()), python, "-c", code))
+        command = (*(() if trust is None else trust.prefix()), python, "-c", code)
+        verified = transport.run(profile.gpu_access.wrap(command) if require_cuda else command)
         if verified.returncode or native is None:
             return verified
         return ManagedEnvironmentProvider._native_tools(transport, python, native)
@@ -373,7 +375,9 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         native: NativeEnvironmentPlan | None,
     ) -> CommandResult:
         """Verify runtime behavior and exact native inventory before cache reuse."""
-        verified = ManagedEnvironmentProvider._verify(transport, python, plan, trust, native)
+        verified = ManagedEnvironmentProvider._verify(
+            profile, transport, python, plan, trust, native
+        )
         if verified.returncode or native is None:
             return verified
         return ManagedEnvironmentProvider._verify_native_inventory(

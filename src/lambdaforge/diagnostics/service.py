@@ -683,7 +683,13 @@ class DiagnosticClassifier:
                 operation=context.operation,
                 job_id=job_id,
             )
-        if isinstance(error, (FileExistsError, FileNotFoundError, KeyError, ValueError, TypeError)):
+        internal_model_transport = isinstance(error, TypeError) and (
+            "cannot pickle 'mappingproxy' object" in lowered
+            or "cannot pickle 'frozenjson" in lowered
+        )
+        if isinstance(
+            error, (FileExistsError, FileNotFoundError, KeyError, ValueError, TypeError)
+        ) and not internal_model_transport:
             return diagnostic(
                 ErrorCategory.CONFIGURATION,
                 "LambdaForge cannot perform the requested operation with the supplied values.",

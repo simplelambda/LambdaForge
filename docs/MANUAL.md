@@ -67,6 +67,12 @@ project/
   .lambdaforge/          # managed state; ignored by Git
 ```
 
+`lf --help`, `lf help`, `lf COMMAND --help` and `lf help COMMAND SUBCOMMAND` are equivalent
+successful help routes. For a first remote target, `lf clusters setup` provides an explained
+interactive wizard; `lf clusters modify [NAME]` edits an existing profile. Both invoke only the
+same native cluster subcommands used by scripts and never put password values in argv or YAML.
+Every prompt accepts `0`, `q`, `quit` or `exit`; an unconfirmed prompt is never applied.
+
 ## 3. Work API
 
 Subclass `Work`, use a no-argument constructor (normally no constructor at all), and implement
@@ -446,35 +452,137 @@ seeds: [7, 17]
 search:
   strategy: adaptive
   trials: 12
+  startup_trials: 10
   min_seeds: 1
-  reduction_factor: 2
+  seed_probability_threshold: 0.1
+  equivalence_margin: 0.002
+  confirmation_top_k: 2
+  confirmation_seeds: [1001, 1002, 1003]
+  sampler: auto
+  max_runs: 180
+  max_time: 12h
+  convergence_patience: 8
+  min_improvement: 0.0005
   max_parallel: 2
+  failure_retries: 1
   learning_rate: {range: [0.0001, 0.01], scale: log}
   width: {values: [128, 256]}
 objective: {metric: val_score, mode: max}
 ```
 
-Finite-only dimensions form a Cartesian product. A numeric range uses deterministic random search
-for `trials` variants. Every executed variant/seed is a Run; values are normal `run()` parameters,
-`self.trial` describes the variant, and `self.seed` describes the seed. The objective is selected
-only from Runs belonging to that Work and must be logged under the exact scalar metric name.
+Finite-only exhaustive dimensions form a Cartesian product. In explicit `strategy: exhaustive`
+mode this is an exact contract, not a sampling hint: finite `when` branches are enumerated, while
+`range` and `trials` are rejected because a continuous interval/candidate cap cannot be exhaustive.
+Replace a range with explicit `values` when a full reproducible sweep is required.
+Adaptive/numeric spaces build a
+deterministic scrambled-Sobol pool bounded by `trials`; conditional parameters use `when` and carry
+an explicit active/inactive feature rather than a fake value. This pool is planning state, not a
+list of decided Trials. LambdaForge first proposes at most `startup_trials` space-filling points.
+After their objective values arrive, `sampler: auto` prefers optional BoTorch mixed-GP qLogNEI and
+falls back to a dependency-light mixed k-NN acquisition if the extra is absent, observations are
+still insufficient or GP fitting is numerically unsafe. `sampler: knn` forces the base backend;
+`sampler: botorch` requests BoTorch but still fails safe to k-NN. Only proposed candidates appear in
+`lf top`. This is a genuinely joint decision model: numeric dimensions, categorical dimensions and
+conditional active/inactive indicators share one input vector, so posterior predictions can depend
+on interactions. When repeated seeds provide a standard error, it is passed as observation noise;
+qLogNEI then selects from the finite candidate pool while accounting for noisy observations and
+every already-pending candidate. The log-EI family is used for its more stable
+numerics ([BoTorch acquisition guidance](https://botorch.org/docs/optimization)).
 
-With an objective and more than one seed, omitted `strategy` means `adaptive`. Explicit
-`strategy: exhaustive` retains the full Cartesian behavior. Adaptive search uses successive
-halving. If candidate (i) has observations (x_{i1},\ldots,x_{in}), it is ranked conservatively
-for maximization by
+The objective may include explicit outcome constraints:
+
+```yaml
+objective:
+  metric: val_auprc
+  mode: max
+  constraints:
+    val_accuracy: {min: 0.55}
+    val_kappa: {min: 0.05}
+```
+
+Each constraint accepts `min`, `max` or both. LambdaForge reads its value at the exact epoch where
+the primary objective was best, then averages that aligned value across completed seeds. A missing
+metric or violated mean makes the candidate infeasible: it remains auditable in telemetry but is
+excluded from seed racing, surrogate observations and final selection. This prevents one lucky
+objective checkpoint from hiding a model that fails an explicitly declared scientific validity
+criterion. LambdaForge never infers constraints from unrelated logged metrics, their names or
+directions. Doing so would silently change the research question. Multiple objectives require an
+explicit Pareto problem and are intentionally not simulated by hidden weights.
+
+With an objective, omitted `strategy` means `adaptive`, even with one seed. This activates all safe
+optimizations by default: Sobol startup, adaptive proposals, seed racing, curve pruning,
+convergence detection, bounded failure recovery and fresh-seed confirmation. Unless authored,
+`min_seeds` is up to three available search seeds and three deterministic disjoint confirmation
+seeds are generated; use `confirmation_seeds: []` only to deliberately disable final confirmation.
+Search and seed evidence are interleaved. For candidate \(i\), seed outcomes estimate a
+random-effects mean \(\hat\mu_i\) with pooled between-seed variance when only one observation
+exists. Shared seed order
+allows the paired differences
 
 $$
-q_i = \bar{x}_i - c\frac{s_i}{\sqrt{n}},
+d_s=Y(i,s)-Y(i^\star,s).
 $$
 
-and by the corresponding upper bound for minimization. `confidence` is (c) (default 1); with one
-seed the mean is used because variance is not identifiable. Starting from `min_seeds`, each round
-keeps `ceil(candidates / reduction_factor)` and increases its seed budget by the reduction factor,
-bounded by the authored seed list. The summary retains contributing Run IDs/seeds and maximum
-`planned_runs`; `completed_runs` records what was actually evaluated.
+Another seed is useful while
 
-### 7.1 Independent trainings per GPU
+$$
+P(\mu_i\geq\mu_{i^\star}-\epsilon\mid D)\geq\delta,
+$$
+
+where `equivalence_margin` is \(\epsilon\) and `seed_probability_threshold` is \(\delta\). Clearly
+dominated candidates stop receiving seeds; uncertainty near the decision boundary receives them
+first, divided by observed Run duration. `min_seeds` is only the initial evidence floor. The old
+`reduction_factor` remains accepted for configuration continuity but no longer dictates a fixed
+seed-halving ladder.
+
+Search evidence and final evidence are separate. `confirmation_top_k` freezes the best search
+candidates and `confirmation_seeds` evaluates them with disjoint seeds. If confirmation is present,
+only its mean selects `summary.best`; otherwise a conservative search bound prevents a lucky
+one-seed candidate from defeating a better-supported candidate. `max_runs`, `max_time`,
+`convergence_patience` and `min_improvement` bound spending. A convergence stop ends new proposals
+but may still resolve seed uncertainty with the remaining budget.
+
+One seed Run has two deliberately different objective values. `current` is the observation at its
+latest reported step and is used for like-for-like curve projection and pruning. `best` is the
+minimum/maximum observation over its completed curve and is the checkpoint value used for seed
+racing, the surrogate and final ranking. Consequently a late overfitting epoch does not
+underestimate a completed Run, while a promising early point cannot save a cooperatively pruned
+partial Run. A Trial's HPO value is the mean of the per-seed best values—not the single luckiest
+seed. Fresh confirmation seeds and the conservative search bound limit repeated-validation bias.
+The default initial floor is up to three authored seeds per proposed Trial: enough to estimate
+seed variability without spending all declared seeds on a clearly dominated configuration.
+
+Every controller action is auditable. `hpo-control/decisions.jsonl` is an append-only sequence of
+initialization, surrogate/fallback, `START_NEW`, `ADD_SEED`, `RESUME`, convergence, confirmation and
+finish events. `hpo-control/state.json` is the compact latest replay snapshot. Both are linked from
+`result.json` under `summary.adaptive_controller`; they contain scalar identities and decisions,
+not checkpoints or model bytes.
+
+The acquisition loop is bounded-asynchronous. A terminal observation may immediately fill a free
+slot while other Runs from the current batch remain active. The controller proposes at most
+`max(1, min(2, parallelism // 3))` such look-ahead candidates per scheduling wave, conditions the
+Bayesian acquisition on every pending candidate and records the launch as `START_NEW` with
+`reason=bounded-async-lookahead`. This can hide long stragglers without building a large queue from
+stale posterior states. It does not preempt a healthy Run merely because rankings change; safe
+cooperative pruning and fidelity decisions remain the only scientific cancellation mechanisms.
+
+### 7.1 Exact sweeps without HPO
+
+Use a finite exhaustive sweep when the scientific question requires every authored combination:
+
+```yaml
+seeds: [7, 17]
+search:
+  strategy: exhaustive
+  optimizer: {values: [adamw, sgd]}
+  momentum: {values: [0.8, 0.9], when: {optimizer: sgd}}
+```
+
+This runs one AdamW variant and two SGD variants for each seed: six Runs exactly. It does not use an
+objective, surrogate, pruning, adaptive seed allocation or confirmation. An objective may still be
+declared to summarize/rank the complete evidence, but it does not change which Runs execute.
+
+### 7.2 Independent trainings per GPU
 
 The YAML resource block is the fixed outer reservation. `resources.gpu` reserves GPUs for one
 study; it is not repeated per child. `search.runs_per_gpu` packs independent spawned Runs onto each
@@ -488,7 +596,7 @@ search:
   runs_per_gpu: 4
   min_seeds: 1
   reduction_factor: 2
-  early_stopping: {enabled: true, min_step: 5}
+  early_stopping: {enabled: true, min_step: 5, confirmations: 2}
   learning_rate: {range: [0.00001, 0.003], scale: log}
   hidden_dim: {values: [64, 128, 256]}
 objective: {metric: val_auprc, mode: max}
@@ -500,19 +608,65 @@ resources:
   time: 24h
 ```
 
-The maximum is (2\times4=8) concurrent trainings. Six GPUs with `runs_per_gpu: 2` gives 12;
+The maximum is \(2\times4=8\) concurrent trainings. Six GPUs with `runs_per_gpu: 2` gives 12;
 two GPUs with `runs_per_gpu: 1` gives 2. Packing above one requires `gpu_memory`, interpreted as a
-per-Run bound. Before child launch LambdaForge requires
+per-Run admission threshold. Before launching each individual child LambdaForge requires
 
 $$
-\texttt{runs\_per\_gpu}\times\texttt{gpu\_memory}
+\texttt{gpu\_memory}
 \leq \text{currently free device memory}.
 $$
 
-This is an admission check, not a promise against unrelated processes allocating memory later.
-`max_parallel` can lower GPU concurrency and bounds CPU-only studies when no GPU is requested.
+`runs_per_gpu` is only the per-device maximum. LambdaForge probes every allocated device and fills
+only the slots that pass this check; temporarily unavailable Runs remain queued and the controller
+polls again. Launches on one GPU are separated by five seconds so a new process can materialize its
+allocation before the next observation. The controller also fixes a conservative free-memory
+budget when a device starts a wave and accounts the full declared threshold for every admitted Run,
+even if CUDA has not allocated it yet; the budget resets only after that device has no active
+LambdaForge Run. Every admitted Run has a fresh one-worker spawned process. It is shut down as soon
+as its result or error is received, releasing the whole CUDA context; a persistent idle pool could
+retain VRAM and deadlock the Runs waiting for admission. A full or smaller GPU is skipped while other usable GPUs continue. Only a
+threshold above the total VRAM of every allocated device is impossible and fails as configuration.
+The memory probe itself executes in a short-lived child and exits after returning JSON, so the HPO
+controller does not appear as one idle CUDA process per GPU and does not consume a
+`runs_per_gpu` slot. Wait/admission records are flushed to the Work log.
 
-### 7.2 Early stopping contract
+This dynamic admission is not a promise against unrelated processes allocating memory afterward,
+nor a hard memory limiter inside consumer code. Declare a conservative peak requirement.
+`max_parallel` can lower the global GPU maximum and bounds CPU-only studies.
+
+Failure isolation follows the Run boundary. CPU and GPU adaptive Runs both use fresh one-worker
+processes, so a killed worker cannot poison a shared pool or cancel unrelated candidates. A worker
+lost before returning a result and CUDA OOM/allocation failures are retried as a new Attempt up to
+`failure_retries` (default 1, allowed 0–3). Compatible checkpoints remain under the same Run and
+are discovered by the retry. A repeated resource failure becomes terminal, and ordinary consumer
+exceptions are never retried blindly because invalid data/code will not improve with repetition.
+Other pending/active Runs continue. The enclosing Work is still reported failed when a Run exhausts
+recovery, preserving honest scientific evidence instead of hiding a missing candidate.
+
+### 7.3 Multi-fidelity continuation
+
+`search.fidelity` is optional because only the consumer Work knows whether its budget is cumulative
+and resumable. It must not be inferred from a parameter named `epochs`:
+
+```yaml
+search:
+  trials: 40
+  fidelity: {min: 5, max: 100, reduction_factor: 3}
+  learning_rate: {range: [0.00001, 0.003], scale: log}
+objective: {metric: val_auprc, mode: max}
+```
+
+The first Attempt receives `self.fidelity.current == 0` and `target == 5`. A promoted Run keeps the
+same scientific identity/checkpoint root and receives cumulative targets 15, 45 and 100. The Work
+must advance only from `current` to `target`, save resumable state through `self.checkpoints`, and
+log the objective at each useful step. It must not restart the entire target budget. Confirmation
+Runs always target `maximum`. `LightningRunner` implements this contract automatically by limiting
+`max_epochs`, persisting a managed `last.ckpt` and passing it to the next Attempt; custom trainers
+must implement the same semantics explicitly. Without `fidelity`, normal full-budget behavior is
+unchanged.
+
+### 7.4 Early stopping contract
 
 Adaptive early stopping is cooperative. Log repeated objective observations with an integer step:
 
@@ -523,13 +677,18 @@ if self.stop_requested:
     return {"stopped": True}
 ```
 
-After `early_stopping.min_step`, the controller compares active Runs at a common observed step and
-requests a stop from the current bottom fraction. `LightningRunner` automatically forwards its
-validation `callback_metrics[objective]` and honors requests at batch boundaries. Custom trainers
-use the public metric/flag contract above. A final-only metric still enables adaptive seed
-allocation, but provides no safe in-training observation for early stopping.
+After `early_stopping.min_step`, the controller compares active Runs at a common observed step. A
+bounded local-linear posterior projects each curve a short distance forward and carries residual
+plus pooled uncertainty. It requests a stop only when the probability of remaining within
+`equivalence_margin` of the projected incumbent falls below `seed_probability_threshold`. This is
+more conservative with noisy or still-improving curves than dropping a fixed fraction. By default
+the condition must remain true at two distinct common steps (`confirmations: 2`); repeated polling
+of the same epoch cannot satisfy it. Set `confirmations: 1` only when an intentionally aggressive
+policy is worth the increased risk of reacting to one noisy validation point.
+`LightningRunner` forwards its validation metric and honors requests at batch boundaries. A
+final-only metric still enables adaptive seeds but cannot stop the current training early.
 
-### 7.3 Live study observability
+### 7.5 Live study observability
 
 The outer scheduler Job is an allocation/cancellation boundary, not a reason to merge scientific
 meaning. LambdaForge therefore keeps one compact study index next to that Job and one tiny state
@@ -546,12 +705,97 @@ Work
        └─ Seed 7: complete → curves, timing, isolated log
 ```
 
-The candidate view reports scheduled/active/completed/failed/pruned counts and promotion state.
-The Run view includes exact candidate parameters, state, duration, latest scalar values, learning
-curves, latest `epoch_time_s`/`validation_time_s`, terminal failure and only that process's captured
-output. Run detail refreshes outside the terminal event loop. Curves are read with a byte bound and
-reduced to 10–500 representative points while retaining endpoints; the TUI requests 80. Logs are
-bounded for interactive refresh and no telemetry reader mutates scientific evidence.
+The candidate view reports proposed versus planned candidates plus
+scheduled/active/completed/failed/pruned counts and promotion state. Its
+table separates best objective, its seed/epoch and current objective. HPO separately uses the mean
+of every completed seed's best checkpoint. Every parameter of the selected Trial is rendered below
+it. The seed table includes latest epoch, best epoch, best objective, current objective and GPU
+index, followed by a bounded latest-metric preview; the complete Run dashboard remains one Enter
+away, and the table reserves at least three seed rows at common terminal heights. `pruned` means
+the Run accepted a terminal probabilistic early-stop request; it is not failed, paused or later
+resumed, and its persisted reason is shown. A Trial containing only pruned seeds is therefore
+`pruned`, not `failed`. Its partial curves remain available as censored diagnostic evidence, but
+they are deliberately excluded from completed seed means, surrogate fitting and marginal
+objective statistics. Treating a partial best value as a full-budget observation would bias the
+search. LambdaForge nevertheless uses the information: the HPO read model reports terminal pruning
+rate by parameter region, and a pruned-only Trial contributes a mild neighbourhood penalty during
+proposal selection. This is censored negative evidence, not a fabricated scalar target.
+
+Press `i` from the adaptive candidate or Trial screen to open the HPO evidence console. For every
+detected hyperparameter it derives a bounded candidate-level diagnostic: numeric rank direction,
+low/high standardized contrast and possible threshold, or categorical group means and coverage.
+It labels evidence low/medium/high with conservative sample floors and an association score, and proposes the next
+comparison that would reduce ambiguity. The header separately reports the controller's actual
+latest action plus comparable, provisional and censored counts. Marginal associations can be confounded by correlated parameters, conditional
+activation, unequal seeds or partial fidelity, whereas the sampler reasons over the mixed
+multivariate space. The console therefore says “appears associated”, never causal or guaranteed.
+Interaction-importance methods such as functional ANOVA can summarize a mature surrogate
+([fANOVA paper](https://proceedings.mlr.press/v32/hutter14.html)), but applying them to the first few
+Trials would create unstable precision theatre. LambdaForge therefore keeps early explanations
+auditable and marginal while its actual GP/k-NN controller stays multivariate. Enter/right on a
+selected parameter opens a binned numeric response chart or categorical mean bars plus a pairwise
+relationship heat table. Pairwise values are leave-one-out k-NN joint predictive gain over the
+better marginal predictor, normalized by objective standard deviation. Positive gain says that the
+pair helped predict held-out outcomes; it is not a causal interaction score. The bounded raw
+response points and a maximum 12×12 relationship matrix make the same view available to wrappers.
+Descriptive response and joint coverage begin with two observations; predictive gain begins with
+three, while confidence labels retain conservative sample floors. A newer observer locally
+rebuilds an older bounded snapshot from candidate telemetry, so live remote studies do not require
+a restart merely to obtain a newer diagnostic view.
+The console also prints declared outcome constraints and infeasible-candidate counts. The same JSON
+is `overview` → `work.items[].study.hpo_analysis`; recent structured actions are in
+`.controller`, bounded to 25 events.
+
+The Run view is split into two regions. The upper region contains the complete aligned parameter
+list, live duration/timing summary and up to four learning curves. `n` and `p` select the next or
+previous numbered curve page; these plain keys work consistently across keyboard layouts. The lower
+region is an epoch table: up/down selects an epoch, the
+selection is marked red on every applicable curve, the objective-best epoch remains a green marker
+and highlighted row, and Enter/right opens a dedicated view containing
+every scalar for that epoch. `o` switches the lower region to the isolated raw Run output; modified
+left/right pans it horizontally. Duration is computed from `started_at_utc` while active. Measured
+`epoch_time_s` and `validation_time_s` replace the labelled elapsed-per-epoch estimate as soon as
+telemetry arrives. Run detail refreshes outside the terminal event loop.
+
+Curves are read with a byte bound and reduced to 10–500 representative points while retaining
+endpoints and the exact objective-best epoch; the TUI requests 80. Logs are bounded for interactive refresh and no telemetry reader
+mutates scientific evidence.
+
+The interactive plots follow nvtop's terminal grammar—framed time axes and live curves—but remain
+a small Unicode renderer rather than adding a plotting stack or rewriting the tested polling and
+process-control loop around an asynchronous UI framework. A final semantic ANSI layer adds colour
+only after width calculation, respects `NO_COLOR`, and leaves snapshots/machine output plain.
+Cluster rows contain compact CPU/RAM/GPU history; cluster detail plots whole-cluster CPU, RAM, GPU
+utilization and GPU-memory percentages over `lf top --history SECONDS`, with the current
+LambdaForge-owned share reported separately. Shift+left/right pans long Attempt or raw Run log
+lines while bare left keeps its navigation meaning; `h`/`l` are fallbacks.
+
+Collection and presentation are separate. `LightningRunner` retains every bounded finite scalar,
+but projects may select the curves drawn by `lf top` with shell patterns:
+
+```python
+from lambdaforge.training import LightningTrainConfig
+
+training = LightningTrainConfig(
+    epoch_console_include=["train_loss", "val_*", "*_time_s"],
+    epoch_chart_include=["val_*", "epoch_time_s", "validation_time_s"],
+    epoch_chart_exclude=["*_aux"],
+)
+```
+
+`epoch_console_include`/`epoch_console_exclude` select the per-epoch human log table; the chart
+patterns independently select only TUI presentation. CSV selection remains available through
+`epoch_metrics_include`/`epoch_metrics_exclude`.
+
+The default order gives the objective first, then `epoch_time_s`, `validation_time_s`, memory,
+validation and training metrics. CUDA memory names are precise: `gpu_mem_mb` is peak live tensor
+allocation (`max_memory_allocated`); `gpu_reserved_mb` is the current PyTorch caching-allocator
+pool; `gpu_peak_reserved_mb` is that pool's epoch peak. Reserved memory contains live allocations
+plus reusable cached blocks, so it can legitimately be much larger without being a second
+scheduler reservation. Adaptive packing never derives concurrency from this diagnostic value: it
+uses explicit per-Run `resources.gpu_memory` as a live admission threshold plus current driver free
+memory, filling safe slots rather than requiring the maximum upfront. After each packed Run,
+its dedicated process exits and releases the complete CUDA context before the slot is admitted again.
 
 There is no training-specific execution type. Local validation marks any ordinary Work declaring
 `search` or multiple `seeds` as expecting a parameter study. Consequently the study screen is
@@ -655,6 +899,26 @@ explicit mean-based ranking without guessing metric direction.
 
 ## 10. Clusters and jobs
 
+Humans can configure the same complete profile through an explained terminal flow:
+
+```bash
+lf clusters setup
+lf clusters modify gpu
+```
+
+The wizard covers connection/authentication, workspace/project/dataset paths, storage, managed or
+existing Python, PyTorch/CUDA policy, scheduler dialect and GPU access. Automation uses the native
+`clusters add/set/unset/credentials/test` commands shown below; the wizard calls those operations
+rather than maintaining a second configuration implementation. Backend answers how the process is
+launched: choose Direct for a normal SSH host even when GPU execution is wrapped by `gpu exec`, and
+choose SLURM only for `sbatch`. The later GPU access step configures allocation/claims. Every
+question offers `0`/`q`/`quit`/`exit` without applying the current prompt. In an interactive TTY,
+up/down (or `j`/`k`) changes the focused option, a contextual panel explains exactly what it owns
+and what risk it implies, and Enter selects it. Redirected/non-interactive terminals receive the
+same descriptions in the numbered fallback. GPU access is not a third backend: `exclusive` owns
+local LambdaForge leases, `shared` permits external coexistence subject to site policy,
+`scheduler` trusts a SLURM grant, and `command` preserves the visibility created by a site launcher.
+
 ```bash
 lf clusters add gpu --host HOST --user USER --workspace /remote/work \
   --project-root /scratch/USER/my-project
@@ -683,13 +947,27 @@ GPU admission is configured once per cluster:
 
 ```bash
 lf clusters set free-host gpu_access.mode shared
-lf clusters set claimed-host gpu_access '{mode: command, command_prefix: [gpu, run, --]}'
+lf clusters set citius-gpu gpu_access '{mode: command, command_prefix: [gpu, exec]}'
 ```
 
 The command form is an argv sequence and never invokes a shell. Use it when a center requires a
-wrapper around every GPU command. Site-specific SLURM directives/prologue remain appropriate when
-the scheduler owns claims. `shared` is an explicit risk choice for permissive hosts, not a hidden
-default.
+wrapper around every GPU command. At CITIUS, `gpu exec` is the preferred self-contained gpuctl
+form because allocation lifetime matches the command. If a site requires a persistent claim, pair
+claim and release atomically:
+
+```bash
+lf clusters set citius-gpu gpu_access \
+  '{mode: command, command_prefix: [gpu, exec], claim_command: [gpu, claim, --numgpus, "{gpu_count}"], release_command: [gpu, release]}'
+```
+
+`{gpu_count}` is the only interpolation and comes from the absolute YAML GPU request. Claiming runs
+inside durable background submission; the direct supervisor releases after success, failure or
+cancellation, and submission failure also attempts release. Persistent claims are rejected for
+SLURM profiles. For command/scheduler access, the child must inherit `CUDA_VISIBLE_DEVICES` from the
+site. LambdaForge treats indices/UUIDs/MIG UUIDs as opaque grants, only narrows them per Run and
+never replaces or broadens them; missing, duplicate or insufficient grants fail closed. The managed
+Python executable is absolute, so no shell/Conda activation must survive the wrapper. `shared` is
+an explicit risk choice for permissive hosts, not a hidden default.
 
 `workspace` and `project_root` are deliberately different. `workspace` is LambdaForge-owned state:
 bundle cache, environments, Job directories and logs may be garbage-collected according to their
@@ -835,7 +1113,11 @@ installable consumer source context rather than the controller's nonexistent phy
 `lf top` is the semantic interactive view. Up/down traverse clusters and Work rows as one list.
 For a study, Enter or right arrow drills through Trials, seed Runs and the live Run dashboard; `a`
 opens its outer numbered scheduler Attempts. Other Works drill directly into numbered Attempts and
-full logs. Left goes back. Every open log refreshes automatically while preserving manual scroll;
+full logs. A terminal study without a published study index falls back to its outer Attempts, which
+preserves ordinary output and the terminal error even when failure preceded telemetry publication.
+Within a failed seed Run, `e` expands type/message/phase/result path/traceback; in a full Attempt log
+the same key toggles persisted traceback detail. Left goes back. Every open log refreshes
+automatically while preserving manual scroll;
 when positioned at the end it follows new output. Long operational Job IDs stay out of this primary
 path and remain available
 through `lf jobs` and the machine-readable overview. `self.progress.update` reaches the supervisor's durable
@@ -915,11 +1197,13 @@ Attempt environment provenance remains after reconstructible environment bytes a
 | `top`, `overview` | human live and machine global control-plane views |
 | `show`, `logs`, `cancel`, `retry`, `delete` | semantic Work operations |
 | `jobs ...` | low-level Job control; `clear [--apply]` cleans terminal history |
-| `clusters ...`, `doctor`, `resources` | target setup and diagnosis; bootstrap accepts `--project` and read-only `--dry-run` |
+| `clusters setup/modify` | explained interactive front end over native cluster operations |
+| `clusters ...`, `doctor`, `resources` | scriptable target setup and diagnosis; bootstrap accepts `--project` and read-only `--dry-run` |
 | `datasets ...` | inspect/verify/place/delete published dataset versions |
 | `results list/show/compare` | query Work Execution results |
 | `clean` | preview/apply safe cache and terminal-artifact compaction |
 
+`lf help`, `lf --help`, `lf help clusters add` and conventional nested `--help` all exit zero.
 All command failures go through stable diagnostic categories/exit codes; add `--json` for tooling
 and `--debug` for tracebacks. Unsupported authoring commands and dataset build do not exist because
 all computation is `lf run`.

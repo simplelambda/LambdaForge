@@ -10,6 +10,118 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+### Fixed
+
+- Made early HPO evidence useful instead of blank: marginal response and pair coverage now render
+  from two comparable candidates, predictive pair gain starts at three with explicitly low early
+  confidence, and a newer `lf top` rebuilds old remote analysis snapshots locally. Pruned Runs now
+  contribute visible parameter-region pruning rates and mild censored-neighbourhood avoidance
+  without being misrepresented as completed objective values.
+- Removed the HPO controller's persistent per-GPU CUDA probe contexts. Free-VRAM observations now
+  run in an ephemeral inherited-grant child, so monitoring neither occupies a scientific packing
+  slot nor retains memory that can prevent the final `runs_per_gpu` Run from being admitted.
+- Made an all-pruned Trial terminal `pruned` instead of `failed`, retained its partial curves as
+  censored evidence without contaminating completed-objective statistics, and prevented duplicate
+  metric streams from overwriting a terminal Run's distinct current/best objective.
+- Kept at least three seed rows visible at common terminal heights by bounding parameter/metric
+  previews, with complete detail one drill-down away.
+- Separated current and best objective evidence throughout adaptive studies. Completed HPO now
+  ranks the mean per-seed best checkpoint while same-step current curves remain the pruning input;
+  `lf top` shows best/current values and the winning seed/epoch instead of conflating them.
+- Clarified that Direct/SLURM is process launch rather than GPU type, and made the cluster wizard
+  exit cleanly from every prompt through `0`, `q`, `quit` or `exit`.
+- Made immutable Work result/artifact metadata pickle-safe across adaptive spawned workers. A Run
+  that completed with artifacts can no longer fail afterwards with `cannot pickle 'mappingproxy'`;
+  that signature is also classified as an internal framework fault rather than user configuration.
+- Made terminal studies without a published telemetry index fall back to numbered Attempts and
+  ordinary logs in `lf top`, preserving the actual terminal failure instead of an unavailable-data
+  placeholder.
+- Isolated every adaptive CPU/GPU Run in its own worker so a killed process cannot poison a shared
+  pool or abort unrelated trainings. Lost workers and CUDA OOMs receive a bounded checkpoint-aware
+  retry; repeated resource failures remain terminal evidence while other Runs continue.
+- Replaced the fatal all-GPU `runs_per_gpu × gpu_memory` preflight with dynamic per-Run GPU
+  admission. Temporarily occupied devices now wait and are polled, available GPUs continue at
+  partial capacity, same-device launches are staggered, and only a bound physically impossible on
+  every allocated GPU fails as configuration.
+- Prevented adaptive GPU studies from deadlocking after a Run completes: packed Runs now use fresh
+  one-worker processes that exit on result or error, releasing their CUDA contexts instead of
+  leaving idle pool workers holding VRAM while later Runs wait forever.
+- Prevented live study refreshes from racing with worker completion and reverting a terminal Run to
+  `running`: controller-owned best-epoch observations now have a separate atomic record, so final
+  counters and queued-Run admission cannot be stranded by stale telemetry.
+- Made `lf help`, nested command-first help and conventional `--help` exit successfully, including
+  when the CLI entry point is embedded and called directly.
+
+### Added
+
+- Added explicit `objective.constraints` outcome guardrails. Bounds are evaluated at the primary
+  objective's best epoch and averaged across seeds; missing or violated evidence marks the
+  candidate infeasible and excludes it from adaptive fitting/selection without hiding its record.
+- Added bounded asynchronous acquisition refill: one or two updated-posterior look-ahead candidates
+  can fill capacity before a straggling batch ends, all pending points condition qLogNEI, and every
+  decision is audited without speculative mass cancellation.
+- Added HPO parameter drill-down in `lf top` with numeric response curves, categorical mean bars and
+  a pairwise joint-predictive-gain heat table. The bounded response points and relationship matrix
+  are also published in overview JSON with explicit non-causal semantics.
+- Added an `i` HPO evidence console to adaptive studies in `lf top`. It explains per-parameter
+  numeric direction/possible thresholds or categorical contrasts with coverage, standardized
+  effect, conservative confidence, a next-evidence suggestion and the controller's actual latest
+  action. The same bounded, explicitly non-causal read model is available in overview JSON.
+- Made every objective-bearing `search` use the complete adaptive policy by default: scrambled
+  Sobol startup, result-dependent mixed acquisition, probabilistic shared-seed allocation,
+  conservative curve pruning, convergence budgets and disjoint fresh-seed confirmation. Optional
+  BoTorch noise-aware mixed-GP qLogNEI remains dependency-isolated with deterministic k-NN fallback.
+- Added explicit cumulative `search.fidelity` promotion through `self.fidelity` and managed
+  checkpoints; Lightning training resumes increasing epoch budgets automatically and final
+  confirmation always runs at full fidelity.
+- Added compact adaptive replay/audit evidence in `hpo-control/state.json` and append-only
+  `decisions.jsonl`, including proposal backend/fallback, `START_NEW`, `ADD_SEED`, `RESUME`, stop and
+  confirmation decisions. Result summaries link these records and report seed uncertainty/fidelity.
+- Made `strategy: exhaustive` a strict exact-sweep contract for finite `values` and conditional
+  `when` branches. Continuous ranges and candidate caps are rejected instead of silently sampling.
+- Added expandable failed-Run evidence in `lf top`: `e` toggles persisted traceback details in both
+  seed dashboards and full Attempt logs, including failure phase and exact result path.
+- Added result-dependent sequential candidate proposal: a space-filling startup set is followed by
+  mixed numeric/categorical k-NN acquisition batches, and `lf top` publishes parameters only when a
+  Trial is actually proposed instead of displaying the complete deterministic pool as decided.
+- Added per-seed GPU index/token provenance to persisted results, JSON study detail and `lf top`.
+- Replaced compact resource/study sparklines in `lf top` with framed high-resolution Unicode
+  time-series charts inspired by nvtop's terminal layout, without a new plotting dependency.
+- Added horizontal panning for long live logs and per-dashboard Lightning curve selection through
+  `epoch_chart_include`/`epoch_chart_exclude`.
+- Added semantic terminal colour with `NO_COLOR` support, compact cluster-history traces, complete
+  selected-Trial parameter grids, paged four-curve study dashboards, selectable epoch tables,
+  curve selection markers, full per-epoch scalar detail and an explicit raw-output toggle.
+- Simplified study selection tables by removing redundant truncated summaries, adding a complete
+  selected-seed metric panel and using layout-independent `n`/`p` curve-page controls.
+- Added objective-aware study navigation: Trial tables name metric and direction, seed rows separate
+  latest and best epoch, and Run charts/tables retain a green best-epoch marker alongside the red
+  selected epoch even after bounded downsampling.
+- Added `lf clusters setup` and `lf clusters modify` as explained, dependency-light terminal flows
+  over the existing native profile commands; they cover credentials, paths, runtimes, storage,
+  schedulers and GPU policy without a second configuration backend.
+- Added arrow/Enter navigation and focused consequence/risk help to cluster setup choices, retaining
+  the equally documented numbered fallback and safe exit at every prompt.
+- Added atomic per-cluster GPU claim/release argv around command-wrapped Jobs. Self-contained
+  wrappers such as CITIUS `gpu exec` are preferred; persistent claims release after success,
+  failure, cancellation or failed submission and are rejected with SLURM.
+
+### Changed
+
+- Adaptive Bayesian proposals now use joint noisy expected improvement with seed standard errors
+  and pending-batch awareness. HPO insight confidence has conservative sample floors, explicitly
+  identifies marginal explanation versus joint decision-making, and reports pruned evidence as
+  censored. Curve pruning requires two distinct unfavorable common steps by default.
+- Training telemetry now names peak live CUDA allocation separately from current/peak PyTorch
+  allocator cache, prioritizes epoch/validation timing, and releases unused CUDA cache between
+  packed study Runs. HPO admission remains based on explicit per-Run GPU memory and driver free
+  memory, not allocator-reserved telemetry.
+- Active study Runs now show live duration and measured timing as it arrives, with a labelled
+  elapsed-per-epoch estimate only while explicit timing telemetry is unavailable.
+- Command/scheduler GPU Runs now treat inherited `CUDA_VISIBLE_DEVICES` entries as opaque site
+  grants (including UUID/MIG tokens), narrow them per child and fail closed instead of inventing or
+  broadening an absent/insufficient allocation. CUDA probes use the same site command wrapper.
+
 ## [0.13.0] - 2026-08-30
 
 ### Fixed

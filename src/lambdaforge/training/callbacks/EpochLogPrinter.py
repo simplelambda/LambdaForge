@@ -273,7 +273,9 @@ class EpochLogPrinter(CallbackBase):
         if "epoch_time_s" in metrics:
             stats.append(f"time={metrics['epoch_time_s']:.2f}s")
         if "gpu_mem_mb" in metrics:
-            stats.append(f"gpu_peak={metrics['gpu_mem_mb']:.1f} MB")
+            stats.append(f"gpu_peak_alloc={metrics['gpu_mem_mb']:.1f} MB")
+        if "gpu_reserved_mb" in metrics:
+            stats.append(f"gpu_cache_reserved={metrics['gpu_reserved_mb']:.1f} MB")
         if "cpu_rss_mb" in metrics:
             stats.append(f"cpu_rss={metrics['cpu_rss_mb']:.1f} MB")
 

@@ -6,6 +6,7 @@ import json
 import math
 import os
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -21,17 +22,29 @@ class AdaptiveHpoCallback(CallbackBase):
         metrics_path: Path | None,
         stop_path: Path | None,
         training_metrics_path: Path | None = None,
+        chart_include: Sequence[str] | None = None,
+        chart_exclude: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
         self.metric = metric
         self.metrics_path = metrics_path
         self.stop_path = stop_path
         self.training_metrics_path = training_metrics_path
+        self.chart_include = tuple(str(value) for value in chart_include or ())
+        self.chart_exclude = tuple(str(value) for value in chart_exclude or ())
         self._validation_started: float | None = None
+        self._epoch_started: float | None = None
         self._last_training_step: int | None = None
+        self._written: set[tuple[int, str]] = set()
+        self._chart_filter_written = False
 
     @classmethod
-    def from_environment(cls) -> AdaptiveHpoCallback | None:
+    def from_environment(
+        cls,
+        *,
+        chart_include: Sequence[str] | None = None,
+        chart_exclude: Sequence[str] | None = None,
+    ) -> AdaptiveHpoCallback | None:
         metric = os.environ.get("LAMBDAFORGE_HPO_OBJECTIVE")
         metrics = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
         stop = os.environ.get("LAMBDAFORGE_STOP_REQUEST_PATH")
@@ -44,12 +57,27 @@ class AdaptiveHpoCallback(CallbackBase):
             Path(metrics) if adaptive and metrics else None,
             Path(stop) if adaptive and stop else None,
             Path(training) if training else None,
+            chart_include,
+            chart_exclude,
         )
+
+    def on_train_epoch_start(self, trainer: Any, *_: Any) -> None:
+        self._epoch_started = time.perf_counter()
 
     def on_train_batch_start(self, trainer: Any, *_: Any) -> None:
         self._stop(trainer)
 
     def on_validation_batch_start(self, trainer: Any, *_: Any) -> None:
+        self._stop(trainer)
+
+    def on_train_epoch_end(self, trainer: Any, *_: Any) -> None:
+        """Record every epoch's wall time after its training/validation hooks complete."""
+        step = int(getattr(trainer, "current_epoch", 0)) + 1
+        scalars = self._scalars(getattr(trainer, "callback_metrics", {}))
+        if self._epoch_started is not None:
+            scalars["epoch_time_s"] = time.perf_counter() - self._epoch_started
+        if bool(getattr(trainer, "is_global_zero", True)):
+            self._write_training(scalars, step)
         self._stop(trainer)
 
     def on_validation_epoch_start(self, trainer: Any, *_: Any) -> None:
@@ -85,9 +113,26 @@ class AdaptiveHpoCallback(CallbackBase):
             return
         self.training_metrics_path.parent.mkdir(parents=True, exist_ok=True)
         with self.training_metrics_path.open("a", encoding="utf-8") as handle:
+            if not self._chart_filter_written and (self.chart_include or self.chart_exclude):
+                handle.write(
+                    json.dumps(
+                        {
+                            "kind": "chart-filter",
+                            "include": list(self.chart_include),
+                            "exclude": list(self.chart_exclude),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+                self._chart_filter_written = True
             for name, value in values.items():
+                if (step, name) in self._written:
+                    continue
                 record = {"name": name, "value": value, "step": step, "split": None}
                 handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+                self._written.add((step, name))
             handle.flush()
             os.fsync(handle.fileno())
         self._last_training_step = step

@@ -1,5 +1,6 @@
 """End-to-end CPU Lightning smoke test."""
 
+from pathlib import Path
 
 import pytest
 import torch
@@ -62,6 +63,30 @@ class TestTrainingSmoke:
         assert datamodule.train_dataloader().timeout == 0
         with pytest.raises(ValueError, match="batch_size"):
             LightningDataModule(dataset, dataloader_kwargs={"batch_size": 99})
+
+    def test_declared_fidelity_caps_epochs_and_forces_a_resumable_checkpoint(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        checkpoint_root = tmp_path / "managed-checkpoint"
+        monkeypatch.setenv("LAMBDAFORGE_FIDELITY_TARGET", "3")
+        monkeypatch.setenv("LAMBDAFORGE_HPO_CHECKPOINT_DIR", str(checkpoint_root))
+        runner = LightningRunner(
+            LightningTrainConfig(
+                max_epochs=20,
+                checkpoint_policy="none",
+                default_root_dir=tmp_path,
+            )
+        )
+
+        trainer = runner.build_trainer()
+
+        assert trainer.max_epochs == 3
+        managed = [
+            callback
+            for callback in trainer.callbacks
+            if Path(str(getattr(callback, "dirpath", ""))) == checkpoint_root
+        ]
+        assert len(managed) == 1
 
     def test_model_input_routing_supports_positional_and_named_arguments(self) -> None:
         batch = {

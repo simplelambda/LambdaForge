@@ -120,6 +120,11 @@ class ClusterProfile:
                 "SLURM clusters must use gpu_access mode 'scheduler' or 'command'; "
                 "direct-process exclusive/shared leases are not scheduler allocations."
             )
+        if self.scheduler == "slurm" and gpu_access.claim_command:
+            raise ValueError(
+                "SLURM profiles cannot use a persistent gpu_access.claim_command; use scheduler "
+                "allocation or a self-contained command wrapper that releases with the command."
+            )
         if self.scheduler == "local" and effective_gpu_access == "scheduler":
             raise ValueError("Local process clusters cannot use gpu_access mode 'scheduler'.")
         object.__setattr__(self, "scheduler_options", FrozenJsonMapping(self.scheduler_options))

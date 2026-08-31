@@ -32,6 +32,7 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
 | Results | `lf results list/show/compare` |
 | Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
+| Guided cluster profile | `lf clusters setup`; `lf clusters modify [NAME]` |
 | Preview safe storage cleanup | `lf clean [--on CLUSTER]`; add `--apply` after review |
 | Scaffold | `lf init DIRECTORY` |
 
@@ -138,7 +139,13 @@ scaling, imputation, PCA, thresholds or stability policy in clusterer defaults.
 `print()` and standard Python logging are captured by Job logs. Use `self.log()` for timestamped,
 immediately flushed human narration, `self.progress.update()` for completion and `metrics.log()` for
 scientific numeric evidence. In `lf top`, a study drills Work -> Trial candidate -> seed Run ->
-curves/timing/isolated live log; `a` opens its outer scheduler Attempts. Other Works drill directly
+paged curves/epoch table; `o` toggles isolated raw output and `a` opens outer scheduler Attempts.
+For a failed Run, `e` opens the persisted failure/traceback. A terminal declared study with no
+published telemetry must fall back to numbered Attempts/logs rather than hiding its error.
+The selected Trial and seed Run expose bounded parameter/latest-metric previews while preserving at
+least three seed rows; Enter opens complete Run detail. Candidate tables do not repeat truncated
+summaries. `n`/`p` pages at most four curves, up/down selects an epoch, and
+Enter/right expands all its scalars. Other Works drill directly
 to numbered Attempts/logs and left backs out; the primary TUI hides long Job IDs. `d` deletes one confirmed terminal
 selection and `D` clears confirmed terminal history while preserving active Jobs. Automation uses
 `lf overview --json` (`work.items[].attempt_history` retains Job IDs), ordinary `lf logs` and
@@ -146,7 +153,9 @@ preview-first `lf jobs clear [--apply]` instead of parsing the TUI. Local provid
 the durable Job and must never be recomputed from the observer's current directory.
 Attempt logs in `lf top` refresh automatically. Failed Work logs append persisted exception
 type/message/phase/result path after any requested tail; request `--verbose` or `--debug` for the
-traceback, or `--json` for structured `failure`/`failures`. Cache fetch retries incomplete HTTP/
+traceback, press `e` in the TUI, or use `--json` for structured `failure`/`failures`. Immutable
+runtime/result models crossing a spawned process boundary must remain pickle-safe; never expose a
+raw `mappingproxy` through that boundary. Cache fetch retries incomplete HTTP/
 chunked/gzip transfers and transient statuses from clean unpublished temporaries; never add a
 consumer-side retry workaround. Human bootstrap progress is stderr-only and machine JSON is clean.
 Parameter studies are ordinary Works declaring `search` or multiple `seeds`, not a
@@ -161,21 +170,70 @@ alone remain ordinary Attempt/log Works and must not create study telemetry.
 all members. Cross-step outputs reference `step.output` and are invalid when the producer has
 multiple seeds/trials. `seeds` creates separate Runs and does not inject a `seed` argument.
 `search` parameters override normal `with` values and are passed normally to `run()`. The objective
-must name a scalar logged through `self.metrics`. Objective plus multiple seeds defaults to adaptive
-successive halving; use `strategy: exhaustive` deliberately. Adaptive ranking uses mean plus a
-conservative standard-error bound, allocates `min_seeds` first and promotes only the top
-`1/reduction_factor`. `runs_per_gpu` packs independent spawned Runs inside the fixed outer
-reservation; values >1 require per-Run `resources.gpu_memory`. Repeated objective observations need
+must name a scalar logged through `self.metrics`. Any search with an objective defaults to the full
+adaptive policy: scrambled-Sobol startup, optional noise-aware BoTorch mixed-GP qLogNEI with deterministic
+mixed-kNN fallback, probabilistic shared-seed racing, curve pruning, convergence and fresh-seed
+confirmation. Only proposed candidates become public. `strategy: exhaustive` instead enumerates
+exact finite `values`/`when` combinations and every seed; it rejects continuous `range` and
+`trials`. Default confirmation seeds are disjoint; `confirmation_seeds: []` deliberately disables
+them. `search.fidelity` is explicit cumulative Work-defined budget; `self.fidelity` plus checkpoints
+implement continuation and LightningRunner bridges epoch budgets. Controller decisions/state live
+in `hpo-control/decisions.jsonl` and `state.json`. A bounded asynchronous look-ahead fills newly
+free slots from updated evidence while conditioning on all pending candidates; it proposes at most
+one or two candidates per wave and never preempts healthy Runs outside cooperative pruning.
+`objective.constraints.METRIC.min/max` are explicit guardrails evaluated at the primary-best epoch
+and averaged across seeds; missing/violated evidence is infeasible and excluded from HPO. Never
+infer guardrails or hidden multi-objective weights from other metrics. `runs_per_gpu` packs independent spawned Runs inside the fixed outer
+reservation; values >1 require per-Run `resources.gpu_memory`. This is a live free-VRAM threshold
+per new Run, while `runs_per_gpu` is only a maximum: temporarily full GPUs wait and are polled,
+other devices continue, and same-device launches are staggered. Reject only when no allocated GPU
+has enough total VRAM. Every admitted GPU Run uses a fresh one-worker spawned process that exits on
+result/error; never restore a persistent CUDA pool because idle contexts retain VRAM and can
+deadlock queued Runs. GPU memory probing must remain a short-lived child process: the controller
+must not retain one CUDA context per device or consume a scientific slot. Repeated objective observations need
 `step=` for early stopping. `LightningRunner` bridges them automatically; custom loops return at a
 safe boundary when `self.stop_requested` is true.
+
+Every adaptive CPU/GPU Run owns a fresh one-worker process. A lost/killed worker and CUDA OOM may
+retry as a new checkpoint-compatible Attempt up to `failure_retries` (default 1, max 3); a repeat is
+terminal. Never retry arbitrary consumer exceptions. One exhausted Run makes the enclosing Work
+honestly failed but must not cancel unrelated active/queued Runs. Telemetry records logical GPU
+index and exact inherited token; never infer or broaden physical devices from that display field.
 
 Study telemetry is a bounded read model, not another result store. It references per-Run logs and
 scalar JSONL, never copies checkpoints/outputs, and exposes exact keys under
 `overview --json` → `work.items[].study`. `lf show WORK --run KEY --json` returns parameters,
-down-sampled curves/timing/failure/log; `lf logs WORK --run KEY` isolates output. Lightning scalar
+down-sampled curves, current/best objective and epoch, timing/failure/log; `lf logs WORK --run KEY`
+isolates output. Completed HPO uses the mean of each seed's best observed checkpoint; current
+same-step curves drive pruning, and pruned Runs are terminal censored evidence—not failures—and
+excluded as exact values from completed-objective fitting/statistics. Their parameter-region
+pruning rates remain visible and pruned-only Trials mildly discourage nearby proposals without
+fabricating a full-budget score. Default pruning requires two distinct
+uncompetitive common steps through `early_stopping.confirmations`. Lightning scalar
 callback metrics plus epoch/validation time are automatic. Custom trainers log curves with
 `self.metrics.log(name, value, step=epoch)`; use `progress.update` for coarse progress and
 `self.log`/print only for human narration.
+
+Adaptive telemetry also includes bounded `hpo_analysis` and the last 25 structured `controller`
+actions. `lf top` opens it with `i`; automation reads
+`work.items[].study.hpo_analysis/controller`. Treat per-parameter insights as marginal
+associations with explicit coverage/confidence/caveats, never causal claims or a replacement for
+the joint multivariate sampler. Enter/right opens the selected parameter's bounded response chart
+and pairwise joint-predictive-gain panel; descriptive response/coverage begins at two comparable
+observations and predictive gain at three, always with conservative confidence floors. The JSON
+includes response points, pruning signal and a bounded matrix.
+
+`lf top` renders colour-coded framed Unicode time-series charts without a plotting dependency;
+colour is post-layout and respects `NO_COLOR`. `--history` controls cluster history;
+Shift+left/right pans raw logs while bare left backs out. Lightning
+study tables label the objective, proposed/planned candidates, GPU and latest/best epoch; charts keep red selected and green
+objective-best markers after bounded downsampling. Lightning
+projects choose displayed curves with `LightningTrainConfig(epoch_chart_include=[...],
+epoch_chart_exclude=[...])`; collection remains complete. `gpu_mem_mb` is peak live allocation,
+whereas `gpu_reserved_mb`/`gpu_peak_reserved_mb` are allocator-cache diagnostics. Never use reserved
+telemetry as a scheduler request: packing uses explicit `resources.gpu_memory` plus driver free
+memory for per-Run dynamic admission, and completed packed Runs empty unused CUDA cache before slot
+reuse. Temporary pressure queues and polls; it is not a scientific failure.
 
 Do not confuse `self.map` concurrency inside one Work with a YAML parallel group. A parallel group
 uses isolated spawned Work processes inside the enclosing Job's aggregate fixed allocation.
@@ -215,8 +273,16 @@ CUDA usability requires an actual tensor probe, not `nvidia-smi` alone.
 Cluster `gpu_access.mode` is `auto|scheduler|exclusive|shared|command`. Auto selects scheduler for
 SLURM and exclusive cooperative leases for direct hosts. Shared admits external occupancy only when
 the operator explicitly accepts that risk. Command requires an argv `command_prefix` for a site
-claim wrapper; never encode it as shell. Superseded managed environments are pruned only after a
-verified replacement is active and live-Job references are protected.
+claim wrapper; never encode it as shell. Prefer a self-contained `gpu exec`-style wrapper. Optional
+`claim_command` and `release_command` are an atomic pair; only `{gpu_count}` expands, the direct
+supervisor releases on every terminal path, and persistent claims are invalid with SLURM. In
+command/scheduler modes inherited `CUDA_VISIBLE_DEVICES` tokens are opaque grants: never replace or
+broaden them, and fail closed when missing/duplicate/insufficient. `lf clusters setup/modify` is a
+human front end over native commands, not another profile implementation. TTY choices use
+arrows/Enter with contextual help; redirected input receives numbered help. It accepts
+`0`/`q`/`quit`/`exit` at every prompt. Direct versus SLURM selects process launch; GPU
+wrappers/claims are the separate `gpu_access` policy, so `gpu exec` normally uses Direct. Superseded managed
+environments are pruned only after a verified replacement is active and live-Job references are protected.
 
 Direct/SLURM jobs retain durable state, heartbeat, logs, usage, cancellation and identity checks.
 Provider outage is unknown state, not scientific failure. Do not contact a real cluster or run a

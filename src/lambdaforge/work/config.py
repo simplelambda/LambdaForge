@@ -6,10 +6,11 @@ import copy
 import importlib
 import inspect
 import itertools
+import math
 import os
 import types
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
@@ -64,7 +65,7 @@ class RunDefinition:
     resources: ResourceRequest
     seeds: tuple[int | None, ...] = (None,)
     variants: tuple[Mapping[str, Any], ...] = ({},)
-    objective: Mapping[str, str] | None = None
+    objective: Mapping[str, Any] | None = None
     search_policy: AdaptiveSearchPolicy | None = None
     study_expected: bool = False
 
@@ -80,7 +81,13 @@ class RunDefinition:
 
     @property
     def run_count(self) -> int:
-        return len(self.seeds) * len(self.variants)
+        confirmation = (
+            min(self.search_policy.confirmation_top_k, len(self.variants))
+            * len(self.search_policy.confirmation_seeds)
+            if self.search_policy is not None
+            else 0
+        )
+        return len(self.seeds) * len(self.variants) + confirmation
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,7 +440,7 @@ def _run_definition(
         dict(parameters),
         resources,
         seeds,
-        _variants(search),
+        _variants(search, adaptive=policy is not None),
         objective,
         policy,
         search is not None or len(seeds) > 1,
@@ -465,7 +472,7 @@ def _work_resources(value: Any) -> ResourceRequest:
     return ResourceRequest.from_mapping(value)
 
 
-def _variants(value: Any) -> tuple[Mapping[str, Any], ...]:
+def _variants(value: Any, *, adaptive: bool = False) -> tuple[Mapping[str, Any], ...]:
     if value is None:
         return ({},)
     if not isinstance(value, Mapping) or not value:
@@ -474,6 +481,7 @@ def _variants(value: Any) -> tuple[Mapping[str, Any], ...]:
     finite_values: list[tuple[Any, ...]] = []
     random_space: dict[str, dict[str, Any]] = {}
     random_count = 20
+    conditional = False
     for raw_name, raw_descriptor in value.items():
         name = str(raw_name)
         if name in SEARCH_POLICY_FIELDS:
@@ -484,6 +492,11 @@ def _variants(value: Any) -> tuple[Mapping[str, Any], ...]:
         descriptor = (
             raw_descriptor if isinstance(raw_descriptor, Mapping) else {"values": raw_descriptor}
         )
+        condition = descriptor.get("when")
+        if condition is not None:
+            if not isinstance(condition, Mapping) or not condition:
+                raise TypeError(f"search.{name}.when must be a non-empty mapping.")
+            conditional = True
         if "values" in descriptor:
             choices = descriptor["values"]
             if not isinstance(choices, Sequence) or isinstance(choices, str | bytes) or not choices:
@@ -505,16 +518,20 @@ def _variants(value: Any) -> tuple[Mapping[str, Any], ...]:
             random_space[name] = {"type": kind, "low": bounds[0], "high": bounds[1]}
         else:
             raise ValueError(f"search.{name} requires values or range.")
+        if condition is not None:
+            random_space[name]["when"] = {str(key): item for key, item in condition.items()}
     has_range = any(
         "range" in descriptor for descriptor in value.values() if isinstance(descriptor, Mapping)
     )
-    if has_range:
+    if not adaptive:
+        return _exhaustive_variants(value)
+    if has_range or conditional or "trials" in value:
         if random_count < 1:
             raise ValueError("search.trials must be >= 1.")
-        from lambdaforge.hpo.RandomSearch import RandomSearch
+        from lambdaforge.hpo.SobolSearch import SobolSearch
 
         return tuple(
-            dict(trial.parameters) for trial in RandomSearch(random_space).trials(random_count)
+            dict(trial.parameters) for trial in SobolSearch(random_space).trials(random_count)
         )
     return tuple(
         dict(zip(finite_names, combination, strict=True))
@@ -522,11 +539,60 @@ def _variants(value: Any) -> tuple[Mapping[str, Any], ...]:
     )
 
 
+def _exhaustive_variants(value: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    """Enumerate an exact finite conditional sweep in authored parameter order."""
+    dimensions: list[tuple[str, tuple[Any, ...], Mapping[str, Any] | None]] = []
+    known: set[str] = set()
+    for raw_name, raw_descriptor in value.items():
+        name = str(raw_name)
+        if name in SEARCH_POLICY_FIELDS or name == "trials":
+            continue
+        descriptor = (
+            raw_descriptor if isinstance(raw_descriptor, Mapping) else {"values": raw_descriptor}
+        )
+        if "range" in descriptor:
+            raise ValueError(
+                f"search.{name}.range is continuous and cannot be exhaustive; use "
+                "strategy=adaptive or replace it with an explicit values list."
+            )
+        choices = descriptor.get("values")
+        if not isinstance(choices, Sequence) or isinstance(choices, str | bytes) or not choices:
+            raise TypeError(f"search.{name}.values must be a non-empty list.")
+        raw_condition = descriptor.get("when")
+        condition: Mapping[str, Any] | None = None
+        if raw_condition is not None:
+            if not isinstance(raw_condition, Mapping) or not raw_condition:
+                raise TypeError(f"search.{name}.when must be a non-empty mapping.")
+            unknown = set(map(str, raw_condition)) - known
+            if unknown:
+                raise ValueError(
+                    f"search.{name}.when must reference parameters declared earlier: "
+                    f"{sorted(unknown)}."
+                )
+            condition = {str(key): item for key, item in raw_condition.items()}
+        dimensions.append((name, tuple(choices), condition))
+        known.add(name)
+
+    expanded: list[dict[str, Any]] = [{}]
+    for name, choices, condition in dimensions:
+        next_values: list[dict[str, Any]] = []
+        for current in expanded:
+            active = condition is None or all(
+                current.get(key) == expected for key, expected in condition.items()
+            )
+            if active:
+                next_values.extend({**current, name: choice} for choice in choices)
+            else:
+                next_values.append(current)
+        expanded = next_values
+    return tuple(expanded)
+
+
 def _search_policy(
     value: Any,
     *,
     seeds: tuple[int | None, ...],
-    objective: Mapping[str, str] | None,
+    objective: Mapping[str, Any] | None,
     resources: ResourceRequest,
 ) -> AdaptiveSearchPolicy | None:
     if value is None:
@@ -536,41 +602,109 @@ def _search_policy(
     strategy = (
         str(raw_strategy).lower()
         if raw_strategy is not None
-        else ("adaptive" if objective is not None and len(seeds) > 1 else "exhaustive")
+        else ("adaptive" if objective is not None else "exhaustive")
     )
     if strategy not in {"adaptive", "exhaustive"}:
         raise ValueError("search.strategy must be adaptive or exhaustive.")
     if strategy == "exhaustive":
-        unexpected = SEARCH_POLICY_FIELDS.intersection(value) - {"strategy"}
+        unexpected = set(SEARCH_POLICY_FIELDS.intersection(value) - {"strategy"})
+        if "trials" in value:
+            unexpected.add("trials")
         if unexpected:
             raise ValueError(
-                "Adaptive search options require search.strategy=adaptive: "
+                "Adaptive search options are not valid with search.strategy=exhaustive: "
                 f"{sorted(unexpected)}."
             )
         return None
     if objective is None:
         raise ValueError("Adaptive search requires objective.metric and objective.mode.")
     policy = AdaptiveSearchPolicy.from_search(value)
+    if "min_seeds" not in value:
+        policy = replace(policy, min_seeds=min(3, len(seeds)))
+    if "confirmation_seeds" not in value:
+        policy = replace(
+            policy,
+            confirmation_seeds=_automatic_confirmation_seeds(seeds, count=3),
+        )
     if policy.min_seeds > len(seeds):
         raise ValueError("search.min_seeds cannot exceed the number of configured seeds.")
+    overlap = set(policy.confirmation_seeds).intersection(
+        seed for seed in seeds if seed is not None
+    )
+    if overlap:
+        raise ValueError(
+            f"search.confirmation_seeds must be disjoint from search seeds: {sorted(overlap)}."
+        )
     if policy.runs_per_gpu > 1 and resources.gpu_memory_bytes <= 0:
         raise ValueError(
             "search.runs_per_gpu > 1 requires resources.gpu_memory so LambdaForge can "
-            "reject an unsafe per-GPU packing plan before training."
+            "admit each Run only when that much device memory is currently free."
         )
     return policy
 
 
-def _objective(value: Any) -> Mapping[str, str] | None:
+def _automatic_confirmation_seeds(
+    search_seeds: Sequence[int | None], *, count: int
+) -> tuple[int, ...]:
+    """Return stable fresh seeds without coupling them to controller IDs or time."""
+    occupied = {seed for seed in search_seeds if seed is not None}
+    output: list[int] = []
+    candidate = 1_000_003
+    while len(output) < count:
+        if candidate not in occupied:
+            output.append(candidate)
+        candidate += 30
+    return tuple(output)
+
+
+def _objective(value: Any) -> Mapping[str, Any] | None:
     if value is None:
         return None
-    if not isinstance(value, Mapping) or set(value) != {"metric", "mode"}:
-        raise ValueError("objective must contain exactly metric and mode.")
+    if not isinstance(value, Mapping):
+        raise TypeError("objective must be a mapping.")
+    unknown = set(value) - {"metric", "mode", "constraints"}
+    if unknown or not {"metric", "mode"} <= set(value):
+        raise ValueError(
+            "objective requires metric/mode and optionally constraints; unknown field(s): "
+            f"{sorted(unknown)}."
+        )
     metric = _nonempty(value["metric"], "objective.metric")
     mode = str(value["mode"]).lower()
     if mode not in {"min", "max"}:
         raise ValueError("objective.mode must be min or max.")
-    return {"metric": metric, "mode": mode}
+    raw_constraints = value.get("constraints", {})
+    if not isinstance(raw_constraints, Mapping):
+        raise TypeError("objective.constraints must map metric names to min/max bounds.")
+    constraints: dict[str, dict[str, float]] = {}
+    for raw_name, raw_rule in raw_constraints.items():
+        name = _nonempty(raw_name, "objective.constraints metric")
+        if name == metric:
+            raise ValueError(f"objective.constraints cannot repeat the primary metric {metric!r}.")
+        if not isinstance(raw_rule, Mapping) or not raw_rule:
+            raise TypeError(f"objective.constraints.{name} must contain min and/or max.")
+        if set(raw_rule) - {"min", "max"}:
+            raise ValueError(f"objective.constraints.{name} accepts only min and max bounds.")
+        rule: dict[str, float] = {}
+        for bound in ("min", "max"):
+            if bound not in raw_rule:
+                continue
+            raw_bound = raw_rule[bound]
+            if (
+                isinstance(raw_bound, bool)
+                or not isinstance(raw_bound, int | float)
+                or not math.isfinite(float(raw_bound))
+            ):
+                raise TypeError(f"objective.constraints.{name}.{bound} must be a finite number.")
+            rule[bound] = float(raw_bound)
+        if not rule:
+            raise ValueError(f"objective.constraints.{name} requires min and/or max.")
+        if "min" in rule and "max" in rule and rule["min"] > rule["max"]:
+            raise ValueError(f"objective.constraints.{name} min cannot exceed max.")
+        constraints[name] = rule
+    output: dict[str, Any] = {"metric": metric, "mode": mode}
+    if constraints:
+        output["constraints"] = constraints
+    return output
 
 
 def _signature_errors(target: type[Work], configured: Mapping[str, Any]) -> list[str]:

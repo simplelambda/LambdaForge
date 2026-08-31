@@ -60,7 +60,7 @@ class CudaCompatibilityResolver:
                 "bootstrap; python.strategy=existing never installs or changes system Python. "
                 "Use python.strategy=auto or managed to permit a user-space runtime."
             )
-        driver, capabilities = self._nvidia(transport)
+        driver, capabilities = self._nvidia(profile, transport)
         has_cuda = driver is not None and bool(capabilities)
         required = profile.pytorch.require_cuda
         require_cuda = has_cuda if required is None else required
@@ -218,16 +218,20 @@ class CudaCompatibilityResolver:
         return lines[0], lines[1]
 
     @classmethod
-    def _nvidia(cls, transport: Transport) -> tuple[str | None, tuple[str, ...]]:
+    def _nvidia(
+        cls, profile: ClusterProfile, transport: Transport
+    ) -> tuple[str | None, tuple[str, ...]]:
         result = transport.run(
-            (
-                "nvidia-smi",
-                "--query-gpu=driver_version,compute_cap",
-                "--format=csv,noheader,nounits",
+            profile.gpu_access.wrap(
+                (
+                    "nvidia-smi",
+                    "--query-gpu=driver_version,compute_cap",
+                    "--format=csv,noheader,nounits",
+                )
             )
         )
         if result.returncode:
-            visible = transport.run(("nvidia-smi", "-L"))
+            visible = transport.run(profile.gpu_access.wrap(("nvidia-smi", "-L")))
             if visible.returncode == 0 and visible.stdout.strip():
                 raise RuntimeError(
                     "NVIDIA GPUs are visible but driver/compute capability could not be queried "

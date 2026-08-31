@@ -41,6 +41,7 @@ class CommandLineInterface:
     @classmethod
     def main(cls, argv: Sequence[str] | None = None) -> int:
         supplied = list(argv) if argv is not None else sys.argv[1:]
+        supplied = cls._normalize_help(supplied)
         context = DiagnosticContext.from_argv(supplied)
         parent = current_diagnostic_context()
         if parent.arguments:
@@ -54,6 +55,14 @@ class CommandLineInterface:
         with diagnostic_context(context):
             try:
                 return cls._dispatch(parsed, json_output=context.json_output)
+            except SystemExit as error:
+                # argparse implements successful help/version rendering by raising
+                # SystemExit.  The console-script wrapper handles that, but direct API
+                # callers should receive the same ordinary integer result as every other
+                # LambdaForge CLI operation.
+                if error.code in {None, 0}:
+                    return 0
+                raise
             except KeyboardInterrupt:
                 print(
                     "Operation cancelled; submitted jobs continue until explicitly cancelled.",
@@ -62,6 +71,14 @@ class CommandLineInterface:
                 return 130
             except Exception as error:
                 return report_error(error)
+
+    @staticmethod
+    def _normalize_help(argv: Sequence[str]) -> list[str]:
+        """Accept ``help`` in the natural command positions supported by users."""
+        values = list(argv)
+        if "help" not in values:
+            return values
+        return [value for value in values if value != "help"] + ["--help"]
 
     @classmethod
     def _dispatch(cls, argv: Sequence[str], *, json_output: bool) -> int:
@@ -250,9 +267,7 @@ class CommandLineInterface:
                         "scientific_result_path": (
                             scientific.get("path") if scientific is not None else None
                         ),
-                        "failure": (
-                            scientific.get("failure") if scientific is not None else None
-                        ),
+                        "failure": (scientific.get("failure") if scientific is not None else None),
                         "failures": (
                             scientific.get("failures", []) if scientific is not None else []
                         ),

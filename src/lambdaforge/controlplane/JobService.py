@@ -604,6 +604,8 @@ class JobService:
         if selected is None:
             raise KeyError(f"Unknown study Run {run_key!r} in Job {job_id}.")
         log_path = self._owned_study_path(record, selected.get("log_path"))
+        run_dir = self._owned_study_path(record, selected.get("run_dir"))
+        result_path = run_dir / "result.json" if run_dir is not None else None
         metric_paths = tuple(
             path
             for path in (
@@ -613,7 +615,28 @@ class JobService:
             if path is not None
         )
         log_text, log_truncated = self._read_study_log(transport, log_path, tail=tail)
+        failure = selected.get("failure")
+        failure = dict(failure) if isinstance(failure, Mapping) else None
+        if result_path is not None and failure is not None:
+            result_text, _result_truncated = self._read_bounded_file(
+                transport, result_path, limit=8 * 1024 * 1024
+            )
+            if result_text:
+                try:
+                    persisted = json.loads(result_text)
+                except (json.JSONDecodeError, TypeError):
+                    persisted = None
+                if isinstance(persisted, Mapping) and isinstance(
+                    persisted.get("failure"), Mapping
+                ):
+                    failure = dict(persisted["failure"])
+        if failure is not None:
+            diagnostic = failure.get("diagnostic")
+            diagnostic = diagnostic if isinstance(diagnostic, Mapping) else {}
+            failure.setdefault("phase", diagnostic.get("operation") or "Work.run")
+            failure["result_path"] = str(result_path) if result_path is not None else None
         observations: list[dict[str, Any]] = []
+        chart_filter: dict[str, list[str]] = {}
         metrics_truncated = False
         for path in metric_paths:
             text, truncated = self._read_bounded_file(transport, path, limit=16 * 1024 * 1024)
@@ -624,6 +647,13 @@ class JobService:
                 except json.JSONDecodeError:
                     continue
                 if not isinstance(value, Mapping):
+                    continue
+                if value.get("kind") == "chart-filter":
+                    chart_filter = {
+                        field: [str(item) for item in value.get(field, ())]
+                        for field in ("include", "exclude")
+                        if isinstance(value.get(field), list)
+                    }
                     continue
                 metric = value.get("value")
                 step = value.get("step")
@@ -640,8 +670,30 @@ class JobService:
             series.setdefault(str(observation["name"]), []).append(
                 {"step": int(observation["step"]), "value": float(observation["value"])}
             )
+        objective = summary.get("objective", {})
+        objective = objective if isinstance(objective, Mapping) else {}
+        objective_metric = str(objective.get("metric", ""))
+        objective_mode = str(objective.get("mode", "max"))
+        objective_values = series.get(objective_metric, ())
+        best_observation = (
+            (min if objective_mode == "min" else max)(
+                objective_values, key=lambda value: float(value["value"])
+            )
+            if objective_values
+            else None
+        )
+        best_step = (
+            int(best_observation["step"])
+            if isinstance(best_observation, Mapping)
+            else selected.get("best_step")
+        )
+        best_objective = (
+            float(best_observation["value"])
+            if isinstance(best_observation, Mapping)
+            else selected.get("best_objective")
+        )
         normalized_series: dict[str, Sequence[dict[str, float | int]]] = {
-            name: self._downsample_curve(values, curve_points)
+            name: self._downsample_curve(values, curve_points, preserve_step=best_step)
             for name, values in sorted(series.items())
         }
         latest = {
@@ -655,11 +707,17 @@ class JobService:
             "trial": selected.get("trial"),
             "seed": selected.get("seed"),
             "state": selected.get("state"),
+            "gpu_index": selected.get("gpu_index"),
+            "gpu_token": selected.get("gpu_token"),
             "parameters": candidate_parameters or dict(selected.get("parameters", {})),
+            "objective": dict(objective),
+            "best_step": best_step,
+            "best_objective": best_objective,
+            "chart_filter": chart_filter,
             "started_at_utc": selected.get("started_at_utc"),
             "finished_at_utc": selected.get("finished_at_utc"),
             "duration_seconds": selected.get("duration_seconds"),
-            "failure": selected.get("failure"),
+            "failure": failure,
             "prune_reason": selected.get("prune_reason"),
             "latest_metrics": {**dict(selected.get("latest_metrics", {})), **latest},
             "curves": normalized_series,
@@ -670,6 +728,7 @@ class JobService:
                 "run_dir": selected.get("run_dir"),
                 "log": str(log_path) if log_path is not None else None,
                 "metrics": [str(value) for value in metric_paths],
+                "result": str(result_path) if result_path is not None else None,
             },
         }
 
@@ -743,7 +802,10 @@ class JobService:
 
     @staticmethod
     def _downsample_curve(
-        values: Sequence[Mapping[str, Any]], maximum: int
+        values: Sequence[Mapping[str, Any]],
+        maximum: int,
+        *,
+        preserve_step: int | None = None,
     ) -> Sequence[dict[str, float | int]]:
         ordered = sorted(
             ({"step": int(value["step"]), "value": float(value["value"])} for value in values),
@@ -757,6 +819,22 @@ class JobService:
         indices = {
             round(index * (len(compact) - 1) / (maximum - 1)) for index in range(maximum)
         }
+        preserved = next(
+            (
+                index
+                for index, value in enumerate(compact)
+                if preserve_step is not None and int(value["step"]) == preserve_step
+            ),
+            None,
+        )
+        if preserved is not None and preserved not in indices:
+            indices.add(preserved)
+            removable = sorted(
+                indices - {0, len(compact) - 1, preserved},
+                key=lambda index: (abs(index - preserved), index),
+            )
+            if removable:
+                indices.remove(removable[0])
         return [compact[index] for index in sorted(indices)]
 
     def _scientific_result(self, record: JobRecord) -> dict[str, Any] | None:

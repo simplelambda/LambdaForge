@@ -134,6 +134,43 @@ def test_prelaunch_failure_has_empty_stable_log_streams(tmp_path: Path) -> None:
     assert "Unsafe or missing staged source" in str(observed.details(job_dir.name)["message"])
 
 
+def test_external_gpu_wrapper_environment_is_preserved_without_local_leases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_dir = tmp_path / "jobs" / "job-external-gpu"
+    work_dir = job_dir / "work"
+    work_dir.mkdir(parents=True)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-granted-7,GPU-granted-9")
+    request = job_dir / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "job_id": job_dir.name,
+                "command": [
+                    sys.executable,
+                    "-c",
+                    "import os; print(os.environ['CUDA_VISIBLE_DEVICES']); "
+                    "print(os.environ['LAMBDAFORGE_GPU_ACCESS_MODE'])",
+                ],
+                "cluster": "remote",
+                "source_work_dir": str(work_dir),
+                "stage_source": False,
+                "resources": {"gpu_count": 2},
+                "gpu_access": {"mode": "command", "command_prefix": ["gpu"]},
+                "lease_root": str(tmp_path / "gpu-leases"),
+                "resource_lease_root": str(tmp_path / "process-leases"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert ProcessSupervisor.serve(request) == 0
+    output = (job_dir / "stdout.log").read_text(encoding="utf-8")
+    assert output.splitlines() == ["GPU-granted-7,GPU-granted-9", "command"]
+    state = json.loads((job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["allocated_gpus"] == []
+
+
 def test_log_reader_treats_legacy_missing_streams_as_no_output(tmp_path: Path) -> None:
     value = scheduler(tmp_path)
     (tmp_path / "jobs" / "job-legacy-no-streams").mkdir(parents=True)

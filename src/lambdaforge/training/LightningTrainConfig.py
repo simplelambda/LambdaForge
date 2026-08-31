@@ -94,6 +94,10 @@ class LightningTrainConfig:
         Optional shell-style key patterns controlling CSV columns.
     epoch_console_include, epoch_console_exclude
         Optional shell-style key patterns controlling the epoch table.
+    epoch_chart_include, epoch_chart_exclude
+        Optional shell-style key patterns selecting the scalar curves shown in
+        ``lf top``. Collection remains complete; these fields only control the
+        compact interactive dashboard.
     """
 
     max_epochs: int = 10
@@ -134,6 +138,8 @@ class LightningTrainConfig:
     epoch_metrics_exclude: list[str] | None = None
     epoch_console_include: list[str] | None = None
     epoch_console_exclude: list[str] | None = None
+    epoch_chart_include: list[str] | None = None
+    epoch_chart_exclude: list[str] | None = None
     trainer_kwargs: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
@@ -167,6 +173,8 @@ class LightningTrainConfig:
             "epoch_metrics_exclude",
             "epoch_console_include",
             "epoch_console_exclude",
+            "epoch_chart_include",
+            "epoch_chart_exclude",
         ):
             patterns = getattr(self, field_name)
             if isinstance(patterns, str):

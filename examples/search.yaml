@@ -2,11 +2,21 @@ name: search-example
 run: examples.work.Train
 seeds: [7, 17]
 search:
-  strategy: adaptive
+  # objective makes this adaptive by default. Use strategy: exhaustive with finite values for a
+  # literal full sweep instead.
+  startup_trials: 2
   min_seeds: 1
-  reduction_factor: 2
   max_parallel: 1
+  failure_retries: 1
+  # Require two distinct unfavorable objective steps before cooperative pruning.
+  early_stopping: {enabled: true, min_step: 3, confirmations: 2}
+  confirmation_top_k: 1
+  confirmation_seeds: [1001, 1002, 1003]
   learning_rate: {values: [0.001, 0.01]}
-objective: {metric: score, mode: max}
+objective:
+  metric: score
+  mode: max
+  # Optional scientific guardrail example (the Work would also need to log accuracy):
+  # constraints: {accuracy: {min: 0.55}}
 resources:
   cpu: 1

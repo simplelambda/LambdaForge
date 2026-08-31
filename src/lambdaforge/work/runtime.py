@@ -23,6 +23,7 @@ from lambdaforge.work.checkpoints import CheckpointCollection
 from lambdaforge.work.managed import ManagedFile
 from lambdaforge.work.models import (
     WorkConfiguration,
+    WorkFidelity,
     WorkInput,
     WorkResources,
     WorkTrial,
@@ -166,6 +167,7 @@ class WorkRuntime:
     cache: WorkCache
     seed: int | None
     trial: WorkTrial | None
+    fidelity: WorkFidelity | None
     resuming: bool
     scientific_fingerprint: str
     execution_id: str
