@@ -127,9 +127,7 @@ def test_research_work_ignores_legacy_single_run_telemetry_for_normal_work() -> 
                 "study": {
                     "study_telemetry_version": 1,
                     "planned_runs": 2,
-                    "candidates": [
-                        {"trial": 1, "runs": [{"seed": 4}, {"seed": 7}]}
-                    ],
+                    "candidates": [{"trial": 1, "runs": [{"seed": 4}, {"seed": 7}]}],
                 }
             },
         },
@@ -322,9 +320,7 @@ def test_local_submission_storage_is_anchored_to_consumer_project(tmp_path: Path
     )
 
     assert Path(resolved.workspace) == project / ".lambdaforge/remote"
-    assert Path(resolved.storage.run_root) == (
-        project / ".lambdaforge/remote/.lambdaforge/jobs"
-    )
+    assert Path(resolved.storage.run_root) == (project / ".lambdaforge/remote/.lambdaforge/jobs")
 
 
 def test_clear_history_removes_terminal_jobs_and_preserves_active(tmp_path: Path) -> None:
@@ -376,7 +372,12 @@ def test_clear_history_removes_terminal_jobs_and_preserves_active(tmp_path: Path
     applied = service.clear_history(apply=True)
 
     assert set(applied["deleted_jobs"]) == {"job-succeeded", "job-failed"}
-    assert store.get("job-running",).state is JobState.RUNNING
+    assert (
+        store.get(
+            "job-running",
+        ).state
+        is JobState.RUNNING
+    )
     assert (tmp_path / "jobs/job-running").is_dir()
     assert not (tmp_path / "jobs/job-succeeded").exists()
     assert not (store.root / "submissions/job-succeeded").exists()

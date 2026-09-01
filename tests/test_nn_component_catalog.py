@@ -196,7 +196,6 @@ class TestNeuralComponentCatalog:
             and binary_logits.grad is not None
         )
 
-
     def test_normalizations_have_expected_shapes_and_norms(self) -> None:
         vectors = torch.randn(3, 4, requires_grad=True)
         l2 = L2Norm(4)(vectors)

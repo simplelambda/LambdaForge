@@ -183,9 +183,7 @@ def test_managed_output_can_publish_a_safe_explicit_copy(tmp_path: Path) -> None
     assert first.runs[0].artifacts[0].metadata["published_to"] == str(destination)
     assert first.runs[0].artifacts[0].metadata["retention"] == "published-only"
     assert not (first.runs[0].run_dir / first.runs[0].artifacts[0].path).exists()
-    receipt = json.loads(
-        (first.runs[0].run_dir / "retention.json").read_text(encoding="utf-8")
-    )
+    receipt = json.loads((first.runs[0].run_dir / "retention.json").read_text(encoding="utf-8"))
     assert receipt["reclaimed_bytes"] == len("first")
 
     changed = WorkConfig.from_mapping(
@@ -262,9 +260,7 @@ def test_terminal_job_compaction_removes_interrupted_partial_artifacts_only(
     assert preview["reclaimable_bytes"] == 32
     assert (attempt / "artifacts/partial.bin").is_file()
 
-    historical_preview = StorageOperations.gc(
-        descriptor, {"terminal_jobs": [job_id]}, apply=False
-    )
+    historical_preview = StorageOperations.gc(descriptor, {"terminal_jobs": [job_id]}, apply=False)
     assert historical_preview["candidates"][0]["job_id"] == job_id
     assert historical_preview["reclaimable_bytes"] == 32
 

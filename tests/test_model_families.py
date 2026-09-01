@@ -151,7 +151,6 @@ class TestModelFamilies:
         first.sum().backward()
         assert continuous.grad is not None
 
-
     def test_residual_mlp_supports_per_block_configuration_and_gradients(self) -> None:
         model = ResidualMLP(
             5,

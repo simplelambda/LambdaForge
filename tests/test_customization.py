@@ -9,7 +9,6 @@ from tests.fixtures.UserCallback import UserCallback
 class TestCustomization:
     """Verify that external objects and logging choices require no framework edits."""
 
-
     def test_log_key_filter_uses_include_and_exclude_patterns(self) -> None:
         selector = LogKeyFilter(include=["val_*", "epoch_time_s"], exclude=["*_loss_*"])
         assert selector.accepts("val_accuracy")

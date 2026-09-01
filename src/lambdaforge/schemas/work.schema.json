@@ -91,9 +91,21 @@
             "type": "object",
             "additionalProperties": false,
             "minProperties": 1,
+            "anyOf": [{"required": ["min"]}, {"required": ["max"]}],
+            "allOf": [
+              {
+                "if": {"required": ["confidence"]},
+                "then": {
+                  "required": ["seed_aggregation"],
+                  "properties": {"seed_aggregation": {"const": "lcb"}}
+                }
+              }
+            ],
             "properties": {
               "min": {"type": "number"},
-              "max": {"type": "number"}
+              "max": {"type": "number"},
+              "seed_aggregation": {"enum": ["mean", "worst", "lcb"]},
+              "confidence": {"type": "number", "exclusiveMinimum": 0.5, "exclusiveMaximum": 1}
             }
           }
         }

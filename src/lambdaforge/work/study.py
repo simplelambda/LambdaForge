@@ -12,7 +12,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from lambdaforge.hpo.ObjectiveUtility import pareto_front
+from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility, aggregate_constraint, pareto_front
 from lambdaforge.hpo.StudyInsights import StudyInsightAnalyzer
 from lambdaforge.work.models import WorkResult, atomic_json
 
@@ -322,12 +322,16 @@ class StudyTelemetry:
             current = self._read(self.root / "controller.json")
             recent = [value for value in current.get("recent", ()) if isinstance(value, dict)]
             recent.append(dict(event))
+            belief = event.get("surrogate_belief")
+            if not isinstance(belief, Mapping):
+                belief = current.get("surrogate_belief")
             atomic_json(
                 self.root / "controller.json",
                 {
                     "controller_telemetry_version": 1,
                     "last": dict(event),
                     "recent": recent[-25:],
+                    "surrogate_belief": dict(belief) if isinstance(belief, Mapping) else None,
                     "updated_at_utc": _now(),
                 },
             )
@@ -355,12 +359,15 @@ class StudyTelemetry:
                     state = self._run_state(key)
                     observation = self._observation_state(key)
                     merged = {**dict(descriptor), **state, **observation}
-                    latest, latest_step, best_step, best_objective = self._observation_summary(
-                        merged,
-                        objective_metric=objective_metric,
-                        objective_mode=objective_mode,
+                    latest, latest_step, best_step, best_objective, live_objective = (
+                        self._observation_summary(
+                            merged,
+                            objective=objective,
+                        )
                     )
                     merged["latest_metrics"] = latest
+                    if live_objective is not None:
+                        merged["objective_observation"] = live_objective
                     if latest_step is not None:
                         merged["latest_step"] = latest_step
                     if best_step is not None and best_objective is not None:
@@ -454,6 +461,19 @@ class StudyTelemetry:
                 ),
                 {},
             )
+            retained_belief = controller.get("surrogate_belief")
+            surrogate_belief = (
+                dict(retained_belief)
+                if isinstance(retained_belief, Mapping)
+                else next(
+                    (
+                        dict(value["surrogate_belief"])
+                        for value in reversed(recent_decisions)
+                        if isinstance(value.get("surrogate_belief"), Mapping)
+                    ),
+                    None,
+                )
+            )
             raw_slots = initialization.get("slots_total")
             slots_total = int(raw_slots) if isinstance(raw_slots, int) and raw_slots > 0 else None
             snapshot = {
@@ -500,6 +520,7 @@ class StudyTelemetry:
                     if str(index.get("strategy", "")) == "adaptive"
                     else None
                 ),
+                "surrogate_belief": surrogate_belief,
                 "updated_at_utc": _now(),
             }
             atomic_json(self.root / "summary.json", snapshot)
@@ -553,9 +574,10 @@ class StudyTelemetry:
     def _observation_summary(
         run: Mapping[str, Any],
         *,
-        objective_metric: str,
-        objective_mode: str,
-    ) -> tuple[dict[str, float], int | None, int | None, float | None]:
+        objective: Mapping[str, Any],
+    ) -> tuple[dict[str, float], int | None, int | None, float | None, Mapping[str, Any] | None]:
+        objective_metric = str(objective.get("metric", ""))
+        objective_mode = str(objective.get("mode", "max"))
         latest: dict[str, float] = {
             str(key): float(value)
             for key, value in dict(run.get("metrics", {})).items()
@@ -572,6 +594,7 @@ class StudyTelemetry:
             if isinstance(raw_best, int | float) and not isinstance(raw_best, bool)
             else None
         )
+        records: list[Mapping[str, Any]] = []
         for field in ("metrics_path", "training_metrics_path"):
             raw = run.get(field)
             if not isinstance(raw, str):
@@ -591,6 +614,8 @@ class StudyTelemetry:
                     value = json.loads(line)
                     if value.get("kind") == "chart-filter":
                         continue
+                    if isinstance(value, Mapping):
+                        records.append(value)
                     name = str(value["name"])
                     key = f"{value['split']}_{name}" if value.get("split") else name
                     metric = value.get("value")
@@ -624,24 +649,46 @@ class StudyTelemetry:
         # A terminal result computes these fields from the complete ordered streams. Reapply it
         # after the bounded live-tail scan so duplicated callback/adoption records cannot turn
         # current into best or otherwise change the terminal meaning.
-        objective = run.get("objective_observation")
-        objective = objective if isinstance(objective, Mapping) else {}
-        if objective.get("metric") == objective_metric:
-            raw_current = objective.get("current")
+        persisted = run.get("objective_observation")
+        persisted = persisted if isinstance(persisted, Mapping) else None
+        live = (
+            ObjectiveUtility(objective).observation(records, fallback=latest)
+            if objective_metric
+            else None
+        )
+        selected_source = persisted if persisted is not None else live
+        selected = dict(selected_source) if selected_source is not None else None
+        if selected is not None and selected.get("metric") == objective_metric:
+            raw_current = selected.get("current")
             if isinstance(raw_current, int | float) and not isinstance(raw_current, bool):
                 latest[objective_metric] = float(raw_current)
-            raw_current_step = objective.get("current_step")
+            raw_current_step = selected.get("current_step")
             if isinstance(raw_current_step, int) and not isinstance(raw_current_step, bool):
                 latest_step = raw_current_step
-            raw_objective_best = objective.get("best")
+            raw_objective_best = selected.get("best")
             if isinstance(raw_objective_best, int | float) and not isinstance(
                 raw_objective_best, bool
             ):
-                best_objective = float(raw_objective_best)
-            raw_best_step = objective.get("best_step")
-            if isinstance(raw_best_step, int) and not isinstance(raw_best_step, bool):
-                best_step = raw_best_step
-        return latest, latest_step, best_step, best_objective
+                observed_best = float(raw_objective_best)
+                observed_best_step = selected.get("best_step")
+                replaces_history = (
+                    persisted is not None
+                    or best_objective is None
+                    or (objective_mode == "min" and observed_best < best_objective)
+                    or (objective_mode != "min" and observed_best > best_objective)
+                )
+                if replaces_history:
+                    best_objective = observed_best
+                    if isinstance(observed_best_step, int) and not isinstance(
+                        observed_best_step, bool
+                    ):
+                        best_step = observed_best_step
+                else:
+                    # The bounded live tail cannot disprove an earlier all-time optimum.
+                    # Keep the structured observation internally consistent for TUI/API users.
+                    selected["best"] = best_objective
+                    selected["best_step"] = best_step
+        return latest, latest_step, best_step, best_objective, selected
 
     @staticmethod
     def _terminal_candidate_state(states: Sequence[Any], *, successful: str) -> str:
@@ -713,11 +760,15 @@ class StudyTelemetry:
                 if len(selection_values) > 1
                 else None
             )
+        if evidence:
             component_groups: dict[str, dict[str, list[float]]] = {}
-            for _value, run in selectable:
+            for _value, run in evidence:
                 observation = run.get("objective_observation", {})
                 observation = observation if isinstance(observation, Mapping) else {}
-                components = observation.get("components", {})
+                components = observation.get(
+                    "components" if run.get("state") == "succeeded" else "current_components",
+                    {},
+                )
                 components = components if isinstance(components, Mapping) else {}
                 for name, raw_detail in components.items():
                     detail = raw_detail if isinstance(raw_detail, Mapping) else {}
@@ -740,7 +791,6 @@ class StudyTelemetry:
                     }
                     for name, fields in component_groups.items()
                 }
-        if evidence:
             best_value, best_run = (min if objective_mode == "min" else max)(
                 evidence, key=lambda item: item[0]
             )
@@ -779,29 +829,7 @@ class StudyTelemetry:
                     values.append(float(value))
                 else:
                     missing += 1
-            mean = sum(values) / len(values) if values and not missing else None
-            minimum, maximum = rule.get("min"), rule.get("max")
-            satisfied = (
-                mean is not None
-                and not (
-                    isinstance(minimum, int | float)
-                    and not isinstance(minimum, bool)
-                    and mean < float(minimum)
-                )
-                and not (
-                    isinstance(maximum, int | float)
-                    and not isinstance(maximum, bool)
-                    and mean > float(maximum)
-                )
-            )
-            summary[str(name)] = {
-                "mean": mean,
-                "samples": len(values),
-                "missing": missing,
-                "min": minimum,
-                "max": maximum,
-                "satisfied": satisfied,
-            }
+            summary[str(name)] = aggregate_constraint(values, rule, missing=missing)
         return {
             "feasible": bool(completed)
             and all(bool(value["satisfied"]) for value in summary.values()),

@@ -211,7 +211,6 @@ class TestCompositionModels:
         assert identical.shape == (5, 1)
         assert torch.allclose(identical, torch.ones_like(identical), atol=1e-6)
 
-
     @pytest.mark.parametrize(
         "constructor",
         [
@@ -290,7 +289,6 @@ class TestSIREN:
             linear.bias is None or torch.count_nonzero(linear.bias) == 0
             for linear in configured.linears
         )
-
 
     @pytest.mark.parametrize(
         "kwargs",

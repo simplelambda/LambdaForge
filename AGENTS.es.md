@@ -1,6 +1,6 @@
 # Guía de LambdaForge para agentes
 
-Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.13.2. Consulta solo la
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.13.3. Consulta solo la
 sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
 
 ## Arquitectura no negociable
@@ -116,12 +116,14 @@ LightningRunner enlaza epochs. Decisiones/snapshot viven en `hpo-control/decisio
 `confirmation_incomplete` y no selecciona una media solo de supervivientes. `trials` limita
 candidatos ejecutados y `proposal_pool_size` el pool determinista
 mayor. El refill por eventos compara `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` y
-`RESUME_PREEMPTED` mediante información/coste;
-startup no es barrera y las identidades pendientes evitan seeds duplicadas. Se eliminan
+`RESUME_PREEMPTED` mediante un proxy auditable de valor del controlador por coste incremental
+observado; nunca lo llames ganancia de información calibrada. Startup no es barrera, la cola no
+despachada es provisional y registra `CANCEL_QUEUED_ACTION` al replanificar; las identidades
+pendientes `(candidato, seed, fidelidad)` evitan duplicados. Se eliminan
 `search.reduction_factor` y `search.confidence` raíz en favor de controles separados.
-`objective.constraints.METRICA.min/max`
-declara guardas evaluadas en la mejor época primaria y promediadas entre seeds; evidencia
-ausente/incumplida es no factible y se excluye de HPO. Nunca infieras guardas o pesos
+`objective.constraints.METRICA.min/max` declara guardas del mismo checkpoint. Entre seeds,
+`seed_aggregation` es `mean` legacy, `worst` o `lcb` con `confidence`; evidencia ausente o LCB
+insuficiente es no factible. Un componente de utilidad también puede ser constraint. Nunca infieras guardas o pesos
 multiobjetivo ocultos desde otras métricas. `runs_per_gpu` empaqueta Runs spawn independientes dentro de una
 reserva fija y valores >1 exigen `resources.gpu_memory` por Run. Es un umbral vivo de VRAM libre por
 nuevo Run y `runs_per_gpu` solo un máximo: GPU llenas esperan y se sondean, las demás continúan y
@@ -139,6 +141,10 @@ defecto, máximo 3); si se repite queda terminal. No reintentes excepciones cons
 Un Run agotado deja el Work honestamente fallido, pero no cancela Runs ajenos activos/en cola. La
 telemetría guarda índice GPU lógico y token heredado exacto; nunca infieras ni amplíes dispositivos
 físicos desde el campo de visualización.
+
+Agrupa evidencia terminada por rung exacto `(candidato,target,maximum)`; nunca promedies fidelidades
+heterogéneas ni enfrentes rungs incompatibles. `lf top` separa diagnósticos marginales/por pares del
+snapshot `.surrogate_belief` emitido por el sampler real.
 
 La telemetría de estudio es un modelo de lectura acotado, no otro almacén de resultados. Referencia
 logs y JSONL escalares por Run, nunca copia checkpoints/outputs, y expone claves exactas en

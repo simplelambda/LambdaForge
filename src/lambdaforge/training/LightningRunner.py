@@ -214,9 +214,7 @@ class LightningRunner:
         policy = self.config.checkpoint_policy
         managed = os.environ.get("LAMBDAFORGE_HPO_CHECKPOINT_DIR")
         fidelity_callback = (
-            ModelCheckpoint(
-                dirpath=Path(managed), filename="last", save_last=True, save_top_k=0
-            )
+            ModelCheckpoint(dirpath=Path(managed), filename="last", save_last=True, save_top_k=0)
             if managed
             else None
         )

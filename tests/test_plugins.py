@@ -144,14 +144,6 @@ class TestPluginDiscovery:
             (PluginKind.ACTIVATION, "externalgelu")
         ]
 
-
-
-
-
-
-
-
-
     def test_missing_conflicting_and_invalid_contracts_are_rejected(self, monkeypatch) -> None:
         entries = [
             self._entry_point("duplicate", "tests.fixtures.UserModel:UserModel", PluginKind.MODEL),
@@ -210,7 +202,6 @@ class TestPluginDiscovery:
         assert second is not first
         assert second._process_id == process_id + 1
 
-
     def test_component_alias_plugins_are_fallbacks_and_cannot_shadow_builtins(
         self, monkeypatch
     ) -> None:
@@ -232,7 +223,6 @@ class TestPluginDiscovery:
         assert calls == []
         assert ComponentRegistry.resolve_activation("external-gelu") is GELU
         assert calls == ["lambdaforge.activations"]
-
 
     def test_plugin_reference_rejects_magic_or_ambiguous_values(self) -> None:
         with pytest.raises(TypeError, match="must be a mapping"):

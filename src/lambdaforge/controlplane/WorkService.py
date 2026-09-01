@@ -79,9 +79,7 @@ class WorkService:
                     }
                 )
         if failures:
-            details = "; ".join(
-                f"{failure['job_id']}: {failure['error']}" for failure in failures
-            )
+            details = "; ".join(f"{failure['job_id']}: {failure['error']}" for failure in failures)
             raise RuntimeError(
                 f"Work cancellation was incomplete after attempting every active Job: {details}"
             )

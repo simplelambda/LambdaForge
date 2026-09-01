@@ -22,7 +22,6 @@ class TestEncodingsAndRegularization:
         output.sum().backward()
         assert learned.positions.grad is not None
 
-
     def test_rotary_encoding_preserves_pair_norms(self) -> None:
         x = torch.randn(2, 6, 8)
         output = RotaryPositionalEncoding(8)(x)

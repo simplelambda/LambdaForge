@@ -488,9 +488,7 @@ class JobService:
 
                         compacted = StorageService(
                             self.catalog, self.factory, jobs=self
-                        ).compact_job(
-                            record.cluster, record.job_id, apply=True
-                        )
+                        ).compact_job(record.cluster, record.job_id, apply=True)
                         metadata = {
                             **dict(record.metadata),
                             "workspace_compaction": {
@@ -626,9 +624,7 @@ class JobService:
                     persisted = json.loads(result_text)
                 except (json.JSONDecodeError, TypeError):
                     persisted = None
-                if isinstance(persisted, Mapping) and isinstance(
-                    persisted.get("failure"), Mapping
-                ):
+                if isinstance(persisted, Mapping) and isinstance(persisted.get("failure"), Mapping):
                     failure = dict(persisted["failure"])
         if failure is not None:
             diagnostic = failure.get("diagnostic")
@@ -696,9 +692,7 @@ class JobService:
             name: self._downsample_curve(values, curve_points, preserve_step=best_step)
             for name, values in sorted(series.items())
         }
-        latest = {
-            name: values[-1]["value"] for name, values in normalized_series.items() if values
-        }
+        latest = {name: values[-1]["value"] for name, values in normalized_series.items() if values}
         return {
             "study_run_version": 1,
             "job_id": job_id,
@@ -779,9 +773,7 @@ class JobService:
         return JobService._read_bounded_file(transport, path, limit=8 * 1024 * 1024)
 
     @staticmethod
-    def _read_bounded_file(
-        transport: Any, path: PurePosixPath, *, limit: int
-    ) -> tuple[str, bool]:
+    def _read_bounded_file(transport: Any, path: PurePosixPath, *, limit: int) -> tuple[str, bool]:
         linked = transport.run(("test", "-L", str(path)), timeout=10.0)
         if linked.returncode == 0:
             return "", False
@@ -792,11 +784,7 @@ class JobService:
             size = int(size_result.stdout.strip().split()[0])
         except (ValueError, IndexError):
             return "", False
-        command = (
-            ("cat", str(path))
-            if size <= limit
-            else ("tail", "-c", str(limit), str(path))
-        )
+        command = ("cat", str(path)) if size <= limit else ("tail", "-c", str(limit), str(path))
         result = transport.run(command, timeout=30.0)
         return (result.stdout if result.returncode == 0 else ""), size > limit
 
@@ -816,9 +804,7 @@ class JobService:
         compact = [unique[key] for key in sorted(unique)]
         if len(compact) <= maximum:
             return compact
-        indices = {
-            round(index * (len(compact) - 1) / (maximum - 1)) for index in range(maximum)
-        }
+        indices = {round(index * (len(compact) - 1) / (maximum - 1)) for index in range(maximum)}
         preserved = next(
             (
                 index
@@ -861,8 +847,7 @@ class JobService:
             if require_job_match:
                 runs = value.get("runs", ())
                 if not isinstance(runs, Sequence) or not any(
-                    isinstance(run, Mapping) and run.get("job_id") == record.job_id
-                    for run in runs
+                    isinstance(run, Mapping) and run.get("job_id") == record.job_id for run in runs
                 ):
                     return None
             failures = scientific_failures(value, result_path=path)
@@ -1212,8 +1197,7 @@ class JobService:
                 valid.append(selected.parent.parent)
         if not valid:
             raise RuntimeError(
-                f"Persisted local work directory is not owned by {record.job_id}: "
-                f"{record.work_dir}"
+                f"Persisted local work directory is not owned by {record.job_id}: {record.work_dir}"
             )
         for root in valid:
             if (root / record.job_id / "state.json").is_file():

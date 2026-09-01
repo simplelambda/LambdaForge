@@ -12,7 +12,7 @@ from typing import Any
 import torch
 
 from lambdaforge.hpo.AdaptiveSampler import CandidateObservation
-from lambdaforge.hpo.SurvivalModel import SurvivalEstimate
+from lambdaforge.hpo.SurvivalModel import SurvivalAcquisitionPolicy, SurvivalEstimate
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,8 @@ class BayesianSampler:
         }
         self.mode = mode
         self._vectors, self._categorical = self._encode(self.candidates)
+        self.last_diagnostics: dict[str, Any] = {}
+        self.survival_policy = SurvivalAcquisitionPolicy()
 
     @staticmethod
     def available() -> bool:
@@ -58,6 +60,7 @@ class BayesianSampler:
         selected: Sequence[int],
         pending: Sequence[int] = (),
         pending_fidelity: Mapping[int, float] | None = None,
+        pending_observations: Sequence[tuple[int, float]] = (),
         censored: Sequence[int] = (),
         survival: Mapping[int, SurvivalEstimate] | None = None,
         count: int,
@@ -111,24 +114,61 @@ class BayesianSampler:
             )
         mll = provider["ExactMarginalLogLikelihood"](model.likelihood, model)
         provider["fit_gpytorch_mll"](mll)
+        diagnostic_x = torch.tensor(
+            [(*self._vectors[trial], 1.0) for trial in available], dtype=torch.double
+        )
+        with torch.no_grad():
+            posterior = model.posterior(diagnostic_x)
+            means = posterior.mean.reshape(-1).tolist()
+            deviations = posterior.variance.clamp_min(0).sqrt().reshape(-1).tolist()
+        prediction_rows = sorted(
+            (
+                (trial, sign * float(mean), float(deviation))
+                for trial, mean, deviation in zip(available, means, deviations, strict=True)
+            ),
+            key=lambda value: (value[1], -value[0]),
+            reverse=self.mode == "max",
+        )[:5]
+        predicted = [
+            {
+                "trial": trial,
+                "parameters": dict(self.candidates[trial]),
+                "predicted_objective": mean,
+                "prediction_standard_deviation": deviation,
+            }
+            for trial, mean, deviation in prediction_rows
+        ]
+        self.last_diagnostics = {
+            "kind": "surrogate-belief",
+            "backend": ("MixedSingleTaskGP" if self._categorical else "SingleTaskMultiFidelityGP"),
+            "target_fidelity": 1.0,
+            "ranked_candidates": predicted,
+            "pending_observations": (
+                len(pending_observations) if pending_observations else len(pending)
+            ),
+            "global_monotonic_direction": "not-inferred",
+            "conditional_dependence": "encoded jointly; no causal interpretation",
+            "survival_adjustment": self.survival_policy.to_dict(),
+        }
         proposed: list[int] = []
         with torch.no_grad():
             while available and len(proposed) < count:
-                pending_points = [*pending, *proposed]
+                pending_points = (
+                    list(pending_observations)
+                    if pending_observations
+                    else [
+                        (trial, float((pending_fidelity or {}).get(trial, 1.0)))
+                        for trial in pending
+                    ]
+                ) + [(trial, 1.0) for trial in proposed]
                 pending_tensor = (
                     torch.tensor(
                         [
                             (
                                 *self._vectors[trial],
-                                min(
-                                    1.0,
-                                    max(
-                                        0.0,
-                                        float((pending_fidelity or {}).get(trial, 1.0)),
-                                    ),
-                                ),
+                                min(1.0, max(0.0, float(fidelity))),
                             )
-                            for trial in pending_points
+                            for trial, fidelity in pending_points
                         ],
                         dtype=torch.double,
                     )
@@ -157,10 +197,7 @@ class BayesianSampler:
                         normalized = (score - low) / span if span > 1e-12 else 0.5
                         if survival is not None and trial in survival:
                             estimate = survival[trial]
-                            uncertainty = estimate.upper - estimate.lower
-                            score = (
-                                normalized + 0.25 * (estimate.probability - 0.5) + 0.1 * uncertainty
-                            )
+                            score = self.survival_policy.adjust(normalized, estimate)
                         elif censored_trials:
                             distance = min(
                                 self._distance(trial, censored_trial)

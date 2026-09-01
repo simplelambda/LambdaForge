@@ -29,7 +29,7 @@ def _execution_result(*, failed: bool = True) -> dict[str, Any]:
             "message": "IncompleteRead(2183 bytes read)",
             "traceback": (
                 "Traceback (most recent call last):\n"
-                "  File \"work.py\", line 20, in run\n"
+                '  File "work.py", line 20, in run\n'
                 "http.client.IncompleteRead: IncompleteRead(2183 bytes read)\n"
             ),
             "diagnostic": {"operation": "resume_map item download"},

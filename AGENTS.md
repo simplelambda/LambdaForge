@@ -1,6 +1,6 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.13.2. Spanish is
+This is the low-token source of truth for agents using or modifying LambdaForge 0.13.3. Spanish is
 in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
 then inspect the public signature or implementation being changed. Current tests and code override
 assumptions.
@@ -185,11 +185,14 @@ in `hpo-control/decisions.jsonl` and `state.json`. Confirmation is immune to per
 pruning/preemption; an incomplete set persists `confirmation_incomplete` and cannot select a
 survivor-only mean. `trials` is the executed-candidate budget and
 `proposal_pool_size` the larger deterministic pool. Event-driven refill compares `START_NEW`,
-`ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` by expected information per cost after every terminal event; startup is not
-a barrier and pending identities prevent duplicate seeds. Root `search.reduction_factor` and
+`ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` by an auditable controller-value proxy per
+observed incremental cost after every terminal event; never call this calibrated information gain.
+Startup is not a barrier, undispatched queue entries are provisional/replanned with explicit
+`CANCEL_QUEUED_ACTION`, and pending `(candidate, seed, fidelity)` identities prevent duplicates. Root `search.reduction_factor` and
 `search.confidence` are removed in favour of separately owned fidelity/seed/pruning controls.
-`objective.constraints.METRIC.min/max` are explicit guardrails evaluated at the primary-best epoch
-and averaged across seeds; missing/violated evidence is infeasible and excluded from HPO. Never
+`objective.constraints.METRIC.min/max` are explicit same-checkpoint guardrails. Across seeds,
+`seed_aggregation` is legacy `mean`, `worst` or `lcb` with optional `confidence`; missing/insufficient
+LCB evidence is infeasible. A utility component may also be constrained. Never
 infer guardrails or hidden multi-objective weights from other metrics. `runs_per_gpu` packs independent spawned Runs inside the fixed outer
 reservation; values >1 require per-Run `resources.gpu_memory`. This is a live free-VRAM threshold
 per new Run, while `runs_per_gpu` is only a maximum: temporarily full GPUs wait and are polled,
@@ -215,7 +218,9 @@ isolates output. Completed HPO uses the mean of each seed's best observed checkp
 same-step curves drive pruning, and pruned Runs are terminal censored evidence—not failures—and
 excluded as exact values from completed-objective fitting/statistics. Their parameter-region
 pruning rates remain visible. Any performance-pruned seed censors the whole candidate; never average
-its earlier completed seeds as survivor-only evidence. A candidate-level joint survival model with uncertainty softly
+its earlier completed seeds as survivor-only evidence. Group completed evidence by exact
+`(candidate,target,maximum)` rung; never average heterogeneous fidelities or race incompatible rungs.
+A candidate-level joint survival model with uncertainty softly
 modifies acquisition; multiple seeds do not overcount one candidate and operational failures or
 scheduler preemption remain neutral. Default pruning requires two distinct
 uncompetitive common steps through `early_stopping.confirmations`. Lightning scalar

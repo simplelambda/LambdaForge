@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from lambdaforge.hpo.SurvivalModel import SurvivalEstimate
+from lambdaforge.hpo.SurvivalModel import SurvivalAcquisitionPolicy, SurvivalEstimate
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +38,8 @@ class AdaptiveSampler:
         }
         self.mode = mode
         self._numeric_bounds = self._bounds(tuple(self.candidates.values()))
+        self.last_diagnostics: dict[str, Any] = {}
+        self.survival_policy = SurvivalAcquisitionPolicy()
 
     def initial(self, count: int) -> tuple[int, ...]:
         """Return a deterministic space-filling startup set."""
@@ -68,6 +70,7 @@ class AdaptiveSampler:
         selected: Sequence[int],
         pending: Sequence[int] = (),
         pending_fidelity: Mapping[int, float] | None = None,
+        pending_observations: Sequence[tuple[int, float]] = (),
         censored: Sequence[int] = (),
         survival: Mapping[int, SurvivalEstimate] | None = None,
         count: int,
@@ -85,9 +88,10 @@ class AdaptiveSampler:
         center = sum(values) / len(values)
         scale = max(max(values) - min(values), 1e-12)
         proposed: list[int] = []
+        chosen_evidence: list[dict[str, Any]] = []
         while available and len(proposed) < count:
 
-            def acquisition(trial: int) -> tuple[float, float, int]:
+            def base_acquisition(trial: int) -> tuple[float, float, float]:
                 parameters = self.candidates[trial]
                 neighbours = sorted(
                     (
@@ -120,19 +124,23 @@ class AdaptiveSampler:
                     exploitation = -exploitation
                 references = (
                     [(item.trial, min(1.0, max(0.0, item.fidelity))) for item in observed]
-                    + [
-                        (
-                            reference,
-                            min(
-                                1.0,
-                                max(
-                                    0.0,
-                                    float((pending_fidelity or {}).get(reference, 1.0)),
+                    + (
+                        list(pending_observations)
+                        if pending_observations
+                        else [
+                            (
+                                reference,
+                                min(
+                                    1.0,
+                                    max(
+                                        0.0,
+                                        float((pending_fidelity or {}).get(reference, 1.0)),
+                                    ),
                                 ),
-                            ),
-                        )
-                        for reference in pending
-                    ]
+                            )
+                            for reference in pending
+                        ]
+                    )
                     + [(reference, 1.0) for reference in [*censored_trials, *proposed]]
                 )
                 exploration = min(
@@ -157,27 +165,61 @@ class AdaptiveSampler:
                     if censored_trials
                     else 0.0
                 )
-                survival_adjustment = 0.0
-                if survival is not None and trial in survival:
-                    estimate = survival[trial]
-                    uncertainty = estimate.upper - estimate.lower
-                    survival_adjustment = 0.25 * (estimate.probability - 0.5) + 0.1 * uncertainty
                 # Exploitation dominates once evidence exists, while the distance bonus keeps
                 # unexplored regions alive and avoids proposing near-duplicates in one batch.
                 # A pruned-only neighbour is censored negative evidence: discourage its immediate
                 # vicinity mildly, but never invent an exact full-budget objective for it.
-                return (
-                    exploitation
-                    + 0.35 * exploration
-                    - (0.0 if survival is not None else censored_penalty)
-                    + survival_adjustment,
-                    exploration,
-                    -trial,
-                )
+                return exploitation + 0.35 * exploration, exploration, censored_penalty
+
+            base = {trial: base_acquisition(trial) for trial in available}
+            low = min(value[0] for value in base.values())
+            high = max(value[0] for value in base.values())
+            span = high - low
+
+            def acquisition(
+                trial: int,
+                *,
+                scores: Mapping[int, tuple[float, float, float]] = base,
+                minimum: float = low,
+                score_span: float = span,
+            ) -> tuple[float, float, int]:
+                raw, exploration, censored_penalty = scores[trial]
+                normalized = (raw - minimum) / score_span if score_span > 1e-12 else 0.5
+                score = normalized
+                if survival is not None and trial in survival:
+                    score = self.survival_policy.adjust(score, survival[trial])
+                elif censored_trials:
+                    score -= censored_penalty
+                return score, exploration, -trial
 
             chosen = max(available, key=acquisition)
+            chosen_score = acquisition(chosen)[0]
+            estimate = survival.get(chosen) if survival is not None else None
+            chosen_evidence.append(
+                {
+                    "trial": chosen,
+                    "parameters": dict(self.candidates[chosen]),
+                    "controller_score": chosen_score,
+                    "survival_probability": estimate.probability if estimate is not None else None,
+                    "prediction_uncertainty": (
+                        estimate.upper - estimate.lower if estimate is not None else None
+                    ),
+                }
+            )
             proposed.append(chosen)
             available.remove(chosen)
+        self.last_diagnostics = {
+            "kind": "surrogate-belief",
+            "backend": "mixed-knn",
+            "target_fidelity": 1.0,
+            "ranked_candidates": chosen_evidence,
+            "pending_observations": (
+                len(pending_observations) if pending_observations else len(pending)
+            ),
+            "global_monotonic_direction": "not-supported",
+            "conditional_dependence": "represented jointly; no stable global summary inferred",
+            "survival_adjustment": self.survival_policy.to_dict(),
+        }
         return tuple(proposed)
 
     @staticmethod

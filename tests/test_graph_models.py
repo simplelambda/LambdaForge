@@ -264,7 +264,6 @@ class TestGraphModels:
         x, edge_index = self.graph()
         assert model(x, edge_index).shape == (5, 2)
 
-
     def test_gat_rejects_non_divisible_concatenated_width(self) -> None:
         with pytest.raises(ValueError, match="divisible"):
             GAT(4, 2, hidden_channels=[7], heads=[2, 1])

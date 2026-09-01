@@ -83,7 +83,6 @@ class TestRoadmapThirteenToSeventeen:
         assert encoder.cardinalities == (3, 2)
         assert restored.transform([["missing", "small"]]).tolist() == [[0, 1]]
 
-
     def test_long_sequence_models_and_optional_adapter_preserve_contracts(self) -> None:
         source = torch.randn(2, 7, 3, requires_grad=True)
         target = torch.randn(2, 5, 4, requires_grad=True)

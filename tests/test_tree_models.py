@@ -66,7 +66,6 @@ class TestGradTree:
         assert torch.equal(model(x), clone(x))
 
 
-
 class TestGRANDE:
     """Verify instance weighting, local feature sampling and gradients."""
 
@@ -169,7 +168,6 @@ class TestNODE:
         for parameter in model.parameters():
             assert parameter.grad is not None
             assert torch.isfinite(parameter.grad).all()
-
 
     @pytest.mark.parametrize(
         ("factory", "match"),

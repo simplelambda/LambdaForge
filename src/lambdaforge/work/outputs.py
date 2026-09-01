@@ -227,8 +227,7 @@ class OutputCollection:
         if source.is_dir() and destination != source:
             if destination.is_relative_to(source):
                 raise ValueError(
-                    "A managed directory cannot be published inside itself: "
-                    f"{destination}."
+                    f"A managed directory cannot be published inside itself: {destination}."
                 )
             if source.is_relative_to(destination):
                 raise ValueError(
@@ -258,9 +257,7 @@ class OutputCollection:
         if destination == source:
             return destination
         self._preflight_publication(source, destination, pending.overwrite)
-        same_kind = (
-            destination.is_file() if source.is_file() else destination.is_dir()
-        )
+        same_kind = destination.is_file() if source.is_file() else destination.is_dir()
         if destination.exists() and same_kind and fingerprint(destination) == fingerprint(source):
             return destination
         self._reject_symlink_ancestors(destination)

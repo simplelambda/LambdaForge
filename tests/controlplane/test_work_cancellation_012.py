@@ -78,9 +78,7 @@ def test_cancel_work_stops_every_active_job_and_skips_terminal_history() -> None
     assert jobs.cancelled == ["job-1", "job-2", "job-4"]
     assert result["status"] == "cancelled"
     assert [value["job_id"] for value in result["cancelled_jobs"]] == ["job-1", "job-2"]
-    assert result["reconciled_cancelled_jobs"] == [
-        {"job_id": "job-4", "state": "cancelled"}
-    ]
+    assert result["reconciled_cancelled_jobs"] == [{"job_id": "job-4", "state": "cancelled"}]
     assert result["already_terminal"] == [{"job_id": "job-3", "state": "failed"}]
 
 

@@ -32,6 +32,7 @@ class SeedRaceDecision:
     probability_competitive: float
     expected_uncertainty_reduction: float
     completed_seeds: int
+    current_standard_error: float
 
 
 class AdaptiveSeedRacer:
@@ -122,7 +123,13 @@ class AdaptiveSeedRacer:
             if trial == incumbent:
                 boundary_weight = max(boundary_weight, 0.25)
             decisions.append(
-                SeedRaceDecision(trial, probability, reduction * boundary_weight, estimate.samples)
+                SeedRaceDecision(
+                    trial,
+                    probability,
+                    reduction * boundary_weight,
+                    estimate.samples,
+                    estimate.standard_error,
+                )
             )
         return tuple(
             sorted(
@@ -143,9 +150,7 @@ class AdaptiveSeedRacer:
         incumbent: CandidateEstimate,
     ) -> float:
         shared = [
-            seed
-            for seed in candidate_values
-            if seed is not None and seed in incumbent_values
+            seed for seed in candidate_values if seed is not None and seed in incumbent_values
         ]
         sign = 1.0 if self.mode == "max" else -1.0
         if len(shared) >= 2:
@@ -164,9 +169,7 @@ class AdaptiveSeedRacer:
             return 1.0 if mean >= -self.margin else 0.0
         return 1.0 - statistics.NormalDist(mean, error).cdf(-self.margin)
 
-    def _pooled_variance(
-        self, outcomes: Mapping[int, Mapping[int | None, float]]
-    ) -> float:
+    def _pooled_variance(self, outcomes: Mapping[int, Mapping[int | None, float]]) -> float:
         variances: list[tuple[int, float]] = []
         all_values: list[float] = []
         for values_by_seed in outcomes.values():

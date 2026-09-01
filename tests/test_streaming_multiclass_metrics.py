@@ -194,7 +194,6 @@ class TestStreamingMulticlassMetrics:
         assert calls == [(2, 3, 8)]
         assert metric.distributed_state()["positive_counts"].sum().item() == 4
 
-
     def test_state_round_trip_has_same_scores(self) -> None:
         metric = StreamingMulticlassAUROC(num_classes=3, num_bins=8)
         metric.update({"logits": torch.randn(5, 3)}, {"y": torch.tensor([0, 1, 2, 0, 1])})

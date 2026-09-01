@@ -36,20 +36,15 @@ class SobolSearch:
             attempts += 1
             point = engine.draw(1, dtype=torch.float64).reshape(-1).tolist()
             parameters: dict[str, Any] = {}
-            for (name, specification), coordinate in zip(
-                self.space.items(), point, strict=True
-            ):
+            for (name, specification), coordinate in zip(self.space.items(), point, strict=True):
                 condition = specification.get("when")
                 if condition is not None:
                     if not isinstance(condition, Mapping) or any(
-                        parameters.get(str(key)) != expected
-                        for key, expected in condition.items()
+                        parameters.get(str(key)) != expected for key, expected in condition.items()
                     ):
                         continue
                 parameters[name] = self._decode(specification, float(coordinate))
-            encoded = json.dumps(
-                parameters, sort_keys=True, separators=(",", ":"), allow_nan=False
-            )
+            encoded = json.dumps(parameters, sort_keys=True, separators=(",", ":"), allow_nan=False)
             fingerprint = "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
             if fingerprint not in seen:
                 seen.add(fingerprint)

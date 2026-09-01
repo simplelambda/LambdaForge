@@ -127,6 +127,60 @@ def test_study_telemetry_preserves_best_epoch_outside_the_bounded_tail(
     assert run["best_objective"] == 0.9
 
 
+def test_live_composite_objective_is_checkpoint_aligned_before_run_completion(
+    tmp_path: Path,
+) -> None:
+    study = StudyTelemetry(tmp_path / "study")
+    specification = _specification()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    metrics = run_dir / "metrics.jsonl"
+    metrics.touch()
+    training = run_dir / "training-metrics.jsonl"
+    training.write_text(
+        "".join(
+            json.dumps({"name": name, "value": value, "step": step, "split": None}) + "\n"
+            for step, quality, stability in ((1, 0.9, 0.2), (2, 0.7, 0.8))
+            for name, value in (("quality", quality), ("stability", stability))
+        ),
+        encoding="utf-8",
+    )
+    objective = ObjectiveUtility.normalize(
+        {
+            "metrics": {
+                "quality": {"mode": "max", "weight": 0.5, "range": [0, 1]},
+                "stability": {"mode": "max", "weight": 0.5, "range": [0, 1]},
+            },
+            "aggregation": "geometric",
+        }
+    )
+    study.initialize(
+        name="composite-live",
+        execution_id="execution-1",
+        strategy="adaptive",
+        objective=objective,
+        specifications=(specification,),
+    )
+    study.schedule((specification,))
+    study.run_started(
+        specification,
+        run_dir=run_dir,
+        metrics_path=metrics,
+        training_metrics_path=training,
+    )
+
+    snapshot = study.refresh()
+    run = snapshot["candidates"][0]["runs"][0]
+    observation = run["objective_observation"]
+
+    assert run["state"] == "running"
+    assert observation["metric"] == "__lambdaforge_utility__"
+    assert observation["current_step"] == 2
+    assert observation["current"] == pytest.approx((0.7 * 0.8) ** 0.5)
+    assert set(observation["current_components"]) == {"quality", "stability"}
+    assert snapshot["candidates"][0]["current_objective"] == pytest.approx((0.7 * 0.8) ** 0.5)
+
+
 def test_terminal_objective_keeps_current_distinct_from_best_despite_duplicate_streams(
     tmp_path: Path,
 ) -> None:
@@ -653,6 +707,52 @@ def test_study_snapshot_and_renderer_expose_hpo_analysis_and_latest_action(
     assert "slots=0 active/4 total" in screen
     assert "SELECTED HYPERPARAMETER · width" in screen
     assert "associations are exploratory, not causal" in screen
+
+
+def test_surrogate_belief_remains_distinct_from_descriptive_diagnostics(
+    tmp_path: Path,
+) -> None:
+    study = StudyTelemetry(tmp_path / "study")
+    specifications = tuple(_specification(trial=index) for index in range(1, 5))
+    study.initialize(
+        name="belief-study",
+        execution_id="execution-belief",
+        strategy="adaptive",
+        objective={"metric": "score", "mode": "max"},
+        specifications=specifications,
+    )
+    belief = {
+        "kind": "surrogate-belief",
+        "backend": "SingleTaskMultiFidelityGP",
+        "target_fidelity": 1.0,
+        "pending_observations": 2,
+        "ranked_candidates": [
+            {
+                "trial": 4,
+                "predicted_objective": 0.81,
+                "prediction_standard_deviation": 0.07,
+            }
+        ],
+    }
+    study.controller_decision({"action": "PROPOSE", "surrogate_belief": belief})
+    for decision in range(30):
+        study.controller_decision({"action": "WAIT", "decision": decision})
+
+    snapshot = study.refresh()
+    screen = StudyInsightRenderer.render(
+        {"work": {"items": [{"study": snapshot}]}},
+        0,
+        selected_parameter=0,
+        message="",
+        width=140,
+        height=32,
+    )
+
+    assert snapshot["surrogate_belief"] == belief
+    assert "SURROGATE BELIEF" in screen
+    assert "SingleTaskMultiFidelityGP" in screen
+    assert "MARGINAL / PAIRWISE DIAGNOSTICS" in screen
+    assert "descriptive, non-causal" in screen
 
 
 def test_curve_downsampling_preserves_the_exact_best_epoch() -> None:

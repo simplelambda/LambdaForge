@@ -188,7 +188,7 @@ jobs:
           python -m pip install -e ".[dev,adaptive-hpo]"
 
       - name: Exercise the real provider adapter
-        run: python -m pytest -q tests/hpo/test_botorch_searcher.py
+        run: python -m pytest -q tests/hpo/test_botorch_provider.py
 
   package:
     name: Build and inspect distributions

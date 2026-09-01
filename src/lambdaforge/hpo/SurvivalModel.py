@@ -29,6 +29,28 @@ class SurvivalEstimate:
     effective_samples: float
 
 
+@dataclass(frozen=True, slots=True)
+class SurvivalAcquisitionPolicy:
+    """Interpretable bounded adjustment of objective acquisition by censored evidence."""
+
+    minimum_survival_factor: float = 0.5
+    uncertainty_exploration_weight: float = 0.1
+
+    def adjust(self, objective_score: float, estimate: SurvivalEstimate) -> float:
+        """Discount likely-pruned regions softly while retaining uncertainty exploration."""
+        probability = min(1.0, max(0.0, estimate.probability))
+        factor = self.minimum_survival_factor + (1.0 - self.minimum_survival_factor) * probability
+        uncertainty = max(0.0, estimate.upper - estimate.lower)
+        return float(objective_score) * factor + self.uncertainty_exploration_weight * uncertainty
+
+    def to_dict(self) -> dict[str, float | str]:
+        return {
+            "method": "objective-score-times-survival-factor-plus-uncertainty",
+            "minimum_survival_factor": self.minimum_survival_factor,
+            "uncertainty_exploration_weight": self.uncertainty_exploration_weight,
+        }
+
+
 class SurvivalModel:
     """Joint mixed-space k-NN Beta model for censored performance evidence.
 
@@ -131,4 +153,9 @@ class SurvivalModel:
         return math.sqrt(squared / len(names))
 
 
-__all__ = ["SurvivalEstimate", "SurvivalModel", "SurvivalObservation"]
+__all__ = [
+    "SurvivalAcquisitionPolicy",
+    "SurvivalEstimate",
+    "SurvivalModel",
+    "SurvivalObservation",
+]

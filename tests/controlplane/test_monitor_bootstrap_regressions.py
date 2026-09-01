@@ -516,9 +516,7 @@ def test_right_opens_work_attempt_then_logs_and_left_walks_back(
             pass
 
     class ImmediateLogs:
-        def __init__(
-            self, jobs: Any, job_id: str, *, include_traceback: bool = False
-        ) -> None:
+        def __init__(self, jobs: Any, job_id: str, *, include_traceback: bool = False) -> None:
             del jobs
             del include_traceback
             assert job_id == "job-linked"
@@ -789,9 +787,7 @@ def test_work_attempt_log_view_refreshes_without_reopening(
     class RefreshingLogs:
         loads = 0
 
-        def __init__(
-            self, jobs: Any, job_id: str, *, include_traceback: bool = False
-        ) -> None:
+        def __init__(self, jobs: Any, job_id: str, *, include_traceback: bool = False) -> None:
             del jobs
             del include_traceback
             assert job_id == "job-linked"

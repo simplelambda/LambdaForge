@@ -95,9 +95,7 @@ def test_bundle_persists_remote_path_and_worker_identity_contract(tmp_path: Path
         },
     )
 
-    bundle = ExecutionBundleBuilder(
-        tmp_path / "bundles", max_inline_bytes=1
-    ).build(config, profile)
+    bundle = ExecutionBundleBuilder(tmp_path / "bundles", max_inline_bytes=1).build(config, profile)
 
     path_context = json.loads(
         (bundle.directory / ".lambdaforge-paths.json").read_text(encoding="utf-8")

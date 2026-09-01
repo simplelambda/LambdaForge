@@ -138,29 +138,22 @@ class TerminalTimeSeriesChart:
     @staticmethod
     def _finite(value: object) -> TypeGuard[int | float]:
         return (
-            isinstance(value, int | float)
-            and not isinstance(value, bool)
-            and math.isfinite(value)
+            isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
         )
 
     @classmethod
-    def _resample(
-        cls, values: Sequence[float | None], count: int
-    ) -> tuple[float | None, ...]:
+    def _resample(cls, values: Sequence[float | None], count: int) -> tuple[float | None, ...]:
         clean = tuple(float(value) if cls._finite(value) else None for value in values)
         if not clean:
             return (None,) * count
         if len(clean) == 1:
             return (clean[0],) * count
         return tuple(
-            clean[round(index * (len(clean) - 1) / max(1, count - 1))]
-            for index in range(count)
+            clean[round(index * (len(clean) - 1) / max(1, count - 1))] for index in range(count)
         )
 
     @staticmethod
-    def _line(
-        raster: list[list[bool]], start: tuple[int, int], end: tuple[int, int]
-    ) -> None:
+    def _line(raster: list[list[bool]], start: tuple[int, int], end: tuple[int, int]) -> None:
         """Draw one Bresenham segment into the chart raster."""
         x0, y0 = start
         x1, y1 = end

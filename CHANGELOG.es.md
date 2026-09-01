@@ -9,6 +9,38 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+## [0.13.3] - 2026-09-01
+
+### Corregido
+
+- Corregida la evidencia multi-fidelidad: resultados de seeds se agrupan por rung exacto
+  `(candidato, target, maximum)`, un candidato puede generar varias observaciones y nunca se
+  reetiqueta una media heterogénea como presupuesto completo.
+- Eliminada la semántica residual de compromiso de cola/rondas. Cada evento replantea acciones aún
+  no despachadas, registra `CANCEL_QUEUED_ACTION` con coste científico cero y rellena slots libres;
+  una promoción espera evidencia comparable ya en vuelo antes de decidir prematuramente.
+- Sustituida la falsa «información esperada» por un `controller_value` centralizado, acotado y
+  documentado, dividido por coste incremental observado.
+- Corregida la utilidad compuesta viva para combinar componentes del mismo step y conservar el
+  mejor checkpoint histórico aunque salga del tail acotado.
+- Permitido usar una métrica como componente y constraint; añadida agregación entre seeds `mean`,
+  `worst` y `lcb` con evidencia ausente/insuficiente fail-closed.
+- Centralizado el ajuste de supervivencia y publicados sus coeficientes. Pruning sigue siendo
+  evidencia censurada; fallos operacionales y preemption siguen neutrales.
+- Separados en `lf top`/JSON los diagnósticos marginales descriptivos del `surrogate_belief` real
+  GP/k-NN, conservando el último snapshot ligero sin serializar modelos.
+- Corregida la ruta CI del provider opcional y añadidas pruebas BoTorch obligatorias sin skip para
+  multi-fidelidad numérica, espacio mixto/condicional, pendientes, ruido, predicción a fidelidad
+  objetivo y ajuste de supervivencia.
+
+### Cambiado
+
+- Documentada con precisión la arquitectura como surrogate sensible a fidelidad más scheduler
+  externo sensible a coste, junto con rungs exactos, cola provisional, constraints robustas,
+  métricas dependientes de threshold y calibración retrospectiva del pruner.
+- Ampliadas regresiones end-to-end para runner→observaciones→samplers, sustitución de cola, fallback
+  controlado, utilidad compuesta viva, surrogate retenido y falso prune deliberado de late bloomer.
+
 ## [0.13.2] - 2026-09-01
 
 ### Corregido

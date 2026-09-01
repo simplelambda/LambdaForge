@@ -142,6 +142,7 @@ class StudyInsightAnalyzer:
         complete = sum(done for _parameters, _value, done in observations)
         return {
             "analysis_version": 4,
+            "analysis_kind": "marginal-and-pairwise-descriptive-diagnostics",
             "objective": {
                 "metric": metric,
                 "mode": mode,
@@ -188,8 +189,9 @@ class StudyInsightAnalyzer:
                 "hyperparameters, "
                 "conditional spaces, unequal seed counts and partial fidelities can confound "
                 "them. Pruned partial curves are censored: they are not fabricated into completed "
-                "objectives, but their pruning frequency is shown and their neighbourhood can "
-                "receive a mild proposal penalty. The multivariate adaptive sampler remains the "
+                "objectives. Their candidate-level survival probability and uncertainty softly "
+                "adjust acquisition without treating operational failures as poor science. The "
+                "multivariate adaptive sampler remains the "
                 "decision authority."
             ),
         }

@@ -1119,6 +1119,16 @@ class StudyInsightRenderer:
         last = last if isinstance(last, Mapping) else {}
         scheduler = controller.get("scheduler", {})
         scheduler = scheduler if isinstance(scheduler, Mapping) else {}
+        belief = study.get("surrogate_belief", {})
+        belief = belief if isinstance(belief, Mapping) else {}
+        ranked_belief = [
+            value for value in belief.get("ranked_candidates", ()) if isinstance(value, Mapping)
+        ]
+        predicted = ranked_belief[0] if ranked_belief else {}
+        predicted_uncertainty = predicted.get(
+            "prediction_standard_deviation",
+            predicted.get("prediction_uncertainty"),
+        )
         next_question = analysis.get("next_question")
         next_question = next_question if isinstance(next_question, Mapping) else {}
         constraints = objective.get("constraints", {})
@@ -1146,6 +1156,19 @@ class StudyInsightRenderer:
             ),
             f"outcome guardrails: {guardrails or 'none (the declared objective alone decides)'}",
             f"decision model: {analysis.get('decision_model') or 'preparing joint model'}",
+            (
+                "SURROGATE BELIEF · "
+                f"backend={belief.get('backend', 'preparing')}  "
+                f"target fidelity={_display_value(belief.get('target_fidelity'))}  "
+                f"pending={belief.get('pending_observations', 0)}  "
+                f"best predicted Trial={predicted.get('trial', '-')}  "
+                f"uncertainty={_display_value(predicted_uncertainty)}"
+            ),
+            (
+                "  conditional dependence: "
+                f"{belief.get('conditional_dependence', 'not available yet')}; "
+                f"global direction={belief.get('global_monotonic_direction', 'not inferred')}"
+            ),
             f"controller: {cls._decision(last)}",
             (
                 "scheduler: "
@@ -1158,7 +1181,7 @@ class StudyInsightRenderer:
             (
                 "scheduler evidence: "
                 f"score={_display_value(last.get('score'))}  "
-                f"information={_display_value(last.get('expected_information'))}  "
+                f"value proxy={_display_value(last.get('controller_value'))}  "
                 f"cost={_seconds(last.get('expected_cost_seconds'))}  "
                 f"reason={last.get('reason', 'collecting evidence')}"
             ),
@@ -1167,6 +1190,8 @@ class StudyInsightRenderer:
                 f"{next_question.get('suggestion', 'More evidence is required.')}"
             ),
             "",
+            "MARGINAL / PAIRWISE DIAGNOSTICS · descriptive, non-causal, "
+            "other parameters uncontrolled",
             "  PARAMETER                 KIND         N/VALUES  CONFIDENCE  CURRENT SIGNAL",
         ]
         selected_parameter = min(selected_parameter, max(0, len(parameters) - 1))

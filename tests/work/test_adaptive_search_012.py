@@ -111,18 +111,21 @@ def test_objective_guardrails_are_validated_and_preserved(tmp_path: Path) -> Non
     config = WorkConfig.from_mapping(base, source=tmp_path / "guarded.yaml")
 
     assert config.levels[0].runs[0].objective == base["objective"]
-    with pytest.raises(ValueError, match="cannot repeat"):
-        WorkConfig.from_mapping(
-            {
-                **base,
-                "objective": {
-                    "metric": "score",
-                    "mode": "max",
-                    "constraints": {"score": {"min": 0.1}},
-                },
+    repeated = WorkConfig.from_mapping(
+        {
+            **base,
+            "objective": {
+                "metric": "score",
+                "mode": "max",
+                "constraints": {"score": {"min": 0.1, "seed_aggregation": "worst"}},
             },
-            source=tmp_path / "invalid.yaml",
-        )
+        },
+        source=tmp_path / "repeated.yaml",
+    )
+    assert repeated.levels[0].runs[0].objective["constraints"]["score"] == {
+        "min": 0.1,
+        "seed_aggregation": "worst",
+    }
 
 
 def test_adaptive_sampler_proposes_only_after_observing_the_startup_region() -> None:
@@ -505,6 +508,51 @@ def test_adaptive_search_allocates_more_seeds_only_to_promising_candidates(
     assert all(run["log_path"] for run in observed_runs)
 
 
+def test_bayesian_provider_failure_is_audited_before_deterministic_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_provider(*args: Any, **kwargs: Any) -> tuple[int, ...]:
+        del args, kwargs
+        raise RuntimeError("controlled provider fit failure")
+
+    monkeypatch.setattr("lambdaforge.work.runner.BayesianSampler.propose", fail_provider)
+    config = WorkConfig.from_mapping(
+        {
+            "name": "provider-fallback",
+            "run": "tests.work_cases.AdaptiveScoreWork",
+            "seeds": [1],
+            "search": {
+                "strategy": "adaptive",
+                "sampler": "botorch",
+                "trials": 3,
+                "startup_trials": 2,
+                "confirmation_seeds": [],
+                "quality": {"values": [1.0, 2.0, 3.0]},
+            },
+            "objective": {"metric": "score", "mode": "max"},
+            "resources": {"cpu": 2},
+        },
+        source=tmp_path / "fallback.yaml",
+    )
+
+    result = WorkRunner().run(config)
+    decisions = [
+        json.loads(line)
+        for line in (result.execution_dir / "hpo-control" / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    fallback = next(value for value in decisions if value["action"] == "SURROGATE_FALLBACK")
+    assert fallback["error_type"] == "RuntimeError"
+    assert fallback["error"] == "controlled provider fit failure"
+    assert any(
+        value["action"] == "PROPOSE" and value["backend"] == "mixed-knn" for value in decisions
+    )
+    assert result.status == "succeeded"
+
+
 def test_gpu_packing_is_explicit_and_requires_a_per_run_memory_bound(tmp_path: Path) -> None:
     base = {
         "name": "gpu-study",
@@ -812,7 +860,7 @@ def test_killed_cpu_worker_is_retried_without_aborting_an_unrelated_run(
     assert executors == []
 
 
-def test_cpu_dispatch_refills_a_free_slot_before_the_straggler_finishes(
+def test_cpu_dispatch_replaces_stale_queued_work_before_the_straggler_finishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     submitted: list[int] = []
@@ -836,13 +884,16 @@ def test_cpu_dispatch_refills_a_free_slot_before_the_straggler_finishes(
             del kwargs
 
     def refill(
-        result: Any, queued: int, pending: Sequence[Mapping[str, Any]]
+        result: Any,
+        queued: Sequence[Mapping[str, Any]],
+        pending: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
-        del result, queued
-        if 3 not in submitted:
+        del result
+        if 4 not in submitted:
             assert len(pending) == 1
+            assert [int(value["trial_index"]) for value in queued] == [3]
             second.set_result(SimpleNamespace(trial={"index": 2}))
-            return [{"trial_index": 3, "seed": 3}]
+            return [{"trial_index": 4, "seed": 4}]
         return []
 
     monkeypatch.setattr("lambdaforge.work.runner.ProcessPoolExecutor", ControlledPool)
@@ -850,7 +901,11 @@ def test_cpu_dispatch_refills_a_free_slot_before_the_straggler_finishes(
     executors: list[Any] = []
 
     _execute_cpu_isolated_runs(
-        [{"trial_index": 1, "seed": 1}, {"trial_index": 2, "seed": 2}],
+        [
+            {"trial_index": 1, "seed": 1},
+            {"trial_index": 2, "seed": 2},
+            {"trial_index": 3, "seed": 3},
+        ],
         policy=AdaptiveSearchPolicy(max_parallel=2, early_stopping=False),
         parallelism=2,
         objective_metric="score",
@@ -861,7 +916,7 @@ def test_cpu_dispatch_refills_a_free_slot_before_the_straggler_finishes(
         on_result=refill,
     )
 
-    assert submitted == [1, 2, 3]
+    assert submitted == [1, 2, 4]
     assert len(results) == 3
 
 

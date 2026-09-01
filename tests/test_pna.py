@@ -198,7 +198,6 @@ class TestPNA:
         assert torch.isfinite(output).all()
         assert x.grad is not None
 
-
     @pytest.mark.parametrize(
         ("keyword", "value", "match"),
         [

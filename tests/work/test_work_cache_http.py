@@ -159,8 +159,6 @@ def test_incomplete_fetches_complete_inside_concurrent_resume_map(tmp_path: Path
 
     assert result.status == "succeeded"
     assert result.runs[0].primary_result == {
-        "items": [
-            {"id": str(index), "value": f"payload:/{index}.gz"} for index in range(4)
-        ]
+        "items": [{"id": str(index), "value": f"payload:/{index}.gz"} for index in range(4)]
     }
     assert set(server.counts.values()) == {2}

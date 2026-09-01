@@ -487,13 +487,21 @@ still insufficient or GP fitting is numerically unsafe. `sampler: knn` forces th
 conditional active/inactive indicators share one input vector, so posterior predictions can depend
 on interactions. When repeated seeds provide a standard error, it is passed as observation noise;
 qLogNEI then selects from the finite candidate pool while accounting for noisy observations and
-every already-pending candidate. A pending Run retains its actual target fidelity instead of being
-represented as a fictitious full-budget observation. Fidelity is a normalized explicit input:
+every already-pending candidate. Evidence is grouped by exact cumulative rung: each
+`(candidate, target, maximum)` has its own across-seed mean and standard error, and the same
+candidate may produce several observations. Seed racing compares candidates only on one shared
+exact rung; a heterogeneous seed mean is never relabelled with maximum, minimum or average
+fidelity. A pending Run retains its actual target fidelity instead of being represented as a
+fictitious full-budget observation. Fidelity is a normalized explicit input:
 numeric spaces use `SingleTaskMultiFidelityGP`, mixed/categorical spaces
 keep that coordinate in `MixedSingleTaskGP`, and the dependency-light k-NN fallback combines
 parameter and fidelity distance conservatively. Acquisition always scores new candidates at target
 fidelity. The log-EI family is used for its more stable
 numerics ([BoTorch acquisition guidance](https://botorch.org/docs/optimization)).
+This is deliberately described as a **fidelity-aware surrogate plus an external cost-aware action
+scheduler**. LambdaForge does not claim to implement a unified multi-fidelity knowledge-gradient
+acquisition for every mixed/conditional space; promotions compete with seeds and new candidates in
+the provider-neutral controller.
 
 The legacy scalar objective may include explicit outcome constraints:
 
@@ -502,17 +510,18 @@ objective:
   metric: val_auprc
   mode: max
   constraints:
-    val_accuracy: {min: 0.55}
-    val_kappa: {min: 0.05}
+    val_accuracy: {min: 0.55, seed_aggregation: worst}
+    val_kappa: {min: 0.05, seed_aggregation: lcb, confidence: 0.95}
 ```
 
-Each constraint accepts `min`, `max` or both. LambdaForge reads its value at the exact epoch where
-the primary objective was best, then averages that aligned value across completed seeds. A missing
-metric or violated mean makes the candidate infeasible: it remains auditable in telemetry but is
-excluded from seed racing, surrogate observations and final selection. This prevents one lucky
-objective checkpoint from hiding a model that fails an explicitly declared scientific validity
-criterion. LambdaForge never infers constraints from unrelated logged metrics, their names or
-directions. Doing so would silently change the research question.
+Each constraint accepts `min`, `max` or both. LambdaForge reads its value at the exact checkpoint
+where the objective utility was best. Across completed seeds, `seed_aggregation` is `mean` by
+default for backwards compatibility, `worst` tests the least favourable seed, and `lcb` applies a
+two-sided normal confidence bound (`confidence`, default 0.95) conservatively to lower and/or upper
+bounds. LCB with fewer than two seeds and every missing metric fail closed. The same metric may be
+both a composite component and a hard constraint: feasible values still contribute continuously
+to utility. Infeasible candidates remain auditable but are excluded from seed racing, surrogate
+observations and final selection. LambdaForge never infers constraints from metric names.
 
 For a deliberate graded compromise, `objective.metrics` defines a composite utility. Every
 component requires `mode`, a non-negative `weight` and a fixed finite `range`; aggregations are
@@ -587,11 +596,18 @@ finish events. `hpo-control/state.json` is the compact latest replay snapshot. B
 not checkpoints or model bytes.
 
 The acquisition loop is event-driven rather than round-barrier based. Each terminal observation
-re-evaluates `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` for the free slot
-using expected information per incremental wall-clock cost. Startup work is submitted gradually and can interleave with
-model-directed decisions. Pending identities condition the surrogate and prevent duplicate queued
-seeds. Each action records score, cost, reason and compact alternatives; waiting is valid only when
-no useful in-budget action exists. A running scored action may be preempted only after 30 seconds,
+re-evaluates `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` for every free slot.
+Their common `controller_value` is explicitly a bounded heuristic, not information gain: ADD_SEED
+uses relative standard-error reduction near the ranking boundary; START_NEW uses fixed coverage,
+observation-sparsity and bounded periodic-exploration terms; fidelity actions use the square root of
+remaining normalized fidelity. Priority divides this value by observed incremental wall-clock cost.
+Startup work is submitted gradually and can interleave with model-directed decisions. Pending
+identities and exact target fidelities condition the surrogate and prevent duplicate queued seeds.
+Undispatched actions form a mutable dispatch buffer. After new evidence, a stale queued action may
+be replaced at zero scientific compute cost; `CANCEL_QUEUED_ACTION` records old/new priority,
+replacement and reason. Each action records value, score, cost, reason and compact alternatives;
+waiting is valid only when no useful in-budget action exists. A running scored action may be
+preempted only after 30 seconds,
 with an owned non-symlink checkpoint, and when the next useful alternative exceeds the greater of
 its original action priority and current continuation value by 50%. Startup actions without a
 comparable score and all confirmation Runs are protected. LambdaForge writes a cooperative stop,
@@ -772,8 +788,8 @@ pruned Run.
 `lf top` consumes the same controller evidence rather than fitting a second HPO model. Its candidate
 view shows composite utility mean/standard error, aggregation, same-checkpoint raw and normalized
 components, weights/contributions, constraints and diagnostic Pareto membership. The HPO panel
-shows active/available slots, queued/paused Runs and the latest action's score, expected information
-and cost. A pruned Run expands to its persisted candidate, step/fidelity, prediction uncertainty,
+shows active/available slots, queued/paused Runs and the latest action's score, controller-value
+proxy and cost. A pruned Run expands to its persisted candidate, step/fidelity, prediction uncertainty,
 incumbent, probability, threshold, margin, confirmations and curve method.
 
 Press `i` from the adaptive candidate or Trial screen to open the HPO evidence console. For every
@@ -784,7 +800,11 @@ comparison that would reduce ambiguity. The header separately reports the contro
 latest action plus comparable, provisional and censored counts. Marginal associations can be confounded by correlated parameters, conditional
 activation, unequal seeds or partial fidelity, whereas the sampler reasons over the mixed
 multivariate space. The console therefore says “appears associated”, never causal or guaranteed.
-Interaction-importance methods such as functional ANOVA can summarize a mature surrogate
+The header has two deliberately separate blocks. `MARGINAL / PAIRWISE DIAGNOSTICS` contains these
+descriptive, non-causal summaries. `SURROGATE BELIEF` is the retained lightweight output of the
+actual last GP/k-NN refresh: backend, target fidelity, pending count, leading predicted candidate or
+region and posterior/predictive uncertainty. It is retained independently of the 25-event tail and
+contains no pickled model. Interaction-importance methods such as functional ANOVA can summarize a mature surrogate
 ([fANOVA paper](https://proceedings.mlr.press/v32/hutter14.html)), but applying them to the first few
 Trials would create unstable precision theatre. LambdaForge therefore keeps early explanations
 auditable and marginal while its actual GP/k-NN controller stays multivariate. Enter/right on a
@@ -799,7 +819,12 @@ rebuilds an older bounded snapshot from candidate telemetry, so live remote stud
 a restart merely to obtain a newer diagnostic view.
 The console also prints declared outcome constraints and infeasible-candidate counts. The same JSON
 is `overview` → `work.items[].study.hpo_analysis`; recent structured actions are in
-`.controller`, bounded to 25 events.
+`.controller`, bounded to 25 events, and actual sampler diagnostics in `.surrogate_belief`.
+
+Threshold-dependent metrics—F1, balanced accuracy, Cohen's kappa, accuracy, precision and
+recall—are consumed exactly as logged. LambdaForge does not optimize their classification
+threshold, select a per-candidate threshold or equate them with AUROC/AUPRC. Threshold selection is
+part of the Work's evaluation protocol and must remain scientifically comparable.
 
 The Run view is split into two regions. The upper region contains the complete aligned parameter
 list, live duration/timing summary and up to four learning curves. `n` and `p` select the next or

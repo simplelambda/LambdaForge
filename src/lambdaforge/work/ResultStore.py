@@ -96,9 +96,7 @@ class ResultStore:
         try:
             value = json.loads(execution_manifest.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as error:
-            raise RuntimeError(
-                f"Corrupt Work execution manifest: {execution_manifest}"
-            ) from error
+            raise RuntimeError(f"Corrupt Work execution manifest: {execution_manifest}") from error
         source = Path(str(value.get("source", ""))).expanduser().resolve()
         if not source.is_file() or source.is_symlink():
             raise FileNotFoundError(f"Recorded Work YAML is unavailable: {source}")
@@ -116,9 +114,7 @@ class ResultStore:
             raw = json.loads(configuration_path.read_text(encoding="utf-8"))
             execution = json.loads(execution_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as error:
-            raise RuntimeError(
-                f"Corrupt Work retry metadata below: {execution_dir}"
-            ) from error
+            raise RuntimeError(f"Corrupt Work retry metadata below: {execution_dir}") from error
         if not isinstance(raw, Mapping) or not isinstance(execution, Mapping):
             raise RuntimeError(f"Corrupt Work retry metadata below: {execution_dir}")
         source = Path(str(execution.get("source", ""))).expanduser().resolve()
@@ -158,7 +154,9 @@ class ResultStore:
         captured = (
             text
             if tail is None
-            else "".join(text.splitlines(keepends=True)[-tail:]) if tail else ""
+            else "".join(text.splitlines(keepends=True)[-tail:])
+            if tail
+            else ""
         )
         failures = scientific_failures(selected, result_path=str(manifest))
         section = render_scientific_failures(
@@ -220,9 +218,7 @@ class ResultStore:
                 for run in value.get("runs", ())
                 if isinstance(run, Mapping) and run.get("status") == "succeeded"
                 for name in (
-                    run.get("metrics", {}).keys()
-                    if isinstance(run.get("metrics"), Mapping)
-                    else ()
+                    run.get("metrics", {}).keys() if isinstance(run.get("metrics"), Mapping) else ()
                 )
             }
         )

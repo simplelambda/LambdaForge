@@ -10,13 +10,23 @@ import pytest
 
 from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservation
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
+from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
 from lambdaforge.hpo.BayesianSampler import BayesianSampler
 from lambdaforge.hpo.CurveEvidence import CompletedCurve, audit_pruner
-from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility, pareto_front
+from lambdaforge.hpo.ObjectiveUtility import (
+    ObjectiveUtility,
+    aggregate_constraint,
+    pareto_front,
+)
 from lambdaforge.hpo.StudyInsights import StudyInsightAnalyzer
 from lambdaforge.hpo.SurvivalModel import SurvivalModel, SurvivalObservation
-from lambdaforge.work import WorkConfig
-from lambdaforge.work.runner import _request_scheduler_preemption, _run_termination
+from lambdaforge.work import WorkConfig, WorkRunner
+from lambdaforge.work.models import WorkResources, WorkResult
+from lambdaforge.work.runner import (
+    _candidate_observations,
+    _request_scheduler_preemption,
+    _run_termination,
+)
 
 
 def test_composite_utility_normalizes_fixed_ranges_and_weights() -> None:
@@ -185,6 +195,174 @@ def test_pareto_diagnostic_uses_raw_metric_directions() -> None:
     assert pareto_front(candidates, objective) == (2, 3)
 
 
+@pytest.mark.parametrize(
+    ("aggregation", "expected"),
+    [
+        ("mean", True),
+        ("worst", False),
+        ("lcb", False),
+    ],
+)
+def test_constraint_seed_aggregation_is_explicit_and_conservative(
+    aggregation: str, expected: bool
+) -> None:
+    rule = {"min": 0.8, "seed_aggregation": aggregation, "confidence": 0.95}
+    if aggregation != "lcb":
+        rule.pop("confidence")
+
+    evidence = aggregate_constraint((0.75, 0.95), rule)
+
+    assert evidence["seed_aggregation"] == aggregation
+    assert evidence["satisfied"] is expected
+
+
+def _rung_result(
+    tmp_path: Path, *, trial: int, seed: int, value: float, target: int, maximum: int
+) -> WorkResult:
+    run_dir = tmp_path / f"trial-{trial}-seed-{seed}-rung-{target}"
+    run_dir.mkdir(parents=True)
+    return WorkResult(
+        name="rung-study",
+        work_class="tests.work_cases.AdaptiveScoreWork",
+        execution_id="execution-rungs",
+        run_id=f"run-{trial}-{seed}-{target}",
+        attempt_id="attempt-0001",
+        attempt_number=1,
+        scientific_fingerprint=f"sha256:{trial}{seed}{target}",
+        status="succeeded",
+        run_dir=run_dir,
+        created_at_utc="2026-09-01T00:00:00+00:00",
+        started_at_utc="2026-09-01T00:00:00+00:00",
+        finished_at_utc="2026-09-01T00:00:01+00:00",
+        duration_seconds=1.0,
+        seed=seed,
+        trial={"index": trial, "parameters": {"x": trial}},
+        parameters={"x": trial},
+        inputs=(),
+        requested_resources=WorkResources(1, 0, 0, 0, None, 0, 1),
+        metrics={"score": value},
+        fidelity={"current": 0, "target": target, "maximum": maximum},
+        objective_observation={
+            "metric": "score",
+            "mode": "max",
+            "current": value,
+            "best": value,
+        },
+        termination_type="completed",
+        termination={"type": "completed"},
+    )
+
+
+def test_runner_observations_never_label_a_mixed_fidelity_seed_mean_as_full(
+    tmp_path: Path,
+) -> None:
+    results = {
+        1: [
+            _rung_result(tmp_path, trial=1, seed=1, value=0.90, target=100, maximum=100),
+            _rung_result(tmp_path, trial=1, seed=2, value=0.40, target=25, maximum=100),
+        ],
+        **{
+            trial: [
+                _rung_result(
+                    tmp_path,
+                    trial=trial,
+                    seed=1,
+                    value=0.50 + trial / 100,
+                    target=100,
+                    maximum=100,
+                )
+            ]
+            for trial in range(2, 6)
+        },
+    }
+    observations = _candidate_observations(
+        results,
+        metric="score",
+        objective={"metric": "score", "mode": "max"},
+        racer=AdaptiveSeedRacer(mode="max"),
+    )
+
+    first = [(value.value, value.fidelity) for value in observations if value.trial == 1]
+    assert first == [(0.40, 0.25), (0.90, 1.0)]
+    assert (0.65, 1.0) not in first
+
+    candidates = {trial: {"x": trial} for trial in range(1, 8)}
+    assert AdaptiveSampler(candidates, mode="max").propose(
+        observations, selected=(1, 2, 3, 4, 5), count=1
+    )
+    if BayesianSampler.available():
+        assert BayesianSampler(candidates, mode="max").propose(
+            observations, selected=(1, 2, 3, 4, 5), count=1
+        )
+
+
+def test_real_runner_results_flow_through_rung_observations_into_both_samplers(
+    tmp_path: Path,
+) -> None:
+    config = WorkConfig.from_mapping(
+        {
+            "name": "runner-rung-pipeline",
+            "run": "tests.work_cases.FidelityScoreWork",
+            "seeds": [11],
+            "search": {
+                "strategy": "adaptive",
+                "trials": 6,
+                "startup_trials": 6,
+                "proposal_pool_size": 8,
+                "min_seeds": 1,
+                "confirmation_seeds": [],
+                "fidelity": {"min": 1, "max": 3, "reduction_factor": 3},
+                "quality": {"values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]},
+            },
+            "objective": {"metric": "score", "mode": "max"},
+            "resources": {"cpu": 2},
+        },
+        source=tmp_path / "runner-rungs.yaml",
+    )
+
+    execution = WorkRunner().run(config)
+    by_trial: dict[int, list[WorkResult]] = {}
+    for run in execution.runs:
+        assert run.trial is not None
+        by_trial.setdefault(int(run.trial["index"]), []).append(run)
+    observations = _candidate_observations(
+        by_trial,
+        metric="score",
+        objective={"metric": "score", "mode": "max"},
+        racer=AdaptiveSeedRacer(mode="max"),
+    )
+
+    expected = {
+        (
+            trial,
+            int(run.fidelity["target"]) / int(run.fidelity["maximum"]),
+        ): run.objective_observation["best"]
+        for trial, runs in by_trial.items()
+        for run in runs
+        if run.fidelity is not None and run.objective_observation is not None
+    }
+    assert observations
+    assert {(item.trial, item.fidelity): item.value for item in observations} == expected
+    assert any(
+        len({item.fidelity for item in observations if item.trial == trial}) > 1
+        for trial in by_trial
+    )
+
+    candidates = {trial: {"quality": float(trial)} for trial in range(1, 9)}
+    selected = tuple(sorted(by_trial))
+    assert AdaptiveSampler(candidates, mode="max").propose(
+        observations,
+        selected=selected,
+        count=1,
+    )
+    if BayesianSampler.available():
+        assert BayesianSampler(candidates, mode="max").propose(
+            observations,
+            selected=selected,
+            count=1,
+        )
+
+
 def test_survival_model_is_smoothed_joint_and_uncertain() -> None:
     model = SurvivalModel({1: {"x": 0, "kind": "a"}, 2: {"x": 1, "kind": "b"}})
     estimates = model.predict_all((SurvivalObservation(1, False),))
@@ -216,6 +394,25 @@ def test_retrospective_pruner_audit_reports_savings_and_false_prunes() -> None:
     assert report["epochs_saved"] > 0
     assert report["gpu_seconds_saved"] > 0
     assert report["probability_brier_score"] is not None
+
+
+def test_retrospective_pruner_audit_detects_a_late_bloomer_false_prune() -> None:
+    report = audit_pruner(
+        (
+            CompletedCurve(1, 1, ((1, 0.80), (2, 0.81), (3, 0.82), (4, 0.83)), 40, True),
+            CompletedCurve(2, 1, ((1, 0.10), (2, 0.10), (3, 0.10), (4, 1.00)), 40, True),
+            CompletedCurve(3, 1, ((1, 0.30), (2, 0.30), (3, 0.30), (4, 0.30)), 40, True),
+        ),
+        mode="max",
+        min_step=1,
+        confirmations=1,
+        probability_threshold=0.45,
+        margin=0.0,
+    )
+
+    assert report["false_pruned_candidates"] == [2]
+    assert report["false_prune_rate"] > 0
+    assert report["regret"] > 0
 
 
 def test_pruning_statistics_count_candidates_not_seeds() -> None:

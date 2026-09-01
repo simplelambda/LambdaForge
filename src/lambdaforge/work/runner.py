@@ -35,12 +35,21 @@ from lambdaforge.data.DatasetResolver import DatasetResolver
 from lambdaforge.EnvironmentManifest import EnvironmentManifest
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservation
-from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
+from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy, ControllerValuePolicy
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
 from lambdaforge.hpo.BayesianSampler import BayesianSampler
 from lambdaforge.hpo.CurveEvidence import CompletedCurve, audit_pruner, predict_curve
-from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility, constraint_satisfied, pareto_front
-from lambdaforge.hpo.SurvivalModel import SurvivalModel, SurvivalObservation
+from lambdaforge.hpo.ObjectiveUtility import (
+    ObjectiveUtility,
+    aggregate_constraint,
+    constraint_satisfied,
+    pareto_front,
+)
+from lambdaforge.hpo.SurvivalModel import (
+    SurvivalAcquisitionPolicy,
+    SurvivalModel,
+    SurvivalObservation,
+)
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
 from lambdaforge.work.cache import WorkCache
@@ -1154,6 +1163,7 @@ def _execute_adaptive_group(
         f"parallel={parallelism} runs_per_gpu={policy.runs_per_gpu}",
         flush=True,
     )
+    controller_values = ControllerValuePolicy()
     record_decision(
         "INITIALIZE",
         candidate_budget=candidate_budget,
@@ -1161,6 +1171,8 @@ def _execute_adaptive_group(
         search_seed_budget=seed_count,
         slots_total=parallelism,
         policy=policy.to_dict(),
+        controller_value_policy=controller_values.to_dict(),
+        survival_acquisition=SurvivalAcquisitionPolicy().to_dict(),
     )
     candidate_parameters = {
         trial: dict(by_trial[trial][0].get("trial_parameters", {})) for trial in all_trials
@@ -1178,6 +1190,7 @@ def _execute_adaptive_group(
     pool_trials_by_proposal: dict[int, int] = {}
     inflight_by_trial: dict[int, int] = {}
     pending_fidelity_by_trial: dict[int, float] = {}
+    pending_observations: list[tuple[int, float]] = []
     scheduled_run_keys: set[tuple[int, int | None, str, int]] = set()
 
     def scheduling_key(specification: Mapping[str, Any]) -> tuple[int, int | None, str, int]:
@@ -1283,64 +1296,27 @@ def _execute_adaptive_group(
         return pool_trials_by_proposal[public_trial]
 
     def values_by_trial(*, final_only: bool = True) -> dict[int, dict[int | None, float]]:
-        values: dict[int, dict[int | None, tuple[int, float, WorkResult]]] = {}
-        for trial, results in completed.items():
-            if any(
-                result.pruned or result.termination_type == "performance_pruned"
-                for result in results
-            ):
-                # Candidate-level pruning censors the whole candidate. Keeping only its earlier
-                # successful seeds would select survivors and bias both racing and the surrogate.
-                continue
-            for result in results:
-                objective_value = _result_objective(result, metric)
-                if (
-                    result.pruned
-                    or result.termination_type != "completed"
-                    or objective_value is None
-                ):
-                    continue
-                target = (
-                    int(result.fidelity["target"]) if result.fidelity is not None else 2**31 - 1
-                )
-                maximum = int(result.fidelity["maximum"]) if result.fidelity is not None else target
-                if final_only and target < maximum:
-                    continue
-                previous = values.setdefault(trial, {}).get(result.seed)
-                if previous is None or target >= previous[0]:
-                    values[trial][result.seed] = (target, objective_value, result)
-        return {
-            trial: {seed: value for seed, (_target, value, _result) in by_seed.items()}
-            for trial, by_seed in values.items()
-            if _candidate_constraints(
-                [result for _target, _value, result in by_seed.values()], objective
-            )["feasible"]
-        }
+        """Return one exact comparable rung for seed racing or final selection."""
+        grouped = _candidate_values_by_rung(completed, metric=metric, objective=objective)
+        eligible_rungs = [rung for rung in grouped if not final_only or rung[0] >= rung[1]]
+        if not eligible_rungs:
+            return {}
+        # A new seed always starts at the lowest authored rung, so ADD_SEED comparisons use that
+        # exact rung. Final ranking uses the full-budget rung. No heterogeneous values are merged.
+        selected_rung = (max if final_only else min)(
+            eligible_rungs, key=lambda rung: (rung[0] / max(1, rung[1]), rung)
+        )
+        return grouped[selected_rung]
 
     def observations() -> list[CandidateObservation]:
-        estimates = racer.estimates(values_by_trial(final_only=False))
-        fidelity_by_trial = {
-            trial: max(
-                (
-                    int((result.fidelity or {}).get("target", 1))
-                    / max(1, int((result.fidelity or {}).get("maximum", 1)))
-                    for result in completed[trial]
-                    if result.ok and not result.pruned
-                ),
-                default=1.0,
+        return list(
+            _candidate_observations(
+                completed,
+                metric=metric,
+                objective=objective,
+                racer=racer,
             )
-            for trial in proposed
-        }
-        return [
-            CandidateObservation(
-                trial,
-                estimates[trial].mean,
-                estimates[trial].standard_error,
-                fidelity_by_trial[trial],
-            )
-            for trial in proposed
-            if trial in estimates
-        ]
+        )
 
     def propose(count: int) -> tuple[int, ...]:
         evidence = observations()
@@ -1414,6 +1390,7 @@ def _execute_adaptive_group(
                     selected=proposed,
                     pending=pending_trials,
                     pending_fidelity=pending_fidelity_by_trial,
+                    pending_observations=pending_observations,
                     censored=censored_trials,
                     survival=survival,
                     count=count,
@@ -1428,6 +1405,7 @@ def _execute_adaptive_group(
                         observed=len(evidence),
                         censored_trials=censored_trials,
                         survival_evidence=len(survival_observations),
+                        surrogate_belief=dict(bayesian.last_diagnostics),
                     )
                     return selected
             except Exception as error:
@@ -1448,6 +1426,7 @@ def _execute_adaptive_group(
             selected=proposed,
             pending=pending_trials,
             pending_fidelity=pending_fidelity_by_trial,
+            pending_observations=pending_observations,
             censored=censored_trials,
             survival=survival,
             count=count,
@@ -1461,10 +1440,14 @@ def _execute_adaptive_group(
                 observed=len(evidence),
                 censored_trials=censored_trials,
                 survival_evidence=len(survival_observations),
+                surrogate_belief=dict(selector.last_diagnostics),
             )
         return selected
 
     started = time.monotonic()
+    best_value: float | None = None
+    stale_events = 0
+    search_converged = False
 
     def allowance() -> int:
         if policy.max_runs is None:
@@ -1528,10 +1511,14 @@ def _execute_adaptive_group(
         options: list[tuple[float, int, str, dict[str, Any], dict[str, Any]]] = []
 
         provisional_values = values_by_trial(final_only=False)
-        comparison_ready = len(provisional_values) >= 2
         eligible = [trial for trial in proposed if next_seed_specification(trial) is not None]
+        # Do not spend an extra seed while a peer at the comparison rung is already in flight.
+        # This is an event-driven wait, not a round barrier: unrelated new candidates may still
+        # fill a free slot below, and the next completion immediately replans every queued action.
         seed_decisions = (
-            racer.decisions(provisional_values, eligible=eligible) if comparison_ready else ()
+            racer.decisions(provisional_values, eligible=eligible)
+            if len(provisional_values) >= 2 or not pending_observations
+            else ()
         )
         for decision in seed_decisions:
             specification = next_seed_specification(decision.trial)
@@ -1543,24 +1530,36 @@ def _execute_adaptive_group(
                 if result.duration_seconds > 0
             ]
             cost = statistics.fmean(candidate_costs) if candidate_costs else default_cost
-            information = max(1e-6, decision.expected_uncertainty_reduction)
+            value_proxy = min(
+                1.0,
+                decision.expected_uncertainty_reduction
+                / max(decision.current_standard_error, 1e-9),
+            )
             options.append(
                 (
-                    information / max(cost, 1e-9),
+                    value_proxy / max(cost, 1e-9),
                     1,
                     "ADD_SEED",
                     specification,
                     {
                         "probability_competitive": decision.probability_competitive,
-                        "expected_information": information,
+                        "current_standard_error": decision.current_standard_error,
+                        "expected_uncertainty_reduction": (decision.expected_uncertainty_reduction),
+                        "controller_value": value_proxy,
+                        "value_basis": "seed-mean-standard-error-reduction-near-boundary",
                         "expected_cost_seconds": cost,
                         "completed_seeds": decision.completed_seeds,
                     },
                 )
             )
 
-        provisional = (
-            racer.decisions(provisional_values, eligible=proposed) if comparison_ready else ()
+        comparable_rungs = _candidate_values_by_rung(completed, metric=metric, objective=objective)
+        pending_fidelities = {fidelity for _trial, fidelity in pending_observations}
+        provisional = tuple(
+            decision
+            for (target, maximum), rung_values in comparable_rungs.items()
+            if len(rung_values) >= 2 or target / max(1, maximum) not in pending_fidelities
+            for decision in racer.decisions(rung_values, eligible=proposed)
         )
         competitive = {decision.trial for decision in provisional}
         latest_by_seed: dict[tuple[int, int | None], WorkResult] = {}
@@ -1581,12 +1580,15 @@ def _execute_adaptive_group(
                 continue
             fidelity = specification["hpo_fidelity"]
             current, target = int(fidelity["current"]), int(fidelity["target"])
-            incremental_fraction = max(1, target - current) / max(1, target)
-            cost = max(1e-9, result.duration_seconds * incremental_fraction)
-            information = 0.5 / math.sqrt(1 + current)
+            incremental_fraction = max(1, target - current) / max(1, current)
+            base_cost = result.duration_seconds if result.duration_seconds > 0 else default_cost
+            cost = max(1e-9, base_cost * incremental_fraction)
+            maximum = max(1, int(fidelity["maximum"]))
+            fidelity_gain = max(0.0, min(1.0, (target - current) / maximum))
+            value_proxy = controller_values.fidelity_uncertainty_weight * math.sqrt(fidelity_gain)
             options.append(
                 (
-                    information / cost,
+                    value_proxy / cost,
                     2,
                     (
                         "RESUME_PREEMPTED"
@@ -1595,7 +1597,8 @@ def _execute_adaptive_group(
                     ),
                     specification,
                     {
-                        "expected_information": information,
+                        "controller_value": value_proxy,
+                        "value_basis": "remaining-fidelity-uncertainty-proxy",
                         "expected_cost_seconds": cost,
                         "current": current,
                         "target": target,
@@ -1604,20 +1607,29 @@ def _execute_adaptive_group(
             )
 
         proposal: tuple[int, ...] = ()
-        if len(proposed) < candidate_budget:
+        if len(proposed) < candidate_budget and not search_converged:
             proposal = propose(1)
         if proposal:
-            exploration_bonus = 0.5 if len(outcomes) % max(2, parallelism) == 0 else 0.0
-            information = 0.35 + 1.0 / math.sqrt(1 + len(observations())) + exploration_bonus
+            exploration_bonus = (
+                controller_values.periodic_exploration_bonus
+                if len(outcomes) % max(2, parallelism) == 0
+                else 0.0
+            )
+            value_proxy = (
+                controller_values.new_region_base
+                + controller_values.observation_sparsity_weight / math.sqrt(1 + len(observations()))
+                + exploration_bonus
+            )
             specification = initial_specifications(proposal[0])[0]
             options.append(
                 (
-                    information / max(default_cost, 1e-9),
+                    value_proxy / max(default_cost, 1e-9),
                     0,
                     "START_NEW",
                     specification,
                     {
-                        "expected_information": information,
+                        "controller_value": value_proxy,
+                        "value_basis": "new-region-coverage-and-observation-sparsity-proxy",
                         "expected_cost_seconds": default_cost,
                         "pool_trial": proposal[0],
                         "exploration_bonus": exploration_bonus,
@@ -1640,7 +1652,7 @@ def _execute_adaptive_group(
                 "action": value[2],
                 "trial": int(value[3]["trial_index"]),
                 "score": value[0],
-                "expected_information": value[4].get("expected_information"),
+                "controller_value": value[4].get("controller_value"),
                 "expected_cost_seconds": value[4].get("expected_cost_seconds"),
             }
             for value in sorted(options, key=lambda item: item[0], reverse=True)[:6]
@@ -1652,7 +1664,11 @@ def _execute_adaptive_group(
                 **evidence,
                 "score": score,
                 "alternatives": alternatives,
-                "reason": "highest-expected-information-per-cost",
+                "reason": "highest-controller-value-per-incremental-cost",
+                "pending_context": [
+                    {"trial": trial, "target_fidelity": fidelity}
+                    for trial, fidelity in sorted(pending_fidelity_by_trial.items())[:12]
+                ],
             },
         )
 
@@ -1679,22 +1695,25 @@ def _execute_adaptive_group(
 
         def observed(
             result: WorkResult,
-            queued: int,
+            queued_specifications: Sequence[Mapping[str, Any]],
             pending_specifications: Sequence[Mapping[str, Any]],
         ) -> Sequence[dict[str, Any]]:
+            nonlocal best_value, search_converged, stale_events
             pending_runs = len(pending_specifications)
             pending_fidelity_by_trial.clear()
+            pending_observations.clear()
             for pending in pending_specifications:
                 pending_trial = int(pending.get("candidate_pool_index", pending["trial_index"]))
                 raw_fidelity = pending.get("hpo_fidelity")
-                fidelity = (
+                pending_fraction = (
                     int(raw_fidelity.get("target", 1)) / max(1, int(raw_fidelity.get("maximum", 1)))
                     if isinstance(raw_fidelity, Mapping)
                     else 1.0
                 )
                 pending_fidelity_by_trial[pending_trial] = max(
-                    fidelity, pending_fidelity_by_trial.get(pending_trial, 0.0)
+                    pending_fraction, pending_fidelity_by_trial.get(pending_trial, 0.0)
                 )
+                pending_observations.append((pending_trial, pending_fraction))
             trial = pool_trial_for(result)
             if result.termination_type == "scheduler_preempted":
                 scheduled_run_keys.discard(
@@ -1708,6 +1727,46 @@ def _execute_adaptive_group(
             inflight_by_trial[trial] = max(0, inflight_by_trial.get(trial, 1) - 1)
             completed[trial].append(result)
             outcomes.append(result)
+            result_fidelity = result.fidelity or {}
+            reached_final_fidelity = int(result_fidelity.get("target", 1)) >= int(
+                result_fidelity.get("maximum", 1)
+            )
+            if (
+                result.termination_type == "completed"
+                and reached_final_fidelity
+                and result.study_phase != "confirmation"
+            ):
+                final_estimates = racer.estimates(values_by_trial())
+                if final_estimates:
+                    current = (
+                        max(value.mean for value in final_estimates.values())
+                        if mode == "max"
+                        else min(value.mean for value in final_estimates.values())
+                    )
+                    improvement = (
+                        math.inf
+                        if best_value is None
+                        else current - best_value
+                        if mode == "max"
+                        else best_value - current
+                    )
+                    if improvement > policy.min_improvement:
+                        best_value, stale_events = current, 0
+                    else:
+                        stale_events += 1
+                    if (
+                        policy.convergence_patience
+                        and stale_events >= policy.convergence_patience
+                        and not search_converged
+                    ):
+                        search_converged = True
+                        record_decision(
+                            "STOP_PROPOSING",
+                            reason="full-fidelity-evidence-convergence",
+                            stale_evidence_events=stale_events,
+                            best_objective=best_value,
+                            minimum_improvement=policy.min_improvement,
+                        )
             persist_state()
             if result.termination_type == "scheduler_preempted":
                 record_decision(
@@ -1726,6 +1785,13 @@ def _execute_adaptive_group(
                     "PERFORMANCE_PRUNE",
                     **prune_event,
                 )
+            if result.study_phase == "confirmation":
+                return [dict(value) for value in queued_specifications]
+            stale_queue = [dict(value) for value in queued_specifications]
+            for stale in stale_queue:
+                scheduled_run_keys.discard(scheduling_key(stale))
+                stale_trial = int(stale.get("candidate_pool_index", stale["trial_index"]))
+                inflight_by_trial[stale_trial] = max(0, inflight_by_trial.get(stale_trial, 1) - 1)
             if result.termination_type == "performance_pruned" and deferred_queue:
                 retained: deque[dict[str, Any]] = deque()
                 while deferred_queue:
@@ -1752,7 +1818,18 @@ def _execute_adaptive_group(
                         compute_seconds=0.0,
                     )
                 deferred_queue.extend(retained)
-            if queued or not within_time():
+            deferred_keys = {scheduling_key(value) for value in deferred_queue}
+            for stale in stale_queue:
+                stale_trial = int(stale.get("candidate_pool_index", stale["trial_index"]))
+                key = scheduling_key(stale)
+                if (
+                    not completed[stale_trial]
+                    and stale.get("hpo_phase", "search") == "search"
+                    and key not in deferred_keys
+                ):
+                    deferred_queue.append(stale)
+                    deferred_keys.add(key)
+            if not within_time():
                 return ()
             remaining_capacity = allowance() - pending_runs
             if remaining_capacity <= 0:
@@ -1766,7 +1843,8 @@ def _execute_adaptive_group(
                 action = "START_NEW"
                 evidence = {
                     "reason": "asynchronous-space-filling-startup",
-                    "expected_information": None,
+                    "controller_value": None,
+                    "value_basis": "required-space-filling-coverage",
                     "expected_cost_seconds": None,
                     "score": None,
                     "alternatives": [],
@@ -1782,7 +1860,32 @@ def _execute_adaptive_group(
                     }
             specifications = list(specifications[:remaining_capacity])
             if not specifications:
+                for stale in stale_queue:
+                    if telemetry is not None:
+                        telemetry.queued_action_cancelled(
+                            stale, reason="no longer useful after new HPO evidence"
+                        )
+                    record_decision(
+                        "CANCEL_QUEUED_ACTION",
+                        reason="superseded-by-new-evidence",
+                        trial=int(stale["trial_index"]),
+                        seed=stale.get("seed"),
+                        phase=stale.get("hpo_phase", "search"),
+                        started=False,
+                        compute_seconds=0.0,
+                        old_priority=stale.get("hpo_scheduler_priority"),
+                        new_best_action="WAIT",
+                        new_priority=None,
+                        new_evidence={"termination_type": result.termination_type},
+                    )
                 return ()
+            selected_keys = {scheduling_key(value) for value in specifications}
+            retained_deferred: deque[dict[str, Any]] = deque()
+            while deferred_queue:
+                deferred_value = deferred_queue.popleft()
+                if scheduling_key(deferred_value) not in selected_keys:
+                    retained_deferred.append(deferred_value)
+            deferred_queue.extend(retained_deferred)
             action_priority = evidence.get("score")
             for specification in specifications:
                 specification["hpo_scheduler_action"] = action
@@ -1790,6 +1893,31 @@ def _execute_adaptive_group(
                     action_priority, bool
                 ):
                     specification["hpo_scheduler_priority"] = float(action_priority)
+            for stale in stale_queue:
+                if scheduling_key(stale) in selected_keys:
+                    continue
+                cancellation = {
+                    "reason": "superseded-by-new-evidence",
+                    "trial": int(stale["trial_index"]),
+                    "seed": stale.get("seed"),
+                    "phase": stale.get("hpo_phase", "search"),
+                    "target_fidelity": int((stale.get("hpo_fidelity") or {}).get("target", 0)),
+                    "started": False,
+                    "compute_seconds": 0.0,
+                    "old_priority": stale.get("hpo_scheduler_priority"),
+                    "new_best_action": action,
+                    "new_priority": evidence.get("score"),
+                    "new_evidence": {
+                        "termination_type": result.termination_type,
+                        "completed_trial": int((result.trial or {"index": 0})["index"]),
+                        "completed_seed": result.seed,
+                    },
+                }
+                if telemetry is not None:
+                    telemetry.queued_action_cancelled(
+                        stale, reason="superseded by new HPO evidence before dispatch"
+                    )
+                record_decision("CANCEL_QUEUED_ACTION", **cancellation)
             preemption = _request_scheduler_preemption(
                 pending_specifications,
                 alternatives=(
@@ -1835,7 +1963,7 @@ def _execute_adaptive_group(
             register(specifications)
             return specifications
 
-        _execute_adaptive_round(
+        _execute_adaptive_dispatch(
             limited,
             resources=resources,
             policy=policy,
@@ -1872,174 +2000,14 @@ def _execute_adaptive_group(
         public_trials=[public_trial(trial) for trial in startup],
     )
     startup_specs = [value for trial in startup for value in initial_specifications(trial)]
-    # Deferred startup Runs are planned but not submitted. Marking their identities prevents the
-    # event planner from independently scheduling the same seed before the startup queue reaches it.
-    scheduled_run_keys.update(scheduling_key(value) for value in startup_specs)
+    # Deferred startup Runs remain a provisional planning pool. Only specifications handed to the
+    # dispatcher enter ``scheduled_run_keys``; this lets every result re-rank the undispatched tail.
     startup_width = max(1, min(parallelism, allowance(), len(startup_specs)))
     execute(
         startup_specs[:startup_width],
         startup,
         deferred=startup_specs[startup_width:],
     )
-
-    best_value: float | None = None
-    stale_rounds = 0
-    search_converged = False
-    while within_time() and allowance() > 0:
-        remaining = candidate_budget - len(proposed)
-        eligible = [trial for trial in proposed if next_seed_specification(trial) is not None]
-        decisions = list(racer.decisions(values_by_trial(), eligible=eligible))
-        provisional = racer.decisions(values_by_trial(final_only=False), eligible=proposed)
-        competitive = {decision.trial for decision in provisional}
-        latest_by_seed: dict[tuple[int, int | None], WorkResult] = {}
-        for trial in proposed:
-            for result in completed[trial]:
-                target = int((result.fidelity or {}).get("target", 2**31 - 1))
-                key = (trial, result.seed)
-                previous = latest_by_seed.get(key)
-                previous_target = (
-                    int((previous.fidelity or {}).get("target", 2**31 - 1))
-                    if previous is not None
-                    else -1
-                )
-                if target >= previous_target:
-                    latest_by_seed[key] = result
-                if result.termination_type == "scheduler_preempted":
-                    competitive.add(trial)
-        resume_actions = [
-            value
-            for (trial, _seed), result in latest_by_seed.items()
-            if trial in competitive
-            for value in [resume_specification(result)]
-            if value is not None
-        ]
-        resume_actions.sort(
-            key=lambda value: (
-                int(value["hpo_fidelity"]["target"])
-                / max(1, int(value["hpo_fidelity"]["current"])),
-                -int(value["trial_index"]),
-            ),
-            reverse=True,
-        )
-        # Prefer evidence with more uncertainty reduction per observed wall-clock cost.
-        durations = [
-            result.duration_seconds
-            for result in outcomes
-            if result.ok and result.duration_seconds > 0
-        ]
-        default_cost = statistics.fmean(durations) if durations else 1.0
-        decisions.sort(
-            key=lambda decision: (
-                -decision.expected_uncertainty_reduction
-                / max(
-                    statistics.fmean(
-                        [
-                            result.duration_seconds
-                            for result in completed[decision.trial]
-                            if result.ok and result.duration_seconds > 0
-                        ]
-                    )
-                    if any(
-                        result.ok and result.duration_seconds > 0
-                        for result in completed[decision.trial]
-                    )
-                    else default_cost,
-                    1e-9,
-                )
-            )
-        )
-        slots = min(parallelism, allowance())
-        evidence_actions = len(resume_actions) + len(decisions)
-        seed_slots = min(
-            evidence_actions, slots // 2 if remaining and not search_converged else slots
-        )
-        new_count = 0
-        if remaining and not search_converged:
-            new_count = min(remaining, max(1, slots - seed_slots))
-        proposal_batch = propose(new_count)
-        proposed.extend(proposal_batch)
-        if proposal_batch:
-            record_decision(
-                "START_NEW",
-                reason="adaptive-acquisition",
-                pool_trials=list(proposal_batch),
-                public_trials=[public_trial(trial) for trial in proposal_batch],
-            )
-        scheduled = [value for trial in proposal_batch for value in initial_specifications(trial)]
-        available = max(0, slots - len(scheduled))
-        selected_resumes = resume_actions[:available]
-        scheduled.extend(selected_resumes)
-        for value in selected_resumes:
-            fidelity = value["hpo_fidelity"]
-            action = "RESUME_PREEMPTED" if value.get("hpo_resume_preempted") else "PROMOTE_FIDELITY"
-            print(
-                f"[hpo] {action} trial={value['trial_index']} "
-                f"seed={value.get('seed')} "
-                f"budget={fidelity['current']}->{fidelity['target']}",
-                flush=True,
-            )
-            record_decision(
-                action,
-                trial=int(value["trial_index"]),
-                seed=value.get("seed"),
-                current=int(fidelity["current"]),
-                target=int(fidelity["target"]),
-                maximum=int(fidelity["maximum"]),
-            )
-        available = max(0, slots - len(scheduled))
-        for decision in decisions[:available]:
-            next_value = next_seed_specification(decision.trial)
-            if next_value is not None:
-                scheduled.append(next_value)
-                print(
-                    f"[hpo] ADD_SEED trial={public_trial(decision.trial)} "
-                    f"p_competitive={decision.probability_competitive:.3f} "
-                    f"completed={decision.completed_seeds}",
-                    flush=True,
-                )
-                record_decision(
-                    "ADD_SEED",
-                    trial=public_trial(decision.trial),
-                    seed=next_value.get("seed"),
-                    probability_competitive=decision.probability_competitive,
-                    expected_uncertainty_reduction=(decision.expected_uncertainty_reduction),
-                    completed_seeds=decision.completed_seeds,
-                )
-        if not scheduled:
-            break
-        execute(scheduled, proposal_batch)
-        estimates = racer.estimates(values_by_trial())
-        if estimates:
-            current = (
-                max(value.mean for value in estimates.values())
-                if mode == "max"
-                else min(value.mean for value in estimates.values())
-            )
-            improvement = (
-                math.inf
-                if best_value is None
-                else current - best_value
-                if mode == "max"
-                else best_value - current
-            )
-            if improvement > policy.min_improvement:
-                best_value, stale_rounds = current, 0
-            else:
-                stale_rounds += 1
-            if policy.convergence_patience and stale_rounds >= policy.convergence_patience:
-                search_converged = True
-                print(
-                    f"[hpo] new-candidate search converged after {stale_rounds} "
-                    "round(s) without material improvement; resolving seed uncertainty",
-                    flush=True,
-                )
-                record_decision(
-                    "STOP_PROPOSING",
-                    reason="convergence",
-                    stale_rounds=stale_rounds,
-                    best_objective=best_value,
-                    minimum_improvement=policy.min_improvement,
-                )
 
     estimates = racer.estimates(values_by_trial())
     ranked = sorted(
@@ -2092,7 +2060,7 @@ def _execute_adaptive_group(
     return tuple(outcomes)
 
 
-def _execute_adaptive_round(
+def _execute_adaptive_dispatch(
     specifications: Sequence[dict[str, Any]],
     *,
     resources: ResourceRequest,
@@ -2103,7 +2071,10 @@ def _execute_adaptive_round(
     historical_results: Sequence[WorkResult],
     parallelism: int,
     telemetry: StudyTelemetry | None = None,
-    on_result: Callable[[WorkResult, int, Sequence[Mapping[str, Any]]], Sequence[dict[str, Any]]]
+    on_result: Callable[
+        [WorkResult, Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+        Sequence[dict[str, Any]],
+    ]
     | None = None,
     on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[WorkResult, ...]:
@@ -2149,7 +2120,7 @@ def _execute_adaptive_round(
 
     def dispatch_refill(
         result: WorkResult,
-        queued: int,
+        queued: Sequence[Mapping[str, Any]],
         pending: Sequence[Mapping[str, Any]],
     ) -> Sequence[dict[str, Any]]:
         if on_result is None:
@@ -2211,7 +2182,10 @@ def _execute_cpu_isolated_runs(
     telemetry: StudyTelemetry | None,
     results: list[WorkResult],
     executors: list[ProcessPoolExecutor],
-    on_result: Callable[[WorkResult, int, Sequence[Mapping[str, Any]]], Sequence[dict[str, Any]]]
+    on_result: Callable[
+        [WorkResult, Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+        Sequence[dict[str, Any]],
+    ]
     | None = None,
     on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
@@ -2255,13 +2229,13 @@ def _execute_cpu_isolated_runs(
                     if telemetry is not None:
                         telemetry.run_finished(value, failure)
                     if on_result is not None:
-                        queued.extend(
-                            on_result(
-                                failure,
-                                len(queued),
-                                tuple(item for item, _pool in pending.values()),
-                            )
+                        replacement = on_result(
+                            failure,
+                            tuple(queued),
+                            tuple(item for item, _pool in pending.values()),
                         )
+                        queued.clear()
+                        queued.extend(replacement)
             else:
                 retry = _retry_failed_result(
                     value,
@@ -2274,13 +2248,13 @@ def _execute_cpu_isolated_runs(
                 else:
                     results.append(result)
                     if on_result is not None:
-                        queued.extend(
-                            on_result(
-                                result,
-                                len(queued),
-                                tuple(item for item, _pool in pending.values()),
-                            )
+                        replacement = on_result(
+                            result,
+                            tuple(queued),
+                            tuple(item for item, _pool in pending.values()),
                         )
+                        queued.clear()
+                        queued.extend(replacement)
             finally:
                 pool.shutdown(wait=True, cancel_futures=True)
                 executors.remove(pool)
@@ -2493,7 +2467,10 @@ def _execute_gpu_admitted_runs(
     telemetry: StudyTelemetry | None,
     results: list[WorkResult],
     executors: list[ProcessPoolExecutor],
-    on_result: Callable[[WorkResult, int, Sequence[Mapping[str, Any]]], Sequence[dict[str, Any]]]
+    on_result: Callable[
+        [WorkResult, Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+        Sequence[dict[str, Any]],
+    ]
     | None = None,
     on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
@@ -2536,13 +2513,13 @@ def _execute_gpu_admitted_runs(
                     if telemetry is not None:
                         telemetry.run_finished(value, failure)
                     if on_result is not None:
-                        queued.extend(
-                            on_result(
-                                failure,
-                                len(queued),
-                                tuple(item for item, _slot, _pool in pending.values()),
-                            )
+                        replacement = on_result(
+                            failure,
+                            tuple(queued),
+                            tuple(item for item, _slot, _pool in pending.values()),
                         )
+                        queued.clear()
+                        queued.extend(replacement)
             else:
                 retry = _retry_failed_result(
                     value,
@@ -2555,13 +2532,13 @@ def _execute_gpu_admitted_runs(
                 else:
                     results.append(result)
                     if on_result is not None:
-                        queued.extend(
-                            on_result(
-                                result,
-                                len(queued),
-                                tuple(item for item, _slot, _pool in pending.values()),
-                            )
+                        replacement = on_result(
+                            result,
+                            tuple(queued),
+                            tuple(item for item, _slot, _pool in pending.values()),
                         )
+                        queued.clear()
+                        queued.extend(replacement)
                     print(
                         f"[hpo] finished trial={value['trial_index']} "
                         f"seed={value.get('seed')} on GPU {visible_gpus[slot]}; "
@@ -3512,6 +3489,73 @@ def _result_objective(result: WorkResult, metric: str) -> float | None:
     return None
 
 
+def _candidate_values_by_rung(
+    results_by_trial: Mapping[int, Sequence[WorkResult]],
+    *,
+    metric: str,
+    objective: Mapping[str, Any],
+) -> dict[tuple[int, int], dict[int, dict[int | None, float]]]:
+    """Group candidate seed evidence by one exact cumulative-fidelity rung.
+
+    A candidate may contribute observations at several rungs, but a mean is formed only from seeds
+    that reached the same ``(target, maximum)`` pair. One performance-pruned seed censors the whole
+    candidate at every rung, preventing survivor-only fitting.
+    """
+    selected: dict[tuple[int, int], dict[int, dict[int | None, tuple[int, float, WorkResult]]]] = {}
+    for raw_trial, results in results_by_trial.items():
+        trial = int(raw_trial)
+        if any(
+            result.pruned or result.termination_type == "performance_pruned" for result in results
+        ):
+            continue
+        for result in results:
+            value = _result_objective(result, metric)
+            if result.termination_type != "completed" or value is None:
+                continue
+            fidelity = result.fidelity or {}
+            target = int(fidelity.get("target", 1))
+            maximum = max(1, int(fidelity.get("maximum", target)))
+            rung = (target, maximum)
+            prior = selected.setdefault(rung, {}).setdefault(trial, {}).get(result.seed)
+            if prior is None or result.attempt_number >= prior[0]:
+                selected[rung][trial][result.seed] = (result.attempt_number, value, result)
+    grouped: dict[tuple[int, int], dict[int, dict[int | None, float]]] = {}
+    for rung, by_trial in selected.items():
+        for trial, by_seed in by_trial.items():
+            evidence = [result for _attempt, _value, result in by_seed.values()]
+            if not _candidate_constraints(evidence, objective)["feasible"]:
+                continue
+            grouped.setdefault(rung, {})[trial] = {
+                seed: value for seed, (_attempt, value, _result) in by_seed.items()
+            }
+    return grouped
+
+
+def _candidate_observations(
+    results_by_trial: Mapping[int, Sequence[WorkResult]],
+    *,
+    metric: str,
+    objective: Mapping[str, Any],
+    racer: AdaptiveSeedRacer,
+) -> tuple[CandidateObservation, ...]:
+    """Build the exact rung-aware observations consumed by every proposal sampler."""
+    observations: list[CandidateObservation] = []
+    grouped = _candidate_values_by_rung(results_by_trial, metric=metric, objective=objective)
+    for (target, maximum), outcomes in sorted(
+        grouped.items(), key=lambda item: (item[0][0] / max(1, item[0][1]), item[0])
+    ):
+        for trial, estimate in sorted(racer.estimates(outcomes).items()):
+            observations.append(
+                CandidateObservation(
+                    trial=trial,
+                    value=estimate.mean,
+                    standard_error=estimate.standard_error,
+                    fidelity=target / maximum,
+                )
+            )
+    return tuple(observations)
+
+
 def _candidate_constraints(
     results: Sequence[WorkResult], objective: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -3546,16 +3590,7 @@ def _candidate_constraints(
                 values.append(float(value))
             else:
                 missing += 1
-        mean = statistics.fmean(values) if values and not missing else None
-        satisfied = not missing and bool(values) and _constraint_satisfied(mean, rule)
-        summary[str(name)] = {
-            "mean": mean,
-            "samples": len(values),
-            "missing": missing,
-            "min": rule.get("min"),
-            "max": rule.get("max"),
-            "satisfied": satisfied,
-        }
+        summary[str(name)] = aggregate_constraint(values, rule, missing=missing)
     return {
         "feasible": all(bool(value["satisfied"]) for value in summary.values()),
         "constraints": summary,

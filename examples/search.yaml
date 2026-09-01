@@ -18,7 +18,8 @@ search:
 objective:
   metric: score
   mode: max
-  # Optional scientific guardrail example (the Work would also need to log accuracy):
-  # constraints: {accuracy: {min: 0.55}}
+  # A component may also be a hard guardrail. Aggregation is mean (legacy), worst or lcb.
+  # The Work must log the constrained metric at the same objective checkpoint.
+  # constraints: {accuracy: {min: 0.55, seed_aggregation: worst}}
 resources:
   cpu: 1

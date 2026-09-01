@@ -46,6 +46,30 @@ class FidelityPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class ControllerValuePolicy:
+    """Bounded common-scale heuristics for unlike scheduler actions.
+
+    These are controller-value proxies, not Shannon information gain or calibrated probabilities.
+    Seed actions use measured standard-error reduction; these constants put coverage and fidelity
+    actions on a transparent conservative scale until retrospective calibration can own them.
+    """
+
+    new_region_base: float = 0.15
+    observation_sparsity_weight: float = 0.35
+    periodic_exploration_bonus: float = 0.10
+    fidelity_uncertainty_weight: float = 0.35
+
+    def to_dict(self) -> dict[str, float | str]:
+        return {
+            "meaning": "bounded-controller-value-proxy-not-information-gain",
+            "new_region_base": self.new_region_base,
+            "observation_sparsity_weight": self.observation_sparsity_weight,
+            "periodic_exploration_bonus": self.periodic_exploration_bonus,
+            "fidelity_uncertainty_weight": self.fidelity_uncertainty_weight,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AdaptiveSearchPolicy:
     """Sequential candidate, fidelity and probability-driven seed policy."""
 
@@ -283,4 +307,9 @@ SEARCH_POLICY_FIELDS = frozenset(
 )
 
 
-__all__ = ["AdaptiveSearchPolicy", "FidelityPolicy", "SEARCH_POLICY_FIELDS"]
+__all__ = [
+    "AdaptiveSearchPolicy",
+    "ControllerValuePolicy",
+    "FidelityPolicy",
+    "SEARCH_POLICY_FIELDS",
+]

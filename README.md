@@ -27,7 +27,7 @@ projects, or an editable checkout while developing LambdaForge:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.13.2
+python -m pip install lambdaforge==0.13.3
 python -m pip install -e .
 python -m pip check
 lf --version
@@ -308,7 +308,7 @@ version probes live once in `environment.json`.
 Install the optional mature backend and use the uniform Python contract:
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.13.2"
+python -m pip install "lambdaforge[clustering]==0.13.3"
 ```
 
 ```python
@@ -387,10 +387,14 @@ BoTorch mixed-GP qLogNEI when `lambdaforge[adaptive-hpo]` is installed and enoug
 with a deterministic k-NN fallback for missing dependencies or numerical failures. Only proposed
 Trials appear in `lf top`. The GP sees all encoded dimensions jointly, including conditional
 activity and categorical choices, and qLogNEI incorporates the standard error observed across
-seeds. Fidelity is an explicit input: numeric spaces use BoTorch's multi-fidelity GP and mixed
-spaces retain the normalized fidelity coordinate in the joint mixed GP; the k-NN fallback also
-weights neighbours by comparable fidelity. The per-parameter HPO panels are intentionally
-marginal explanations, not the decision model.
+seeds. Fidelity is explicit: each `(candidate, exact rung)` becomes a separate observation,
+aggregated only across seeds that reached that same cumulative budget. Numeric spaces use
+BoTorch's multi-fidelity GP; mixed spaces retain normalized fidelity in the joint mixed GP; the
+k-NN fallback also weights exact-rung evidence. LambdaForge never labels a mean of heterogeneous
+seed fidelities as a full-budget result. Per-parameter HPO panels are descriptive marginal
+explanations, not the decision model. The maintained architecture is a fidelity-aware surrogate
+plus an external cost-aware action scheduler, not a claim of one universal multi-fidelity Bayesian
+acquisition over every mixed/conditional space.
 
 The HPO decision authority is always one auditable scalar utility. The compact legacy form is
 `objective: {metric: val_score, mode: max}`. When scientific quality genuinely depends on several
@@ -413,10 +417,12 @@ non-dominated Pareto set as a diagnostic only; Pareto status does not silently r
 
 If a high utility can be scientifically
 misleading on its own, declare explicit outcome guardrails instead of expecting LambdaForge to
-guess which other metrics matter. Each bound is evaluated at the primary objective's best epoch;
-candidate feasibility then uses the mean of those same-epoch values across completed seeds.
-Missing guardrail evidence fails closed, and infeasible candidates remain visible but cannot guide
-the surrogate or win selection:
+guess which other metrics matter. Each bound is evaluated at the objective's best checkpoint.
+Candidate feasibility aggregates those same-checkpoint values across completed seeds with explicit
+`seed_aggregation: mean` (legacy default), `worst`, or `lcb`; `lcb` also accepts `confidence` and
+fails closed until repeated seed evidence can estimate uncertainty. A metric may simultaneously be
+a composite-utility component and a hard constraint. Missing guardrail evidence fails closed, and
+infeasible candidates remain visible but cannot guide the surrogate or win selection:
 
 ```yaml
 name: guarded-training
@@ -425,8 +431,8 @@ objective:
   metric: val_auprc
   mode: max
   constraints:
-    val_accuracy: {min: 0.55}
-    val_kappa: {min: 0.05}
+    val_accuracy: {min: 0.55, seed_aggregation: worst}
+    val_kappa: {min: 0.05, seed_aggregation: lcb, confidence: 0.95}
 ```
 
 This is constrained single-objective optimization, not an implicit multi-objective compromise.
@@ -541,8 +547,14 @@ append-only `hpo-control/decisions.jsonl` evidence for every `START_NEW`, `ADD_S
 fallback, convergence and confirmation decision; result summaries link both files.
 
 Scheduling is event-driven. Every terminal Run causes the free slot to reconsider `START_NEW`,
-`ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED`; each alternative has compact
-expected-information, incremental-cost and score evidence in `hpo-control/decisions.jsonl`.
+`ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED`; each alternative has a compact
+`controller_value`, incremental-cost estimate and resulting priority in
+`hpo-control/decisions.jsonl`. This value is an auditable common-scale heuristic, not Shannon
+information gain or a calibrated probability. Seed actions use relative standard-error reduction,
+new-region actions use bounded coverage/sparsity terms, and promotions use remaining-fidelity
+uncertainty, divided by observed incremental wall time. Undispatched queued actions form a
+provisional dispatch buffer: new evidence may replace one at zero scientific compute cost, with a
+`CANCEL_QUEUED_ACTION` record containing old/new priority and reason.
 Startup is a space-filling queue, not a barrier:
 model-directed work may begin while slower startup Runs remain active. Pending candidates condition
 the surrogate at their actual target fidelity, queued identities prevent duplicate seeds, and the
@@ -570,6 +582,9 @@ possible threshold, categorical contrast, standardized effect, conservative conf
 most useful evidence to collect next. The header separately shows the controller's actual latest
 `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY`, fallback or confirmation decision. These are exploratory
 marginal associations, not causal claims; the joint multivariate sampler remains authoritative.
+The console renders a separate `SURROGATE BELIEF` block from the actual last sampler refresh
+(backend, target fidelity, predicted region and uncertainty), never presenting a marginal tendency
+as GP/k-NN belief.
 Select a parameter and press Enter/right to open its binned response chart and a pairwise
 relationship panel. The latter reports leave-one-out joint predictive gain over the better
 one-parameter predictor in objective-standard-deviation units; it is a visual diagnostic of where
@@ -579,8 +594,14 @@ candidates; pairwise coverage is also shown from two and predictive gain starts 
 small-sample panels remain explicitly low confidence. The observer recomputes old bounded analysis
 snapshots locally, so an already-running remote Work gains the newer view without restarting. The
 same bounded response points, relationship matrix and
-controller evidence are available to automation under `work.items[].study.hpo_analysis` and
-`.controller`.
+controller evidence are available to automation under `work.items[].study.hpo_analysis`,
+`.controller` and the retained `.surrogate_belief`.
+
+Threshold-dependent metrics such as F1, balanced accuracy, Cohen's kappa, accuracy, precision and
+recall are consumed exactly as the Work logs them. LambdaForge never searches a classification
+threshold, chooses a different threshold per candidate or treats them as semantically equivalent
+to threshold-free ranking metrics such as AUROC/AUPRC. Threshold policy belongs to the Work's
+evaluation protocol and must stay comparable across candidates.
 
 Concurrent training does not require reading one interleaved Job stream. A study is not a special
 Work type: any normal Work declaring `search` or multiple `seeds` is marked as a study during local

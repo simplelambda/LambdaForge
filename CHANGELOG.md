@@ -10,6 +10,44 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-09-01
+
+### Fixed
+
+- Corrected the adaptive controller's multi-fidelity evidence model. Seed results are now grouped
+  by exact `(candidate, target, maximum)` rung, one candidate may emit several fidelity
+  observations, and neither seed racing nor surrogate fitting can relabel a heterogeneous mean as
+  full-budget evidence.
+- Removed the remaining dispatch commitment semantics. Every terminal event replans undispatched
+  queue entries, records zero-compute `CANCEL_QUEUED_ACTION` evidence for superseded work and fills
+  freed slots without an outer round barrier; promotions wait for in-flight comparable rung
+  evidence instead of racing a lone partial result prematurely.
+- Replaced misleading expected-information telemetry with a centralized, documented
+  `controller_value` proxy and observed incremental cost. Seed uncertainty, region coverage and
+  fidelity actions now share explicit bounded terms without claiming calibrated information gain.
+- Corrected live composite-objective telemetry to evaluate complete same-step vectors while Runs
+  are active and preserve an all-time best checkpoint outside bounded metric tails.
+- Allowed an objective component to remain a hard constraint and added explicit across-seed
+  `mean`, `worst` and confidence-bound (`lcb`) aggregation with fail-closed missing evidence.
+- Centralized the survival acquisition adjustment and exposed its coefficients/meaning in decision
+  telemetry. Performance-pruned candidates remain censored evidence; operational failures and
+  scheduler pauses remain neutral.
+- Separated descriptive marginal/pairwise diagnostics from the actual lightweight GP/k-NN
+  `surrogate_belief` in `lf top` and overview JSON, retaining the latest model diagnostic beyond the
+  bounded controller-event tail without serializing provider models.
+- Corrected the optional-provider CI target and added mandatory non-skipping BoTorch tests for
+  numerical multi-fidelity, mixed categorical/conditional encoding, pending fidelity, observation
+  noise, target-fidelity predictions and survival-adjusted acquisition.
+
+### Changed
+
+- Documented the maintained multi-fidelity architecture honestly as a fidelity-aware surrogate
+  plus an external cost-aware action scheduler, including exact rungs, provisional dispatch,
+  robust constraints, threshold-dependent metric policy and pruner calibration semantics.
+- Expanded controller regressions for real runner-to-observation-to-sampler flow, stale queue
+  replacement, controlled provider fallback, live composite utility, retained surrogate belief and
+  deliberate late-bloomer false-prune detection.
+
 ## [0.13.2] - 2026-09-01
 
 ### Fixed
@@ -963,7 +1001,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.13.3...HEAD
+[0.13.3]: https://github.com/simplelambda/LambdaForge/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/simplelambda/LambdaForge/compare/v0.13.0...v0.13.2
 [0.13.0]: https://github.com/simplelambda/LambdaForge/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/simplelambda/LambdaForge/compare/v0.12.0...v0.12.1

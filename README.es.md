@@ -25,7 +25,7 @@ proyecto:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.13.2
+python -m pip install lambdaforge==0.13.3
 python -m pip install -e .
 python -m pip check
 ```
@@ -263,7 +263,7 @@ produce un error claro. La ruta y la versión consultada se registran una sola v
 ## Clustering
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.13.2"
+python -m pip install "lambdaforge[clustering]==0.13.3"
 ```
 
 ```python
@@ -312,11 +312,15 @@ reproducibles que cubren el espacio; tras `startup_trials`, los resultados elige
 siguientes. `sampler: auto` usa qLogNEI con GP mixto de BoTorch si está instalado el extra
 `lambdaforge[adaptive-hpo]` y existe evidencia suficiente, con fallback k-NN determinista ante una
 dependencia ausente o un fallo numérico. El GP ve conjuntamente todas las dimensiones codificadas,
-incluidas categorías y activación condicional, y qLogNEI incorpora el error estándar entre seeds;
-la fidelidad es una entrada explícita: espacios numéricos usan el GP multi-fidelidad de BoTorch,
-los mixtos conservan su coordenada normalizada en el GP conjunto y el fallback k-NN pondera por
-fidelidad comparable. Los paneles por parámetro son explicaciones marginales, no el modelo que
-decide. Solo aparecen en `lf top` los Trials ya propuestos.
+incluidas categorías y activación condicional, y qLogNEI incorpora el error estándar entre seeds.
+Cada `(candidato, rung exacto)` es una observación distinta, agregada solo entre seeds que alcanzaron
+ese presupuesto acumulativo. Los espacios numéricos usan el GP multi-fidelidad de BoTorch, los
+mixtos conservan la fidelidad normalizada en el GP conjunto y el fallback k-NN pondera evidencia de
+rung exacto. Nunca se etiqueta como presupuesto completo una media de fidelidades heterogéneas.
+Los paneles por parámetro son explicaciones marginales, no el modelo que decide. Solo aparecen en
+`lf top` los Trials ya propuestos. La arquitectura es un surrogate sensible a fidelidad más un
+scheduler externo sensible a coste, no una supuesta adquisición bayesiana multi-fidelidad universal
+para todo espacio mixto/condicional.
 
 La autoridad de decisión HPO siempre es una utilidad escalar auditable. La forma compacta heredada
 es `objective: {metric: val_score, mode: max}`. Si la calidad científica depende realmente de
@@ -338,8 +342,10 @@ siguen visibles y `lf top` marca el frente Pareto no dominado solo como diagnós
 
 Si una utilidad alta puede resultar engañosa
 por sí solo, declara guardas de resultado explícitas en vez de esperar que LambdaForge adivine qué
-otras métricas importan. Cada límite se evalúa en la mejor época del objetivo primario; la
-factibilidad del candidato usa después la media entre seeds de esos valores de la misma época. La
+otras métricas importan. Cada límite se evalúa en el mejor checkpoint del objetivo. La factibilidad
+agrega esos valores del mismo checkpoint entre seeds mediante `seed_aggregation: mean` (legacy),
+`worst` o `lcb`; `lcb` admite `confidence` y falla cerrado hasta tener repetición suficiente para
+estimar incertidumbre. Una métrica puede ser a la vez componente de utilidad y constraint. La
 evidencia ausente falla cerrado y los candidatos no factibles siguen visibles, pero no guían el
 surrogate ni pueden ganar:
 
@@ -350,8 +356,8 @@ objective:
   metric: val_auprc
   mode: max
   constraints:
-    val_accuracy: {min: 0.55}
-    val_kappa: {min: 0.05}
+    val_accuracy: {min: 0.55, seed_aggregation: worst}
+    val_kappa: {min: 0.05, seed_aggregation: lcb, confidence: 0.95}
 ```
 
 Esto es optimización restringida de un único objetivo, no un compromiso multiobjetivo implícito.
@@ -461,8 +467,13 @@ confirmación; el resumen del resultado enlaza ambos ficheros.
 
 La planificación está dirigida por eventos. Cada Run terminal hace que el slot libre reconsidere
 `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` y `RESUME_PREEMPTED`; cada alternativa guarda
-información esperada, coste incremental y score compacto en `hpo-control/decisions.jsonl`. Startup
-es una cola de cobertura, no una barrera:
+`controller_value`, coste incremental y prioridad en `hpo-control/decisions.jsonl`. El valor es una
+heurística auditable en escala común, no ganancia de información ni probabilidad calibrada: seeds
+usan reducción relativa del error estándar, regiones nuevas usan cobertura/escasez y promociones
+usan incertidumbre de fidelidad, todo dividido por coste incremental observado. Las acciones en
+cola aún no despachadas son provisionales: nueva evidencia puede sustituirlas con coste científico
+cero y registrar `CANCEL_QUEUED_ACTION` con prioridad anterior/nueva y motivo. Startup es una cola
+de cobertura, no una barrera:
 puede empezar trabajo guiado por el modelo mientras quedan Runs iniciales lentos. Los candidatos
 pendientes condicionan el surrogate en su fidelidad objetivo real, las identidades en cola evitan
 seeds duplicadas y es legítimo esperar si ninguna acción aporta valor científico. La fidelidad es
@@ -488,6 +499,8 @@ el objective por candidato y muestra cobertura, dirección o posible umbral num�
 categórico, efecto estandarizado, confianza conservadora y qué evidencia convendría obtener
 después. La cabecera separa la última decisión real `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY`, fallback o
 confirmación. Son asociaciones exploratorias marginales, no relaciones causales; el sampler
+real aparece aparte como `SURROGATE BELIEF`, con backend, fidelidad objetivo, región predicha e
+incertidumbre; una tendencia marginal nunca se presenta como creencia GP/k-NN. El sampler
 conjunto multivariable sigue siendo la autoridad. Selecciona un parámetro y pulsa Enter/derecha para
 abrir su curva de respuesta agrupada y el panel de relaciones por pares. Este último muestra la
 ganancia predictiva leave-one-out conjunta frente al mejor predictor de un parámetro, medida en
@@ -498,7 +511,12 @@ tempranos permanecen marcados con confianza baja. El observador recalcula localm
 análisis antiguos, por lo que un Work remoto ya activo obtiene la vista nueva sin reiniciarse. La
 consola muestra además las guardas explícitas y candidatos no factibles.
 Automatización recibe puntos de respuesta, matriz de relaciones y acciones en
-`work.items[].study.hpo_analysis` y `.controller`.
+`work.items[].study.hpo_analysis`, `.controller` y `.surrogate_belief`.
+
+Métricas dependientes de threshold como F1, balanced accuracy, kappa de Cohen, accuracy, precision
+y recall se usan exactamente como las registra el Work. LambdaForge nunca busca automáticamente un
+threshold, elige uno distinto por candidato ni las considera equivalentes a AUROC/AUPRC. La política
+de threshold pertenece al protocolo de evaluación del Work y debe ser comparable entre candidatos.
 
 No es necesario leer un único stream mezclado cuando hay entrenos concurrentes. Un estudio no es
 un tipo especial de Work: cualquier Work normal con `search` o varias `seeds` queda marcado

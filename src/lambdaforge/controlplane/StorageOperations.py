@@ -266,9 +266,7 @@ class StorageOperations:
         candidate_paths: set[str] = set()
         for job_id in sorted(set(str(value) for value in references.get("terminal_jobs", ()))):
             compacted = cls.compact_job(descriptor, job_id, apply=apply)
-            candidates.extend(
-                item for item in compacted["candidates"] if isinstance(item, dict)
-            )
+            candidates.extend(item for item in compacted["candidates"] if isinstance(item, dict))
         now = time.time()
         maximum_age = descriptor.get("cache_max_age")
         runtime_references = cls._runtime_references(roots, references.get("runtimes", ()))

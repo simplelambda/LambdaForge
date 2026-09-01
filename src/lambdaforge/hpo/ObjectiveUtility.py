@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeGuard, cast
@@ -256,10 +257,6 @@ class ObjectiveUtility:
             mode = str(value["mode"]).lower()
             if mode not in {"min", "max"}:
                 raise ValueError("objective.mode must be min or max.")
-            if metric in constraints:
-                raise ValueError(
-                    f"objective.constraints cannot repeat the primary metric {metric!r}."
-                )
             output: dict[str, Any] = {"metric": metric, "mode": mode}
         else:
             raw_metrics = value.get("metrics")
@@ -313,11 +310,6 @@ class ObjectiveUtility:
                 raise ValueError("objective.metrics weights must have a positive sum.")
             for rule in metrics.values():
                 rule["weight"] = float(rule["weight"]) / total_weight
-            repeated = set(metrics).intersection(constraints)
-            if repeated:
-                raise ValueError(
-                    f"objective.constraints cannot repeat utility components: {sorted(repeated)}."
-                )
             output = {
                 "metric": UTILITY_METRIC,
                 "mode": "max",
@@ -329,17 +321,20 @@ class ObjectiveUtility:
         return output
 
     @staticmethod
-    def _constraints(value: Any) -> dict[str, dict[str, float]]:
+    def _constraints(value: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(value, Mapping):
             raise TypeError("objective.constraints must map metric names to min/max bounds.")
-        constraints: dict[str, dict[str, float]] = {}
+        constraints: dict[str, dict[str, Any]] = {}
         for raw_name, raw_rule in value.items():
             name = _nonempty(raw_name, "objective.constraints metric")
             if not isinstance(raw_rule, Mapping) or not raw_rule:
                 raise TypeError(f"objective.constraints.{name} must contain min and/or max.")
-            if set(raw_rule) - {"min", "max"}:
-                raise ValueError(f"objective.constraints.{name} accepts only min and max bounds.")
-            rule: dict[str, float] = {}
+            unknown = set(raw_rule) - {"min", "max", "seed_aggregation", "confidence"}
+            if unknown:
+                raise ValueError(
+                    f"Unknown objective.constraints.{name} field(s): {sorted(unknown)}."
+                )
+            rule: dict[str, Any] = {}
             for bound in ("min", "max"):
                 if bound in raw_rule:
                     if not _finite(raw_rule[bound]):
@@ -351,6 +346,27 @@ class ObjectiveUtility:
                 raise ValueError(f"objective.constraints.{name} requires min and/or max.")
             if rule.get("min", -math.inf) > rule.get("max", math.inf):
                 raise ValueError(f"objective.constraints.{name} min cannot exceed max.")
+            aggregation = str(raw_rule.get("seed_aggregation", "mean")).lower()
+            if aggregation not in {"mean", "worst", "lcb"}:
+                raise ValueError(
+                    f"objective.constraints.{name}.seed_aggregation must be mean, worst or lcb."
+                )
+            if "seed_aggregation" in raw_rule:
+                rule["seed_aggregation"] = aggregation
+            if "confidence" in raw_rule:
+                confidence = raw_rule["confidence"]
+                if not _finite(confidence) or not 0.5 < float(confidence) < 1:
+                    raise ValueError(
+                        f"objective.constraints.{name}.confidence must be between 0.5 and 1."
+                    )
+                if aggregation != "lcb":
+                    raise ValueError(
+                        f"objective.constraints.{name}.confidence is valid only with "
+                        "seed_aggregation=lcb."
+                    )
+                rule["confidence"] = float(confidence)
+            elif aggregation == "lcb":
+                rule["confidence"] = 0.95
             constraints[name] = rule
         return constraints
 
@@ -412,6 +428,53 @@ def constraint_satisfied(value: Any, rule: Mapping[str, Any]) -> bool:
     )
 
 
+def aggregate_constraint(
+    values: Sequence[float], rule: Mapping[str, Any], *, missing: int = 0
+) -> dict[str, Any]:
+    """Aggregate one hard guardrail across seeds with explicit conservative semantics."""
+    finite = [float(value) for value in values if _finite(value)]
+    aggregation = str(rule.get("seed_aggregation", "mean"))
+    mean = statistics.fmean(finite) if finite else None
+    lower = upper = mean
+    standard_error: float | None = None
+    confidence = float(rule.get("confidence", 0.95)) if aggregation == "lcb" else None
+    evidence_complete = bool(finite) and missing == 0
+    if aggregation == "worst" and finite:
+        lower, upper = min(finite), max(finite)
+    elif aggregation == "lcb":
+        if len(finite) > 1:
+            standard_error = statistics.stdev(finite) / math.sqrt(len(finite))
+            assert confidence is not None
+            assert mean is not None
+            z = statistics.NormalDist().inv_cdf(0.5 + confidence / 2.0)
+            lower, upper = mean - z * standard_error, mean + z * standard_error
+        else:
+            # One seed cannot estimate a confidence bound. Hard constraints fail closed until
+            # repeated evidence exists rather than silently pretending zero seed variance.
+            evidence_complete = False
+            lower = upper = None
+    minimum, maximum = rule.get("min"), rule.get("max")
+    satisfied = (
+        evidence_complete
+        and (not _finite(minimum) or (lower is not None and lower >= float(minimum)))
+        and (not _finite(maximum) or (upper is not None and upper <= float(maximum)))
+    )
+    return {
+        "value": mean,
+        "mean": mean,
+        "lower": lower,
+        "upper": upper,
+        "standard_error": standard_error,
+        "samples": len(finite),
+        "missing": missing,
+        "seed_aggregation": aggregation,
+        "confidence": confidence,
+        "min": minimum,
+        "max": maximum,
+        "satisfied": satisfied,
+    }
+
+
 def _finite(value: Any) -> TypeGuard[int | float]:
     return (
         not isinstance(value, bool)
@@ -430,6 +493,7 @@ def _nonempty(value: Any, field: str) -> str:
 __all__ = [
     "ObjectiveUtility",
     "UTILITY_METRIC",
+    "aggregate_constraint",
     "UtilityMetric",
     "constraint_satisfied",
     "pareto_front",

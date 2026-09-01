@@ -400,13 +400,21 @@ ausente o inestabilidad numérica usa el surrogate mixto k-NN determinista. Es u
 realmente conjunto: números, categorías e indicadores de activación condicional comparten un mismo
 vector, por lo que el posterior puede depender de interacciones. Si las seeds repetidas producen
 error estándar, se pasa como ruido observado; qLogNEI considera ese ruido y los miembros pendientes
-en su totalidad. Un Run pendiente conserva su fidelidad objetivo real en vez de representarse como
-un resultado ficticio a presupuesto completo. La fidelidad es una entrada normalizada explícita:
+en su totalidad. La evidencia se agrupa por rung acumulativo exacto: cada
+`(candidato, target, maximum)` tiene media/error entre seeds propios y un candidato puede producir
+varias observaciones. La carrera de seeds solo compara un mismo rung; nunca reetiqueta una media
+heterogénea con fidelidad máxima, mínima o media. Un Run pendiente conserva su fidelidad objetivo
+real en vez de representarse como un resultado ficticio a presupuesto completo. La fidelidad es
+una entrada normalizada explícita:
 espacios numéricos usan `SingleTaskMultiFidelityGP`, los mixtos/categóricos
 conservan esa coordenada en `MixedSingleTaskGP` y el fallback k-NN combina distancia de parámetros y
 fidelidad de forma conservadora. La adquisición puntúa candidatos nuevos a fidelidad objetivo. La
 familia log-EI se usa por su mayor estabilidad numérica
 ([guía de adquisición de BoTorch](https://botorch.org/docs/optimization)).
+La arquitectura se describe con precisión como **surrogate sensible a fidelidad más scheduler de
+acciones externo sensible a coste**. No afirma implementar una knowledge-gradient multi-fidelidad
+única para todo espacio mixto/condicional; promociones, seeds y candidatos nuevos compiten en el
+controlador independiente del provider.
 
 El objetivo admite restricciones de resultado explícitas:
 
@@ -415,17 +423,17 @@ objective:
   metric: val_auprc
   mode: max
   constraints:
-    val_accuracy: {min: 0.55}
-    val_kappa: {min: 0.05}
+    val_accuracy: {min: 0.55, seed_aggregation: worst}
+    val_kappa: {min: 0.05, seed_aggregation: lcb, confidence: 0.95}
 ```
 
-Cada restricción acepta `min`, `max` o ambos. LambdaForge toma su valor en la época exacta donde el
-objetivo primario fue mejor y después promedia ese valor alineado entre seeds terminadas. Una
-métrica ausente o una media que viole el límite hace al candidato no factible: permanece auditable,
-pero no entra en carrera de seeds, observaciones del surrogate ni selección final. Así un checkpoint
-afortunado no oculta un modelo que incumple un criterio científico declarado. LambdaForge nunca
-infiere restricciones de otras métricas, sus nombres o direcciones: hacerlo cambiaría en silencio
-la pregunta científica.
+Cada restricción acepta `min`, `max` o ambos y toma el valor del checkpoint donde la utilidad fue
+mejor. `seed_aggregation` es `mean` por defecto para compatibilidad, `worst` comprueba la seed menos
+favorable y `lcb` aplica conservadoramente un intervalo normal bilateral (`confidence`, 0.95 por
+defecto) a límites inferiores/superiores. LCB con menos de dos seeds y cualquier métrica ausente
+fallan cerrado. Una métrica puede ser simultáneamente componente de utilidad y constraint: si es
+factible sigue aportando de forma gradual. Los candidatos no factibles permanecen auditables, pero
+no entran en carrera, surrogate ni selección. Nunca se infieren constraints por el nombre.
 
 Para un compromiso gradual deliberado, `objective.metrics` define una utilidad compuesta. Cada
 componente exige `mode`, `weight` no negativo y `range` finito fijo; se puede agregar mediante
@@ -486,10 +494,14 @@ El diario append-only `hpo-control/decisions.jsonl` explica inicialización, sur
 snapshot compacto; `summary.adaptive_controller` enlaza ambos sin copiar modelos ni checkpoints.
 
 El bucle de adquisición está dirigido por eventos, no por barreras. Cada observación terminal
-reevalúa `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` y `RESUME_PREEMPTED` según información esperada por coste incremental.
-Startup se envía gradualmente y puede entrelazarse con decisiones del modelo. Las identidades
-pendientes condicionan el surrogate y evitan seeds duplicadas. Cada acción registra score, coste,
-motivo y alternativas compactas; esperar solo es válido si no queda acción útil bajo presupuesto.
+reevalúa `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` y `RESUME_PREEMPTED`. Su `controller_value`
+común es una heurística acotada, no ganancia de información: ADD_SEED usa reducción relativa del
+error estándar; START_NEW combina cobertura, escasez y exploración periódica acotada; promociones
+usan la raíz de la fidelidad normalizada restante. La prioridad divide ese valor por el coste
+temporal incremental observado. Startup puede entrelazarse con decisiones del modelo. Identidades
+y fidelidades pendientes condicionan el surrogate. La cola no despachada es provisional: nueva
+evidencia puede sustituir una acción con coste científico cero y registrar
+`CANCEL_QUEUED_ACTION`, prioridades y motivo. Cada acción guarda valor, score, coste y alternativas.
 Una acción puntuada ya activa solo puede preemptarse tras 30 segundos, con un checkpoint propio no
 symlink, y si la siguiente alternativa útil supera en un 50 % tanto su prioridad original como el
 valor actual de continuar. Startup sin score comparable y toda confirmación quedan protegidos.
@@ -663,7 +675,7 @@ podado.
 candidato muestra media/error estándar de la utilidad compuesta, agregación, componentes raw y
 normalizados del mismo checkpoint, pesos/contribuciones, constraints y pertenencia Pareto
 diagnóstica. El panel HPO muestra slots activos/disponibles, Runs en cola/pausados y score,
-información y coste de la última acción. Un Run podado despliega candidato, step/fidelity,
+proxy de valor del controlador y coste de la última acción. Un Run podado despliega candidato, step/fidelity,
 incertidumbre de predicción, incumbent, probabilidad, umbral, margen, confirmaciones y modelo de
 curva persistidos.
 
@@ -680,7 +692,10 @@ espacio mixto multivariable. Por eso dice «parece asociado», nunca causal ni g
 de importancia de interacciones como functional ANOVA pueden resumir un surrogate maduro
 ([artículo fANOVA](https://proceedings.mlr.press/v32/hutter14.html)), pero aplicarlos a los primeros
 Trials produciría falsa precisión inestable. Por eso las explicaciones tempranas siguen siendo
-marginales y auditables mientras el controlador GP/k-NN real sí permanece multivariable.
+marginales y auditables mientras el controlador GP/k-NN real sí permanece multivariable. La
+cabecera separa `MARGINAL / PAIRWISE DIAGNOSTICS` (descriptivo/no causal) de `SURROGATE BELIEF`, el
+snapshot ligero del sampler real: backend, fidelidad objetivo, pendientes, candidato/región predicha
+e incertidumbre. Se conserva fuera de la cola de 25 eventos y nunca serializa el modelo.
 Enter/derecha sobre el parámetro seleccionado abre una curva numérica agrupada o barras de medias
 categóricas y una tabla de calor de relaciones por pares. Cada valor es la ganancia predictiva
 leave-one-out de k-NN conjunto frente al mejor predictor marginal, normalizada por la desviación del
@@ -691,8 +706,12 @@ de muestra conservadores para la confianza. Un observador nuevo reconstruye loca
 acotado antiguo a partir de la telemetría de candidatos, sin reiniciar un estudio remoto activo. La
 consola también muestra restricciones y
 candidatos no factibles. El mismo JSON está en `overview` →
-`work.items[].study.hpo_analysis` y las acciones recientes en
-`.controller`, acotadas a 25 eventos.
+`work.items[].study.hpo_analysis`, las acciones recientes en `.controller` (25 eventos) y el
+sampler real en `.surrogate_belief`.
+
+F1, balanced accuracy, kappa de Cohen, accuracy, precision y recall dependen potencialmente de un
+threshold. LambdaForge usa exactamente el valor registrado: no optimiza ese threshold, no elige uno
+por candidato ni las equipara a AUROC/AUPRC. Esa política pertenece al protocolo del Work.
 
 La vista de Run se divide en dos regiones. Arriba aparecen la lista completa y alineada de
 parámetros, el resumen vivo de duración/tiempos y hasta cuatro curvas. `n` y `p` avanzan o retroceden

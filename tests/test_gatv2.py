@@ -190,7 +190,6 @@ class TestGATv2:
         assert output.shape == (3, 2)
         assert torch.isfinite(output).all()
 
-
     @pytest.mark.parametrize(
         ("arguments", "error", "message"),
         [
