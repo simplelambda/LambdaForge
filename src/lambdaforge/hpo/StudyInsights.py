@@ -31,7 +31,8 @@ class StudyInsightAnalyzer:
         objective: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Return one compact JSON-shaped HPO interpretation snapshot."""
-        metric = str(objective.get("metric", ""))
+        composite = isinstance(objective.get("metrics"), Mapping)
+        metric = "utility" if composite else str(objective.get("metric", ""))
         mode = str(objective.get("mode", "max"))
         if not metric or mode not in {"min", "max"}:
             return cls._empty(metric, mode, "Objective metadata is not available yet.")
@@ -45,14 +46,21 @@ class StudyInsightAnalyzer:
             runs = [item for item in candidate.get("runs", ()) if isinstance(item, Mapping)]
             states = {str(item.get("state", "")) for item in runs}
             if isinstance(parameters, Mapping):
-                pruning_observations.extend(
-                    (parameters, state == "pruned")
-                    for state in (str(item.get("state", "")) for item in runs)
-                    if state in {"succeeded", "pruned"}
-                )
-                if not runs and candidate.get("state") == "pruned":
+                scientific_states = [
+                    str(item.get("state", ""))
+                    for item in runs
+                    if str(item.get("state", "")) in {"succeeded", "pruned"}
+                ]
+                if scientific_states:
+                    # One candidate contributes one regional outcome irrespective of how many
+                    # seeds it happened to receive. Any performance-pruned seed censors the
+                    # candidate; otherwise completed seeds are positive survival evidence.
+                    pruning_observations.append((parameters, "pruned" in scientific_states))
+                elif not runs and candidate.get("state") == "pruned":
                     pruning_observations.append((parameters, True))
-            if states and states <= {"pruned"}:
+            if candidate.get("state") == "pruned" or (
+                states and states <= {"pruned", "cancelled"} and "pruned" in states
+            ):
                 censored += 1
             elif candidate.get("state") == "infeasible":
                 infeasible += 1
@@ -97,26 +105,50 @@ class StudyInsightAnalyzer:
         ]
         relationship_observations = cls._bounded(observations, cls.MAX_RELATIONSHIP_CANDIDATES)
         relationships = cls._relationships(relationship_names, relationship_observations)
-        insights = [
-            {
-                **value,
-                "response": cls._response(str(value["parameter"]), observations, mode=mode),
-                "joint_relationships": relationships.get(str(value["parameter"]), []),
-                "pruning_signal": cls._pruning_signal(
-                    str(value["parameter"]), pruning_observations
-                ),
-            }
-            for value in insights
-        ]
+        enriched: list[dict[str, Any]] = []
+        for value in insights:
+            name = str(value["parameter"])
+            joint = relationships.get(name, [])
+            contextual = [
+                relationship
+                for relationship in joint
+                if relationship.get("status") == "predictive"
+                and float(relationship.get("gain", 0.0)) > 0.05
+            ]
+            contextual.sort(key=lambda item: float(item.get("gain", 0.0)), reverse=True)
+            interaction_context = (
+                "No global independent preference; the observed response depends on "
+                + ", ".join(str(item.get("parameter")) for item in contextual[:3])
+                + "."
+                if contextual and value.get("status") != "actionable"
+                else None
+            )
+            enriched.append(
+                {
+                    **value,
+                    "response": cls._response(name, observations, mode=mode),
+                    "joint_relationships": joint,
+                    "interaction_context": interaction_context,
+                    "higher_order_caution": (
+                        "Pairwise summaries are incomplete; higher-order/context-dependent "
+                        "interactions may remain in the joint surrogate."
+                    ),
+                    "pruning_signal": cls._pruning_signal(name, pruning_observations),
+                }
+            )
+        insights = enriched
         actionable = [value for value in insights if value["status"] == "actionable"]
         selected = max(insights, key=lambda value: float(value["priority"]), default=None)
         complete = sum(done for _parameters, _value, done in observations)
         return {
-            "analysis_version": 3,
+            "analysis_version": 4,
             "objective": {
                 "metric": metric,
                 "mode": mode,
                 "constraints": dict(objective.get("constraints", {})),
+                "kind": "composite-utility" if composite else "scalar",
+                "metrics": dict(objective.get("metrics", {})) if composite else {},
+                "aggregation": objective.get("aggregation") if composite else None,
             },
             "candidate_observations": len(observations),
             "terminal_candidate_observations": complete,
@@ -575,6 +607,7 @@ class StudyInsightAnalyzer:
                             "observations": len(group),
                             "pruned": pruned_count,
                             "pruned_rate": pruned_count / len(group),
+                            **cls._rate_interval(pruned_count, len(group)),
                         }
                     )
         else:
@@ -590,6 +623,7 @@ class StudyInsightAnalyzer:
                         "observations": len(values),
                         "pruned": pruned_count,
                         "pruned_rate": pruned_count / len(values),
+                        **cls._rate_interval(pruned_count, len(values)),
                     }
                 )
         pruned_total = sum(pruned for _value, pruned in rows)
@@ -599,11 +633,26 @@ class StudyInsightAnalyzer:
             "observations": len(rows),
             "pruned": pruned_total,
             "pruned_rate": pruned_total / len(rows),
+            **cls._rate_interval(pruned_total, len(rows)),
             "groups": groups,
             "caveat": (
                 "Pruning is a censored negative signal, not a completed objective value. Rates "
                 "may also reflect fidelity and asynchronous scheduling."
             ),
+        }
+
+    @staticmethod
+    def _rate_interval(events: int, samples: int) -> dict[str, float]:
+        """Return a smoothed 90% Beta-posterior interval for sparse pruning rates."""
+        alpha = 1.0 + events
+        beta = 1.0 + samples - events
+        total = alpha + beta
+        mean = alpha / total
+        deviation = math.sqrt(alpha * beta / (total * total * (total + 1.0)))
+        return {
+            "smoothed_rate": mean,
+            "rate_lower": max(0.0, mean - 1.645 * deviation),
+            "rate_upper": min(1.0, mean + 1.645 * deviation),
         }
 
     @classmethod
@@ -747,7 +796,7 @@ class StudyInsightAnalyzer:
     @staticmethod
     def _empty(metric: str, mode: str, reason: str) -> dict[str, Any]:
         return {
-            "analysis_version": 3,
+            "analysis_version": 4,
             "objective": {"metric": metric, "mode": mode},
             "candidate_observations": 0,
             "terminal_candidate_observations": 0,

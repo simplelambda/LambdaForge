@@ -452,10 +452,10 @@ seeds: [7, 17]
 search:
   strategy: adaptive
   trials: 12
+  proposal_pool_size: 192
   startup_trials: 10
   min_seeds: 1
-  seed_probability_threshold: 0.1
-  equivalence_margin: 0.002
+  seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.002}
   confirmation_top_k: 2
   confirmation_seeds: [1001, 1002, 1003]
   sampler: auto
@@ -474,8 +474,9 @@ Finite-only exhaustive dimensions form a Cartesian product. In explicit `strateg
 mode this is an exact contract, not a sampling hint: finite `when` branches are enumerated, while
 `range` and `trials` are rejected because a continuous interval/candidate cap cannot be exhaustive.
 Replace a range with explicit `values` when a full reproducible sweep is required.
-Adaptive/numeric spaces build a
-deterministic scrambled-Sobol pool bounded by `trials`; conditional parameters use `when` and carry
+Adaptive/numeric spaces build a deterministic scrambled-Sobol pool bounded by
+`proposal_pool_size` (by default up to 16 times `trials`, capped at 4096); `trials` is only the
+maximum number of candidates that may execute. Conditional parameters use `when` and carry
 an explicit active/inactive feature rather than a fake value. This pool is planning state, not a
 list of decided Trials. LambdaForge first proposes at most `startup_trials` space-filling points.
 After their objective values arrive, `sampler: auto` prefers optional BoTorch mixed-GP qLogNEI and
@@ -486,10 +487,15 @@ still insufficient or GP fitting is numerically unsafe. `sampler: knn` forces th
 conditional active/inactive indicators share one input vector, so posterior predictions can depend
 on interactions. When repeated seeds provide a standard error, it is passed as observation noise;
 qLogNEI then selects from the finite candidate pool while accounting for noisy observations and
-every already-pending candidate. The log-EI family is used for its more stable
+every already-pending candidate. A pending Run retains its actual target fidelity instead of being
+represented as a fictitious full-budget observation. Fidelity is a normalized explicit input:
+numeric spaces use `SingleTaskMultiFidelityGP`, mixed/categorical spaces
+keep that coordinate in `MixedSingleTaskGP`, and the dependency-light k-NN fallback combines
+parameter and fidelity distance conservatively. Acquisition always scores new candidates at target
+fidelity. The log-EI family is used for its more stable
 numerics ([BoTorch acquisition guidance](https://botorch.org/docs/optimization)).
 
-The objective may include explicit outcome constraints:
+The legacy scalar objective may include explicit outcome constraints:
 
 ```yaml
 objective:
@@ -506,8 +512,26 @@ metric or violated mean makes the candidate infeasible: it remains auditable in 
 excluded from seed racing, surrogate observations and final selection. This prevents one lucky
 objective checkpoint from hiding a model that fails an explicitly declared scientific validity
 criterion. LambdaForge never infers constraints from unrelated logged metrics, their names or
-directions. Doing so would silently change the research question. Multiple objectives require an
-explicit Pareto problem and are intentionally not simulated by hidden weights.
+directions. Doing so would silently change the research question.
+
+For a deliberate graded compromise, `objective.metrics` defines a composite utility. Every
+component requires `mode`, a non-negative `weight` and a fixed finite `range`; aggregations are
+`weighted_mean`, `geometric` and `chebyshev`. Weights are normalized during validation and ranges
+never depend on later observations. Components are combined only at the same real integer step.
+
+```yaml
+objective:
+  aggregation: geometric
+  metrics:
+    val_auprc: {mode: max, weight: 3, range: [0.0, 1.0]}
+    val_balanced_accuracy: {mode: max, weight: 1, range: [0.0, 1.0]}
+  constraints:
+    val_kappa: {min: 0.05}
+```
+
+That one utility governs acquisition, seed racing, pruning, fidelity, confirmation and ranking.
+Constraints remain separate hard feasibility rules. Raw components, contributions and the
+diagnostic Pareto front are retained; Pareto status never becomes a second hidden policy.
 
 With an objective, omitted `strategy` means `adaptive`, even with one seed. This activates all safe
 optimizations by default: Sobol startup, adaptive proposals, seed racing, curve pruning,
@@ -529,11 +553,12 @@ $$
 P(\mu_i\geq\mu_{i^\star}-\epsilon\mid D)\geq\delta,
 $$
 
-where `equivalence_margin` is \(\epsilon\) and `seed_probability_threshold` is \(\delta\). Clearly
+where `seed_racing.equivalence_margin` is \(\epsilon\) and
+`seed_racing.probability_threshold` is \(\delta\). Clearly
 dominated candidates stop receiving seeds; uncertainty near the decision boundary receives them
-first, divided by observed Run duration. `min_seeds` is only the initial evidence floor. The old
-`reduction_factor` remains accepted for configuration continuity but no longer dictates a fixed
-seed-halving ladder.
+first, divided by observed Run duration. `min_seeds` is only the initial evidence floor. Ambiguous
+root `search.reduction_factor` and `search.confidence` fields are rejected: fidelity spacing,
+seed-racing probability and early-stop probability have separate named owners.
 
 Search evidence and final evidence are separate. `confirmation_top_k` freezes the best search
 candidates and `confirmation_seeds` evaluates them with disjoint seeds. If confirmation is present,
@@ -551,20 +576,30 @@ partial Run. A Trial's HPO value is the mean of the per-seed best values—not t
 seed. Fresh confirmation seeds and the conservative search bound limit repeated-validation bias.
 The default initial floor is up to three authored seeds per proposed Trial: enough to estimate
 seed variability without spending all declared seeds on a clearly dominated configuration.
+Confirmation is never performance-pruned or opportunistically preempted. Missing or failed
+required confirmation seeds persist `summary.confirmation.status=incomplete` and
+`confirmation_incomplete=true`; no survivor-only confirmation mean becomes the selected model.
 
 Every controller action is auditable. `hpo-control/decisions.jsonl` is an append-only sequence of
-initialization, surrogate/fallback, `START_NEW`, `ADD_SEED`, `RESUME`, convergence, confirmation and
+initialization, surrogate/fallback, `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY`, convergence, confirmation and
 finish events. `hpo-control/state.json` is the compact latest replay snapshot. Both are linked from
 `result.json` under `summary.adaptive_controller`; they contain scalar identities and decisions,
 not checkpoints or model bytes.
 
-The acquisition loop is bounded-asynchronous. A terminal observation may immediately fill a free
-slot while other Runs from the current batch remain active. The controller proposes at most
-`max(1, min(2, parallelism // 3))` such look-ahead candidates per scheduling wave, conditions the
-Bayesian acquisition on every pending candidate and records the launch as `START_NEW` with
-`reason=bounded-async-lookahead`. This can hide long stragglers without building a large queue from
-stale posterior states. It does not preempt a healthy Run merely because rankings change; safe
-cooperative pruning and fidelity decisions remain the only scientific cancellation mechanisms.
+The acquisition loop is event-driven rather than round-barrier based. Each terminal observation
+re-evaluates `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` for the free slot
+using expected information per incremental wall-clock cost. Startup work is submitted gradually and can interleave with
+model-directed decisions. Pending identities condition the surrogate and prevent duplicate queued
+seeds. Each action records score, cost, reason and compact alternatives; waiting is valid only when
+no useful in-budget action exists. A running scored action may be preempted only after 30 seconds,
+with an owned non-symlink checkpoint, and when the next useful alternative exceeds the greater of
+its original action priority and current continuation value by 50%. Startup actions without a
+comparable score and all confirmation Runs are protected. LambdaForge writes a cooperative stop,
+waits for the Work/Lightning loop to return at a safe boundary, and later resumes the same Run and
+fidelity target from its checkpoint. It never kills the worker for this optimization. The decision
+log distinguishes `PREEMPT`, terminal `PAUSE`, `CONTINUE` and `RESUME_PREEMPTED`, including old/new
+priorities and the evidence change. `scheduler_preempted` remains neutral evidence, never a
+performance prune.
 
 ### 7.1 Exact sweeps without HPO
 
@@ -595,8 +630,8 @@ search:
   trials: 40
   runs_per_gpu: 4
   min_seeds: 1
-  reduction_factor: 2
-  early_stopping: {enabled: true, min_step: 5, confirmations: 2}
+  early_stopping: {enabled: true, min_step: 5, confirmations: 2,
+                   probability_threshold: 0.05, equivalence_margin: 0.0}
   learning_rate: {range: [0.00001, 0.003], scale: log}
   hidden_dim: {values: [64, 128, 256]}
 objective: {metric: val_auprc, mode: max}
@@ -680,7 +715,8 @@ if self.stop_requested:
 After `early_stopping.min_step`, the controller compares active Runs at a common observed step. A
 bounded local-linear posterior projects each curve a short distance forward and carries residual
 plus pooled uncertainty. It requests a stop only when the probability of remaining within
-`equivalence_margin` of the projected incumbent falls below `seed_probability_threshold`. This is
+`early_stopping.equivalence_margin` of the projected incumbent falls below
+`early_stopping.probability_threshold`. This is
 more conservative with noisy or still-improving curves than dropping a fixed fraction. By default
 the condition must remain true at two distinct common steps (`confirmations: 2`); repeated polling
 of the same epoch cannot satisfy it. Set `confirmations: 1` only when an intentionally aggressive
@@ -717,9 +753,28 @@ resumed, and its persisted reason is shown. A Trial containing only pruned seeds
 `pruned`, not `failed`. Its partial curves remain available as censored diagnostic evidence, but
 they are deliberately excluded from completed seed means, surrogate fitting and marginal
 objective statistics. Treating a partial best value as a full-budget observation would bias the
-search. LambdaForge nevertheless uses the information: the HPO read model reports terminal pruning
-rate by parameter region, and a pruned-only Trial contributes a mild neighbourhood penalty during
-proposal selection. This is censored negative evidence, not a fabricated scalar target.
+search. If any seed receives candidate-level performance pruning, the whole candidate remains
+censored; earlier successful seeds are not averaged as a survivor-only objective. LambdaForge
+nevertheless uses the information: the HPO read model reports terminal pruning
+rate by parameter region. Candidate-level completed/pruned outcomes fit a joint mixed-space
+survival model with a smoothed uncertainty interval; multiple seeds do not overcount one candidate.
+Infrastructure/resource failures and scheduler preemption are neutral. This is censored negative
+evidence, not a fabricated scalar target.
+
+The controller also backtests the configured pruner against fully completed curves and writes the
+bounded report to `hpo-control/state.json` as `pruner_calibration`. It records policy inputs,
+simulated candidate prunes, Runs/epochs/GPU-seconds that would have been saved, false-prune rate,
+regret, probability Brier score, curve RMSE and approximate 90% interval coverage. Tiny studies
+report `null` uncertainty fields instead of invented certainty. This audit is retrospective
+diagnosis; it never changes recorded objectives or invents the counterfactual result of a genuinely
+pruned Run.
+
+`lf top` consumes the same controller evidence rather than fitting a second HPO model. Its candidate
+view shows composite utility mean/standard error, aggregation, same-checkpoint raw and normalized
+components, weights/contributions, constraints and diagnostic Pareto membership. The HPO panel
+shows active/available slots, queued/paused Runs and the latest action's score, expected information
+and cost. A pruned Run expands to its persisted candidate, step/fidelity, prediction uncertainty,
+incumbent, probability, threshold, margin, confirmations and curve method.
 
 Press `i` from the adaptive candidate or Trial screen to open the HPO evidence console. For every
 detected hyperparameter it derives a bounded candidate-level diagnostic: numeric rank direction,

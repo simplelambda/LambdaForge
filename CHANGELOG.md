@@ -10,8 +10,34 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-09-01
+
 ### Fixed
 
+- Unified adaptive HPO around one checkpoint-aligned scientific utility. Objectives may now be
+  legacy scalar metrics or fixed-range weighted/geometric/Chebyshev composites; constraints remain
+  separate, raw components and Pareto diagnostics stay auditable, and missing same-step components
+  never get silently mixed across epochs.
+- Reworked pruning from isolated Runs to candidate-level evidence across active and completed seeds,
+  with historical incumbents, conservative curve uncertainty, retrospective calibration records,
+  separate seed/early-stop thresholds and an explicit no-pruning rule for confirmation Runs.
+- Replaced fixed censored-neighbour penalties with a joint candidate-level survival model and
+  uncertainty intervals. Performance prunes remain censored negative evidence, while resource,
+  infrastructure and scheduler-preemption outcomes remain statistically neutral.
+- Removed round/startup barriers from adaptive refill: every terminal Run can choose `START_NEW`,
+  `ADD_SEED` or `PROMOTE_FIDELITY` by expected information per observed cost, while pending identities prevent
+  duplicate seeds and every decision persists compact alternatives and cost evidence.
+- Added conservative checkpoint-safe scheduler preemption for already-scored fidelity Runs. A
+  30-second floor, 50% priority hysteresis, confirmation/startup protection and cooperative stop
+  preserve work and prevent thrashing; `PREEMPT`, `PAUSE`, `CONTINUE` and `RESUME_PREEMPTED` remain
+  auditable and statistically neutral.
+- Separated executed candidate budget (`trials`) from `proposal_pool_size`, made fidelity an explicit
+  surrogate feature, rejected ambiguous no-op root `reduction_factor`/`confidence` fields, and added
+  structured termination, confirmation-completeness and wall/GPU-second accounting.
+- Expanded `lf top`/overview HPO evidence with composite components, diagnostic Pareto membership,
+  live scheduler slots/actions, candidate-level pruning uncertainty and the exact
+  probability/reference behind a prune. Added retrospective pruning reports with simulated
+  compute savings, false-prune rate, regret and probability/curve calibration.
 - Made early HPO evidence useful instead of blank: marginal response and pair coverage now render
   from two comparable candidates, predictive pair gain starts at three with explicitly low early
   confidence, and a newer `lf top` rebuilds old remote analysis snapshots locally. Pruned Runs now
@@ -937,7 +963,8 @@ metadata rather than invented release numbers.
 
 - Initial object-oriented infrastructure for reproducible PyTorch training and YAML experiments.
 
-[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/simplelambda/LambdaForge/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/simplelambda/LambdaForge/compare/v0.13.0...v0.13.2
 [0.13.0]: https://github.com/simplelambda/LambdaForge/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/simplelambda/LambdaForge/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/simplelambda/LambdaForge/compare/v0.11.0...v0.12.0

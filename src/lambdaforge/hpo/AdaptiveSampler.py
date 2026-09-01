@@ -7,6 +7,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from lambdaforge.hpo.SurvivalModel import SurvivalEstimate
+
 
 @dataclass(frozen=True, slots=True)
 class CandidateObservation:
@@ -15,6 +17,7 @@ class CandidateObservation:
     trial: int
     value: float
     standard_error: float | None = None
+    fidelity: float = 1.0
 
 
 class AdaptiveSampler:
@@ -64,7 +67,9 @@ class AdaptiveSampler:
         *,
         selected: Sequence[int],
         pending: Sequence[int] = (),
+        pending_fidelity: Mapping[int, float] | None = None,
         censored: Sequence[int] = (),
+        survival: Mapping[int, SurvivalEstimate] | None = None,
         count: int,
     ) -> tuple[int, ...]:
         """Select the next result-dependent batch without exposing unselected candidates."""
@@ -86,28 +91,59 @@ class AdaptiveSampler:
                 parameters = self.candidates[trial]
                 neighbours = sorted(
                     (
-                        (self._distance(parameters, self.candidates[item.trial]), item.value)
+                        (
+                            math.sqrt(
+                                (
+                                    self._distance(parameters, self.candidates[item.trial]) ** 2
+                                    + (1.0 - min(1.0, max(0.0, item.fidelity))) ** 2
+                                )
+                                / 2.0
+                            ),
+                            item.value,
+                            min(1.0, max(0.05, item.fidelity)),
+                        )
                         for item in observed
                     ),
                     key=lambda item: item[0],
                 )[: min(5, len(observed))]
-                weights = [1.0 / max(distance, 1e-6) for distance, _ in neighbours]
+                weights = [
+                    fidelity / max(distance, 1e-6) for distance, _value, fidelity in neighbours
+                ]
                 prediction = sum(
                     weight * value
-                    for weight, (_distance, value) in zip(weights, neighbours, strict=True)
+                    for weight, (_distance, value, _fidelity) in zip(
+                        weights, neighbours, strict=True
+                    )
                 ) / sum(weights)
                 exploitation = (prediction - center) / scale
                 if self.mode == "min":
                     exploitation = -exploitation
                 references = (
-                    [item.trial for item in observed]
-                    + list(pending)
-                    + censored_trials
-                    + proposed
+                    [(item.trial, min(1.0, max(0.0, item.fidelity))) for item in observed]
+                    + [
+                        (
+                            reference,
+                            min(
+                                1.0,
+                                max(
+                                    0.0,
+                                    float((pending_fidelity or {}).get(reference, 1.0)),
+                                ),
+                            ),
+                        )
+                        for reference in pending
+                    ]
+                    + [(reference, 1.0) for reference in [*censored_trials, *proposed]]
                 )
                 exploration = min(
-                    self._distance(parameters, self.candidates[reference])
-                    for reference in references
+                    math.sqrt(
+                        (
+                            self._distance(parameters, self.candidates[reference]) ** 2
+                            + (1.0 - fidelity) ** 2
+                        )
+                        / 2.0
+                    )
+                    for reference, fidelity in references
                 )
                 censored_penalty = (
                     0.2
@@ -121,11 +157,23 @@ class AdaptiveSampler:
                     if censored_trials
                     else 0.0
                 )
+                survival_adjustment = 0.0
+                if survival is not None and trial in survival:
+                    estimate = survival[trial]
+                    uncertainty = estimate.upper - estimate.lower
+                    survival_adjustment = 0.25 * (estimate.probability - 0.5) + 0.1 * uncertainty
                 # Exploitation dominates once evidence exists, while the distance bonus keeps
                 # unexplored regions alive and avoids proposing near-duplicates in one batch.
                 # A pruned-only neighbour is censored negative evidence: discourage its immediate
                 # vicinity mildly, but never invent an exact full-budget objective for it.
-                return exploitation + 0.35 * exploration - censored_penalty, exploration, -trial
+                return (
+                    exploitation
+                    + 0.35 * exploration
+                    - (0.0 if survival is not None else censored_penalty)
+                    + survival_adjustment,
+                    exploration,
+                    -trial,
+                )
 
             chosen = max(available, key=acquisition)
             proposed.append(chosen)

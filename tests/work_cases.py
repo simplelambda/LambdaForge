@@ -77,6 +77,16 @@ class AdaptiveScoreWork(lf.Work):
         return {"score": quality}
 
 
+class ConfirmationFailureWork(lf.Work):
+    """Fail one dedicated confirmation seed to exercise unbiased incomplete selection."""
+
+    def run(self, quality: float = 0.0) -> dict[str, float]:
+        if self.seed == 102:
+            raise RuntimeError("synthetic confirmation failure")
+        self.metrics.log("score", quality, step=1)
+        return {"score": quality}
+
+
 class ConditionalSweepWork(lf.Work):
     """Signature fixture for exact finite conditional sweep expansion."""
 

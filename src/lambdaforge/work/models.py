@@ -17,9 +17,7 @@ def immutable_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
 
     def freeze(item: Any) -> Any:
         if isinstance(item, Mapping):
-            return FrozenJsonMapping(
-                {str(key): freeze(nested) for key, nested in item.items()}
-            )
+            return FrozenJsonMapping({str(key): freeze(nested) for key, nested in item.items()})
         if isinstance(item, list | tuple):
             return tuple(freeze(nested) for nested in item)
         return item
@@ -189,6 +187,8 @@ class WorkResult:
     study_phase: str | None = None
     fidelity: Mapping[str, int] | None = None
     objective_observation: Mapping[str, Any] | None = None
+    termination_type: str = "completed"
+    termination: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -239,6 +239,8 @@ class WorkResult:
                 if self.objective_observation is not None
                 else None
             ),
+            "termination_type": self.termination_type,
+            "termination": copy.deepcopy(dict(self.termination)),
         }
 
     def write(self, path: str | Path) -> Path:

@@ -1,6 +1,6 @@
 # Guía de LambdaForge para agentes
 
-Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.13.0. Consulta solo la
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.13.2. Consulta solo la
 sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
 
 ## Arquitectura no negociable
@@ -101,7 +101,10 @@ específico de entreno. `work.items[].study_expected` existe antes de la telemet
 composición paralela y `self.map()` por sí solos siguen la navegación ordinaria Attempt/log y no
 deben crear telemetría de estudio.
 
-`search` pasa variantes como parámetros normales y `objective` nombra una métrica escalar. Toda
+`search` pasa variantes como parámetros normales. `objective` es `metric`/`mode` heredado o una
+utilidad `metrics` de rangos fijos con `weighted_mean`, `geometric` o `chebyshev`; sus componentes
+comparten un step entero. Una utilidad gobierna HPO, las constraints son guardas duras separadas y
+el frente Pareto crudo solo es diagnóstico. Toda
 búsqueda con objective activa por defecto inicio Sobol scrambled, GP mixto qLogNEI opcional y sensible al ruido con
 fallback k-NN mixto, carrera probabilística de seeds, pruning, convergencia y confirmación con seeds
 nuevas. Solo se publican candidatos propuestos. `strategy: exhaustive` enumera exactamente
@@ -109,9 +112,14 @@ combinaciones finitas `values`/`when` y todas las seeds; rechaza `range` y `tria
 confirmación son disjuntas; `confirmation_seeds: []` las desactiva. `search.fidelity` declara
 presupuesto acumulativo definido por el Work; `self.fidelity` y checkpoints permiten continuar y
 LightningRunner enlaza epochs. Decisiones/snapshot viven en `hpo-control/decisions.jsonl` y
-`state.json`. Una anticipación asíncrona acotada rellena slots libres desde evidencia actualizada y
-condiciona en todos los candidatos pendientes; propone como máximo uno o dos por oleada y no
-interrumpe Runs sanos fuera del pruning cooperativo. `objective.constraints.METRICA.min/max`
+`state.json`. Confirmación es inmune a pruning/preemption; un conjunto incompleto persiste
+`confirmation_incomplete` y no selecciona una media solo de supervivientes. `trials` limita
+candidatos ejecutados y `proposal_pool_size` el pool determinista
+mayor. El refill por eventos compara `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` y
+`RESUME_PREEMPTED` mediante información/coste;
+startup no es barrera y las identidades pendientes evitan seeds duplicadas. Se eliminan
+`search.reduction_factor` y `search.confidence` raíz en favor de controles separados.
+`objective.constraints.METRICA.min/max`
 declara guardas evaluadas en la mejor época primaria y promediadas entre seeds; evidencia
 ausente/incumplida es no factible y se excluye de HPO. Nunca infieras guardas o pesos
 multiobjetivo ocultos desde otras métricas. `runs_per_gpu` empaqueta Runs spawn independientes dentro de una
@@ -139,12 +147,20 @@ curvas reducidas, objective y época actual/óptima, tiempos/fallo/log; `lf logs
 aísla la salida. HPO terminado usa la media del mejor checkpoint de cada seed; las curvas actuales
 al mismo step deciden pruning y un Run podado es evidencia terminal censurada, no fallo, y se
 excluye como valor exacto del ajuste/estadística de objetivos completos. Sus tasas de poda por
-región siguen visibles y un Trial solo podado desaconseja suavemente propuestas cercanas sin
-inventar un score de presupuesto completo. Por defecto el pruning exige dos steps
+región siguen visibles. Cualquier seed podada censura el candidato entero; nunca promedies sus seeds
+terminadas como evidencia solo de supervivientes. Un modelo conjunto de supervivencia por candidato con incertidumbre
+modifica suavemente adquisición; varias seeds no sobrecuentan y fallos operacionales/preemption son
+neutrales. Por defecto el pruning exige dos steps
 comunes desfavorables distintos mediante `early_stopping.confirmations`. Lightning publica
 automáticamente escalares de callback y tiempos de época/validación. Un trainer propio registra
 curvas con `self.metrics.log(nombre, valor, step=epoch)`; `progress.update` es progreso grueso y
 `self.log`/print solo narración humana.
+
+El controlador solo puede preemptar cooperativamente un Run de fidelidad puntuado, no de
+confirmación, con checkpoint propio verificado, al menos 30 segundos de ejecución y una alternativa
+que supere en 50 % las prioridades original y de continuación. Nunca mata por planificación.
+Conserva la evidencia `PREEMPT` → `PAUSE` → `RESUME_PREEMPTED`; startup sin score comparable queda
+protegido y una parada que llega tras alcanzar el target sigue siendo `completed`.
 
 La telemetría adaptativa incluye `hpo_analysis` acotado y las últimas 25 acciones estructuradas del
 `controller`. `lf top` lo abre con `i`; automatización lee
@@ -154,6 +170,9 @@ multivariable. Enter/derecha abre la curva de respuesta y el panel acotado de ga
 conjunta; respuesta/cobertura descriptiva empiezan con dos observaciones comparables y la ganancia
 predictiva con tres, siempre con suelos conservadores de confianza. El JSON incluye puntos de
 respuesta, señal de poda y matriz acotada.
+La calidad retrospectiva del pruner vive en `hpo-control/state.json` → `pruner_calibration`: informa
+ahorro simulado, falsos prunes, regret y calibración probabilística/de curva sin inventar un
+objective completo para Runs censurados.
 
 `lf top` dibuja series temporales Unicode enmarcadas y con color sin dependencia de plotting; el
 color se aplica tras el layout y respeta `NO_COLOR`. El Trial y Run seleccionados muestran previews

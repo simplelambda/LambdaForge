@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import statistics
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from lambdaforge.hpo.ObjectiveUtility import pareto_front
 from lambdaforge.hpo.StudyInsights import StudyInsightAnalyzer
 from lambdaforge.work.models import WorkResult, atomic_json
 
@@ -130,7 +133,7 @@ class StudyTelemetry:
                 runs = [value for value in candidate.get("runs", ()) if isinstance(value, dict)]
                 states = [self._run_state(str(value["key"])).get("state") for value in runs]
                 terminal = bool(states) and all(
-                    state in {"succeeded", "failed", "pruned"} for state in states
+                    state in {"succeeded", "failed", "pruned", "cancelled"} for state in states
                 )
                 if finished and trial in active_set:
                     candidate["state"] = (
@@ -157,7 +160,9 @@ class StudyTelemetry:
                     continue
                 runs = [value for value in candidate.get("runs", ()) if isinstance(value, dict)]
                 states = [self._run_state(str(value["key"])).get("state") for value in runs]
-                if states and all(state in {"succeeded", "failed", "pruned"} for state in states):
+                if states and all(
+                    state in {"succeeded", "failed", "pruned", "cancelled"} for state in states
+                ):
                     candidate["state"] = self._terminal_candidate_state(
                         states, successful="observed"
                     )
@@ -187,6 +192,7 @@ class StudyTelemetry:
                 "log_path": str((run_dir / "work.log").resolve()),
                 "metrics_path": str(metrics_path.resolve()),
                 "training_metrics_path": str(training_metrics_path.resolve()),
+                "hpo_metrics_path": str(specification.get("hpo_metrics_path", "")),
                 "gpu_index": specification.get("gpu_index"),
                 "gpu_token": specification.get("gpu_slot"),
                 "failure": None,
@@ -199,7 +205,15 @@ class StudyTelemetry:
 
     def run_finished(self, specification: Mapping[str, Any], result: WorkResult) -> None:
         """Finalize one Run state while retaining only compact scalar summaries."""
-        state = "pruned" if result.pruned else result.status
+        state = (
+            "pruned"
+            if result.termination_type == "performance_pruned"
+            else "paused"
+            if result.termination_type == "scheduler_preempted"
+            else "aborted"
+            if result.termination_type == "aborted"
+            else result.status
+        )
         self._write_run(
             study_run_key(specification),
             {
@@ -234,6 +248,8 @@ class StudyTelemetry:
                     else None
                 ),
                 "prune_reason": result.prune_reason,
+                "termination_type": result.termination_type,
+                "termination": dict(result.termination),
                 "updated_at_utc": _now(),
             },
         )
@@ -261,6 +277,24 @@ class StudyTelemetry:
                 "retry_reason": reason,
                 "failure": None,
                 "finished_at_utc": None,
+                "updated_at_utc": _now(),
+            },
+        )
+
+    def queued_action_cancelled(self, specification: Mapping[str, Any], *, reason: str) -> None:
+        """Mark a planned Run that was invalidated before consuming scientific compute."""
+        self._write_run(
+            study_run_key(specification),
+            {
+                "state": "cancelled",
+                "trial": int(specification["trial_index"]),
+                "seed": specification.get("seed"),
+                "phase": specification.get("hpo_phase", "search"),
+                "fidelity": dict(specification.get("hpo_fidelity", {})),
+                "parameters": dict(specification.get("trial_parameters", {})),
+                "termination_type": "not_started_cancelled",
+                "termination": {"type": "not_started_cancelled", "reason": reason},
+                "finished_at_utc": _now(),
                 "updated_at_utc": _now(),
             },
         )
@@ -306,7 +340,10 @@ class StudyTelemetry:
             objective = objective if isinstance(objective, Mapping) else {}
             objective_metric = str(objective.get("metric", ""))
             objective_mode = str(objective.get("mode", "max"))
-            completed = active = failed = pruned = 0
+            completed = active = queued = paused = failed = pruned = cancelled = 0
+            terminations: dict[str, int] = {}
+            total_wall_seconds = 0.0
+            total_gpu_seconds = 0.0
             for candidate in index.get("candidates", ()):
                 if not isinstance(candidate, dict):
                     continue
@@ -342,12 +379,41 @@ class StudyTelemetry:
                             )
                     observed_runs.append(merged)
                     selected = str(merged.get("state", "scheduled"))
-                    completed += selected in {"succeeded", "failed", "pruned"}
+                    completed += selected in {"succeeded", "failed", "pruned", "cancelled"}
                     active += selected in {"running", "retrying"}
+                    queued += selected == "scheduled"
+                    paused += selected == "paused"
                     failed += selected == "failed"
                     pruned += selected == "pruned"
+                    cancelled += selected == "cancelled"
+                    termination = str(merged.get("termination_type", ""))
+                    if termination:
+                        terminations[termination] = terminations.get(termination, 0) + 1
                 candidate["runs"] = observed_runs
+                candidate_wall = sum(
+                    float(run.get("duration_seconds", 0.0) or 0.0) for run in observed_runs
+                )
+                candidate_gpu = sum(
+                    float(run.get("duration_seconds", 0.0) or 0.0)
+                    for run in observed_runs
+                    if run.get("gpu_index") is not None or run.get("gpu_token") is not None
+                )
+                candidate["cost"] = {
+                    "wall_seconds": candidate_wall,
+                    "gpu_seconds": candidate_gpu,
+                    "runs_started": sum(bool(run.get("started_at_utc")) for run in observed_runs),
+                }
+                total_wall_seconds += candidate_wall
+                total_gpu_seconds += candidate_gpu
                 candidate["latest_metrics"] = self._candidate_metrics(observed_runs)
+                for stale in (
+                    "selection_objective",
+                    "selection_seed_count",
+                    "selection_standard_error",
+                    "raw_metrics",
+                    "objective_components",
+                ):
+                    candidate.pop(stale, None)
                 objective_summary = self._candidate_objective_summary(
                     observed_runs,
                     objective_metric=objective_metric,
@@ -368,6 +434,28 @@ class StudyTelemetry:
                     and run_states <= {"succeeded", "failed", "pruned"}
                 ):
                     candidate["state"] = "infeasible"
+            candidates = [value for value in index.get("candidates", ()) if isinstance(value, dict)]
+            for candidate in candidates:
+                candidate["pareto_optimal"] = False
+            for trial in pareto_front(candidates, objective):
+                for candidate in candidates:
+                    if candidate.get("trial") == trial:
+                        candidate["pareto_optimal"] = True
+                        break
+            controller = self._read(self.root / "controller.json")
+            recent_decisions = [
+                value for value in controller.get("recent", ()) if isinstance(value, Mapping)
+            ]
+            initialization = next(
+                (
+                    value
+                    for value in reversed(recent_decisions)
+                    if value.get("action") == "INITIALIZE"
+                ),
+                {},
+            )
+            raw_slots = initialization.get("slots_total")
+            slots_total = int(raw_slots) if isinstance(raw_slots, int) and raw_slots > 0 else None
             snapshot = {
                 **index,
                 "counts": {
@@ -379,17 +467,34 @@ class StudyTelemetry:
                     ),
                     "completed_runs": completed,
                     "active_runs": active,
+                    "queued_runs": queued,
+                    "paused_runs": paused,
                     "failed_runs": failed,
                     "pruned_runs": pruned,
+                    "cancelled_before_start": cancelled,
+                    "terminations": terminations,
                 },
-                "controller": self._read(self.root / "controller.json"),
+                "controller": {
+                    **controller,
+                    "scheduler": {
+                        "slots_total": slots_total,
+                        "slots_active": active,
+                        "slots_available": (
+                            max(0, slots_total - active) if slots_total is not None else None
+                        ),
+                        "running": active,
+                        "queued": queued,
+                        "paused": paused,
+                        "preempted": terminations.get("scheduler_preempted", 0),
+                    },
+                },
+                "cost": {
+                    "wall_seconds": total_wall_seconds,
+                    "gpu_seconds": total_gpu_seconds,
+                },
                 "hpo_analysis": (
                     StudyInsightAnalyzer.analyze(
-                        [
-                            value
-                            for value in index.get("candidates", ())
-                            if isinstance(value, Mapping)
-                        ],
+                        candidates,
                         objective,
                     )
                     if str(index.get("strategy", "")) == "adaptive"
@@ -544,9 +649,11 @@ class StudyTelemetry:
         normalized = {str(state) for state in states}
         if "failed" in normalized:
             return "failed"
+        if "pruned" in normalized:
+            return "pruned"
         if "succeeded" in normalized:
             return successful
-        if normalized == {"pruned"}:
+        if normalized and normalized <= {"pruned", "cancelled"}:
             return "pruned"
         return "failed"
 
@@ -575,6 +682,7 @@ class StudyTelemetry:
         current_values: list[float] = []
         selectable: list[tuple[float, Mapping[str, Any]]] = []
         provisional: list[tuple[float, Mapping[str, Any]]] = []
+        censored = any(run.get("state") == "pruned" for run in runs)
         for run in runs:
             latest = run.get("latest_metrics", {})
             latest = latest if isinstance(latest, Mapping) else {}
@@ -593,14 +701,45 @@ class StudyTelemetry:
         constraints = StudyTelemetry._candidate_constraint_summary(
             runs, objective_constraints or {}
         )
-        output: dict[str, Any] = {"feasibility": constraints}
+        output: dict[str, Any] = {"feasibility": constraints, "partially_censored": censored}
         if current_values:
             output["current_objective"] = sum(current_values) / len(current_values)
-        if selectable and constraints["feasible"]:
-            output["selection_objective"] = sum(value for value, _run in selectable) / len(
-                selectable
-            )
+        if selectable and constraints["feasible"] and not censored:
+            selection_values = [value for value, _run in selectable]
+            output["selection_objective"] = sum(selection_values) / len(selection_values)
             output["selection_seed_count"] = len(selectable)
+            output["selection_standard_error"] = (
+                statistics.stdev(selection_values) / math.sqrt(len(selection_values))
+                if len(selection_values) > 1
+                else None
+            )
+            component_groups: dict[str, dict[str, list[float]]] = {}
+            for _value, run in selectable:
+                observation = run.get("objective_observation", {})
+                observation = observation if isinstance(observation, Mapping) else {}
+                components = observation.get("components", {})
+                components = components if isinstance(components, Mapping) else {}
+                for name, raw_detail in components.items():
+                    detail = raw_detail if isinstance(raw_detail, Mapping) else {}
+                    grouped = component_groups.setdefault(str(name), {})
+                    for field in ("raw", "normalized", "weight", "contribution"):
+                        raw = detail.get(field)
+                        if isinstance(raw, int | float) and not isinstance(raw, bool):
+                            grouped.setdefault(field, []).append(float(raw))
+            if component_groups:
+                output["raw_metrics"] = {
+                    name: sum(fields["raw"]) / len(fields["raw"])
+                    for name, fields in component_groups.items()
+                    if fields.get("raw")
+                }
+                output["objective_components"] = {
+                    name: {
+                        field: sum(values) / len(values)
+                        for field, values in fields.items()
+                        if values
+                    }
+                    for name, fields in component_groups.items()
+                }
         if evidence:
             best_value, best_run = (min if objective_mode == "min" else max)(
                 evidence, key=lambda item: item[0]

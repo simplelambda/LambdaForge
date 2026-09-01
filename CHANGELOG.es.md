@@ -9,8 +9,28 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+## [0.13.2] - 2026-09-01
+
 ### Corregido
 
+- Unificado HPO adaptativo alrededor de una única utilidad científica alineada por checkpoint. El
+  objetivo puede ser escalar o compuesto con rangos fijos y agregación ponderada/geométrica/
+  Chebyshev; las constraints siguen separadas y nunca se mezclan componentes de épocas distintas.
+- Rehecho el pruning a nivel de candidato usando seeds activas e históricas, incumbents terminados,
+  incertidumbre conservadora, calibración retrospectiva, umbrales separados y confirmación inmune.
+- Sustituida la penalización fija de censura por un modelo conjunto de supervivencia con intervalos;
+  pruning aporta evidencia censurada, pero recursos, infraestructura y preemption son neutrales.
+- Eliminadas barreras de ronda/startup: cada Run terminal puede elegir `START_NEW`, `ADD_SEED` o
+  `PROMOTE_FIDELITY` por información esperada/coste, evitando seeds duplicadas y auditando alternativas.
+- Añadida preemption conservadora y segura por checkpoint para Runs de fidelidad ya puntuados. Un
+  suelo de 30 segundos, histéresis del 50 %, protección de confirmación/startup y parada cooperativa
+  evitan thrashing; `PREEMPT`, `PAUSE`, `CONTINUE` y `RESUME_PREEMPTED` quedan auditados y neutrales.
+- Separados presupuesto ejecutado `trials` y `proposal_pool_size`, incorporada fidelidad al modelo,
+  rechazados knobs raíz ambiguos/no-op y añadidos terminaciones, confirmación incompleta y costes.
+- Ampliados `lf top`/overview con componentes, Pareto diagnóstico, incertidumbre de poda por
+  candidato, slots/acciones del scheduler y la probabilidad/referencia exactas que justificaron
+  cada poda. Añadidos informes retrospectivos con ahorro simulado, falsos prunes, regret y
+  calibración probabilística/de curva.
 - Hecha útil la evidencia HPO temprana: respuesta marginal y cobertura por pares se muestran desde
   dos candidatos comparables, la ganancia predictiva empieza con tres manteniendo confianza baja y
   un `lf top` nuevo reconstruye localmente análisis remotos antiguos. Los Runs podados aportan tasas

@@ -18,6 +18,7 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Any, TypeVar, cast
 
+from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.work.cache import WorkCache
 from lambdaforge.work.checkpoints import CheckpointCollection
 from lambdaforge.work.managed import ManagedFile
@@ -47,6 +48,13 @@ class MetricCollection:
         self._count = 0
         mirror = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
         self._mirror = Path(mirror).resolve() if mirror else None
+        raw_objective = os.environ.get("LAMBDAFORGE_HPO_OBJECTIVE_CONFIG")
+        try:
+            decoded = json.loads(raw_objective) if raw_objective else None
+        except json.JSONDecodeError:
+            decoded = None
+        self._objective = ObjectiveUtility(decoded) if isinstance(decoded, Mapping) else None
+        self._objective_steps: dict[int | None, dict[str, float]] = {}
 
     def log(
         self,
@@ -82,6 +90,28 @@ class MetricCollection:
                     handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
                     handle.flush()
                     os.fsync(handle.fileno())
+                if self._objective is not None and self._objective.composite and step is not None:
+                    values = self._objective_steps.setdefault(step, {})
+                    values[key] = float(value)
+                    evaluated = self._objective.evaluate(values)
+                    if evaluated is not None:
+                        utility_record = {
+                            "name": self._objective.metric,
+                            "value": evaluated["value"],
+                            "step": step,
+                            "split": None,
+                        }
+                        with self._mirror.open("a", encoding="utf-8", newline="\n") as handle:
+                            handle.write(
+                                json.dumps(
+                                    utility_record,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                )
+                                + "\n"
+                            )
+                            handle.flush()
+                            os.fsync(handle.fileno())
             self._latest[key] = value
             self._count += 1
 

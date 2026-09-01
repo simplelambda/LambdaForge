@@ -692,7 +692,8 @@ class StudyRenderer:
         counts = counts if isinstance(counts, Mapping) else {}
         objective = study.get("objective", {})
         objective = objective if isinstance(objective, Mapping) else {}
-        metric = str(objective.get("metric", ""))
+        composite = isinstance(objective.get("metrics"), Mapping)
+        metric = "composite utility" if composite else str(objective.get("metric", ""))
         mode = str(objective.get("mode", "-"))
         direction = "↑" if mode == "max" else "↓" if mode == "min" else ""
         raw_analysis = study.get("hpo_analysis")
@@ -709,7 +710,16 @@ class StudyRenderer:
                 f"completed={counts.get('completed_runs', 0)}  "
                 f"pruned={counts.get('pruned_runs', 0)}  failed={counts.get('failed_runs', 0)}"
             ),
-            (f"objective: {metric or '-'} ({mode})  |  each row is one hyperparameter combination"),
+            (
+                f"objective: {metric or '-'} ({mode})  |  "
+                + (
+                    f"{objective.get('aggregation', 'weighted_mean')} over "
+                    f"{', '.join(str(name) for name in objective.get('metrics', {}))}  |  "
+                    if composite
+                    else ""
+                )
+                + "each row is one hyperparameter combination"
+            ),
             *(
                 [
                     f"HPO insight: {analysis.get('status', 'preparing')} · next question: "
@@ -741,6 +751,54 @@ class StudyRenderer:
             maximum=max(3, min(6, height // 4)),
             continuation="parameter row(s); Enter opens the Trial.",
         )
+        if composite and candidates:
+            selected_value = candidates[selected_candidate]
+            selected_utility = selected_value.get("selection_objective")
+            selected_error = selected_value.get("selection_standard_error")
+            parameter_lines.extend(
+                (
+                    "SELECTED TRIAL UTILITY",
+                    (
+                        f"  mean={_display_value(selected_utility)}  "
+                        f"standard error={_display_value(selected_error)}  "
+                        f"aggregation={objective.get('aggregation', 'geometric')}  "
+                        f"best step={selected_value.get('best_step', '-')}  "
+                        f"Pareto={'yes' if selected_value.get('pareto_optimal') else 'no'}"
+                    ),
+                )
+            )
+            raw_components = selected_value.get("objective_components", {})
+            components = raw_components if isinstance(raw_components, Mapping) else {}
+            if components:
+                parameter_lines.extend(
+                    (
+                        "COMPONENTS",
+                        "  METRIC                    RAW       NORMALIZED  WEIGHT   CONTRIBUTION",
+                    )
+                )
+                for name, raw_detail in components.items():
+                    detail = raw_detail if isinstance(raw_detail, Mapping) else {}
+                    parameter_lines.append(
+                        f"  {str(name):<25.25} "
+                        f"{_display_value(detail.get('raw')):<9.9} "
+                        f"{_display_value(detail.get('normalized')):<11.11} "
+                        f"{_display_value(detail.get('weight')):<8.8} "
+                        f"{_display_value(detail.get('contribution')):<12.12}"
+                    )
+            feasibility = selected_value.get("feasibility", {})
+            feasibility = feasibility if isinstance(feasibility, Mapping) else {}
+            constraints = feasibility.get("constraints", {})
+            constraints = constraints if isinstance(constraints, Mapping) else {}
+            if constraints:
+                parameter_lines.append(
+                    "CONSTRAINTS · "
+                    + "; ".join(
+                        f"{name}={_display_value(detail.get('mean'))} "
+                        f"({'ok' if detail.get('satisfied') else 'not satisfied'})"
+                        for name, raw_detail in constraints.items()
+                        for detail in [raw_detail if isinstance(raw_detail, Mapping) else {}]
+                    )
+                )
         capacity = max(1, height - len(lines) - len(parameter_lines) - 4)
         start = max(0, selected_candidate - capacity + 1)
         for offset, candidate in enumerate(candidates[start : start + capacity]):
@@ -762,7 +820,8 @@ class StudyRenderer:
             )
             lines.append(
                 f"{'▶' if index == selected_candidate else ' '} "
-                f"Trial {int(candidate.get('trial', index + 1)):<5} "
+                f"{'◆' if candidate.get('pareto_optimal') else ' '}"
+                f"Trial {int(candidate.get('trial', index + 1)):<4} "
                 f"{str(candidate.get('state', 'pending')):<11.11} "
                 f"{terminal:>2}/{len(runs):<4} {best_text:<15.15} "
                 f"{best_location:<21.21} {current_text:<17.17}"
@@ -772,6 +831,8 @@ class StudyRenderer:
                 f"  HPO uses the mean of each completed seed's best {metric} {direction}; "
                 "current is the latest mean."
             )
+        if composite:
+            lines.append("  ◆ marks the current non-dominated Pareto diagnostic in raw metrics.")
         lines.extend(("", *parameter_lines))
         lines.extend(
             (
@@ -890,7 +951,58 @@ class StudyRenderer:
                 f"({objective.get('mode', '-')}); pruned means terminal early stop, not pause."
             )
         if runs and runs[selected_run].get("prune_reason"):
-            lines.append(f"  Pruning reason: {runs[selected_run]['prune_reason']}")
+            termination = runs[selected_run].get("termination", {})
+            termination = termination if isinstance(termination, Mapping) else {}
+            lines.extend(
+                (
+                    "PERFORMANCE PRUNED · candidate-level censored evidence",
+                    (
+                        f"  candidate={termination.get('candidate', candidate.get('trial', '-'))}  "
+                        f"seed={runs[selected_run].get('seed', '-')}  "
+                        f"step={termination.get('common_step', '-')}  "
+                        f"fidelity={_display_value(termination.get('fidelity_targets'))}"
+                    ),
+                    (
+                        f"  utility current={_display_value(termination.get('current_utility'))}  "
+                        f"predicted={_display_value(termination.get('predicted_utility'))} ± "
+                        f"{_display_value(termination.get('predicted_standard_error'))}  "
+                        f"reference Trial={termination.get('reference_candidate', '-')}"
+                    ),
+                    (
+                        f"  P(competitive)="
+                        f"{_display_value(termination.get('probability_competitive'))}  "
+                        f"threshold={_display_value(termination.get('threshold'))}  "
+                        f"margin={_display_value(termination.get('equivalence_margin'))}  "
+                        f"confirmations={termination.get('confirmations', '-')}/"
+                        f"{termination.get('required_confirmations', '-')}"
+                    ),
+                    (
+                        f"  model={termination.get('curve_model', '-')}  "
+                        f"method={termination.get('comparison_method', '-')}  "
+                        f"reason={runs[selected_run]['prune_reason']}"
+                    ),
+                )
+            )
+        if runs and runs[selected_run].get("termination_type") == "scheduler_preempted":
+            termination = runs[selected_run].get("termination", {})
+            termination = termination if isinstance(termination, Mapping) else {}
+            lines.extend(
+                (
+                    "SCHEDULER PAUSED · neutral evidence, resumable from owned checkpoint",
+                    (
+                        f"  step={termination.get('observed_step', '-')}  "
+                        f"old={termination.get('old_action', 'CONTINUE')} "
+                        f"({_display_value(termination.get('old_priority'))})  →  "
+                        f"new={termination.get('new_action', '-')} "
+                        f"({_display_value(termination.get('new_priority'))})"
+                    ),
+                    (
+                        f"  hysteresis={_display_value(termination.get('hysteresis_ratio'))}  "
+                        f"runtime={_seconds(termination.get('elapsed_seconds'))}  "
+                        f"reason={termination.get('reason', '-')}"
+                    ),
+                )
+            )
         lines.extend(("", *metric_lines))
         lines.extend(
             (
@@ -940,9 +1052,7 @@ class StudyInsightRenderer:
             else []
         )
         current_shape = all(
-            "response" in value
-            and "joint_relationships" in value
-            and "pruning_signal" in value
+            "response" in value and "joint_relationships" in value and "pruning_signal" in value
             for value in parameters
         )
         if (
@@ -950,7 +1060,7 @@ class StudyInsightRenderer:
             and isinstance(objective, Mapping)
             and (
                 analysis is None
-                or int(analysis.get("analysis_version", 0) or 0) < 3
+                or int(analysis.get("analysis_version", 0) or 0) < 4
                 or not current_shape
             )
         ):
@@ -1007,6 +1117,8 @@ class StudyInsightRenderer:
         controller = controller if isinstance(controller, Mapping) else {}
         last = controller.get("last", {})
         last = last if isinstance(last, Mapping) else {}
+        scheduler = controller.get("scheduler", {})
+        scheduler = scheduler if isinstance(scheduler, Mapping) else {}
         next_question = analysis.get("next_question")
         next_question = next_question if isinstance(next_question, Mapping) else {}
         constraints = objective.get("constraints", {})
@@ -1035,6 +1147,21 @@ class StudyInsightRenderer:
             f"outcome guardrails: {guardrails or 'none (the declared objective alone decides)'}",
             f"decision model: {analysis.get('decision_model') or 'preparing joint model'}",
             f"controller: {cls._decision(last)}",
+            (
+                "scheduler: "
+                f"slots={scheduler.get('slots_active', '-')} active/"
+                f"{scheduler.get('slots_total', '-')} total  "
+                f"available={scheduler.get('slots_available', '-')}  "
+                f"queued={scheduler.get('queued', 0)}  paused={scheduler.get('paused', 0)}  "
+                f"preempted={scheduler.get('preempted', 0)}"
+            ),
+            (
+                "scheduler evidence: "
+                f"score={_display_value(last.get('score'))}  "
+                f"information={_display_value(last.get('expected_information'))}  "
+                f"cost={_seconds(last.get('expected_cost_seconds'))}  "
+                f"reason={last.get('reason', 'collecting evidence')}"
+            ),
             (
                 f"next question: {next_question.get('parameter', '-')} · "
                 f"{next_question.get('suggestion', 'More evidence is required.')}"
@@ -1131,7 +1258,7 @@ class StudyInsightRenderer:
             suffix += f" seed={seed}"
         if action == "PROPOSE":
             suffix += f" via {value.get('backend', 'sampler')}"
-        if action == "RESUME":
+        if action in {"RESUME", "RESUME_PREEMPTED", "PROMOTE_FIDELITY"}:
             suffix += f" budget={value.get('current', '?')}→{value.get('target', '?')}"
         if action == "SURROGATE_FALLBACK":
             suffix += f" to {value.get('fallback', 'safe fallback')}"
@@ -1226,26 +1353,44 @@ class StudyParameterInsightRenderer:
         if pruning.get("observations"):
             lines.append(
                 f"  total: {int(pruning.get('pruned', 0))}/"
-                f"{int(pruning.get('observations', 0))} terminal Runs pruned "
-                f"({float(pruning.get('pruned_rate', 0)):.0%})"
+                f"{int(pruning.get('observations', 0))} terminal candidates pruned "
+                f"({float(pruning.get('pruned_rate', 0)):.0%}; smoothed 90% interval "
+                f"{float(pruning.get('rate_lower', 0)):.0%}–"
+                f"{float(pruning.get('rate_upper', 1)):.0%})"
             )
             for value in pruning_groups[: min(4, max(1, height // 10))]:
                 label = value.get("label", value.get("value", "-"))
                 lines.append(
                     f"  {_display_value(label):<22.22} "
                     f"{int(value.get('pruned', 0)):>2}/"
-                    f"{int(value.get('observations', 0)):<2} pruned  "
-                    f"{float(value.get('pruned_rate', 0)):>4.0%}"
+                    f"{int(value.get('observations', 0)):<2} pruned candidates  "
+                    f"{float(value.get('pruned_rate', 0)):>4.0%}  "
+                    f"[{float(value.get('rate_lower', 0)):.0%}, "
+                    f"{float(value.get('rate_upper', 1)):.0%}]"
                 )
         else:
-            lines.append("  No succeeded/pruned terminal Run evidence is available yet.")
+            lines.append("  No succeeded/pruned terminal candidate evidence is available yet.")
 
         relationships = [
             value
             for value in parameter.get("joint_relationships", ())
             if isinstance(value, Mapping)
         ]
-        lines.extend(("", "PAIRWISE JOINT PREDICTIVE GAIN · improvement over best marginal"))
+        lines.extend(
+            (
+                "",
+                "JOINT SURROGATE CONTEXT · controller uses all parameters simultaneously",
+                "  Pairwise held-out predictive gain follows; higher-order effects may exist.",
+            )
+        )
+        if parameter.get("interaction_context"):
+            lines.extend(
+                textwrap.wrap(
+                    f"  {parameter['interaction_context']}",
+                    width=max(24, width),
+                    subsequent_indent="    ",
+                )
+            )
         if relationships:
             predictive = [
                 float(value.get("gain", 0))

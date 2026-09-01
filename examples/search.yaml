@@ -9,7 +9,9 @@ search:
   max_parallel: 1
   failure_retries: 1
   # Require two distinct unfavorable objective steps before cooperative pruning.
-  early_stopping: {enabled: true, min_step: 3, confirmations: 2}
+  early_stopping:
+    {enabled: true, min_step: 3, confirmations: 2, probability_threshold: 0.05}
+  seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.0}
   confirmation_top_k: 1
   confirmation_seeds: [1001, 1002, 1003]
   learning_rate: {values: [0.001, 0.01]}

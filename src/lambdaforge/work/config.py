@@ -18,6 +18,7 @@ import yaml
 
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveSearch import SEARCH_POLICY_FIELDS, AdaptiveSearchPolicy
+from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.work.models import immutable_mapping
 from lambdaforge.work.Work import Work
 
@@ -81,13 +82,18 @@ class RunDefinition:
 
     @property
     def run_count(self) -> int:
+        candidates = (
+            min(self.search_policy.candidate_budget, len(self.variants))
+            if self.search_policy is not None
+            else len(self.variants)
+        )
         confirmation = (
-            min(self.search_policy.confirmation_top_k, len(self.variants))
+            min(self.search_policy.confirmation_top_k, candidates)
             * len(self.search_policy.confirmation_seeds)
             if self.search_policy is not None
             else 0
         )
-        return len(self.seeds) * len(self.variants) + confirmation
+        return len(self.seeds) * candidates + confirmation
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,13 +487,17 @@ def _variants(value: Any, *, adaptive: bool = False) -> tuple[Mapping[str, Any],
     finite_values: list[tuple[Any, ...]] = []
     random_space: dict[str, dict[str, Any]] = {}
     random_count = 20
+    proposal_pool_size: int | None = None
     conditional = False
     for raw_name, raw_descriptor in value.items():
         name = str(raw_name)
-        if name in SEARCH_POLICY_FIELDS:
-            continue
         if name == "trials":
             random_count = int(raw_descriptor)
+            continue
+        if name == "proposal_pool_size":
+            proposal_pool_size = int(raw_descriptor)
+            continue
+        if name in SEARCH_POLICY_FIELDS:
             continue
         descriptor = (
             raw_descriptor if isinstance(raw_descriptor, Mapping) else {"values": raw_descriptor}
@@ -530,8 +540,17 @@ def _variants(value: Any, *, adaptive: bool = False) -> tuple[Mapping[str, Any],
             raise ValueError("search.trials must be >= 1.")
         from lambdaforge.hpo.SobolSearch import SobolSearch
 
+        requested = (
+            proposal_pool_size
+            if proposal_pool_size is not None
+            else max(random_count, min(4096, random_count * 16))
+        )
+        finite_cardinality = (
+            math.prod(len(values) for values in finite_values) if not has_range else None
+        )
+        pool_count = min(requested, finite_cardinality) if finite_cardinality else requested
         return tuple(
-            dict(trial.parameters) for trial in SobolSearch(random_space).trials(random_count)
+            dict(trial.parameters) for trial in SobolSearch(random_space).trials(pool_count)
         )
     return tuple(
         dict(zip(finite_names, combination, strict=True))
@@ -617,7 +636,7 @@ def _search_policy(
             )
         return None
     if objective is None:
-        raise ValueError("Adaptive search requires objective.metric and objective.mode.")
+        raise ValueError("Adaptive search requires a scalar or composite objective.")
     policy = AdaptiveSearchPolicy.from_search(value)
     if "min_seeds" not in value:
         policy = replace(policy, min_seeds=min(3, len(seeds)))
@@ -662,49 +681,7 @@ def _objective(value: Any) -> Mapping[str, Any] | None:
         return None
     if not isinstance(value, Mapping):
         raise TypeError("objective must be a mapping.")
-    unknown = set(value) - {"metric", "mode", "constraints"}
-    if unknown or not {"metric", "mode"} <= set(value):
-        raise ValueError(
-            "objective requires metric/mode and optionally constraints; unknown field(s): "
-            f"{sorted(unknown)}."
-        )
-    metric = _nonempty(value["metric"], "objective.metric")
-    mode = str(value["mode"]).lower()
-    if mode not in {"min", "max"}:
-        raise ValueError("objective.mode must be min or max.")
-    raw_constraints = value.get("constraints", {})
-    if not isinstance(raw_constraints, Mapping):
-        raise TypeError("objective.constraints must map metric names to min/max bounds.")
-    constraints: dict[str, dict[str, float]] = {}
-    for raw_name, raw_rule in raw_constraints.items():
-        name = _nonempty(raw_name, "objective.constraints metric")
-        if name == metric:
-            raise ValueError(f"objective.constraints cannot repeat the primary metric {metric!r}.")
-        if not isinstance(raw_rule, Mapping) or not raw_rule:
-            raise TypeError(f"objective.constraints.{name} must contain min and/or max.")
-        if set(raw_rule) - {"min", "max"}:
-            raise ValueError(f"objective.constraints.{name} accepts only min and max bounds.")
-        rule: dict[str, float] = {}
-        for bound in ("min", "max"):
-            if bound not in raw_rule:
-                continue
-            raw_bound = raw_rule[bound]
-            if (
-                isinstance(raw_bound, bool)
-                or not isinstance(raw_bound, int | float)
-                or not math.isfinite(float(raw_bound))
-            ):
-                raise TypeError(f"objective.constraints.{name}.{bound} must be a finite number.")
-            rule[bound] = float(raw_bound)
-        if not rule:
-            raise ValueError(f"objective.constraints.{name} requires min and/or max.")
-        if "min" in rule and "max" in rule and rule["min"] > rule["max"]:
-            raise ValueError(f"objective.constraints.{name} min cannot exceed max.")
-        constraints[name] = rule
-    output: dict[str, Any] = {"metric": metric, "mode": mode}
-    if constraints:
-        output["constraints"] = constraints
-    return output
+    return ObjectiveUtility.normalize(value)
 
 
 def _signature_errors(target: type[Work], configured: Mapping[str, Any]) -> list[str]:

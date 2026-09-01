@@ -25,7 +25,7 @@ proyecto:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.13.0
+python -m pip install lambdaforge==0.13.2
 python -m pip install -e .
 python -m pip check
 ```
@@ -263,7 +263,7 @@ produce un error claro. La ruta y la versión consultada se registran una sola v
 ## Clustering
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.13.0"
+python -m pip install "lambdaforge[clustering]==0.13.2"
 ```
 
 ```python
@@ -303,8 +303,8 @@ añade una clase vaga `GNN`: topología, agregación y equivariancia son decisio
 ## Composición y experimentos adaptativos
 
 `steps` expresa una secuencia y `{parallel: [...]}` un grupo paralelo aislado por procesos. `seeds`
-crea Runs independientes; `search` expande variantes y `objective` selecciona la métrica escalar
-exacta registrada por el Work. Siempre que `search` tenga `objective`, omitir `strategy` activa la
+crea Runs independientes; `search` expande variantes y `objective` define una métrica registrada o
+una utilidad compuesta explícita de rangos fijos. Siempre que `search` tenga `objective`, omitir `strategy` activa la
 política adaptativa segura completa: inicio Sobol, propuestas dependientes de resultados, carrera
 probabilística de seeds, pruning de curvas, detección de convergencia y confirmación con seeds
 nuevas. Un pool Sobol scrambled proporciona puntos
@@ -313,10 +313,30 @@ siguientes. `sampler: auto` usa qLogNEI con GP mixto de BoTorch si está instala
 `lambdaforge[adaptive-hpo]` y existe evidencia suficiente, con fallback k-NN determinista ante una
 dependencia ausente o un fallo numérico. El GP ve conjuntamente todas las dimensiones codificadas,
 incluidas categorías y activación condicional, y qLogNEI incorpora el error estándar entre seeds;
-los paneles por parámetro son explicaciones marginales, no el modelo que decide. Solo aparecen en
-`lf top` los Trials ya propuestos.
+la fidelidad es una entrada explícita: espacios numéricos usan el GP multi-fidelidad de BoTorch,
+los mixtos conservan su coordenada normalizada en el GP conjunto y el fallback k-NN pondera por
+fidelidad comparable. Los paneles por parámetro son explicaciones marginales, no el modelo que
+decide. Solo aparecen en `lf top` los Trials ya propuestos.
 
-El objetivo primario sigue siendo un escalar auditable. Si un valor alto puede resultar engañoso
+La autoridad de decisión HPO siempre es una utilidad escalar auditable. La forma compacta heredada
+es `objective: {metric: val_score, mode: max}`. Si la calidad científica depende realmente de
+varias métricas, declara rangos y pesos fijos:
+
+```text
+objective:
+  aggregation: geometric
+  metrics:
+    val_auprc: {mode: max, weight: 3, range: [0.0, 1.0]}
+    val_balanced_accuracy: {mode: max, weight: 1, range: [0.0, 1.0]}
+```
+
+Existen `weighted_mean`, `geometric` y `chebyshev`. Los pesos se normalizan una vez y los valores
+fuera del rango se recortan. Todos los componentes deben registrarse en el mismo `step` entero:
+LambdaForge nunca mezcla mejores épocas distintas ni últimos valores independientes. Esa utilidad
+gobierna propuestas, seeds, pruning, fidelidad, confirmación y ranking. Los componentes crudos
+siguen visibles y `lf top` marca el frente Pareto no dominado solo como diagnóstico.
+
+Si una utilidad alta puede resultar engañosa
 por sí solo, declara guardas de resultado explícitas en vez de esperar que LambdaForge adivine qué
 otras métricas importan. Cada límite se evalúa en la mejor época del objetivo primario; la
 factibilidad del candidato usa después la media entre seeds de esos valores de la misma época. La
@@ -340,10 +360,15 @@ exista.
 
 El número de seeds es probabilístico, no igual ni fijado por rondas. Un orden compartido permite
 diferencias pareadas; se añade una seed solo mientras la probabilidad de estar a
-`equivalence_margin` del incumbent alcance `seed_probability_threshold`. El ganador usa una cota
+`seed_racing.equivalence_margin` del incumbent alcance
+`seed_racing.probability_threshold`. El ganador usa una cota
 conservadora de búsqueda o, preferiblemente, la media de `confirmation_seeds` nuevas sobre un top-K
 congelado. Por defecto LambdaForge empieza con hasta tres seeds declaradas por candidato y genera
 tres seeds de confirmación deterministas y nuevas; cada valor puede sobrescribirse expresamente.
+Los Runs de confirmación nunca reciben pruning de rendimiento ni preemption oportunista. Si falla
+una seed requerida o no cabe en el presupuesto global, `summary.confirmation.status` queda
+`incomplete`, `confirmation_incomplete` es true y nunca se elige el subconjunto afortunado que
+logró sobrevivir.
 
 Desactivar HPO es deliberadamente sencillo. `strategy: exhaustive` significa un sweep finito
 literal: ejecuta cada combinación de `values` y cada seed, incluidas ramas `when` finitas exactas.
@@ -366,10 +391,10 @@ run: mi_proyecto.Training
 seeds: [4, 7, 32, 54, 65, 94, 109, 124]
 search:
   trials: 40
+  proposal_pool_size: 640
   min_seeds: 1
   startup_trials: 10
-  seed_probability_threshold: 0.1
-  equivalence_margin: 0.002
+  seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.002}
   confirmation_top_k: 2
   confirmation_seeds: [1001, 1002, 1003]
   sampler: auto
@@ -379,7 +404,8 @@ search:
   min_improvement: 0.0005
   runs_per_gpu: 4
   failure_retries: 1
-  early_stopping: {enabled: true, min_step: 5, confirmations: 2}
+  early_stopping: {enabled: true, min_step: 5, confirmations: 2,
+                   probability_threshold: 0.05, equivalence_margin: 0.002}
   learning_rate: {range: [0.00001, 0.003], scale: log}
   hidden_dim: {values: [64, 128, 256]}
 objective: {metric: val_auprc, mode: max}
@@ -430,16 +456,25 @@ objective: {metric: val_auprc, mode: max}
 
 Solo se promueven configuraciones estadísticamente competitivas y la confirmación final siempre
 usa el máximo. El controlador guarda `hpo-control/state.json` y el diario append-only
-`hpo-control/decisions.jsonl` con cada `START_NEW`, `ADD_SEED`, `RESUME`, fallback, convergencia y
+`hpo-control/decisions.jsonl` con cada `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY`, fallback, convergencia y
 confirmación; el resumen del resultado enlaza ambos ficheros.
 
-La planificación es asíncrona de forma conservadora. Si termina un Run mientras el resto del lote
-de adquisición continúa, el controlador puede rellenar el slot libre desde el posterior actualizado
-sin esperar al más lento. Solo admite uno o dos candidatos de anticipación según la concurrencia, y
-BoTorch condiciona qLogNEI en todos los candidatos pendientes. Así limita decisiones obsoletas y el
-crecimiento de cola. No cancela un Run solo porque un posterior actualizado lo ordene peor; únicamente
-la política normal probabilística/de fidelidad puede podarlo con seguridad. Cada lanzamiento queda
-auditado como `START_NEW` con motivo `bounded-async-lookahead`.
+La planificación está dirigida por eventos. Cada Run terminal hace que el slot libre reconsidere
+`START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` y `RESUME_PREEMPTED`; cada alternativa guarda
+información esperada, coste incremental y score compacto en `hpo-control/decisions.jsonl`. Startup
+es una cola de cobertura, no una barrera:
+puede empezar trabajo guiado por el modelo mientras quedan Runs iniciales lentos. Los candidatos
+pendientes condicionan el surrogate en su fidelidad objetivo real, las identidades en cola evitan
+seeds duplicadas y es legítimo esperar si ninguna acción aporta valor científico. La fidelidad es
+entrada explícita del modelo.
+Un modelo Beta/k-NN conjunto de supervivencia usa candidatos completados frente a podados con
+incertidumbre; fallos de recursos y pausas del scheduler son neutrales y nunca se inventa un
+objective completo para una curva parcial.
+Una acción ya iniciada solo se pausa si posee checkpoint gestionado, ha superado un tiempo mínimo y
+una alternativa nueva supera tanto su prioridad original como el valor de continuar por un margen
+de histéresis del 50 %. La petición es cooperativa en una frontera segura, nunca mata el proceso;
+confirmación y la cobertura startup sin score son inmunes. Los eventos `PREEMPT`, `PAUSE` y
+`RESUME_PREEMPTED` conservan prioridades y motivo sin convertir la pausa en evidencia negativa.
 
 Cada Run adaptativo posee un proceso separado tanto en CPU como GPU. Una excepción normal falla
 solo ese Run. Un worker perdido/matado o una OOM de asignación CUDA se reintenta hasta
@@ -451,7 +486,7 @@ estado fallido si algún Run agota la recuperación.
 Los estudios adaptativos añaden una consola HPO accesible con `i`. Compara cada hiperparámetro con
 el objective por candidato y muestra cobertura, dirección o posible umbral numérico, contraste
 categórico, efecto estandarizado, confianza conservadora y qué evidencia convendría obtener
-después. La cabecera separa la última decisión real `START_NEW`, `ADD_SEED`, `RESUME`, fallback o
+después. La cabecera separa la última decisión real `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY`, fallback o
 confirmación. Son asociaciones exploratorias marginales, no relaciones causales; el sampler
 conjunto multivariable sigue siendo la autoridad. Selecciona un parámetro y pulsa Enter/derecha para
 abrir su curva de respuesta agrupada y el panel de relaciones por pares. Este último muestra la
@@ -559,9 +594,15 @@ una parada temprana cooperativa terminal, no un fallo ni una pausa, y al selecci
 muestra su motivo probabilístico. Las curvas parciales podadas permanecen visibles como evidencia
 censurada y `lf top` muestra tasas de poda por región del parámetro. No cuentan como objetivos
 completos exactos en la carrera de seeds, el ajuste del surrogate ni las estadísticas marginales
-del objective: hacerlo exageraría un presupuesto inacabado. Un Trial solo podado aplica en cambio
-una penalización suave de vecindad a propuestas posteriores, conservando la señal negativa sin
-inventar un score. La cabecera
+del objective: hacerlo exageraría un presupuesto inacabado. Si se poda cualquier seed, el candidato
+entero queda censurado y las seeds terminadas antes no forman una media solo de supervivientes. En
+cambio, los resultados por
+candidato alimentan una probabilidad conjunta suavizada de supervivencia con intervalo de
+incertidumbre; informa suavemente propuestas sin sobrecontar seeds ni inventar un score y los
+fallos operacionales son neutrales. `hpo-control/state.json` conserva además
+`pruner_calibration`, con ahorro simulado, falsos prunes, regret, calibración probabilística y error
+de curva. `lf top` expone componentes, constraints, marca Pareto, slots/acciones y el motivo
+persistido completo de cada performance prune. La cabecera
 separa Trials propuestos del presupuesto total, por lo que una combinación futura no aparece como
 si el optimizador ya la hubiese decidido. Debajo de cada
 tabla, paneles alineados muestran previews de parámetros del Trial y métricas del Run seleccionado;

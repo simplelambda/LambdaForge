@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.integrations.Lightning import CallbackBase
 
 
@@ -24,6 +25,7 @@ class AdaptiveHpoCallback(CallbackBase):
         training_metrics_path: Path | None = None,
         chart_include: Sequence[str] | None = None,
         chart_exclude: Sequence[str] | None = None,
+        objective: ObjectiveUtility | None = None,
     ) -> None:
         super().__init__()
         self.metric = metric
@@ -32,6 +34,7 @@ class AdaptiveHpoCallback(CallbackBase):
         self.training_metrics_path = training_metrics_path
         self.chart_include = tuple(str(value) for value in chart_include or ())
         self.chart_exclude = tuple(str(value) for value in chart_exclude or ())
+        self.objective = objective
         self._validation_started: float | None = None
         self._epoch_started: float | None = None
         self._last_training_step: int | None = None
@@ -49,6 +52,11 @@ class AdaptiveHpoCallback(CallbackBase):
         metrics = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
         stop = os.environ.get("LAMBDAFORGE_STOP_REQUEST_PATH")
         training = os.environ.get("LAMBDAFORGE_TRAINING_METRICS_PATH")
+        raw_objective = os.environ.get("LAMBDAFORGE_HPO_OBJECTIVE_CONFIG")
+        try:
+            decoded = json.loads(raw_objective) if raw_objective else None
+        except json.JSONDecodeError:
+            decoded = None
         adaptive = bool(metric and metrics and stop)
         if not adaptive and not training:
             return None
@@ -59,6 +67,7 @@ class AdaptiveHpoCallback(CallbackBase):
             Path(training) if training else None,
             chart_include,
             chart_exclude,
+            ObjectiveUtility(decoded) if isinstance(decoded, dict) else None,
         )
 
     def on_train_epoch_start(self, trainer: Any, *_: Any) -> None:
@@ -93,8 +102,13 @@ class AdaptiveHpoCallback(CallbackBase):
             scalars["validation_time_s"] = time.perf_counter() - self._validation_started
         if bool(getattr(trainer, "is_global_zero", True)):
             self._write_training(scalars, step)
-            if self.metric is not None and self.metrics_path is not None and self.metric in scalars:
-                self._append(self.metrics_path, self.metric, scalars[self.metric], step)
+            if self.metric is not None and self.metrics_path is not None:
+                selected = scalars.get(self.metric)
+                if self.objective is not None and self.objective.composite:
+                    evaluated = self.objective.evaluate(scalars)
+                    selected = float(evaluated["value"]) if evaluated is not None else None
+                if selected is not None:
+                    self._append(self.metrics_path, self.metric, selected, step)
         self._stop(trainer)
 
     def on_fit_end(self, trainer: Any, *_: Any) -> None:

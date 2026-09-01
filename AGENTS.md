@@ -1,6 +1,6 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.13.0. Spanish is
+This is the low-token source of truth for agents using or modifying LambdaForge 0.13.2. Spanish is
 in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
 then inspect the public signature or implementation being changed. Current tests and code override
 assumptions.
@@ -169,8 +169,11 @@ alone remain ordinary Attempt/log Works and must not create study telemetry.
 `steps` is a sequence. `{parallel: [...]}` is one concurrent level. The following level waits for
 all members. Cross-step outputs reference `step.output` and are invalid when the producer has
 multiple seeds/trials. `seeds` creates separate Runs and does not inject a `seed` argument.
-`search` parameters override normal `with` values and are passed normally to `run()`. The objective
-must name a scalar logged through `self.metrics`. Any search with an objective defaults to the full
+`search` parameters override normal `with` values and are passed normally to `run()`. `objective`
+is legacy `metric`/`mode` or a fixed-range `metrics` utility using `weighted_mean`, `geometric` or
+`chebyshev`; composite components must share one integer step. One utility governs every HPO
+decision, constraints stay separate hard guardrails and raw-component Pareto status is diagnostic.
+Any search with an objective defaults to the full
 adaptive policy: scrambled-Sobol startup, optional noise-aware BoTorch mixed-GP qLogNEI with deterministic
 mixed-kNN fallback, probabilistic shared-seed racing, curve pruning, convergence and fresh-seed
 confirmation. Only proposed candidates become public. `strategy: exhaustive` instead enumerates
@@ -178,9 +181,13 @@ exact finite `values`/`when` combinations and every seed; it rejects continuous 
 `trials`. Default confirmation seeds are disjoint; `confirmation_seeds: []` deliberately disables
 them. `search.fidelity` is explicit cumulative Work-defined budget; `self.fidelity` plus checkpoints
 implement continuation and LightningRunner bridges epoch budgets. Controller decisions/state live
-in `hpo-control/decisions.jsonl` and `state.json`. A bounded asynchronous look-ahead fills newly
-free slots from updated evidence while conditioning on all pending candidates; it proposes at most
-one or two candidates per wave and never preempts healthy Runs outside cooperative pruning.
+in `hpo-control/decisions.jsonl` and `state.json`. Confirmation is immune to performance
+pruning/preemption; an incomplete set persists `confirmation_incomplete` and cannot select a
+survivor-only mean. `trials` is the executed-candidate budget and
+`proposal_pool_size` the larger deterministic pool. Event-driven refill compares `START_NEW`,
+`ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` by expected information per cost after every terminal event; startup is not
+a barrier and pending identities prevent duplicate seeds. Root `search.reduction_factor` and
+`search.confidence` are removed in favour of separately owned fidelity/seed/pruning controls.
 `objective.constraints.METRIC.min/max` are explicit guardrails evaluated at the primary-best epoch
 and averaged across seeds; missing/violated evidence is infeasible and excluded from HPO. Never
 infer guardrails or hidden multi-objective weights from other metrics. `runs_per_gpu` packs independent spawned Runs inside the fixed outer
@@ -207,12 +214,20 @@ down-sampled curves, current/best objective and epoch, timing/failure/log; `lf l
 isolates output. Completed HPO uses the mean of each seed's best observed checkpoint; current
 same-step curves drive pruning, and pruned Runs are terminal censored evidence—not failures—and
 excluded as exact values from completed-objective fitting/statistics. Their parameter-region
-pruning rates remain visible and pruned-only Trials mildly discourage nearby proposals without
-fabricating a full-budget score. Default pruning requires two distinct
+pruning rates remain visible. Any performance-pruned seed censors the whole candidate; never average
+its earlier completed seeds as survivor-only evidence. A candidate-level joint survival model with uncertainty softly
+modifies acquisition; multiple seeds do not overcount one candidate and operational failures or
+scheduler preemption remain neutral. Default pruning requires two distinct
 uncompetitive common steps through `early_stopping.confirmations`. Lightning scalar
 callback metrics plus epoch/validation time are automatic. Custom trainers log curves with
 `self.metrics.log(name, value, step=epoch)`; use `progress.update` for coarse progress and
 `self.log`/print only for human narration.
+
+The controller may cooperatively preempt only a scored non-confirmation fidelity Run with a
+verified owned checkpoint, at least 30 seconds of runtime and a competing action exceeding both
+the original and continuation priorities by 50%. It never kills for scheduling. Preserve
+`PREEMPT` → `PAUSE` → `RESUME_PREEMPTED` evidence; startup without a comparable score is protected,
+and a stop arriving after the target still means `completed`.
 
 Adaptive telemetry also includes bounded `hpo_analysis` and the last 25 structured `controller`
 actions. `lf top` opens it with `i`; automation reads
@@ -222,6 +237,9 @@ the joint multivariate sampler. Enter/right opens the selected parameter's bound
 and pairwise joint-predictive-gain panel; descriptive response/coverage begins at two comparable
 observations and predictive gain at three, always with conservative confidence floors. The JSON
 includes response points, pruning signal and a bounded matrix.
+Retrospective pruner quality lives in `hpo-control/state.json` → `pruner_calibration`; it reports
+simulated savings, false prunes, regret and probability/curve calibration without fabricating a
+full objective for censored Runs.
 
 `lf top` renders colour-coded framed Unicode time-series charts without a plotting dependency;
 colour is post-layout and respects `NO_COLOR`. `--history` controls cluster history;

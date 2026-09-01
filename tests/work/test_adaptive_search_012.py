@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
@@ -371,6 +372,40 @@ def test_fresh_confirmation_seeds_select_the_final_candidate(
     assert result.summary["best"]["confirmation_seeds"] == [101, 102]
 
 
+def test_incomplete_confirmation_is_explicit_and_cannot_select_survivors(
+    tmp_path: Path,
+) -> None:
+    config = WorkConfig.from_mapping(
+        {
+            "name": "incomplete-confirmation",
+            "run": "tests.work_cases.ConfirmationFailureWork",
+            "seeds": [1],
+            "search": {
+                "strategy": "adaptive",
+                "trials": 1,
+                "min_seeds": 1,
+                "failure_retries": 0,
+                "confirmation_top_k": 1,
+                "confirmation_seeds": [101, 102],
+                "quality": {"values": [1.0]},
+            },
+            "objective": {"metric": "score", "mode": "max"},
+            "resources": {"cpu": 1},
+        },
+        source=tmp_path / "incomplete-confirmation.yaml",
+    )
+
+    result = WorkRunner().run(config)
+
+    assert result.status == "failed"
+    assert result.summary["best"] is None
+    assert result.summary["confirmation"]["status"] == "incomplete"
+    assert result.summary["confirmation"]["confirmation_incomplete"] is True
+    candidate = result.summary["candidates"][0]
+    assert candidate["confirmation_incomplete"] is True
+    assert candidate["confirmation_complete"] is False
+
+
 def test_multi_fidelity_resumes_only_a_competitive_configuration(
     tmp_path: Path,
 ) -> None:
@@ -411,7 +446,7 @@ def test_multi_fidelity_resumes_only_a_competitive_configuration(
     assert {decision["action"] for decision in decisions} >= {
         "INITIALIZE",
         "START_NEW",
-        "RESUME",
+        "PROMOTE_FIDELITY",
         "FINISH",
     }
     state = json.loads(
@@ -439,7 +474,6 @@ def test_adaptive_search_allocates_more_seeds_only_to_promising_candidates(
                 "trials": 3,
                 "max_parallel": 2,
                 "min_seeds": 1,
-                "reduction_factor": 2,
                 "confirmation_seeds": [],
                 "quality": {"values": [1.0, 2.0, 3.0]},
             },
@@ -452,9 +486,9 @@ def test_adaptive_search_allocates_more_seeds_only_to_promising_candidates(
     result = WorkRunner().run(config)
 
     assert result.status == "succeeded"
-    assert len(result.runs) == 7
+    assert len(result.runs) <= 8
     assert result.summary["planned_runs"] == 12
-    assert result.summary["completed_runs"] == 7
+    assert result.summary["completed_runs"] == len(result.runs)
     assert result.summary["best"]["parameters"] == {"quality": 3.0}
     seeds_by_quality: dict[float, set[int | None]] = {}
     for run in result.runs:
@@ -464,8 +498,8 @@ def test_adaptive_search_allocates_more_seeds_only_to_promising_candidates(
     assert len(seeds_by_quality[1.0]) == 1
     telemetry = json.loads((study_path / "summary.json").read_text(encoding="utf-8"))
     assert telemetry["strategy"] == "adaptive"
-    assert telemetry["counts"]["scheduled_runs"] == 7
-    assert telemetry["counts"]["completed_runs"] == 7
+    assert telemetry["counts"]["scheduled_runs"] == len(result.runs)
+    assert telemetry["counts"]["completed_runs"] == len(result.runs)
     assert len(telemetry["candidates"]) == 3
     observed_runs = [run for candidate in telemetry["candidates"] for run in candidate["runs"]]
     assert all(run["log_path"] for run in observed_runs)
@@ -801,10 +835,12 @@ def test_cpu_dispatch_refills_a_free_slot_before_the_straggler_finishes(
         def shutdown(self, **kwargs: Any) -> None:
             del kwargs
 
-    def refill(result: Any, queued: int, pending: int) -> list[dict[str, Any]]:
+    def refill(
+        result: Any, queued: int, pending: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
         del result, queued
         if 3 not in submitted:
-            assert pending == 1
+            assert len(pending) == 1
             second.set_result(SimpleNamespace(trial={"index": 2}))
             return [{"trial_index": 3, "seed": 3}]
         return []
@@ -937,6 +973,91 @@ def test_default_pruning_requires_two_distinct_uncompetitive_steps(tmp_path: Pat
     assert "confirmations=2/2" in weak_stop.read_text(encoding="utf-8")
 
 
+def test_completed_historical_candidate_can_prune_a_lone_active_straggler(
+    tmp_path: Path,
+) -> None:
+    historical_dir = tmp_path / "historical"
+    historical_dir.mkdir()
+    (historical_dir / "metrics.jsonl").write_text(
+        "".join(
+            json.dumps({"name": "score", "value": 0.9, "step": step, "split": None}) + "\n"
+            for step in range(1, 7)
+        ),
+        encoding="utf-8",
+    )
+    historical = WorkResult(
+        name="work",
+        work_class="tests.work_cases.AdaptiveScoreWork",
+        execution_id="execution-1",
+        run_id="run-historical",
+        attempt_id="attempt-1",
+        attempt_number=1,
+        scientific_fingerprint="sha256:historical",
+        status="succeeded",
+        run_dir=historical_dir,
+        created_at_utc="2026-01-01T00:00:00+00:00",
+        started_at_utc="2026-01-01T00:00:00+00:00",
+        finished_at_utc="2026-01-01T00:00:06+00:00",
+        duration_seconds=6.0,
+        seed=4,
+        trial={"index": 1, "parameters": {"width": 128}},
+        parameters={},
+        inputs=(),
+        requested_resources=WorkResources(1, 0, 0, 0, None, 0, 1),
+        metrics={"score": 0.9},
+        termination_type="completed",
+    )
+    active_metrics = tmp_path / "active.jsonl"
+    active_metrics.write_text(
+        "".join(
+            json.dumps({"name": "score", "value": 0.1, "step": step, "split": None}) + "\n"
+            for step in range(1, 7)
+        ),
+        encoding="utf-8",
+    )
+    prior_rung_dir = tmp_path / "prior-rung"
+    prior_rung_dir.mkdir()
+    (prior_rung_dir / "metrics.jsonl").write_text(
+        "".join(
+            json.dumps({"name": "score", "value": 0.1, "step": step, "split": None}) + "\n"
+            for step in range(1, 4)
+        ),
+        encoding="utf-8",
+    )
+    prior_same_seed = replace(
+        historical,
+        run_id="run-prior-rung",
+        run_dir=prior_rung_dir,
+        trial={"index": 2, "parameters": {"width": 64}},
+        metrics={"score": 0.1},
+        fidelity={"current": 0, "target": 3, "maximum": 9},
+    )
+    stop = tmp_path / "active.stop"
+
+    _request_early_stops(
+        (
+            {
+                "trial_index": 2,
+                "seed": 4,
+                "hpo_metrics_path": active_metrics,
+                "hpo_stop_path": stop,
+            },
+        ),
+        metric="score",
+        mode="max",
+        min_step=3,
+        confirmations=1,
+        probability_threshold=0.25,
+        historical_results=(historical, prior_same_seed),
+    )
+
+    assert stop.is_file()
+    evidence = json.loads((tmp_path / "active.stop.evidence.json").read_text())
+    assert evidence["reference_candidate"] == 1
+    assert evidence["comparison_method"] == "independent-candidate-posterior"
+    assert evidence["candidate_seed_evidence"] == 1
+
+
 def test_pruned_runs_are_not_promoted_by_a_partial_objective(tmp_path: Path) -> None:
     pruned = WorkResult(
         name="work",
@@ -979,3 +1100,4 @@ def test_pruned_runs_are_not_promoted_by_a_partial_objective(tmp_path: Path) -> 
         },
     )
     assert _candidate_score((completed,), "score", "max", 0.0) == 0.9
+    assert _candidate_score((completed, pruned), "score", "max", 0.0) is None

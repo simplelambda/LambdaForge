@@ -12,6 +12,7 @@ from typing import Any
 import torch
 
 from lambdaforge.hpo.AdaptiveSampler import CandidateObservation
+from lambdaforge.hpo.SurvivalModel import SurvivalEstimate
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,20 +57,25 @@ class BayesianSampler:
         *,
         selected: Sequence[int],
         pending: Sequence[int] = (),
+        pending_fidelity: Mapping[int, float] | None = None,
         censored: Sequence[int] = (),
+        survival: Mapping[int, SurvivalEstimate] | None = None,
         count: int,
     ) -> tuple[int, ...]:
         """Rank unseen pool members using a fresh exact GP posterior."""
         available = [trial for trial in sorted(self.candidates) if trial not in set(selected)]
         observed = [item for item in observations if item.trial in self._vectors]
         censored_trials = [trial for trial in censored if trial in self._vectors]
-        dimension = len(next(iter(self._vectors.values()), ()))
+        dimension = len(next(iter(self._vectors.values()), ())) + 1
         if count < 1 or not available:
             return ()
         if len(observed) < max(4, dimension + 1):
             raise RuntimeError("Insufficient observations for Bayesian proposal.")
         provider = self._provider()
-        train_x = torch.tensor([self._vectors[item.trial] for item in observed], dtype=torch.double)
+        train_x = torch.tensor(
+            [(*self._vectors[item.trial], min(1.0, max(0.0, item.fidelity))) for item in observed],
+            dtype=torch.double,
+        )
         sign = 1.0 if self.mode == "max" else -1.0
         train_y = torch.tensor(
             [[sign * float(item.value)] for item in observed], dtype=torch.double
@@ -99,7 +105,10 @@ class BayesianSampler:
                 **model_kwargs,
             )
         else:
-            model = provider["SingleTaskGP"](**model_kwargs)
+            model = provider["SingleTaskMultiFidelityGP"](
+                data_fidelities=[dimension - 1],
+                **model_kwargs,
+            )
         mll = provider["ExactMarginalLogLikelihood"](model.likelihood, model)
         provider["fit_gpytorch_mll"](mll)
         proposed: list[int] = []
@@ -108,7 +117,20 @@ class BayesianSampler:
                 pending_points = [*pending, *proposed]
                 pending_tensor = (
                     torch.tensor(
-                        [self._vectors[trial] for trial in pending_points], dtype=torch.double
+                        [
+                            (
+                                *self._vectors[trial],
+                                min(
+                                    1.0,
+                                    max(
+                                        0.0,
+                                        float((pending_fidelity or {}).get(trial, 1.0)),
+                                    ),
+                                ),
+                            )
+                            for trial in pending_points
+                        ],
+                        dtype=torch.double,
                     )
                     if pending_points
                     else None
@@ -120,7 +142,7 @@ class BayesianSampler:
                     prune_baseline=True,
                 )
                 values = torch.tensor(
-                    [self._vectors[trial] for trial in available], dtype=torch.double
+                    [(*self._vectors[trial], 1.0) for trial in available], dtype=torch.double
                 ).unsqueeze(-2)
                 raw_scores = acquisition(values).reshape(-1).tolist()
                 finite = [float(score) for score in raw_scores if math.isfinite(float(score))]
@@ -131,13 +153,20 @@ class BayesianSampler:
                     score = float(score)
                     if not math.isfinite(score):
                         continue
-                    if censored_trials:
+                    if censored_trials or survival is not None:
                         normalized = (score - low) / span if span > 1e-12 else 0.5
-                        distance = min(
-                            self._distance(trial, censored_trial)
-                            for censored_trial in censored_trials
-                        )
-                        score = normalized - 0.2 * (1 - distance)
+                        if survival is not None and trial in survival:
+                            estimate = survival[trial]
+                            uncertainty = estimate.upper - estimate.lower
+                            score = (
+                                normalized + 0.25 * (estimate.probability - 0.5) + 0.1 * uncertainty
+                            )
+                        elif censored_trials:
+                            distance = min(
+                                self._distance(trial, censored_trial)
+                                for censored_trial in censored_trials
+                            )
+                            score = normalized - 0.2 * (1 - distance)
                     scored.append((score, -trial, trial))
                 chosen = (
                     max(scored)[2]
@@ -172,6 +201,7 @@ class BayesianSampler:
     def _provider() -> dict[str, Any]:
         try:
             models = importlib.import_module("botorch.models")
+            fidelity_models = importlib.import_module("botorch.models.gp_regression_fidelity")
             transforms = importlib.import_module("botorch.models.transforms.outcome")
             acquisition = importlib.import_module("botorch.acquisition.logei")
             fit = importlib.import_module("botorch.fit")
@@ -181,8 +211,8 @@ class BayesianSampler:
                 "Bayesian HPO requires 'pip install lambdaforge[adaptive-hpo]'."
             ) from error
         return {
-            "SingleTaskGP": models.SingleTaskGP,
             "MixedSingleTaskGP": models.MixedSingleTaskGP,
+            "SingleTaskMultiFidelityGP": fidelity_models.SingleTaskMultiFidelityGP,
             "Standardize": transforms.Standardize,
             "qLogNoisyExpectedImprovement": acquisition.qLogNoisyExpectedImprovement,
             "fit_gpytorch_mll": fit.fit_gpytorch_mll,

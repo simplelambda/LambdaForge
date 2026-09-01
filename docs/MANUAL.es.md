@@ -392,14 +392,20 @@ productor. Ramas, condiciones y bucles complejos pertenecen a Python.
 `seeds` crea Runs independientes. Con `objective`, omitir `strategy` activa por defecto todas las
 optimizaciones seguras: inicio Sobol scrambled, propuestas dependientes de resultados, carrera
 probabilística de seeds, pruning de curvas, convergencia, recuperación acotada y confirmación con
-seeds nuevas. El pool acotado por `trials` es planificación interna; solo los Trials realmente
+seeds nuevas. `proposal_pool_size` acota el pool Sobol interno (por defecto hasta 16 veces
+`trials`, máximo 4096), mientras `trials` solo limita candidatos realmente ejecutables. Solo los Trials
 propuestos aparecen en `lf top`. Tras `startup_trials`, `sampler: auto` prefiere GP mixto qLogNEI de
 BoTorch si está instalado `lambdaforge[adaptive-hpo]` y hay evidencia suficiente; ante dependencia
 ausente o inestabilidad numérica usa el surrogate mixto k-NN determinista. Es un modelo de decisión
 realmente conjunto: números, categorías e indicadores de activación condicional comparten un mismo
 vector, por lo que el posterior puede depender de interacciones. Si las seeds repetidas producen
 error estándar, se pasa como ruido observado; qLogNEI considera ese ruido y los miembros pendientes
-en su totalidad. La familia log-EI se usa por su mayor estabilidad numérica
+en su totalidad. Un Run pendiente conserva su fidelidad objetivo real en vez de representarse como
+un resultado ficticio a presupuesto completo. La fidelidad es una entrada normalizada explícita:
+espacios numéricos usan `SingleTaskMultiFidelityGP`, los mixtos/categóricos
+conservan esa coordenada en `MixedSingleTaskGP` y el fallback k-NN combina distancia de parámetros y
+fidelidad de forma conservadora. La adquisición puntúa candidatos nuevos a fidelidad objetivo. La
+familia log-EI se usa por su mayor estabilidad numérica
 ([guía de adquisición de BoTorch](https://botorch.org/docs/optimization)).
 
 El objetivo admite restricciones de resultado explícitas:
@@ -419,8 +425,26 @@ métrica ausente o una media que viole el límite hace al candidato no factible:
 pero no entra en carrera de seeds, observaciones del surrogate ni selección final. Así un checkpoint
 afortunado no oculta un modelo que incumple un criterio científico declarado. LambdaForge nunca
 infiere restricciones de otras métricas, sus nombres o direcciones: hacerlo cambiaría en silencio
-la pregunta científica. Varios objetivos requieren un problema Pareto explícito y no se simulan
-mediante pesos ocultos.
+la pregunta científica.
+
+Para un compromiso gradual deliberado, `objective.metrics` define una utilidad compuesta. Cada
+componente exige `mode`, `weight` no negativo y `range` finito fijo; se puede agregar mediante
+`weighted_mean`, `geometric` o `chebyshev`. Los pesos se normalizan al validar y los rangos nunca
+dependen de observaciones futuras. Solo se combinan componentes del mismo step entero real.
+
+```yaml
+objective:
+  aggregation: geometric
+  metrics:
+    val_auprc: {mode: max, weight: 3, range: [0.0, 1.0]}
+    val_balanced_accuracy: {mode: max, weight: 1, range: [0.0, 1.0]}
+  constraints:
+    val_kappa: {min: 0.05}
+```
+
+Una única utilidad gobierna adquisición, seeds, pruning, fidelidad, confirmación y ranking. Las
+constraints siguen siendo guardas duras separadas. Componentes, contribuciones y frente Pareto
+diagnóstico permanecen visibles sin convertirse en una segunda política oculta.
 
 Por defecto se inicia con hasta tres seeds declaradas por candidato y se generan tres seeds de
 confirmación deterministas y disjuntas. Puede cambiarse cada valor y `confirmation_seeds: []`
@@ -436,7 +460,8 @@ $$
 P(\mu_i\geq\mu_{i^\star}-\epsilon\mid D)\geq\delta,
 $$
 
-donde `equivalence_margin` es \(\epsilon\) y `seed_probability_threshold` es \(\delta\). Los
+donde `seed_racing.equivalence_margin` es \(\epsilon\) y
+`seed_racing.probability_threshold` es \(\delta\). Los
 candidatos dominados dejan de recibir seeds y la reducción de incertidumbre se divide por el coste
 temporal observado. La selección final usa una cota conservadora o, preferiblemente, la media de
 `confirmation_seeds` nuevas sobre un top-K congelado. `max_runs`, `max_time`,
@@ -451,18 +476,28 @@ media de los mejores valores por seed, nunca la seed más afortunada. Las seeds 
 confirmación y la cota conservadora reducen el sesgo de validar repetidamente. El suelo inicial por
 defecto es de hasta tres seeds declaradas por Trial propuesto: permite estimar variabilidad sin
 gastar todas las seeds en una configuración claramente dominada.
+Confirmación nunca recibe pruning de rendimiento ni preemption oportunista. Si falta o falla una
+seed requerida, persiste `summary.confirmation.status=incomplete` y
+`confirmation_incomplete=true`; la media sesgada del subconjunto superviviente nunca selecciona el
+modelo.
 
 El diario append-only `hpo-control/decisions.jsonl` explica inicialización, surrogate/fallback,
-`START_NEW`, `ADD_SEED`, `RESUME`, convergencia, confirmación y final. `state.json` conserva el
+`START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY`, convergencia, confirmación y final. `state.json` conserva el
 snapshot compacto; `summary.adaptive_controller` enlaza ambos sin copiar modelos ni checkpoints.
 
-El bucle de adquisición es asíncrono y acotado. Una observación terminal puede rellenar un slot
-libre mientras otros Runs del lote siguen activos. El controlador propone como máximo
-`max(1, min(2, paralelismo // 3))` candidatos de anticipación por oleada, condiciona la adquisición
-bayesiana en todos los candidatos pendientes y registra `START_NEW` con
-`reason=bounded-async-lookahead`. Esto oculta stragglers largos sin construir una cola grande desde
-posteriors obsoletos. No interrumpe un Run sano porque cambie el ranking: el pruning cooperativo y
-las decisiones de fidelidad siguen siendo los únicos mecanismos de cancelación científica.
+El bucle de adquisición está dirigido por eventos, no por barreras. Cada observación terminal
+reevalúa `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` y `RESUME_PREEMPTED` según información esperada por coste incremental.
+Startup se envía gradualmente y puede entrelazarse con decisiones del modelo. Las identidades
+pendientes condicionan el surrogate y evitan seeds duplicadas. Cada acción registra score, coste,
+motivo y alternativas compactas; esperar solo es válido si no queda acción útil bajo presupuesto.
+Una acción puntuada ya activa solo puede preemptarse tras 30 segundos, con un checkpoint propio no
+symlink, y si la siguiente alternativa útil supera en un 50 % tanto su prioridad original como el
+valor actual de continuar. Startup sin score comparable y toda confirmación quedan protegidos.
+LambdaForge escribe una parada cooperativa, espera que el Work/Lightning retorne en una frontera
+segura y después reanuda el mismo Run y target de fidelidad desde checkpoint; nunca mata el worker
+por esta optimización. El diario distingue `PREEMPT`, `PAUSE`, `CONTINUE` y `RESUME_PREEMPTED` con
+prioridades antiguas/nuevas y el cambio de evidencia. `scheduler_preempted` es neutral, nunca
+pruning de rendimiento.
 
 ### 7.1 Sweeps exactos sin HPO
 
@@ -494,9 +529,9 @@ search:
   runs_per_gpu: 4
   startup_trials: 10
   min_seeds: 1
-  reduction_factor: 2
   failure_retries: 1
-  early_stopping: {enabled: true, min_step: 5, confirmations: 2}
+  early_stopping: {enabled: true, min_step: 5, confirmations: 2,
+                   probability_threshold: 0.05, equivalence_margin: 0.0}
   learning_rate: {range: [0.00001, 0.003], scale: log}
   hidden_dim: {values: [64, 128, 256]}
 objective: {metric: val_auprc, mode: max}
@@ -570,7 +605,8 @@ El stop es cooperativo. Un Work registra `self.metrics.log("val_auprc", valor, s
 consulta `self.stop_requested` en un límite seguro, guardando checkpoint antes de retornar. El
 controlador compara Runs a un step común tras `early_stopping.min_step`. Una proyección lineal local
 acotada conserva incertidumbre residual y solicita parar solo cuando la probabilidad de seguir a
-`equivalence_margin` del incumbent cae bajo `seed_probability_threshold`; no elimina una fracción
+`early_stopping.equivalence_margin` del incumbent cae bajo
+`early_stopping.probability_threshold`; no elimina una fracción
 fija. Por defecto la condición debe mantenerse en dos steps comunes distintos
 (`confirmations: 2`): sondear repetidamente la misma época no suma evidencia. Usa
 `confirmations: 1` solo para una política deliberadamente agresiva. `LightningRunner` enlaza
@@ -606,10 +642,30 @@ no es un fallo, no queda pausado ni se reanuda después, y se muestra su motivo 
 con solo seeds podadas queda `pruned`, no `failed`. Sus curvas parciales se conservan como evidencia
 censurada, pero no entran como valores exactos en medias de seeds completas, ajuste del surrogate
 ni estadísticas marginales del objective: tratar su mejor punto parcial como presupuesto completo
-sesgaría la búsqueda. LambdaForge sí conserva la información: el modelo de lectura HPO muestra la
-tasa terminal de poda por región y un Trial solo podado añade una penalización suave de vecindad al
-seleccionar propuestas. Es evidencia negativa censurada, no un objetivo escalar inventado. El
+sesgaría la búsqueda. Si cualquier seed recibe pruning de candidato, el candidato entero queda
+censurado: las seeds terminadas antes no se promedian como un objective solo de supervivientes.
+LambdaForge sí conserva la información: el modelo de lectura HPO muestra la
+tasa terminal de poda por región. Los resultados completado/podado por candidato alimentan un
+modelo conjunto de supervivencia con intervalo suavizado de incertidumbre; varias seeds no
+sobrerrepresentan un candidato y fallos de infraestructura/recursos o preemption son neutrales. Es
+evidencia negativa censurada, no un objetivo escalar inventado. El
 detalle JSON conserva además el token heredado exacto para grants UUID/MIG.
+
+El controlador también reejecuta retrospectivamente la política de pruning sobre curvas completas
+y escribe el informe acotado en `hpo-control/state.json` como `pruner_calibration`. Conserva los
+parámetros de política, podas simuladas, Runs/epochs/GPU-seconds que se habrían ahorrado, tasa de
+falsos prunes, regret, Brier score de probabilidad, RMSE de curva y cobertura aproximada del
+intervalo al 90 %. Un estudio pequeño devuelve incertidumbres `null`, no certeza inventada. Es una
+auditoría retrospectiva: no altera objetivos ni inventa el contrafactual de un Run realmente
+podado.
+
+`lf top` consume esa misma evidencia del controlador, no ajusta otro modelo HPO. La vista de
+candidato muestra media/error estándar de la utilidad compuesta, agregación, componentes raw y
+normalizados del mismo checkpoint, pesos/contribuciones, constraints y pertenencia Pareto
+diagnóstica. El panel HPO muestra slots activos/disponibles, Runs en cola/pausados y score,
+información y coste de la última acción. Un Run podado despliega candidato, step/fidelity,
+incertidumbre de predicción, incumbent, probabilidad, umbral, margen, confirmaciones y modelo de
+curva persistidos.
 
 Pulsa `i` desde candidatos o Trial de un estudio adaptativo para abrir la consola de evidencia HPO.
 Por cada hiperparámetro detectado calcula un diagnóstico acotado por candidato: dirección de rango,

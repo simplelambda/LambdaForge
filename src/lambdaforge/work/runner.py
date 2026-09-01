@@ -38,6 +38,9 @@ from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservatio
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
 from lambdaforge.hpo.BayesianSampler import BayesianSampler
+from lambdaforge.hpo.CurveEvidence import CompletedCurve, audit_pruner, predict_curve
+from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility, constraint_satisfied, pareto_front
+from lambdaforge.hpo.SurvivalModel import SurvivalModel, SurvivalObservation
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
 from lambdaforge.work.cache import WorkCache
@@ -61,6 +64,7 @@ from lambdaforge.work.study import StudyTelemetry
 _GPU_ADMISSION_POLL_SECONDS = 1.0
 _GPU_LAUNCH_STAGGER_SECONDS = 5.0
 _GPU_WAIT_LOG_SECONDS = 30.0
+_PRUNER_AUDIT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,7 +406,11 @@ class WorkRunner:
         assert objective is not None
         metric, mode = objective["metric"], objective["mode"]
         objective_runs = [result for result in outcomes if result.name == objective_name]
-        successful_all = [result for result in objective_runs if result.ok and not result.pruned]
+        successful_all = [
+            result
+            for result in objective_runs
+            if result.ok and not result.pruned and result.termination_type == "completed"
+        ]
         latest: dict[tuple[int, int | None, str | None], WorkResult] = {}
         for result in successful_all:
             trial = result.trial or {"index": 0}
@@ -420,6 +428,12 @@ class WorkRunner:
             ):
                 latest[key] = result
         successful = list(latest.values())
+        censored_search_trials = {
+            int((result.trial or {"index": 0})["index"])
+            for result in objective_runs
+            if result.study_phase != "confirmation"
+            and result.termination_type == "performance_pruned"
+        }
         if any(_result_objective(result, metric) is None for result in successful):
             missing = [
                 result.run_id for result in successful if _result_objective(result, metric) is None
@@ -433,12 +447,41 @@ class WorkRunner:
             grouped.setdefault(int(trial["index"]), []).append(result)
         candidates: list[dict[str, Any]] = []
         selection_scores: dict[int, float] = {}
-        has_confirmation = any(result.study_phase == "confirmation" for result in successful)
+        confirmation_policies = [
+            definition.search_policy
+            for definition in adaptive_definitions
+            if definition.name == objective_name and definition.search_policy is not None
+        ]
+        expected_confirmation_seeds = {
+            seed for policy in confirmation_policies for seed in policy.confirmation_seeds
+        }
+        confirmation_attempts = [
+            result for result in objective_runs if result.study_phase == "confirmation"
+        ]
+        confirmation_trial_ids = {
+            int((result.trial or {"index": -1})["index"]) for result in confirmation_attempts
+        }
+        has_confirmation = bool(expected_confirmation_seeds or confirmation_attempts)
         for trial_index, results in sorted(grouped.items()):
             search_results = [result for result in results if result.study_phase != "confirmation"]
             confirmation_results = [
                 result for result in results if result.study_phase == "confirmation"
             ]
+            failed_confirmation = [
+                result
+                for result in confirmation_attempts
+                if int((result.trial or {"index": -1})["index"]) == trial_index and not result.ok
+            ]
+            completed_confirmation_seeds = {result.seed for result in confirmation_results}
+            confirmation_expected = trial_index in confirmation_trial_ids
+            confirmation_complete = (
+                confirmation_expected
+                and bool(expected_confirmation_seeds)
+                and (
+                    completed_confirmation_seeds == expected_confirmation_seeds
+                    and not failed_confirmation
+                )
+            )
             evidence = confirmation_results or search_results
             feasibility = _candidate_constraints(evidence, objective)
             value = statistics.fmean(
@@ -480,6 +523,11 @@ class WorkRunner:
                     (result.seed for result in confirmation_results),
                     key=lambda seed: -1 if seed is None else seed,
                 ),
+                "confirmation_expected": confirmation_expected,
+                "confirmation_complete": confirmation_complete,
+                "confirmation_incomplete": confirmation_expected and not confirmation_complete,
+                "confirmation_failures": [result.run_id for result in failed_confirmation],
+                "partially_censored": trial_index in censored_search_trials,
                 "search_uncertainty": _sample_uncertainty(search_results, metric),
                 "confirmation_uncertainty": _sample_uncertainty(confirmation_results, metric),
                 "feasibility": feasibility,
@@ -491,10 +539,29 @@ class WorkRunner:
                     }
                 ),
             }
+            component_groups: dict[str, list[float]] = {}
+            for result in evidence:
+                observation = result.objective_observation or {}
+                components = observation.get("components", {})
+                if not isinstance(components, Mapping):
+                    continue
+                for name, raw_detail in components.items():
+                    detail = raw_detail if isinstance(raw_detail, Mapping) else {}
+                    raw = detail.get("raw")
+                    if isinstance(raw, int | float) and not isinstance(raw, bool):
+                        component_groups.setdefault(str(name), []).append(float(raw))
+            if component_groups:
+                candidate["raw_metrics"] = {
+                    name: statistics.fmean(values) for name, values in component_groups.items()
+                }
             candidates.append(candidate)
-            if confirmation_results and feasibility["feasible"]:
+            if confirmation_complete and feasibility["feasible"]:
                 selection_scores[trial_index] = value
-            elif not has_confirmation and feasibility["feasible"]:
+            elif (
+                not has_confirmation
+                and feasibility["feasible"]
+                and trial_index not in censored_search_trials
+            ):
                 score = _candidate_score(search_results, metric, mode, 1.0)
                 if score is not None:
                     selection_scores[trial_index] = score
@@ -517,8 +584,35 @@ class WorkRunner:
                 ),
             }
         summary["objective"] = dict(objective)
+        pareto_trials = set(pareto_front(candidates, objective))
+        for candidate in candidates:
+            raw_trial = candidate["trial"]
+            candidate["pareto_optimal"] = isinstance(raw_trial, int) and raw_trial in pareto_trials
         summary["candidates"] = candidates
         summary["best"] = selected
+        if has_confirmation:
+            complete_candidates = sum(
+                bool(candidate.get("confirmation_complete")) for candidate in candidates
+            )
+            expected_candidates = min(
+                max(
+                    (policy.confirmation_top_k for policy in confirmation_policies),
+                    default=0,
+                ),
+                len(candidates),
+            )
+            confirmation_incomplete = complete_candidates < expected_candidates
+            summary["confirmation"] = {
+                "status": "incomplete" if confirmation_incomplete else "complete",
+                "confirmation_incomplete": confirmation_incomplete,
+                "expected_seeds": sorted(expected_confirmation_seeds),
+                "expected_candidates": expected_candidates,
+                "attempted_runs": len(confirmation_attempts),
+                "completed_runs": sum(result.ok for result in confirmation_attempts),
+                "failed_runs": sum(not result.ok for result in confirmation_attempts),
+                "complete_candidates": complete_candidates,
+                "selection_available": selected is not None,
+            }
         return summary
 
     @staticmethod
@@ -675,12 +769,17 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
     metrics_path = specification.get("hpo_metrics_path")
     stop_path = specification.get("hpo_stop_path")
     objective = specification.get("hpo_objective")
+    objective_config = specification.get("hpo_objective_config")
     if metrics_path is not None:
         environment["LAMBDAFORGE_HPO_METRICS_PATH"] = str(metrics_path)
     if stop_path is not None:
         environment["LAMBDAFORGE_STOP_REQUEST_PATH"] = str(stop_path)
     if objective is not None:
         environment["LAMBDAFORGE_HPO_OBJECTIVE"] = str(objective)
+    if isinstance(objective_config, Mapping):
+        environment["LAMBDAFORGE_HPO_OBJECTIVE_CONFIG"] = json.dumps(
+            objective_config, sort_keys=True, separators=(",", ":")
+        )
     semaphore = specification.get("gpu_semaphore")
     if semaphore is not None:
         semaphore.acquire()
@@ -770,6 +869,12 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
     temp_dir = run_dir / "tmp"
     temp_dir.mkdir()
     checkpoints = CheckpointCollection(checkpoint_root)
+    raw_checkpoint_manifest = specification.get("hpo_checkpoint_manifest_path")
+    if raw_checkpoint_manifest is not None:
+        atomic_json(
+            Path(str(raw_checkpoint_manifest)),
+            {"checkpoint_root": str(checkpoint_root.resolve()), "run_id": run_id},
+        )
     resuming = any(path.is_file() for path in checkpoint_root.rglob("*"))
     resources = _work_resources(definition.resources.to_dict())
     config_view = WorkConfiguration(
@@ -897,6 +1002,29 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         paths=(run_dir / "metrics.jsonl", training_metrics_path),
         fallback=runtime.metrics.latest,
     )
+    stop_path = (
+        Path(str(specification["hpo_stop_path"])) if specification.get("hpo_stop_path") else None
+    )
+    termination_type, termination = _run_termination(
+        status=status,
+        failure=failure,
+        stop_path=stop_path,
+        completed_step=(
+            max(
+                (
+                    step
+                    for step, _value in _objective_history(
+                        Path(str(specification["hpo_metrics_path"])),
+                        str(specification.get("hpo_objective", "")),
+                    )
+                ),
+                default=None,
+            )
+            if specification.get("hpo_metrics_path") and specification.get("hpo_objective")
+            else None
+        ),
+        target_step=fidelity.target if fidelity is not None else None,
+    )
     result = WorkResult(
         definition.name,
         definition.work_class,
@@ -925,13 +1053,11 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         failure=failure,
         resumed_from_checkpoint=resuming,
         job_id=os.environ.get("LAMBDAFORGE_JOB_ID"),
-        pruned=bool(
-            specification.get("hpo_stop_path")
-            and Path(str(specification["hpo_stop_path"])).is_file()
-        ),
+        pruned=termination_type == "performance_pruned",
         prune_reason=(
             _prune_reason(Path(str(specification["hpo_stop_path"])))
-            if specification.get("hpo_stop_path")
+            if termination_type == "performance_pruned"
+            and specification.get("hpo_stop_path")
             and Path(str(specification["hpo_stop_path"])).is_file()
             else None
         ),
@@ -952,6 +1078,8 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
             else None
         ),
         objective_observation=objective_observation,
+        termination_type=termination_type,
+        termination=termination,
     )
     result.write(run_dir / "result.json")
     atomic_json(run_root / "result.json", result.to_dict())
@@ -971,11 +1099,13 @@ def _execute_adaptive_group(
     objective = definition.get("objective") or {}
     metric = str(objective["metric"])
     mode = str(objective["mode"])
+    objective_evaluator = ObjectiveUtility(objective)
     parallelism = _adaptive_parallelism(resources, policy)
     by_trial: dict[int, list[Mapping[str, Any]]] = {}
     for specification in specifications:
         by_trial.setdefault(int(specification["trial_index"]), []).append(specification)
     all_trials = sorted(by_trial)
+    candidate_budget = min(policy.candidate_budget, len(all_trials))
     control_root = Path(str(specifications[0]["execution_dir"])) / "hpo-control"
     control_root.mkdir(parents=True, exist_ok=True)
     decisions_path = control_root / "decisions.jsonl"
@@ -1013,20 +1143,23 @@ def _execute_adaptive_group(
             strategy="adaptive",
             objective=objective,
             specifications=(),
-            planned_runs=len(specifications)
-            + min(policy.confirmation_top_k, len(all_trials)) * len(policy.confirmation_seeds),
-            planned_candidates=len(all_trials),
+            planned_runs=candidate_budget * seed_count
+            + min(policy.confirmation_top_k, candidate_budget) * len(policy.confirmation_seeds),
+            planned_candidates=candidate_budget,
         )
     print(
-        f"[hpo] action-adaptive search: candidate_budget={len(all_trials)} "
-        f"startup={min(policy.startup_trials, len(all_trials))} seeds={seed_count} "
+        f"[hpo] action-adaptive search: candidate_budget={candidate_budget} "
+        f"proposal_pool={len(all_trials)} startup={min(policy.startup_trials, candidate_budget)} "
+        f"seeds={seed_count} "
         f"parallel={parallelism} runs_per_gpu={policy.runs_per_gpu}",
         flush=True,
     )
     record_decision(
         "INITIALIZE",
-        candidate_budget=len(all_trials),
+        candidate_budget=candidate_budget,
+        proposal_pool_size=len(all_trials),
         search_seed_budget=seed_count,
+        slots_total=parallelism,
         policy=policy.to_dict(),
     )
     candidate_parameters = {
@@ -1034,6 +1167,7 @@ def _execute_adaptive_group(
     }
     selector = AdaptiveSampler(candidate_parameters, mode=mode)
     bayesian = BayesianSampler(candidate_parameters, mode=mode)
+    survival_model = SurvivalModel(candidate_parameters)
     racer = AdaptiveSeedRacer(
         mode=mode,
         margin=policy.equivalence_margin,
@@ -1043,6 +1177,18 @@ def _execute_adaptive_group(
     proposal_numbers: dict[int, int] = {}
     pool_trials_by_proposal: dict[int, int] = {}
     inflight_by_trial: dict[int, int] = {}
+    pending_fidelity_by_trial: dict[int, float] = {}
+    scheduled_run_keys: set[tuple[int, int | None, str, int]] = set()
+
+    def scheduling_key(specification: Mapping[str, Any]) -> tuple[int, int | None, str, int]:
+        raw_fidelity = specification.get("hpo_fidelity")
+        target = int(raw_fidelity.get("target", 0)) if isinstance(raw_fidelity, Mapping) else 0
+        return (
+            int(specification.get("candidate_pool_index", specification["trial_index"])),
+            int(specification["seed"]) if specification.get("seed") is not None else None,
+            str(specification.get("hpo_phase", "search")),
+            target,
+        )
 
     def public_trial(pool_trial: int) -> int:
         public_trial = proposal_numbers.get(pool_trial)
@@ -1086,14 +1232,21 @@ def _execute_adaptive_group(
     def next_seed_specification(pool_trial: int) -> dict[str, Any] | None:
         attempted = {result.seed for result in completed[pool_trial]}
         for raw in by_trial[pool_trial]:
-            if raw.get("seed") not in attempted:
-                return prepared(pool_trial, raw)
+            value = prepared(pool_trial, raw)
+            if raw.get("seed") not in attempted and scheduling_key(value) not in scheduled_run_keys:
+                return value
         return None
 
     def resume_specification(result: WorkResult) -> dict[str, Any] | None:
         if policy.fidelity is None or result.fidelity is None or not result.ok or result.pruned:
             return None
-        current = int(result.fidelity["target"])
+        preempted = result.termination_type == "scheduler_preempted"
+        raw_observed = result.termination.get("observed_step")
+        current = (
+            int(raw_observed)
+            if preempted and isinstance(raw_observed, int) and not isinstance(raw_observed, bool)
+            else int(result.fidelity["target"])
+        )
         if current >= policy.fidelity.maximum:
             return None
         pool_trial = pool_trial_for(result)
@@ -1104,14 +1257,25 @@ def _execute_adaptive_group(
         if raw is None:
             return None
         value = prepared(pool_trial, raw)
-        value["hpo_fidelity"] = {
-            "current": current,
-            "target": min(
+        target = (
+            int(result.fidelity["target"])
+            if preempted
+            else min(
                 policy.fidelity.maximum,
                 max(current + 1, current * policy.fidelity.reduction_factor),
-            ),
+            )
+        )
+        if target <= current:
+            return None
+        value["hpo_fidelity"] = {
+            "current": current,
+            "target": target,
             "maximum": policy.fidelity.maximum,
         }
+        if preempted:
+            value["hpo_resume_preempted"] = True
+        if scheduling_key(value) in scheduled_run_keys:
+            return None
         return value
 
     def pool_trial_for(result: WorkResult) -> int:
@@ -1121,9 +1285,20 @@ def _execute_adaptive_group(
     def values_by_trial(*, final_only: bool = True) -> dict[int, dict[int | None, float]]:
         values: dict[int, dict[int | None, tuple[int, float, WorkResult]]] = {}
         for trial, results in completed.items():
+            if any(
+                result.pruned or result.termination_type == "performance_pruned"
+                for result in results
+            ):
+                # Candidate-level pruning censors the whole candidate. Keeping only its earlier
+                # successful seeds would select survivors and bias both racing and the surrogate.
+                continue
             for result in results:
                 objective_value = _result_objective(result, metric)
-                if not result.ok or result.pruned or objective_value is None:
+                if (
+                    result.pruned
+                    or result.termination_type != "completed"
+                    or objective_value is None
+                ):
                     continue
                 target = (
                     int(result.fidelity["target"]) if result.fidelity is not None else 2**31 - 1
@@ -1144,11 +1319,24 @@ def _execute_adaptive_group(
 
     def observations() -> list[CandidateObservation]:
         estimates = racer.estimates(values_by_trial(final_only=False))
+        fidelity_by_trial = {
+            trial: max(
+                (
+                    int((result.fidelity or {}).get("target", 1))
+                    / max(1, int((result.fidelity or {}).get("maximum", 1)))
+                    for result in completed[trial]
+                    if result.ok and not result.pruned
+                ),
+                default=1.0,
+            )
+            for trial in proposed
+        }
         return [
             CandidateObservation(
                 trial,
                 estimates[trial].mean,
                 estimates[trial].standard_error,
+                fidelity_by_trial[trial],
             )
             for trial in proposed
             if trial in estimates
@@ -1165,6 +1353,57 @@ def _execute_adaptive_group(
         pending_trials = sorted(
             trial for trial, active_count in inflight_by_trial.items() if active_count > 0
         )
+        survival_observations: list[SurvivalObservation] = []
+        for trial in proposed:
+            scientific = [
+                result
+                for result in completed[trial]
+                if result.termination_type in {"completed", "performance_pruned"}
+            ]
+            if not scientific:
+                continue
+            candidate_weight = 1.0 / len(scientific)
+            for result in scientific:
+                fidelity = result.fidelity or {}
+                target = int(fidelity.get("target", 1))
+                maximum = max(1, int(fidelity.get("maximum", target)))
+                evidence_weight = 1.0
+                if result.termination_type == "performance_pruned":
+                    termination = result.termination
+                    probability = termination.get("probability_competitive")
+                    threshold = termination.get("threshold")
+                    observed_confirmations = termination.get("confirmations")
+                    required_confirmations = termination.get("required_confirmations")
+                    probability_strength = (
+                        min(
+                            1.0,
+                            max(0.1, 1.0 - float(probability) / max(float(threshold), 1e-9)),
+                        )
+                        if isinstance(probability, int | float)
+                        and not isinstance(probability, bool)
+                        and isinstance(threshold, int | float)
+                        and not isinstance(threshold, bool)
+                        else 0.5
+                    )
+                    confirmation_strength = (
+                        min(1.0, float(observed_confirmations) / float(required_confirmations))
+                        if isinstance(observed_confirmations, int | float)
+                        and not isinstance(observed_confirmations, bool)
+                        and isinstance(required_confirmations, int | float)
+                        and not isinstance(required_confirmations, bool)
+                        and float(required_confirmations) > 0
+                        else 0.5
+                    )
+                    evidence_weight = probability_strength * confirmation_strength
+                survival_observations.append(
+                    SurvivalObservation(
+                        trial,
+                        result.termination_type == "completed",
+                        fidelity=target / maximum,
+                        weight=candidate_weight * evidence_weight,
+                    )
+                )
+        survival = survival_model.predict_all(survival_observations)
         use_bayesian = policy.sampler == "botorch" or (
             policy.sampler == "auto" and BayesianSampler.available()
         )
@@ -1174,7 +1413,9 @@ def _execute_adaptive_group(
                     evidence,
                     selected=proposed,
                     pending=pending_trials,
+                    pending_fidelity=pending_fidelity_by_trial,
                     censored=censored_trials,
+                    survival=survival,
                     count=count,
                 )
                 if selected:
@@ -1186,6 +1427,7 @@ def _execute_adaptive_group(
                         selected=list(selected),
                         observed=len(evidence),
                         censored_trials=censored_trials,
+                        survival_evidence=len(survival_observations),
                     )
                     return selected
             except Exception as error:
@@ -1205,7 +1447,9 @@ def _execute_adaptive_group(
             evidence,
             selected=proposed,
             pending=pending_trials,
+            pending_fidelity=pending_fidelity_by_trial,
             censored=censored_trials,
+            survival=survival,
             count=count,
         )
         if selected:
@@ -1216,6 +1460,7 @@ def _execute_adaptive_group(
                 selected=list(selected),
                 observed=len(evidence),
                 censored_trials=censored_trials,
+                survival_evidence=len(survival_observations),
             )
         return selected
 
@@ -1242,6 +1487,18 @@ def _execute_adaptive_group(
                     str(pool_trial): public for pool_trial, public in proposal_numbers.items()
                 },
                 "completed_runs": len(outcomes),
+                "pruner_calibration": (
+                    _pruner_calibration(
+                        outcomes,
+                        objective_evaluator,
+                        min_step=policy.early_stopping_min_step,
+                        confirmations=policy.early_stopping_confirmations,
+                        probability_threshold=policy.early_stopping_probability_threshold,
+                        margin=policy.early_stopping_equivalence_margin,
+                    )
+                    if policy.early_stopping
+                    else None
+                ),
                 "runs": [
                     {
                         "trial": int((result.trial or {"index": 0})["index"]),
@@ -1258,64 +1515,324 @@ def _execute_adaptive_group(
             },
         )
 
-    def execute(scheduled: Sequence[dict[str, Any]], observed_trials: Sequence[int]) -> None:
+    def next_event_action(capacity: int) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+        """Choose one action for a newly free slot from all currently useful action types."""
+        if capacity < 1 or not within_time():
+            return "WAIT", [], {"reason": "budget-or-time-exhausted"}
+        durations = [
+            result.duration_seconds
+            for result in outcomes
+            if result.duration_seconds > 0 and result.termination_type != "scheduler_preempted"
+        ]
+        default_cost = statistics.fmean(durations) if durations else 1.0
+        options: list[tuple[float, int, str, dict[str, Any], dict[str, Any]]] = []
+
+        provisional_values = values_by_trial(final_only=False)
+        comparison_ready = len(provisional_values) >= 2
+        eligible = [trial for trial in proposed if next_seed_specification(trial) is not None]
+        seed_decisions = (
+            racer.decisions(provisional_values, eligible=eligible) if comparison_ready else ()
+        )
+        for decision in seed_decisions:
+            specification = next_seed_specification(decision.trial)
+            if specification is None:
+                continue
+            candidate_costs = [
+                result.duration_seconds
+                for result in completed[decision.trial]
+                if result.duration_seconds > 0
+            ]
+            cost = statistics.fmean(candidate_costs) if candidate_costs else default_cost
+            information = max(1e-6, decision.expected_uncertainty_reduction)
+            options.append(
+                (
+                    information / max(cost, 1e-9),
+                    1,
+                    "ADD_SEED",
+                    specification,
+                    {
+                        "probability_competitive": decision.probability_competitive,
+                        "expected_information": information,
+                        "expected_cost_seconds": cost,
+                        "completed_seeds": decision.completed_seeds,
+                    },
+                )
+            )
+
+        provisional = (
+            racer.decisions(provisional_values, eligible=proposed) if comparison_ready else ()
+        )
+        competitive = {decision.trial for decision in provisional}
+        latest_by_seed: dict[tuple[int, int | None], WorkResult] = {}
+        for trial in proposed:
+            for result in completed[trial]:
+                key = (trial, result.seed)
+                target = int((result.fidelity or {}).get("target", 2**31 - 1))
+                previous = latest_by_seed.get(key)
+                if previous is None or target >= int((previous.fidelity or {}).get("target", -1)):
+                    latest_by_seed[key] = result
+                if result.termination_type == "scheduler_preempted":
+                    competitive.add(trial)
+        for (trial, _seed), result in latest_by_seed.items():
+            if trial not in competitive:
+                continue
+            specification = resume_specification(result)
+            if specification is None:
+                continue
+            fidelity = specification["hpo_fidelity"]
+            current, target = int(fidelity["current"]), int(fidelity["target"])
+            incremental_fraction = max(1, target - current) / max(1, target)
+            cost = max(1e-9, result.duration_seconds * incremental_fraction)
+            information = 0.5 / math.sqrt(1 + current)
+            options.append(
+                (
+                    information / cost,
+                    2,
+                    (
+                        "RESUME_PREEMPTED"
+                        if specification.get("hpo_resume_preempted")
+                        else "PROMOTE_FIDELITY"
+                    ),
+                    specification,
+                    {
+                        "expected_information": information,
+                        "expected_cost_seconds": cost,
+                        "current": current,
+                        "target": target,
+                    },
+                )
+            )
+
+        proposal: tuple[int, ...] = ()
+        if len(proposed) < candidate_budget:
+            proposal = propose(1)
+        if proposal:
+            exploration_bonus = 0.5 if len(outcomes) % max(2, parallelism) == 0 else 0.0
+            information = 0.35 + 1.0 / math.sqrt(1 + len(observations())) + exploration_bonus
+            specification = initial_specifications(proposal[0])[0]
+            options.append(
+                (
+                    information / max(default_cost, 1e-9),
+                    0,
+                    "START_NEW",
+                    specification,
+                    {
+                        "expected_information": information,
+                        "expected_cost_seconds": default_cost,
+                        "pool_trial": proposal[0],
+                        "exploration_bonus": exploration_bonus,
+                    },
+                )
+            )
+        if not options:
+            return "WAIT", [], {"reason": "no-scientifically-useful-action"}
+        score, _tie, action, specification, evidence = max(
+            options, key=lambda value: (value[0], -value[1], -int(value[3]["trial_index"]))
+        )
+        if action == "START_NEW":
+            pool_trial = int(evidence["pool_trial"])
+            proposed.append(pool_trial)
+            specifications = initial_specifications(pool_trial)[:capacity]
+        else:
+            specifications = [specification]
+        alternatives = [
+            {
+                "action": value[2],
+                "trial": int(value[3]["trial_index"]),
+                "score": value[0],
+                "expected_information": value[4].get("expected_information"),
+                "expected_cost_seconds": value[4].get("expected_cost_seconds"),
+            }
+            for value in sorted(options, key=lambda item: item[0], reverse=True)[:6]
+        ]
+        return (
+            action,
+            specifications,
+            {
+                **evidence,
+                "score": score,
+                "alternatives": alternatives,
+                "reason": "highest-expected-information-per-cost",
+            },
+        )
+
+    def execute(
+        scheduled: Sequence[dict[str, Any]],
+        observed_trials: Sequence[int],
+        *,
+        deferred: Sequence[dict[str, Any]] = (),
+    ) -> None:
         limited = list(scheduled[: allowance()])
         if not limited:
             return
-        if telemetry is not None:
-            telemetry.schedule(limited)
-        for value in limited:
-            trial = int(value.get("candidate_pool_index", value["trial_index"]))
-            inflight_by_trial[trial] = inflight_by_trial.get(trial, 0) + 1
-        # One or two speculative candidates are enough to hide a straggler without allowing
-        # stale model decisions to build an unbounded queue. They are proposed only after a real
-        # terminal observation and only when the dispatcher has no already-planned Run waiting.
-        lookahead_candidates = max(1, min(2, parallelism // 3))
-        speculative_candidates = 0
+        deferred_queue = deque(dict(value) for value in deferred)
+
+        def register(values: Sequence[dict[str, Any]]) -> None:
+            if telemetry is not None:
+                telemetry.schedule(values)
+            for value in values:
+                scheduled_run_keys.add(scheduling_key(value))
+                trial = int(value.get("candidate_pool_index", value["trial_index"]))
+                inflight_by_trial[trial] = inflight_by_trial.get(trial, 0) + 1
+
+        register(limited)
 
         def observed(
-            result: WorkResult, queued: int, pending_runs: int
+            result: WorkResult,
+            queued: int,
+            pending_specifications: Sequence[Mapping[str, Any]],
         ) -> Sequence[dict[str, Any]]:
-            nonlocal speculative_candidates
+            pending_runs = len(pending_specifications)
+            pending_fidelity_by_trial.clear()
+            for pending in pending_specifications:
+                pending_trial = int(pending.get("candidate_pool_index", pending["trial_index"]))
+                raw_fidelity = pending.get("hpo_fidelity")
+                fidelity = (
+                    int(raw_fidelity.get("target", 1)) / max(1, int(raw_fidelity.get("maximum", 1)))
+                    if isinstance(raw_fidelity, Mapping)
+                    else 1.0
+                )
+                pending_fidelity_by_trial[pending_trial] = max(
+                    fidelity, pending_fidelity_by_trial.get(pending_trial, 0.0)
+                )
             trial = pool_trial_for(result)
+            if result.termination_type == "scheduler_preempted":
+                scheduled_run_keys.discard(
+                    (
+                        trial,
+                        result.seed,
+                        str(result.study_phase or "search"),
+                        int((result.fidelity or {}).get("target", 0)),
+                    )
+                )
             inflight_by_trial[trial] = max(0, inflight_by_trial.get(trial, 1) - 1)
             completed[trial].append(result)
             outcomes.append(result)
             persist_state()
-            if queued or speculative_candidates >= lookahead_candidates or not within_time():
+            if result.termination_type == "scheduler_preempted":
+                record_decision(
+                    "PAUSE",
+                    trial=int((result.trial or {"index": 0})["index"]),
+                    seed=result.seed,
+                    observed_step=result.termination.get("observed_step"),
+                    reason=result.termination.get("reason"),
+                    checkpoint_required=bool(result.termination.get("checkpoint_required")),
+                )
+            elif result.termination_type == "performance_pruned":
+                prune_event = dict(result.termination)
+                prune_event.setdefault("trial", int((result.trial or {"index": 0})["index"]))
+                prune_event.setdefault("seed", result.seed)
+                record_decision(
+                    "PERFORMANCE_PRUNE",
+                    **prune_event,
+                )
+            if result.termination_type == "performance_pruned" and deferred_queue:
+                retained: deque[dict[str, Any]] = deque()
+                while deferred_queue:
+                    deferred_value = deferred_queue.popleft()
+                    deferred_trial = int(
+                        deferred_value.get("candidate_pool_index", deferred_value["trial_index"])
+                    )
+                    if deferred_trial != trial:
+                        retained.append(deferred_value)
+                        continue
+                    if telemetry is not None:
+                        telemetry.queued_action_cancelled(
+                            deferred_value,
+                            reason=(
+                                "candidate received a candidate-level performance-prune decision"
+                            ),
+                        )
+                    record_decision(
+                        "CANCEL_QUEUED_ACTION",
+                        reason="candidate-level-performance-prune",
+                        trial=int(deferred_value["trial_index"]),
+                        seed=deferred_value.get("seed"),
+                        started=False,
+                        compute_seconds=0.0,
+                    )
+                deferred_queue.extend(retained)
+            if queued or not within_time():
                 return ()
             remaining_capacity = allowance() - pending_runs
-            if remaining_capacity <= 0 or len(proposed) >= len(all_trials):
+            if remaining_capacity <= 0:
                 return ()
-            proposal = propose(1)
-            if not proposal:
+            # Startup is space-filling evidence, not a barrier. Alternate deferred startup work
+            # with model-driven actions as soon as at least two outcomes exist.
+            use_deferred = bool(deferred_queue) and (len(outcomes) < 2 or len(outcomes) % 2 == 1)
+            evidence: dict[str, Any]
+            if use_deferred:
+                specifications = [deferred_queue.popleft()]
+                action = "START_NEW"
+                evidence = {
+                    "reason": "asynchronous-space-filling-startup",
+                    "expected_information": None,
+                    "expected_cost_seconds": None,
+                    "score": None,
+                    "alternatives": [],
+                }
+            else:
+                action, specifications, evidence = next_event_action(remaining_capacity)
+                if not specifications and deferred_queue:
+                    specifications = [deferred_queue.popleft()]
+                    action = "START_NEW"
+                    evidence = {
+                        "reason": "remaining-space-filling-startup",
+                        "alternatives": [],
+                    }
+            specifications = list(specifications[:remaining_capacity])
+            if not specifications:
                 return ()
-            specifications = initial_specifications(proposal[0])
-            if not specifications or len(specifications) > remaining_capacity:
-                return ()
-            proposed.extend(proposal)
-            speculative_candidates += 1
+            action_priority = evidence.get("score")
+            for specification in specifications:
+                specification["hpo_scheduler_action"] = action
+                if isinstance(action_priority, int | float) and not isinstance(
+                    action_priority, bool
+                ):
+                    specification["hpo_scheduler_priority"] = float(action_priority)
+            preemption = _request_scheduler_preemption(
+                pending_specifications,
+                alternatives=(
+                    evidence.get("alternatives", ())
+                    if isinstance(evidence.get("alternatives"), Sequence)
+                    else ()
+                ),
+                selected_action=action,
+                selected_trial=int(specifications[0]["trial_index"]),
+                metric=metric,
+                min_step=policy.early_stopping_min_step,
+            )
+            if preemption is not None:
+                record_decision("PREEMPT", **preemption)
+            elif pending_specifications:
+                record_decision(
+                    "CONTINUE",
+                    running_runs=pending_runs,
+                    reason="preemption benefit did not exceed checkpoint and hysteresis policy",
+                    competing_action=action,
+                    competing_priority=(
+                        float(action_priority)
+                        if isinstance(action_priority, int | float)
+                        and not isinstance(action_priority, bool)
+                        else None
+                    ),
+                )
             record_decision(
-                "START_NEW",
-                reason="bounded-async-lookahead",
-                pool_trials=list(proposal),
-                public_trials=[public_trial(value) for value in proposal],
+                action,
+                **evidence,
+                trial=int(specifications[0]["trial_index"]),
+                seed=specifications[0].get("seed"),
                 completed_runs=len(outcomes),
                 running_runs=pending_runs,
-                lookahead_candidate=speculative_candidates,
-                lookahead_limit=lookahead_candidates,
+                queued_startup_runs=len(deferred_queue),
             )
             print(
-                f"[hpo] ASYNC_START_NEW trial={public_trial(proposal[0])}: "
-                f"one slot became free while {pending_runs} Run(s) remain; "
-                f"lookahead={speculative_candidates}/{lookahead_candidates}",
+                f"[hpo] {action} trial={specifications[0]['trial_index']} "
+                f"seed={specifications[0].get('seed')} because {evidence.get('reason')}; "
+                f"{pending_runs} Run(s) remain active",
                 flush=True,
             )
-            if telemetry is not None:
-                telemetry.schedule(specifications)
-            for value in specifications:
-                pool_trial = int(value.get("candidate_pool_index", value["trial_index"]))
-                inflight_by_trial[pool_trial] = inflight_by_trial.get(pool_trial, 0) + 1
+            register(specifications)
             return specifications
 
         _execute_adaptive_round(
@@ -1324,14 +1841,29 @@ def _execute_adaptive_group(
             policy=policy,
             objective_metric=metric,
             objective_mode=mode,
+            objective=objective,
+            historical_results=outcomes,
             parallelism=parallelism,
             telemetry=telemetry,
             on_result=observed,
+            on_queued_cancel=lambda value: record_decision(
+                "CANCEL_QUEUED_ACTION",
+                reason="candidate-level-performance-prune",
+                trial=int(value["trial_index"]),
+                seed=value.get("seed"),
+                started=False,
+                compute_seconds=0.0,
+            ),
         )
+        # The dispatcher returns only after both its process set and its mutable queue are empty;
+        # queued actions invalidated by candidate pruning have no WorkResult callback to decrement
+        # this controller-side pending counter.
+        for trial in inflight_by_trial:
+            inflight_by_trial[trial] = 0
         if telemetry is not None and observed_trials:
             telemetry.candidates_observed(observed_trials)
 
-    startup = selector.initial(min(policy.startup_trials, len(all_trials)))
+    startup = selector.initial(min(policy.startup_trials, candidate_budget))
     proposed.extend(startup)
     record_decision(
         "START_NEW",
@@ -1340,13 +1872,21 @@ def _execute_adaptive_group(
         public_trials=[public_trial(trial) for trial in startup],
     )
     startup_specs = [value for trial in startup for value in initial_specifications(trial)]
-    execute(startup_specs, startup)
+    # Deferred startup Runs are planned but not submitted. Marking their identities prevents the
+    # event planner from independently scheduling the same seed before the startup queue reaches it.
+    scheduled_run_keys.update(scheduling_key(value) for value in startup_specs)
+    startup_width = max(1, min(parallelism, allowance(), len(startup_specs)))
+    execute(
+        startup_specs[:startup_width],
+        startup,
+        deferred=startup_specs[startup_width:],
+    )
 
     best_value: float | None = None
     stale_rounds = 0
     search_converged = False
     while within_time() and allowance() > 0:
-        remaining = len(all_trials) - len(proposed)
+        remaining = candidate_budget - len(proposed)
         eligible = [trial for trial in proposed if next_seed_specification(trial) is not None]
         decisions = list(racer.decisions(values_by_trial(), eligible=eligible))
         provisional = racer.decisions(values_by_trial(final_only=False), eligible=proposed)
@@ -1364,6 +1904,8 @@ def _execute_adaptive_group(
                 )
                 if target >= previous_target:
                     latest_by_seed[key] = result
+                if result.termination_type == "scheduler_preempted":
+                    competitive.add(trial)
         resume_actions = [
             value
             for (trial, _seed), result in latest_by_seed.items()
@@ -1429,13 +1971,15 @@ def _execute_adaptive_group(
         scheduled.extend(selected_resumes)
         for value in selected_resumes:
             fidelity = value["hpo_fidelity"]
+            action = "RESUME_PREEMPTED" if value.get("hpo_resume_preempted") else "PROMOTE_FIDELITY"
             print(
-                f"[hpo] RESUME trial={value['trial_index']} seed={value.get('seed')} "
+                f"[hpo] {action} trial={value['trial_index']} "
+                f"seed={value.get('seed')} "
                 f"budget={fidelity['current']}->{fidelity['target']}",
                 flush=True,
             )
             record_decision(
-                "RESUME",
+                action,
                 trial=int(value["trial_index"]),
                 seed=value.get("seed"),
                 current=int(fidelity["current"]),
@@ -1555,9 +2099,13 @@ def _execute_adaptive_round(
     policy: AdaptiveSearchPolicy,
     objective_metric: str,
     objective_mode: str,
+    objective: Mapping[str, Any],
+    historical_results: Sequence[WorkResult],
     parallelism: int,
     telemetry: StudyTelemetry | None = None,
-    on_result: Callable[[WorkResult, int, int], Sequence[dict[str, Any]]] | None = None,
+    on_result: Callable[[WorkResult, int, Sequence[Mapping[str, Any]]], Sequence[dict[str, Any]]]
+    | None = None,
+    on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[WorkResult, ...]:
     if not specifications:
         return ()
@@ -1573,10 +2121,12 @@ def _execute_adaptive_round(
         metrics = control_root / f"{token}.metrics.jsonl"
         stop = control_root / f"{token}.stop"
         prune_evidence = stop.with_name(stop.name + ".evidence.json")
+        checkpoint_manifest = control_root / f"{token}.checkpoint.json"
         raw_fidelity = specification.get("hpo_fidelity")
         continuing = isinstance(raw_fidelity, Mapping) and int(raw_fidelity.get("current", 0)) > 0
         if not continuing:
             metrics.unlink(missing_ok=True)
+            checkpoint_manifest.unlink(missing_ok=True)
         stop.unlink(missing_ok=True)
         prune_evidence.unlink(missing_ok=True)
         value = dict(specification)
@@ -1588,14 +2138,20 @@ def _execute_adaptive_round(
                 "gpu_slot": None,
                 "hpo_metrics_path": metrics,
                 "hpo_stop_path": stop,
+                "hpo_checkpoint_manifest_path": checkpoint_manifest,
                 "hpo_objective": objective_metric,
+                "hpo_objective_config": dict(specification["definition"].get("objective", {})),
             }
         )
         return value
 
     prepared.extend(prepare_specification(value) for value in specifications)
 
-    def dispatch_refill(result: WorkResult, queued: int, pending: int) -> Sequence[dict[str, Any]]:
+    def dispatch_refill(
+        result: WorkResult,
+        queued: int,
+        pending: Sequence[Mapping[str, Any]],
+    ) -> Sequence[dict[str, Any]]:
         if on_result is None:
             return ()
         return tuple(prepare_specification(value) for value in on_result(result, queued, pending))
@@ -1612,10 +2168,13 @@ def _execute_adaptive_round(
                 visible_gpus=visible_gpus,
                 objective_metric=objective_metric,
                 objective_mode=objective_mode,
+                objective=objective,
+                historical_results=historical_results,
                 telemetry=telemetry,
                 results=results,
                 executors=executors,
                 on_result=dispatch_refill if on_result is not None else None,
+                on_queued_cancel=on_queued_cancel,
             )
         else:
             _execute_cpu_isolated_runs(
@@ -1624,10 +2183,13 @@ def _execute_adaptive_round(
                 parallelism=parallelism,
                 objective_metric=objective_metric,
                 objective_mode=objective_mode,
+                objective=objective,
+                historical_results=historical_results,
                 telemetry=telemetry,
                 results=results,
                 executors=executors,
                 on_result=dispatch_refill if on_result is not None else None,
+                on_queued_cancel=on_queued_cancel,
             )
     finally:
         for pool in executors:
@@ -1644,10 +2206,14 @@ def _execute_cpu_isolated_runs(
     parallelism: int,
     objective_metric: str,
     objective_mode: str,
+    objective: Mapping[str, Any] | None = None,
+    historical_results: Sequence[WorkResult] = (),
     telemetry: StudyTelemetry | None,
     results: list[WorkResult],
     executors: list[ProcessPoolExecutor],
-    on_result: Callable[[WorkResult, int, int], Sequence[dict[str, Any]]] | None = None,
+    on_result: Callable[[WorkResult, int, Sequence[Mapping[str, Any]]], Sequence[dict[str, Any]]]
+    | None = None,
+    on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
     """Keep CPU Runs isolated so one killed worker cannot break unrelated candidates."""
     queued = deque(dict(value) for value in prepared)
@@ -1655,6 +2221,7 @@ def _execute_cpu_isolated_runs(
     while queued or pending:
         while queued and len(pending) < parallelism:
             value = queued.popleft()
+            value["hpo_dispatched_monotonic"] = time.monotonic()
             pool = ProcessPoolExecutor(
                 max_workers=1,
                 mp_context=multiprocessing.get_context("spawn"),
@@ -1688,7 +2255,13 @@ def _execute_cpu_isolated_runs(
                     if telemetry is not None:
                         telemetry.run_finished(value, failure)
                     if on_result is not None:
-                        queued.extend(on_result(failure, len(queued), len(pending)))
+                        queued.extend(
+                            on_result(
+                                failure,
+                                len(queued),
+                                tuple(item for item, _pool in pending.values()),
+                            )
+                        )
             else:
                 retry = _retry_failed_result(
                     value,
@@ -1701,7 +2274,13 @@ def _execute_cpu_isolated_runs(
                 else:
                     results.append(result)
                     if on_result is not None:
-                        queued.extend(on_result(result, len(queued), len(pending)))
+                        queued.extend(
+                            on_result(
+                                result,
+                                len(queued),
+                                tuple(item for item, _pool in pending.values()),
+                            )
+                        )
             finally:
                 pool.shutdown(wait=True, cancel_futures=True)
                 executors.remove(pool)
@@ -1712,8 +2291,16 @@ def _execute_cpu_isolated_runs(
                 mode=objective_mode,
                 min_step=policy.early_stopping_min_step,
                 confirmations=policy.early_stopping_confirmations,
-                probability_threshold=policy.seed_probability_threshold,
-                margin=policy.equivalence_margin,
+                probability_threshold=policy.early_stopping_probability_threshold,
+                margin=policy.early_stopping_equivalence_margin,
+                historical_results=historical_results,
+                objective=objective,
+            )
+            _cancel_queued_pruned_candidates(
+                queued,
+                tuple(value for value, _pool in pending.values()),
+                telemetry=telemetry,
+                on_cancel=on_queued_cancel,
             )
         if telemetry is not None:
             telemetry.refresh()
@@ -1880,6 +2467,12 @@ def _controller_failure_result(
             if isinstance(specification.get("hpo_fidelity"), Mapping)
             else None
         ),
+        termination_type="resource_failed",
+        termination={
+            "type": "resource_failed",
+            "failure_type": type(error).__name__,
+            "reason": str(error),
+        },
     )
     result.write(run_dir / "result.json")
     atomic_json(run_root / "result.json", result.to_dict())
@@ -1895,10 +2488,14 @@ def _execute_gpu_admitted_runs(
     visible_gpus: Sequence[str],
     objective_metric: str,
     objective_mode: str,
+    objective: Mapping[str, Any] | None = None,
+    historical_results: Sequence[WorkResult] = (),
     telemetry: StudyTelemetry | None,
     results: list[WorkResult],
     executors: list[ProcessPoolExecutor],
-    on_result: Callable[[WorkResult, int, int], Sequence[dict[str, Any]]] | None = None,
+    on_result: Callable[[WorkResult, int, Sequence[Mapping[str, Any]]], Sequence[dict[str, Any]]]
+    | None = None,
+    on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
     """Launch only Runs that currently fit, waiting through temporary VRAM pressure."""
     required = resources.gpu_memory_bytes
@@ -1939,7 +2536,13 @@ def _execute_gpu_admitted_runs(
                     if telemetry is not None:
                         telemetry.run_finished(value, failure)
                     if on_result is not None:
-                        queued.extend(on_result(failure, len(queued), len(pending)))
+                        queued.extend(
+                            on_result(
+                                failure,
+                                len(queued),
+                                tuple(item for item, _slot, _pool in pending.values()),
+                            )
+                        )
             else:
                 retry = _retry_failed_result(
                     value,
@@ -1952,7 +2555,13 @@ def _execute_gpu_admitted_runs(
                 else:
                     results.append(result)
                     if on_result is not None:
-                        queued.extend(on_result(result, len(queued), len(pending)))
+                        queued.extend(
+                            on_result(
+                                result,
+                                len(queued),
+                                tuple(item for item, _slot, _pool in pending.values()),
+                            )
+                        )
                     print(
                         f"[hpo] finished trial={value['trial_index']} "
                         f"seed={value.get('seed')} on GPU {visible_gpus[slot]}; "
@@ -1975,8 +2584,16 @@ def _execute_gpu_admitted_runs(
                 mode=objective_mode,
                 min_step=policy.early_stopping_min_step,
                 confirmations=policy.early_stopping_confirmations,
-                probability_threshold=policy.seed_probability_threshold,
-                margin=policy.equivalence_margin,
+                probability_threshold=policy.early_stopping_probability_threshold,
+                margin=policy.early_stopping_equivalence_margin,
+                historical_results=historical_results,
+                objective=objective,
+            )
+            _cancel_queued_pruned_candidates(
+                queued,
+                tuple(value for value, _slot, _pool in pending.values()),
+                telemetry=telemetry,
+                on_cancel=on_queued_cancel,
             )
         if telemetry is not None:
             telemetry.refresh()
@@ -2009,6 +2626,7 @@ def _execute_gpu_admitted_runs(
             if not queued or len(pending) >= parallelism:
                 break
             value = queued.popleft()
+            value["hpo_dispatched_monotonic"] = time.monotonic()
             value["gpu_slot"] = visible_gpus[slot]
             value["gpu_index"] = slot
             pool = ProcessPoolExecutor(
@@ -2199,10 +2817,12 @@ def _adaptive_run_resources(resources: ResourceRequest, parallelism: int) -> Res
 def _candidate_score(
     results: Sequence[WorkResult], metric: str, mode: str, confidence: float
 ) -> float | None:
+    if any(result.pruned or result.termination_type != "completed" for result in results):
+        return None
     values = [
         value
         for result in results
-        if result.ok and not result.pruned
+        if not result.pruned and result.termination_type == "completed"
         for value in [_result_objective(result, metric)]
         if value is not None
     ]
@@ -2221,10 +2841,12 @@ def _sample_uncertainty(
     results: Sequence[WorkResult], metric: str
 ) -> Mapping[str, int | float | None] | None:
     """Return compact empirical uncertainty without inventing certainty for one seed."""
+    if any(result.pruned or result.termination_type != "completed" for result in results):
+        return None
     values = [
         value
         for result in results
-        if result.ok and not result.pruned
+        if not result.pruned and result.termination_type == "completed"
         for value in [_result_objective(result, metric)]
         if value is not None
     ]
@@ -2239,6 +2861,153 @@ def _sample_uncertainty(
     }
 
 
+def _request_scheduler_preemption(
+    specifications: Sequence[Mapping[str, Any]],
+    *,
+    alternatives: Sequence[Any],
+    selected_action: str,
+    selected_trial: int,
+    metric: str,
+    min_step: int,
+    hysteresis_ratio: float = 0.5,
+    minimum_runtime_seconds: float = 30.0,
+) -> Mapping[str, Any] | None:
+    """Cooperatively pause one resumable Run only for a materially better alternative."""
+    ranked_alternatives = [
+        value
+        for value in alternatives
+        if isinstance(value, Mapping)
+        and isinstance(value.get("score"), int | float)
+        and not isinstance(value.get("score"), bool)
+        and not (
+            str(value.get("action")) == selected_action
+            and int(value.get("trial", -1)) == selected_trial
+        )
+    ]
+    if not ranked_alternatives:
+        return None
+    alternative = max(ranked_alternatives, key=lambda value: float(value["score"]))
+    alternative_score = float(alternative["score"])
+    now = time.monotonic()
+    candidates: list[tuple[float, Mapping[str, Any], int, float, float]] = []
+    for specification in specifications:
+        fidelity = specification.get("hpo_fidelity")
+        if (
+            specification.get("hpo_phase") == "confirmation"
+            or not isinstance(fidelity, Mapping)
+            or specification.get("hpo_resume_preempted")
+        ):
+            continue
+        raw_stop = specification.get("hpo_stop_path")
+        if raw_stop is None:
+            continue
+        stop = Path(str(raw_stop))
+        if stop.is_file():
+            continue
+        started = specification.get("hpo_dispatched_monotonic")
+        if not isinstance(started, int | float) or isinstance(started, bool):
+            continue
+        elapsed = max(0.0, now - float(started))
+        if elapsed < minimum_runtime_seconds:
+            continue
+        raw_old_priority = specification.get("hpo_scheduler_priority")
+        if (
+            not isinstance(raw_old_priority, int | float)
+            or isinstance(raw_old_priority, bool)
+            or float(raw_old_priority) <= 0
+        ):
+            # Startup coverage has no comparable acquisition score. Do not interrupt it using a
+            # synthetic priority: preemption is allowed only between auditable planned actions.
+            continue
+        if not _active_checkpoint_available(specification):
+            continue
+        history = _objective_history(Path(str(specification["hpo_metrics_path"])), metric)
+        if not history or history[-1][0] < min_step:
+            continue
+        observed_step = history[-1][0]
+        current = int(fidelity.get("current", 0))
+        target = int(fidelity.get("target", 0))
+        if observed_step <= current or observed_step >= target:
+            continue
+        completed_fraction = (observed_step - current) / max(1, target - current)
+        remaining_cost = elapsed * (1.0 - completed_fraction) / max(completed_fraction, 1e-6)
+        continue_information = 0.5 / math.sqrt(1 + observed_step)
+        continue_priority = continue_information / max(remaining_cost, 1e-6)
+        old_priority = max(float(raw_old_priority), continue_priority)
+        improvement = alternative_score - old_priority * (1.0 + hysteresis_ratio)
+        if improvement > 0:
+            candidates.append((improvement, specification, observed_step, old_priority, elapsed))
+    if not candidates:
+        return None
+    _improvement, selected, observed_step, old_priority, elapsed = max(
+        candidates,
+        key=lambda value: (
+            value[0],
+            -int(value[1].get("trial_index", 0)),
+        ),
+    )
+    stop = Path(str(selected["hpo_stop_path"]))
+    evidence = {
+        "termination_type": "scheduler_preempted",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "candidate": int(selected["trial_index"]),
+        "seed": selected.get("seed"),
+        "observed_step": observed_step,
+        "fidelity": dict(selected["hpo_fidelity"]),
+        "old_action": str(selected.get("hpo_scheduler_action", "CONTINUE")),
+        "new_action": str(alternative.get("action")),
+        "old_priority": old_priority,
+        "new_priority": alternative_score,
+        "hysteresis_ratio": hysteresis_ratio,
+        "minimum_runtime_seconds": minimum_runtime_seconds,
+        "elapsed_seconds": elapsed,
+        "checkpoint_required": True,
+        "reason": ("checkpoint-safe alternative exceeded continuation priority plus hysteresis"),
+        "evidence_revision": "new terminal Run changed information-per-cost ordering",
+    }
+    evidence_path = stop.with_name(stop.name + ".evidence.json")
+    atomic_json(evidence_path, evidence)
+    stop.parent.mkdir(parents=True, exist_ok=True)
+    stop.write_text(
+        "scheduler requested a cooperative checkpoint-safe pause; "
+        f"alternative={evidence['new_action']} old_priority={old_priority:.8g} "
+        f"new_priority={alternative_score:.8g}\n",
+        encoding="utf-8",
+    )
+    return evidence
+
+
+def _active_checkpoint_available(specification: Mapping[str, Any]) -> bool:
+    """Verify an active Run has an owned durable checkpoint before requesting a pause."""
+    raw_manifest = specification.get("hpo_checkpoint_manifest_path")
+    raw_execution = specification.get("execution_dir")
+    if raw_manifest is None or raw_execution is None:
+        return False
+    manifest = Path(str(raw_manifest))
+    if not manifest.is_file() or manifest.is_symlink():
+        return False
+    try:
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+        raw_root = value.get("checkpoint_root") if isinstance(value, Mapping) else None
+        if not isinstance(raw_root, str):
+            return False
+        declared_root = Path(raw_root)
+        if declared_root.is_symlink():
+            return False
+        root = declared_root.resolve(strict=True)
+        owned = (Path(str(raw_execution)).resolve() / "runs").resolve()
+        if not root.is_relative_to(owned) or not root.is_dir():
+            return False
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                continue
+            if path.is_file():
+                return True
+        return False
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
 def _request_early_stops(
     specifications: Sequence[Mapping[str, Any]],
     *,
@@ -2248,16 +3017,24 @@ def _request_early_stops(
     confirmations: int = 2,
     probability_threshold: float = 0.1,
     margin: float = 0.0,
+    historical_results: Sequence[WorkResult] = (),
+    objective: Mapping[str, Any] | None = None,
 ) -> None:
-    """Request pruning only when a curve is probably not practically competitive."""
+    """Request candidate-level pruning against active and comparable historical evidence."""
     if confirmations < 1:
         raise ValueError("early-stopping confirmations must be positive.")
+    evaluator = ObjectiveUtility(objective or {"metric": metric, "mode": mode})
     histories: list[tuple[Mapping[str, Any], tuple[tuple[int, float], ...]]] = []
-    for specification in specifications:
-        history = _objective_history(Path(str(specification["hpo_metrics_path"])), metric)
+    for ordinal, specification in enumerate(specifications, 1):
+        if specification.get("hpo_phase") == "confirmation":
+            continue
+        resolved = dict(specification)
+        resolved.setdefault("trial_index", ordinal)
+        resolved.setdefault("seed", None)
+        history = _utility_history((Path(str(specification["hpo_metrics_path"])),), evaluator)
         if history and history[-1][0] >= min_step:
-            histories.append((specification, history))
-    if len(histories) < 2:
+            histories.append((resolved, history))
+    if not histories:
         return
     common_step = min(history[-1][0] for _, history in histories)
     latest_values = [
@@ -2266,26 +3043,132 @@ def _request_early_stops(
         if any(step <= common_step for step, _ in history)
     ]
     pooled_deviation = statistics.stdev(latest_values) if len(latest_values) > 1 else 1.0
-    target_step = common_step + max(1, min_step)
-    observed: list[tuple[Mapping[str, Any], float, float]] = []
+    calibration = _pruner_calibration(
+        historical_results,
+        evaluator,
+        min_step=min_step,
+        confirmations=confirmations,
+        probability_threshold=probability_threshold,
+        margin=margin,
+    )
+    calibrated_prior = max(
+        pooled_deviation,
+        float(calibration.get("curve_rmse", 0.0) or 0.0),
+        1e-6,
+    )
+    fidelity_targets = [
+        int(value["hpo_fidelity"]["target"])
+        for value, _history in histories
+        if isinstance(value.get("hpo_fidelity"), Mapping)
+    ]
+    # Predict to the next real decision boundary when fidelity defines one. Without it, keep the
+    # horizon deliberately local; uncertainty still expands with distance.
+    target_step = (
+        max(common_step + 1, min(fidelity_targets))
+        if fidelity_targets
+        else common_step + max(1, min_step)
+    )
+    observed: list[tuple[int, int | None, float, float, int, str]] = []
     for specification, history in histories:
         comparable = [(step, value) for step, value in history if step <= common_step]
         if comparable:
-            mean, deviation = _curve_prediction(
+            mean, deviation = predict_curve(
                 comparable,
                 target_step=target_step,
-                prior_deviation=max(pooled_deviation, 1e-6),
+                prior_deviation=calibrated_prior,
             )
-            observed.append((specification, mean, deviation))
-    if len(observed) < 2:
-        return
-    incumbent = (max if mode == "max" else min)(observed, key=lambda item: item[1])
-    sign = 1.0 if mode == "max" else -1.0
-    for specification, mean, deviation in observed:
-        if specification is incumbent[0]:
+            observed.append(
+                (
+                    int(specification["trial_index"]),
+                    int(specification["seed"]) if specification.get("seed") is not None else None,
+                    mean,
+                    deviation,
+                    comparable[-1][0],
+                    "active",
+                )
+            )
+    active_trials = {value[0] for value in observed}
+    active_seed_keys = {(trial, seed) for trial, seed, *_rest in observed}
+    latest_historical: dict[tuple[int, int | None], WorkResult] = {}
+    for result in historical_results:
+        if (
+            result.termination_type != "completed"
+            or result.study_phase == "confirmation"
+            or result.trial is None
+        ):
             continue
-        difference = sign * (mean - incumbent[1])
-        difference_error = math.sqrt(deviation**2 + incumbent[2] ** 2)
+        trial = int(result.trial["index"])
+        key = (trial, result.seed)
+        if key in active_seed_keys:
+            # A resumed seed's active cumulative curve already contains its earlier rung. Counting
+            # the prior result as another seed would understate uncertainty and over-weight it.
+            continue
+        previous = latest_historical.get(key)
+        target = int((result.fidelity or {}).get("target", 2**31 - 1))
+        previous_target = int((previous.fidelity or {}).get("target", -1)) if previous else -1
+        if target >= previous_target:
+            latest_historical[key] = result
+    for (trial, seed), result in latest_historical.items():
+        history = _utility_history(
+            (result.run_dir / "metrics.jsonl", result.run_dir / "training-metrics.jsonl"),
+            evaluator,
+        )
+        comparable = [(step, value) for step, value in history if step <= common_step]
+        if not comparable:
+            continue
+        mean, deviation = predict_curve(
+            comparable,
+            target_step=target_step,
+            prior_deviation=calibrated_prior,
+        )
+        observed.append((trial, seed, mean, deviation, comparable[-1][0], "historical"))
+    grouped: dict[int, list[tuple[int | None, float, float, int, str]]] = {}
+    for trial, seed, mean, deviation, step, source in observed:
+        grouped.setdefault(trial, []).append((seed, mean, deviation, step, source))
+    estimates: dict[int, tuple[float, float, int]] = {}
+    for trial, values in grouped.items():
+        means = [value[1] for value in values]
+        # Between-seed variance is estimable only after a second seed. The curve model already
+        # carries a conservative prior for a single seed; adding the full cross-candidate spread
+        # here would mistake signal between candidates for seed noise and disable pruning.
+        between = statistics.variance(means) if len(means) > 1 else 0.0
+        curve_variance = statistics.fmean(value[2] ** 2 for value in values)
+        estimates[trial] = (
+            statistics.fmean(means),
+            math.sqrt(max(1e-12, between + curve_variance) / len(values)),
+            len(values),
+        )
+    if len(estimates) < 2:
+        return
+    incumbent_trial = (max if mode == "max" else min)(
+        estimates, key=lambda trial: estimates[trial][0]
+    )
+    incumbent = estimates[incumbent_trial]
+    sign = 1.0 if mode == "max" else -1.0
+    for trial in active_trials:
+        if trial == incumbent_trial:
+            continue
+        mean, deviation, samples = estimates[trial]
+        trial_by_seed = {
+            seed: predicted
+            for seed, predicted, _error, _step, _source in grouped[trial]
+            if seed is not None
+        }
+        incumbent_by_seed = {
+            seed: predicted
+            for seed, predicted, _error, _step, _source in grouped[incumbent_trial]
+            if seed is not None
+        }
+        shared_seeds = sorted(set(trial_by_seed).intersection(incumbent_by_seed))
+        paired = [sign * (trial_by_seed[seed] - incumbent_by_seed[seed]) for seed in shared_seeds]
+        if len(paired) >= 2:
+            difference = statistics.fmean(paired)
+            difference_error = statistics.stdev(paired) / math.sqrt(len(paired))
+            comparison_method = "paired-seed-predicted-differences"
+        else:
+            difference = sign * (mean - incumbent[0])
+            difference_error = math.sqrt(deviation**2 + incumbent[1] ** 2)
+            comparison_method = "independent-candidate-posterior"
         probability = (
             1.0
             if difference_error <= 0 and difference >= -margin
@@ -2293,8 +3176,16 @@ def _request_early_stops(
             if difference_error <= 0
             else 1.0 - statistics.NormalDist(difference, difference_error).cdf(-margin)
         )
-        stop = Path(str(specification["hpo_stop_path"]))
-        evidence_path = stop.with_name(stop.name + ".evidence.json")
+        trial_specifications = [
+            specification
+            for specification, _history in histories
+            if int(specification["trial_index"]) == trial
+        ]
+        if not trial_specifications:
+            continue
+        evidence_path = Path(str(trial_specifications[0]["hpo_stop_path"])).with_name(
+            f"trial-{trial:05d}.prune-evidence.json"
+        )
         if probability >= probability_threshold:
             evidence_path.unlink(missing_ok=True)
             continue
@@ -2316,59 +3207,144 @@ def _request_early_stops(
             if prior_step == common_step and isinstance(prior_count, int)
             else 1
         )
-        atomic_json(
-            evidence_path,
-            {
-                "common_step": common_step,
-                "confirmations": count,
-                "required_confirmations": confirmations,
-                "probability_competitive": probability,
-                "threshold": probability_threshold,
-            },
-        )
-        if count >= confirmations and not stop.exists():
-            stop.parent.mkdir(parents=True, exist_ok=True)
-            stop.write_text(
-                "probabilistic adaptive pruning requested: "
-                f"p_competitive={probability:.6f} threshold={probability_threshold:.6f} "
-                f"common_step={common_step} confirmations={count}/{confirmations}\n",
-                encoding="utf-8",
-            )
+        evidence = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "common_step": common_step,
+            "confirmations": count,
+            "required_confirmations": confirmations,
+            "probability_competitive": probability,
+            "threshold": probability_threshold,
+            "equivalence_margin": margin,
+            "candidate": trial,
+            "reference_candidate": incumbent_trial,
+            "current_utility": statistics.fmean(
+                value[1] for value in grouped[trial] if value[4] == "active"
+            ),
+            "predicted_utility": mean,
+            "predicted_standard_error": deviation,
+            "reference_predicted_utility": incumbent[0],
+            "reference_standard_error": incumbent[1],
+            "candidate_seed_evidence": samples,
+            "reference_seed_evidence": incumbent[2],
+            "shared_seed_evidence": len(shared_seeds),
+            "comparison_method": comparison_method,
+            "target_step": target_step,
+            "fidelity_targets": sorted(set(fidelity_targets)),
+            "curve_model": "conservative-local-linear-last-5",
+            "retrospective_calibration": calibration,
+        }
+        atomic_json(evidence_path, evidence)
+        if count >= confirmations:
+            for specification in trial_specifications:
+                stop = Path(str(specification["hpo_stop_path"]))
+                if stop.exists():
+                    continue
+                run_evidence = stop.with_name(stop.name + ".evidence.json")
+                atomic_json(run_evidence, {**evidence, "seed": specification.get("seed")})
+                stop.parent.mkdir(parents=True, exist_ok=True)
+                stop.write_text(
+                    "candidate-level probabilistic performance pruning requested: "
+                    f"candidate={trial} reference={incumbent_trial} "
+                    f"p_competitive={probability:.6f} threshold={probability_threshold:.6f} "
+                    f"common_step={common_step} confirmations={count}/{confirmations}\n",
+                    encoding="utf-8",
+                )
 
 
-def _curve_prediction(
-    history: Sequence[tuple[int, float]],
+def _cancel_queued_pruned_candidates(
+    queued: deque[dict[str, Any]],
+    active: Sequence[Mapping[str, Any]],
     *,
-    target_step: int,
-    prior_deviation: float,
-) -> tuple[float, float]:
-    """Return a conservative local-linear predictive distribution for one learning curve."""
-    recent = tuple(history[-5:])
-    if len(recent) < 2:
-        return float(recent[-1][1]), float(prior_deviation)
-    steps = [float(item[0]) for item in recent]
-    values = [float(item[1]) for item in recent]
-    step_mean = statistics.fmean(steps)
-    value_mean = statistics.fmean(values)
-    denominator = sum((step - step_mean) ** 2 for step in steps)
-    slope = (
-        sum(
-            (step - step_mean) * (value - value_mean)
-            for step, value in zip(steps, values, strict=True)
+    telemetry: StudyTelemetry | None,
+    on_cancel: Callable[[Mapping[str, Any]], None] | None,
+) -> None:
+    """Remove not-yet-started seeds after their candidate receives a prune decision."""
+    pruned_trials = {
+        int(specification["trial_index"])
+        for specification in active
+        if specification.get("hpo_phase") != "confirmation"
+        and Path(str(specification["hpo_stop_path"])).is_file()
+    }
+    if not pruned_trials or not queued:
+        return
+    retained: deque[dict[str, Any]] = deque()
+    while queued:
+        specification = queued.popleft()
+        trial = int(specification["trial_index"])
+        if trial not in pruned_trials or specification.get("hpo_phase") == "confirmation":
+            retained.append(specification)
+            continue
+        if telemetry is not None:
+            telemetry.queued_action_cancelled(
+                specification,
+                reason="candidate received a candidate-level performance-prune decision",
+            )
+        if on_cancel is not None:
+            on_cancel(specification)
+    queued.extend(retained)
+
+
+def _pruner_calibration(
+    results: Sequence[WorkResult],
+    evaluator: ObjectiveUtility,
+    *,
+    min_step: int,
+    confirmations: int,
+    probability_threshold: float,
+    margin: float,
+) -> dict[str, Any]:
+    """Build the bounded candidate-level retrospective policy report."""
+    completed_identity = tuple(
+        (
+            result.run_id,
+            result.attempt_id,
+            str(result.run_dir),
+            result.termination_type,
         )
-        / denominator
-        if denominator > 0
-        else 0.0
+        for result in results
+        if result.termination_type == "completed" and result.trial is not None
     )
-    intercept = value_mean - slope * step_mean
-    prediction = intercept + slope * target_step
-    residuals = [
-        value - (intercept + slope * step) for step, value in zip(steps, values, strict=True)
-    ]
-    residual_deviation = statistics.stdev(residuals) if len(residuals) > 2 else prior_deviation
-    horizon = max(0.0, target_step - steps[-1]) / max(1.0, steps[-1] - steps[0])
-    deviation = max(residual_deviation, prior_deviation * 0.1) * (1.0 + 0.25 * horizon)
-    return prediction, deviation
+    cache_key = (
+        completed_identity,
+        json.dumps(evaluator.objective, sort_keys=True, separators=(",", ":")),
+        min_step,
+        confirmations,
+        probability_threshold,
+        margin,
+    )
+    cached = _PRUNER_AUDIT_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    curves: list[CompletedCurve] = []
+    for result in results:
+        if result.termination_type != "completed" or result.trial is None:
+            continue
+        history = _utility_history(
+            (result.run_dir / "metrics.jsonl", result.run_dir / "training-metrics.jsonl"),
+            evaluator,
+        )
+        if history:
+            curves.append(
+                CompletedCurve(
+                    int(result.trial["index"]),
+                    result.seed,
+                    history,
+                    result.duration_seconds,
+                    result.gpu_index is not None or result.gpu_token is not None,
+                )
+            )
+    report = audit_pruner(
+        curves,
+        mode=evaluator.mode,
+        min_step=min_step,
+        confirmations=confirmations,
+        probability_threshold=probability_threshold,
+        margin=margin,
+    )
+    if len(_PRUNER_AUDIT_CACHE) >= 64:
+        _PRUNER_AUDIT_CACHE.pop(next(iter(_PRUNER_AUDIT_CACHE)))
+    _PRUNER_AUDIT_CACHE[cache_key] = report
+    return dict(report)
 
 
 def _objective_history(path: Path, metric: str) -> tuple[tuple[int, float], ...]:
@@ -2387,6 +3363,46 @@ def _objective_history(path: Path, metric: str) -> tuple[tuple[int, float], ...]
     return tuple(sorted(history))
 
 
+def _utility_history(
+    paths: Sequence[Path], evaluator: ObjectiveUtility
+) -> tuple[tuple[int, float], ...]:
+    """Build a same-checkpoint utility curve without mixing metric epochs."""
+    records: dict[int, dict[str, float]] = {}
+    synthesized: dict[int, float] = {}
+    for path in paths:
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for line in lines:
+                value = json.loads(line)
+                step = value.get("step")
+                raw = value.get("value")
+                if not isinstance(step, int) or isinstance(step, bool):
+                    continue
+                if not isinstance(raw, int | float) or isinstance(raw, bool):
+                    continue
+                key = (
+                    f"{value['split']}_{value['name']}"
+                    if value.get("split")
+                    else str(value.get("name", ""))
+                )
+                if key == evaluator.metric:
+                    synthesized[step] = float(raw)
+                elif key in evaluator.required_metrics:
+                    records.setdefault(step, {})[key] = float(raw)
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+    history: dict[int, float] = dict(synthesized)
+    for step, values in records.items():
+        if step in history:
+            continue
+        evaluated = evaluator.evaluate(values)
+        if evaluated is not None:
+            history[step] = float(evaluated["value"])
+    return tuple(sorted(history.items()))
+
+
 def _prune_reason(path: Path) -> str:
     """Return a compact persisted pruning explanation without making it resumable state."""
     try:
@@ -2394,6 +3410,60 @@ def _prune_reason(path: Path) -> str:
     except OSError:
         detail = ""
     return f"adaptive-early-stopping: {detail}" if detail else "adaptive-early-stopping"
+
+
+def _run_termination(
+    *,
+    status: str,
+    failure: Mapping[str, Any] | None,
+    stop_path: Path | None,
+    completed_step: int | None = None,
+    target_step: int | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Classify operational termination without confusing it with scientific quality."""
+    # A stop request is only a pruning/preemption outcome when the Work reached its safe boundary
+    # and returned normally. A coincident OOM or consumer exception remains the real termination.
+    if status == "succeeded" and stop_path is not None and stop_path.is_file():
+        evidence_path = stop_path.with_name(stop_path.name + ".evidence.json")
+        evidence: dict[str, Any] = {}
+        if evidence_path.is_file() and not evidence_path.is_symlink():
+            try:
+                decoded = json.loads(evidence_path.read_text(encoding="utf-8"))
+                evidence = dict(decoded) if isinstance(decoded, Mapping) else {}
+            except (OSError, json.JSONDecodeError):
+                evidence = {}
+        requested_type = str(evidence.get("termination_type", "performance_pruned"))
+        if completed_step is not None and target_step is not None and completed_step >= target_step:
+            return "completed", {
+                "type": "completed",
+                "stop_request_observed_after_target": requested_type,
+                "completed_step": completed_step,
+                "target_step": target_step,
+            }
+        if requested_type == "scheduler_preempted":
+            return "scheduler_preempted", {
+                "type": "scheduler_preempted",
+                "reason": evidence.get("reason") or _prune_reason(stop_path),
+                **evidence,
+            }
+        return "performance_pruned", {
+            "type": "performance_pruned",
+            "reason": _prune_reason(stop_path),
+            **evidence,
+        }
+    if status == "succeeded":
+        return "completed", {"type": "completed"}
+    failure_type = str((failure or {}).get("type", ""))
+    message = str((failure or {}).get("message", "")).lower()
+    resource = failure_type in {"OutOfMemoryError", "CUDAOutOfMemoryError"} or any(
+        marker in message for marker in ("out of memory", "cuda error", "resource exhausted")
+    )
+    selected = "resource_failed" if resource else "scientific_failed"
+    return selected, {
+        "type": selected,
+        "failure_type": failure_type or None,
+        "reason": str((failure or {}).get("message", "")) or None,
+    }
 
 
 def _objective_observation(
@@ -2410,125 +3480,23 @@ def _objective_observation(
     """
     if not objective:
         return None
-    metric, mode = str(objective["metric"]), str(objective["mode"])
-    requested_constraints = objective.get("constraints", {})
-    requested_constraints = (
-        requested_constraints if isinstance(requested_constraints, Mapping) else {}
-    )
-    wanted = {metric, *(str(name) for name in requested_constraints)}
-    by_metric: dict[str, list[tuple[int | None, int, float]]] = {name: [] for name in wanted}
-    sequence = 0
+    records: list[Mapping[str, Any]] = []
     for path in paths:
         if not path.is_file() or path.is_symlink():
             continue
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
                 value = json.loads(line)
-                key = (
-                    f"{value['split']}_{value['name']}"
-                    if value.get("split")
-                    else str(value["name"])
-                )
-                raw = value.get("value")
-                if (
-                    key not in wanted
-                    or isinstance(raw, bool)
-                    or not isinstance(raw, int | float)
-                    or not math.isfinite(float(raw))
-                ):
-                    continue
-                step = value.get("step")
-                sequence += 1
-                by_metric[key].append(
-                    (
-                        int(step) if isinstance(step, int) and not isinstance(step, bool) else None,
-                        sequence,
-                        float(raw),
-                    )
-                )
+                if isinstance(value, Mapping):
+                    records.append(value)
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             continue
-    observations = by_metric[metric]
-    if not observations:
-        raw = fallback.get(metric)
-        if (
-            isinstance(raw, bool)
-            or not isinstance(raw, int | float)
-            or not math.isfinite(float(raw))
-        ):
-            return None
-        observations.append((None, sequence + 1, float(raw)))
-    stepped = [(step, order, value) for step, order, value in observations if step is not None]
-    current_step, _current_order, current = (
-        max(stepped, key=lambda item: (item[0], item[1])) if stepped else observations[-1]
-    )
-    best_step, _best_order, best = (min if mode == "min" else max)(
-        observations,
-        key=lambda item: item[2],
-    )
-    constraint_observations: dict[str, Any] = {}
-    for name, raw_rule in requested_constraints.items():
-        rule = raw_rule if isinstance(raw_rule, Mapping) else {}
-        candidates = by_metric.get(str(name), [])
-        matched = (
-            [item for item in candidates if item[0] == best_step]
-            if best_step is not None
-            else [item for item in candidates if item[0] is None]
-        )
-        if not matched and best_step is None:
-            fallback_value = fallback.get(str(name))
-            if (
-                isinstance(fallback_value, int | float)
-                and not isinstance(fallback_value, bool)
-                and math.isfinite(float(fallback_value))
-            ):
-                matched = [(None, sequence + 1, float(fallback_value))]
-        selected = max(matched, key=lambda item: item[1]) if matched else None
-        constraint_value = selected[2] if selected is not None else None
-        constraint_observations[str(name)] = {
-            "value": constraint_value,
-            "step": selected[0] if selected is not None else best_step,
-            "min": rule.get("min"),
-            "max": rule.get("max"),
-            "satisfied": _constraint_satisfied(constraint_value, rule),
-        }
-    output = {
-        "metric": metric,
-        "mode": mode,
-        "current": current,
-        "current_step": current_step,
-        "best": best,
-        "best_step": best_step,
-        "selection": "best-observed-checkpoint",
-    }
-    if constraint_observations:
-        output["constraints"] = constraint_observations
-        output["feasible"] = all(
-            bool(value["satisfied"]) for value in constraint_observations.values()
-        )
-    return output
+    return ObjectiveUtility(objective).observation(records, fallback=fallback)
 
 
 def _constraint_satisfied(value: Any, rule: Mapping[str, Any]) -> bool:
     """Evaluate one explicit outcome bound; missing evidence fails closed."""
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or not math.isfinite(float(value))
-    ):
-        return False
-    numeric = float(value)
-    minimum = rule.get("min")
-    maximum = rule.get("max")
-    return not (
-        isinstance(minimum, int | float)
-        and not isinstance(minimum, bool)
-        and numeric < float(minimum)
-    ) and not (
-        isinstance(maximum, int | float)
-        and not isinstance(maximum, bool)
-        and numeric > float(maximum)
-    )
+    return constraint_satisfied(value, rule)
 
 
 def _result_objective(result: WorkResult, metric: str) -> float | None:
@@ -2854,6 +3822,17 @@ def _work_result_from_mapping(value: Mapping[str, Any]) -> WorkResult:
         str(value["study_phase"]) if value.get("study_phase") is not None else None,
         value.get("fidelity"),
         value.get("objective_observation"),
+        str(
+            value.get(
+                "termination_type",
+                "performance_pruned"
+                if value.get("pruned")
+                else "completed"
+                if value.get("status") == "succeeded"
+                else "scientific_failed",
+            )
+        ),
+        value.get("termination", {}),
     )
 
 

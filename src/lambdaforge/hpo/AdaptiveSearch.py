@@ -52,11 +52,13 @@ class AdaptiveSearchPolicy:
     runs_per_gpu: int = 1
     max_parallel: int | None = None
     min_seeds: int = 1
-    reduction_factor: int = 2
-    confidence: float = 1.0
+    candidate_budget: int = 20
+    proposal_pool_size: int = 320
     early_stopping: bool = True
     early_stopping_min_step: int = 3
     early_stopping_confirmations: int = 2
+    early_stopping_probability_threshold: float = 0.05
+    early_stopping_equivalence_margin: float = 0.0
     startup_trials: int = 10
     failure_retries: int = 1
     seed_probability_threshold: float = 0.1
@@ -74,25 +76,24 @@ class AdaptiveSearchPolicy:
         for name in (
             "runs_per_gpu",
             "min_seeds",
-            "reduction_factor",
             "startup_trials",
             "confirmation_top_k",
+            "candidate_budget",
+            "proposal_pool_size",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"search.{name} must be a positive integer.")
-        if self.reduction_factor < 2:
-            raise ValueError("search.reduction_factor must be >= 2.")
         if self.max_parallel is not None and (
             isinstance(self.max_parallel, bool) or self.max_parallel < 1
         ):
             raise ValueError("search.max_parallel must be a positive integer or null.")
-        if not math.isfinite(self.confidence) or self.confidence < 0:
-            raise ValueError("search.confidence must be a finite non-negative number.")
         if self.early_stopping_min_step < 1:
             raise ValueError("search.early_stopping.min_step must be >= 1.")
         if self.early_stopping_confirmations < 1:
             raise ValueError("search.early_stopping.confirmations must be >= 1.")
+        if self.proposal_pool_size < self.candidate_budget:
+            raise ValueError("search.proposal_pool_size must be >= search.trials.")
         if (
             isinstance(self.failure_retries, bool)
             or not isinstance(self.failure_retries, int)
@@ -101,15 +102,20 @@ class AdaptiveSearchPolicy:
             raise ValueError("search.failure_retries must be an integer from 0 to 3.")
         if not 0 <= self.seed_probability_threshold <= 1:
             raise ValueError("search.seed_probability_threshold must be in [0, 1].")
-        for name in ("equivalence_margin", "min_improvement"):
+        if not 0 <= self.early_stopping_probability_threshold <= 1:
+            raise ValueError("search.early_stopping.probability_threshold must be in [0, 1].")
+        for name in (
+            "equivalence_margin",
+            "early_stopping_equivalence_margin",
+            "min_improvement",
+        ):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"search.{name} must be finite and non-negative.")
         if len(self.confirmation_seeds) != len(set(self.confirmation_seeds)):
             raise ValueError("search.confirmation_seeds cannot contain duplicates.")
         if any(
-            isinstance(seed, bool) or not isinstance(seed, int)
-            for seed in self.confirmation_seeds
+            isinstance(seed, bool) or not isinstance(seed, int) for seed in self.confirmation_seeds
         ):
             raise TypeError("search.confirmation_seeds must contain integers.")
         if self.max_runs is not None and (
@@ -131,20 +137,46 @@ class AdaptiveSearchPolicy:
 
     @classmethod
     def from_search(cls, value: Mapping[str, Any]) -> AdaptiveSearchPolicy:
+        removed = set(value).intersection({"reduction_factor", "confidence"})
+        if removed:
+            raise ValueError(
+                "Removed ambiguous HPO field(s) "
+                f"{sorted(removed)}. Use search.fidelity.reduction_factor for fidelity spacing; "
+                "seed_racing.probability_threshold and early_stopping.probability_threshold "
+                "own their separate statistical decisions."
+            )
         raw_early = value.get("early_stopping", True)
+        raw_seed_racing = value.get("seed_racing", {})
+        if not isinstance(raw_seed_racing, Mapping):
+            raise TypeError("search.seed_racing must be a mapping.")
+        unknown_seed = set(raw_seed_racing) - {"probability_threshold", "equivalence_margin"}
+        if unknown_seed:
+            raise ValueError(f"Unknown search.seed_racing field(s): {sorted(unknown_seed)}.")
         if isinstance(raw_early, bool):
-            early, min_step = raw_early, 3
+            early, min_step, early_probability, early_margin = raw_early, 3, 0.05, 0.0
         elif isinstance(raw_early, Mapping):
-            unknown = set(raw_early) - {"enabled", "min_step", "confirmations"}
+            unknown = set(raw_early) - {
+                "enabled",
+                "min_step",
+                "confirmations",
+                "probability_threshold",
+                "equivalence_margin",
+            }
             if unknown:
                 raise ValueError(f"Unknown search.early_stopping field(s): {sorted(unknown)}.")
             early = bool(raw_early.get("enabled", True))
             min_step = int(raw_early.get("min_step", 3))
             confirmations = int(raw_early.get("confirmations", 2))
+            early_probability = float(raw_early.get("probability_threshold", 0.05))
+            early_margin = float(raw_early.get("equivalence_margin", 0.0))
         else:
             raise TypeError("search.early_stopping must be true/false or a mapping.")
         if isinstance(raw_early, bool):
             confirmations = 2
+        candidate_budget = int(value.get("trials", 20))
+        proposal_pool_size = int(
+            value.get("proposal_pool_size", max(candidate_budget, min(4096, candidate_budget * 16)))
+        )
         maximum = value.get("max_parallel")
         raw_confirmation = value.get("confirmation_seeds", ())
         if not isinstance(raw_confirmation, (list, tuple)):
@@ -163,15 +195,23 @@ class AdaptiveSearchPolicy:
             runs_per_gpu=int(value.get("runs_per_gpu", 1)),
             max_parallel=int(maximum) if maximum is not None else None,
             min_seeds=int(value.get("min_seeds", 1)),
-            reduction_factor=int(value.get("reduction_factor", 2)),
-            confidence=float(value.get("confidence", 1.0)),
+            candidate_budget=candidate_budget,
+            proposal_pool_size=proposal_pool_size,
             early_stopping=early,
             early_stopping_min_step=min_step,
             early_stopping_confirmations=confirmations,
+            early_stopping_probability_threshold=early_probability,
+            early_stopping_equivalence_margin=early_margin,
             startup_trials=int(value.get("startup_trials", 10)),
             failure_retries=int(value.get("failure_retries", 1)),
-            seed_probability_threshold=float(value.get("seed_probability_threshold", 0.1)),
-            equivalence_margin=float(value.get("equivalence_margin", 0.0)),
+            seed_probability_threshold=float(
+                raw_seed_racing.get(
+                    "probability_threshold", value.get("seed_probability_threshold", 0.1)
+                )
+            ),
+            equivalence_margin=float(
+                raw_seed_racing.get("equivalence_margin", value.get("equivalence_margin", 0.0))
+            ),
             confirmation_top_k=int(value.get("confirmation_top_k", 1)),
             confirmation_seeds=tuple(raw_confirmation),
             max_runs=int(max_runs) if max_runs is not None else None,
@@ -192,17 +232,21 @@ class AdaptiveSearchPolicy:
             "runs_per_gpu": self.runs_per_gpu,
             "max_parallel": self.max_parallel,
             "min_seeds": self.min_seeds,
-            "reduction_factor": self.reduction_factor,
-            "confidence": self.confidence,
+            "trials": self.candidate_budget,
+            "proposal_pool_size": self.proposal_pool_size,
             "early_stopping": {
                 "enabled": self.early_stopping,
                 "min_step": self.early_stopping_min_step,
                 "confirmations": self.early_stopping_confirmations,
+                "probability_threshold": self.early_stopping_probability_threshold,
+                "equivalence_margin": self.early_stopping_equivalence_margin,
             },
             "startup_trials": self.startup_trials,
             "failure_retries": self.failure_retries,
-            "seed_probability_threshold": self.seed_probability_threshold,
-            "equivalence_margin": self.equivalence_margin,
+            "seed_racing": {
+                "probability_threshold": self.seed_probability_threshold,
+                "equivalence_margin": self.equivalence_margin,
+            },
             "confirmation_top_k": self.confirmation_top_k,
             "confirmation_seeds": list(self.confirmation_seeds),
             "max_runs": self.max_runs,
@@ -220,9 +264,9 @@ SEARCH_POLICY_FIELDS = frozenset(
         "runs_per_gpu",
         "max_parallel",
         "min_seeds",
-        "reduction_factor",
-        "confidence",
         "early_stopping",
+        "seed_racing",
+        "proposal_pool_size",
         "startup_trials",
         "failure_retries",
         "seed_probability_threshold",

@@ -18,6 +18,7 @@ from lambdaforge.cli.LiveJobMonitor import (
 )
 from lambdaforge.controlplane import ClusterCatalog, ClusterProfile, JobService, JobState, JobStore
 from lambdaforge.controlplane.jobs import JobRecord
+from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.hpo.StudyInsights import StudyInsightAnalyzer
 from lambdaforge.training.callbacks.AdaptiveHpoCallback import AdaptiveHpoCallback
 from lambdaforge.work.study import StudyTelemetry
@@ -228,6 +229,20 @@ def test_pruned_only_candidate_is_terminal_censored_evidence_not_failure(
             "state": "pruned",
             "metrics": {"score": 0.1},
             "prune_reason": "p_competitive=0.01",
+            "termination": {
+                "candidate": 1,
+                "common_step": 5,
+                "current_utility": 0.1,
+                "predicted_utility": 0.2,
+                "predicted_standard_error": 0.03,
+                "reference_candidate": 2,
+                "probability_competitive": 0.01,
+                "threshold": 0.05,
+                "equivalence_margin": 0.0,
+                "confirmations": 2,
+                "required_confirmations": 2,
+                "curve_model": "conservative-local-linear-last-5",
+            },
         },
     )
     study.candidates_observed((1,))
@@ -244,6 +259,66 @@ def test_pruned_only_candidate_is_terminal_censored_evidence_not_failure(
     }
     assert signals["width"]["pruned"] == 1
     assert signals["width"]["pruned_rate"] == 1.0
+    screen = StudyRenderer.render_runs(
+        {"work": {"items": [{"study": snapshot}]}},
+        0,
+        0,
+        selected_run=0,
+        message="",
+        width=140,
+        height=30,
+    )
+    assert "PERFORMANCE PRUNED" in screen
+    assert "P(competitive)=0.01" in screen
+    assert "reference Trial=2" in screen
+
+
+def test_scheduler_preemption_is_rendered_as_a_neutral_resumable_pause() -> None:
+    run = {
+        "key": "trial-00001-seed-4",
+        "seed": 4,
+        "state": "paused",
+        "termination_type": "scheduler_preempted",
+        "termination": {
+            "observed_step": 12,
+            "old_action": "ADD_SEED",
+            "new_action": "START_NEW",
+            "old_priority": 0.1,
+            "new_priority": 0.2,
+            "hysteresis_ratio": 0.5,
+            "elapsed_seconds": 120,
+            "reason": "better checkpoint-safe action",
+        },
+        "latest_metrics": {"score": 0.6},
+    }
+    payload = {
+        "work": {
+            "items": [
+                {
+                    "study": {
+                        "objective": {"metric": "score", "mode": "max"},
+                        "candidates": [
+                            {
+                                "trial": 1,
+                                "state": "running",
+                                "parameters": {"width": 32},
+                                "runs": [run],
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    }
+
+    screen = StudyRenderer.render_runs(
+        payload, 0, 0, selected_run=0, message="", width=140, height=30
+    )
+
+    assert "SCHEDULER PAUSED" in screen
+    assert "neutral evidence" in screen
+    assert "ADD_SEED" in screen and "START_NEW" in screen
+    assert "PERFORMANCE PRUNED" not in screen
 
 
 def test_candidate_that_violates_an_objective_guardrail_is_not_selectable(
@@ -299,6 +374,53 @@ def test_candidate_that_violates_an_objective_guardrail_is_not_selectable(
     assert candidate["feasibility"]["feasible"] is False
     assert "selection_objective" not in candidate
     assert snapshot["hpo_analysis"]["infeasible_candidates"] == 1
+
+
+def test_candidate_with_a_completed_and_pruned_seed_remains_censored(tmp_path: Path) -> None:
+    study = StudyTelemetry(tmp_path / "study")
+    specifications = (_specification(1, 4), _specification(1, 7))
+    study.initialize(
+        name="training",
+        execution_id="execution-1",
+        strategy="adaptive",
+        objective={"metric": "score", "mode": "max"},
+        specifications=(),
+        planned_candidates=1,
+    )
+    study.schedule(specifications)
+    study._write_run(
+        "trial-00001-seed-4",
+        {
+            "trial": 1,
+            "seed": 4,
+            "state": "succeeded",
+            "metrics": {"score": 0.9},
+            "best_objective": 0.9,
+            "objective_observation": {
+                "metric": "score",
+                "mode": "max",
+                "current": 0.9,
+                "best": 0.9,
+                "best_step": 5,
+            },
+        },
+    )
+    study._write_run(
+        "trial-00001-seed-7",
+        {"trial": 1, "seed": 7, "state": "pruned", "metrics": {"score": 0.1}},
+    )
+    study.candidates_observed((1,))
+
+    snapshot = study.refresh()
+    candidate = snapshot["candidates"][0]
+
+    assert candidate["state"] == "pruned"
+    assert candidate["partially_censored"] is True
+    assert "selection_objective" not in candidate
+    assert snapshot["hpo_analysis"]["candidate_observations"] == 0
+    signal = snapshot["hpo_analysis"]["parameters"][0]["pruning_signal"]
+    assert signal["observations"] == 1
+    assert signal["pruned"] == 1
 
 
 def test_hpo_insights_explain_numeric_direction_without_claiming_causality() -> None:
@@ -395,7 +517,7 @@ def test_hpo_insights_expose_visual_response_and_pairwise_joint_gain() -> None:
         height=32,
     )
     assert "MARGINAL RESPONSE" in screen
-    assert "PAIRWISE JOINT PREDICTIVE GAIN" in screen
+    assert "JOINT SURROGATE CONTEXT" in screen
     assert "right" in screen
 
 
@@ -457,7 +579,7 @@ def test_hpo_renderer_recomputes_an_old_remote_analysis_snapshot_locally() -> No
     analysis, parameters = StudyInsightRenderer.analysis(payload, 0)
 
     assert analysis is not None
-    assert analysis["analysis_version"] == 3
+    assert analysis["analysis_version"] == 4
     assert len(parameters[0]["response"]["points"]) == 3
     screen = StudyParameterInsightRenderer.render(
         payload,
@@ -510,12 +632,14 @@ def test_study_snapshot_and_renderer_expose_hpo_analysis_and_latest_action(
                 },
             },
         )
+    study.controller_decision({"decision": 1, "action": "INITIALIZE", "slots_total": 4})
     study.controller_decision({"decision": 7, "action": "ADD_SEED", "trial": 5, "seed": 17})
     snapshot = study.refresh()
     payload = {"work": {"items": [{"study": snapshot}]}}
 
     assert snapshot["hpo_analysis"]["parameters"][0]["parameter"] == "width"
     assert snapshot["controller"]["last"]["action"] == "ADD_SEED"
+    assert snapshot["controller"]["scheduler"]["slots_total"] == 4
     screen = StudyInsightRenderer.render(
         payload,
         0,
@@ -526,6 +650,7 @@ def test_study_snapshot_and_renderer_expose_hpo_analysis_and_latest_action(
     )
     assert "LambdaForge HPO insights" in screen
     assert "controller: ADD_SEED trial=5 seed=17" in screen
+    assert "slots=0 active/4 total" in screen
     assert "SELECTED HYPERPARAMETER · width" in screen
     assert "associations are exploratory, not causal" in screen
 
@@ -763,6 +888,45 @@ def test_lightning_bridge_records_epoch_wall_time_once_per_step(tmp_path: Path) 
     assert sum(value["name"] == "train_loss" for value in values) == 1
 
 
+def test_lightning_bridge_emits_one_same_checkpoint_composite_utility(tmp_path: Path) -> None:
+    path = tmp_path / "hpo.jsonl"
+    objective = ObjectiveUtility.normalize(
+        {
+            "metrics": {
+                "val_quality": {"mode": "max", "weight": 3, "range": [0, 1]},
+                "val_stability": {"mode": "max", "weight": 1, "range": [0, 1]},
+            },
+            "aggregation": "geometric",
+        }
+    )
+    callback = AdaptiveHpoCallback(
+        "__lambdaforge_utility__",
+        path,
+        tmp_path / "stop",
+        objective=ObjectiveUtility(objective),
+    )
+    trainer = SimpleNamespace(
+        sanity_checking=False,
+        current_epoch=2,
+        callback_metrics={"val_quality": 0.8, "val_stability": 0.6},
+        should_stop=False,
+        is_global_zero=True,
+    )
+
+    callback.on_validation_epoch_start(trainer)
+    callback.on_validation_epoch_end(trainer)
+
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert records == [
+        {
+            "name": "__lambdaforge_utility__",
+            "split": None,
+            "step": 3,
+            "value": pytest.approx((0.8**0.75) * (0.6**0.25)),
+        }
+    ]
+
+
 def test_study_renderers_expose_candidates_seeds_curves_and_failure() -> None:
     run = {
         "key": "trial-00001-seed-4",
@@ -923,6 +1087,68 @@ def test_seed_table_keeps_multiple_rows_visible_in_a_common_terminal() -> None:
     assert "Seed 2" in screen
     assert "Seed 3" in screen
     assert "SELECTED SEED/RUN METRICS" in screen
+
+
+def test_composite_candidate_panel_exposes_utility_components_and_pareto() -> None:
+    payload = {
+        "work": {
+            "items": [
+                {
+                    "study": {
+                        "name": "composite",
+                        "strategy": "adaptive",
+                        "objective": {
+                            "metric": "__lambdaforge_utility__",
+                            "mode": "max",
+                            "aggregation": "geometric",
+                            "metrics": {
+                                "quality": {"mode": "max", "weight": 0.75},
+                                "stability": {"mode": "max", "weight": 0.25},
+                            },
+                        },
+                        "counts": {"candidates": 1},
+                        "candidates": [
+                            {
+                                "trial": 1,
+                                "state": "observed",
+                                "parameters": {"width": 128},
+                                "selection_objective": 0.72,
+                                "selection_standard_error": 0.03,
+                                "best_step": 8,
+                                "pareto_optimal": True,
+                                "objective_components": {
+                                    "quality": {
+                                        "raw": 0.8,
+                                        "normalized": 0.8,
+                                        "weight": 0.75,
+                                        "contribution": 0.85,
+                                    },
+                                    "stability": {
+                                        "raw": 0.6,
+                                        "normalized": 0.6,
+                                        "weight": 0.25,
+                                        "contribution": 0.88,
+                                    },
+                                },
+                                "feasibility": {"feasible": True, "constraints": {}},
+                                "runs": [],
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    }
+
+    screen = StudyRenderer.render_candidates(
+        payload, 0, selected_candidate=0, message="", width=140, height=34
+    )
+
+    assert "SELECTED TRIAL UTILITY" in screen
+    assert "aggregation=geometric" in screen
+    assert "COMPONENTS" in screen
+    assert "quality" in screen and "stability" in screen
+    assert "Pareto=yes" in screen
 
 
 def test_study_dashboard_pages_curves_lists_parameters_and_expands_epoch() -> None:
