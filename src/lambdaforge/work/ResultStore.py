@@ -7,9 +7,11 @@ import os
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
-from statistics import fmean
+from statistics import fmean, stdev
 from typing import Any
 
+from lambdaforge.analysis.Report import write_html
+from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
 from lambdaforge.work.config import WorkConfig
 from lambdaforge.work.failure import render_scientific_failures, scientific_failures
 from lambdaforge.work.models import atomic_json
@@ -246,7 +248,28 @@ class ResultStore:
                         "mean": fmean(observations) if observations else None,
                         "minimum": min(observations) if observations else None,
                         "maximum": max(observations) if observations else None,
+                        "standard_deviation": stdev(observations)
+                        if len(observations) >= 2
+                        else None,
+                        "standard_error": stdev(observations) / len(observations) ** 0.5
+                        if len(observations) >= 2
+                        else None,
                     }
+                )
+            baseline = rows[0].get("mean") if rows else None
+            for row in rows:
+                mean = row.get("mean")
+                row["difference_from_first"] = (
+                    float(mean) - float(baseline)
+                    if isinstance(mean, int | float) and isinstance(baseline, int | float)
+                    else None
+                )
+                row["relative_difference_from_first"] = (
+                    (float(mean) - float(baseline)) / abs(float(baseline))
+                    if isinstance(mean, int | float)
+                    and isinstance(baseline, int | float)
+                    and float(baseline) != 0
+                    else None
                 )
             comparisons[name] = rows
         ranking = None
@@ -262,7 +285,66 @@ class ResultStore:
             "metrics": comparisons,
             "ranking": ranking,
             "objective": {"metric": metric, "mode": mode} if metric else None,
+            "resources": {
+                str(value["execution_id"]): _execution_resources(value) for value in selected
+            },
+            "warnings": [
+                f"Metric {name!r} is unavailable in one or more selected Executions."
+                for name, rows in comparisons.items()
+                if any(row["count"] == 0 for row in rows)
+            ],
+            "study_analysis": {
+                str(value["execution_id"]): self.analysis_summary(str(value["execution_id"]))
+                for value in selected
+            },
         }
+
+    def analysis(self, selector: str, *, recompute: bool = False) -> dict[str, Any]:
+        """Compute or reuse the versioned analysis beside one exact Execution."""
+        selected = self.select(selector)
+        if selected.get("already_deleted"):
+            raise ValueError(f"Work Execution {selector!r} was already deleted.")
+        manifest = Path(str(selected["_manifest_path"])).resolve()
+        execution_dir = self._execution_dir(manifest)
+        configuration = _read_mapping(execution_dir / "configuration.json")
+        definition = _analysis_definition(configuration)
+        objective = definition.get("objective")
+        objective = objective if isinstance(objective, Mapping) else None
+        authored = StudyAnalysis.authored_space(definition)
+        return StudyAnalysis.persist(
+            selected,
+            execution_dir / "analysis.json",
+            objective=objective,
+            authored_space=authored,
+            recompute=recompute,
+        )
+
+    def analysis_summary(self, selector: str) -> dict[str, Any] | None:
+        """Read a valid persisted summary without triggering expensive analysis."""
+        selected = self.select(selector)
+        manifest = Path(str(selected["_manifest_path"])).resolve()
+        path = self._execution_dir(manifest) / "analysis.json"
+        if not path.is_file() or path.is_symlink():
+            return None
+        value = _read_mapping(path)
+        return {
+            "analysis_version": value.get("analysis_version"),
+            "status": value.get("source", {}).get("status"),
+            "winner": value.get("winner"),
+            "summary": value.get("summary"),
+            "findings": value.get("findings", []),
+            "path": str(path),
+        }
+
+    def report(
+        self,
+        selector: str,
+        output: str | Path,
+        *,
+        recompute: bool = False,
+    ) -> Path:
+        """Export the same analysis consumed by CLI/TUI to one offline HTML file."""
+        return write_html(self.analysis(selector, recompute=recompute), output)
 
     @property
     def _receipt_root(self) -> Path:
@@ -304,3 +386,54 @@ class ResultStore:
         ):
             raise ValueError(f"Unsafe Work Execution ownership path: {execution_dir}")
         return execution_dir
+
+
+def _read_mapping(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        raise RuntimeError(f"Corrupt JSON metadata: {path}") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Expected a JSON object: {path}")
+    return value
+
+
+def _analysis_definition(configuration: Mapping[str, Any]) -> dict[str, Any]:
+    if isinstance(configuration.get("objective"), Mapping):
+        return dict(configuration)
+    for level in configuration.get("steps", ()):
+        values = (
+            level.get("parallel", ())
+            if isinstance(level, Mapping) and "parallel" in level
+            else (level,)
+        )
+        for value in values:
+            if isinstance(value, Mapping) and isinstance(value.get("objective"), Mapping):
+                return dict(value)
+    return dict(configuration)
+
+
+def _execution_resources(execution: Mapping[str, Any]) -> dict[str, Any]:
+    runs = [value for value in execution.get("runs", ()) if isinstance(value, Mapping)]
+    durations = [
+        float(value["duration_seconds"])
+        for value in runs
+        if isinstance(value.get("duration_seconds"), int | float)
+    ]
+    gpu_seconds = [
+        float(value["duration_seconds"])
+        for value in runs
+        if isinstance(value.get("duration_seconds"), int | float)
+        and (value.get("gpu_index") is not None or value.get("gpu_token") is not None)
+    ]
+    peak_vram = [
+        float(value["peak_vram"])
+        for value in runs
+        if isinstance(value.get("peak_vram"), int | float)
+    ]
+    return {
+        "wall_seconds_sum": sum(durations),
+        "gpu_seconds_sum": sum(gpu_seconds),
+        "peak_vram": max(peak_vram, default=None),
+        "run_count": len(runs),
+    }

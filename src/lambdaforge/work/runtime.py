@@ -136,7 +136,7 @@ class MetricCollection:
 
 
 class ProgressReporter:
-    """Persist optional current progress for job observation and ``lf top``."""
+    """Persist optional current progress for job observation and the Research Console."""
 
     def __init__(self, run_dir: Path) -> None:
         configured = os.environ.get("LAMBDAFORGE_PROGRESS_PATH")

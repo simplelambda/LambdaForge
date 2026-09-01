@@ -9,6 +9,31 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+## [0.14.0] - 2026-09-01
+
+### Añadido
+
+- Análisis de estudios determinista/versionado con semántica exacta de objective actual, óptimo,
+  final y de selección; pruning censurado, incertidumbre bootstrap, comparaciones pareadas y
+  screening separado de confirmación.
+- Validación del surrogate por candidato, importancia funcional global y de región superior,
+  respuestas ajustadas, interacciones/superficies, cobertura marginal/conjunta, bordes, resolución
+  del pool, estabilidad, constraints, calidad de pruning y Pareto de recursos.
+- Persistencia atómica automática de `analysis.json`, `lf results analyze`, JSON estable e informes
+  Plotly offline opcionales mediante `lambdaforge[analysis-report]`.
+- Evidencia estructurada de admisión GPU/CPU/RAM para explicar colas, VRAM por dispositivo y espera
+  sin convertir presión temporal en fallo científico.
+- Consola de investigación Textual 8.2 al ejecutar `lf`, con Overview, Work, Studies, Clusters,
+  Datasets y Results, carga asíncrona, datos stale, ayuda contextual, paleta y confirmaciones.
+
+### Cambiado
+
+- Textual es la única arquitectura interactiva; automatización conserva CLI/JSON. Se retiran las
+  rutas públicas `lf top`, `lf clusters setup` y `lf clusters modify` para no mantener dos UIs.
+- `lf` sin subcomando abre la Consola solo en TTY; con redirección o JSON imprime ayuda y sale.
+- Actualizada toda la documentación humana/técnica/de agentes en inglés y español y aclarada la
+  naturaleza predictiva/descriptiva, no causal, del análisis posterior.
+
 ## [0.13.3] - 2026-09-01
 
 ### Corregido

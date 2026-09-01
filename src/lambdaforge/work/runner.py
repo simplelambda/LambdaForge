@@ -353,6 +353,29 @@ class WorkRunner:
             self._summary(config, outcomes),
         )
         atomic_json(existing, execution_result.to_dict())
+        study_definitions = [
+            definition
+            for level in config.levels
+            for definition in level.runs
+            if definition.study_expected and definition.objective is not None
+        ]
+        if study_definitions:
+            try:
+                from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
+
+                StudyAnalysis.persist(
+                    execution_result.to_dict(),
+                    execution_dir / "analysis.json",
+                    objective=study_definitions[0].objective,
+                    authored_space=StudyAnalysis.authored_space(config.raw),
+                    status="final",
+                )
+            except Exception as error:
+                print(
+                    f"[analysis] Final Study Analysis unavailable: {type(error).__name__}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         self._publish_job_result(execution_result)
         self._compact_outcomes(outcomes)
         return execution_result
@@ -2049,6 +2072,18 @@ def _execute_adaptive_group(
             ranked=tuple(proposal_numbers[trial] for trial in ranked),
             finished=True,
         )
+    final_pruning_audit = (
+        _pruner_calibration(
+            outcomes,
+            objective_evaluator,
+            min_step=policy.early_stopping_min_step,
+            confirmations=policy.early_stopping_confirmations,
+            probability_threshold=policy.early_stopping_probability_threshold,
+            margin=policy.early_stopping_equivalence_margin,
+        )
+        if policy.early_stopping
+        else {"status": "disabled"}
+    )
     record_decision(
         "FINISH",
         completed_runs=len(outcomes),
@@ -2056,6 +2091,7 @@ def _execute_adaptive_group(
         confirmed_public_trials=[public_trial(trial) for trial in active],
         budget_exhausted=allowance() <= 0,
         time_exhausted=not within_time(),
+        pruning_audit=final_pruning_audit,
     )
     return tuple(outcomes)
 
@@ -2150,6 +2186,7 @@ def _execute_adaptive_dispatch(
         else:
             _execute_cpu_isolated_runs(
                 prepared,
+                resources=resources,
                 policy=policy,
                 parallelism=parallelism,
                 objective_metric=objective_metric,
@@ -2173,6 +2210,7 @@ def _execute_adaptive_dispatch(
 def _execute_cpu_isolated_runs(
     prepared: Sequence[dict[str, Any]],
     *,
+    resources: ResourceRequest | None = None,
     policy: AdaptiveSearchPolicy,
     parallelism: int,
     objective_metric: str,
@@ -2190,9 +2228,29 @@ def _execute_cpu_isolated_runs(
     on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
     """Keep CPU Runs isolated so one killed worker cannot break unrelated candidates."""
+    resources = resources or ResourceRequest()
     queued = deque(dict(value) for value in prepared)
     pending: dict[Any, tuple[dict[str, Any], ProcessPoolExecutor]] = {}
     while queued or pending:
+        if telemetry is not None:
+            telemetry.admission_state(
+                {
+                    "summary": "waiting_for_resources"
+                    if queued and len(pending) >= parallelism
+                    else "admissible",
+                    "pending_runs": len(queued),
+                    "max_parallel": policy.max_parallel,
+                    "cpu_slots": parallelism,
+                    "cpu_capacity": resources.cpu_cores,
+                    "ram_capacity_bytes": resources.ram_bytes,
+                    "active_runs": len(pending),
+                    "resource": "max_parallel" if queued and len(pending) >= parallelism else "cpu",
+                    "reason": "max_parallel"
+                    if queued and len(pending) >= parallelism
+                    else "admissible",
+                    "retryable": True,
+                }
+            )
         while queued and len(pending) < parallelism:
             value = queued.popleft()
             value["hpo_dispatched_monotonic"] = time.monotonic()
@@ -2598,6 +2656,20 @@ def _execute_gpu_admitted_runs(
             launch_stagger_seconds=_GPU_LAUNCH_STAGGER_SECONDS,
             usable=usable,
         )
+        if telemetry is not None:
+            telemetry.admission_state(
+                _gpu_admission_diagnostics(
+                    memory,
+                    active=active,
+                    required_bytes=required,
+                    runs_per_gpu=policy.runs_per_gpu,
+                    max_parallel=policy.max_parallel,
+                    pending=len(queued),
+                    visible_gpus=visible_gpus,
+                    usable=usable,
+                    admissible=slots,
+                )
+            )
         launched = False
         for slot in slots:
             if not queued or len(pending) >= parallelism:
@@ -2727,6 +2799,57 @@ def _admissible_gpu_slots(
         and (required_bytes <= 0 or memory[index][0] >= required_bytes)
         and (required_bytes <= 0 or (active[index] + 1) * required_bytes <= admission_budget[index])
     )
+
+
+def _gpu_admission_diagnostics(
+    memory: Sequence[tuple[int, int]],
+    *,
+    active: Sequence[int],
+    required_bytes: int,
+    runs_per_gpu: int,
+    max_parallel: int | None,
+    pending: int,
+    visible_gpus: Sequence[str],
+    usable: Sequence[int],
+    admissible: Sequence[int],
+) -> dict[str, Any]:
+    """Describe why queued Runs can or cannot consume each allocated GPU."""
+    allowed = set(usable)
+    ready = set(admissible)
+    devices: list[dict[str, Any]] = []
+    for index, (free, total) in enumerate(memory):
+        if index not in allowed:
+            reason = "gpu_unavailable"
+        elif active[index] >= runs_per_gpu:
+            reason = "runs_per_gpu"
+        elif required_bytes > 0 and free < required_bytes:
+            reason = "insufficient_free_vram"
+        elif index not in ready:
+            reason = "launch_stagger_or_lease"
+        else:
+            reason = "admissible"
+        devices.append(
+            {
+                "gpu": index,
+                "token": visible_gpus[index] if index < len(visible_gpus) else str(index),
+                "admitted": index in ready,
+                "resource": "gpu_memory" if reason == "insufficient_free_vram" else "gpu",
+                "reason": reason,
+                "required": required_bytes,
+                "available": free,
+                "total": total,
+                "active_runs": active[index],
+                "runs_per_gpu": runs_per_gpu,
+                "retryable": reason not in {"gpu_unavailable"},
+            }
+        )
+    return {
+        "pending_runs": pending,
+        "max_parallel": max_parallel,
+        "runs_per_gpu": runs_per_gpu,
+        "devices": devices,
+        "summary": ("admissible" if ready else "waiting_for_resources" if pending else "idle"),
+    }
 
 
 def _memory_text(value: int) -> str:

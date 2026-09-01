@@ -24,6 +24,7 @@ dependencies = [
     "psutil>=5.9",
     "PyYAML>=6",
     "threadpoolctl>=3.2",
+    "textual>=8.2,<9",
     "tomli>=2",
     "torch>=2.1",
     "torchmetrics>=1.2",
@@ -58,6 +59,9 @@ clustering = [
 adaptive-hpo = [
     "botorch>=0.17,<1",
 ]
+analysis-report = [
+    "plotly>=7,<8",
+]
 dev = [
     "build>=1.2",
     "mypy>=1.10",
@@ -85,6 +89,7 @@ version = { attr = "lambdaforge._version.VERSION" }
 [tool.setuptools.package-data]
 lambdaforge = [
     "schemas/*.json",
+    "tui/*.tcss",
 ]
 
 [tool.setuptools.data-files]
@@ -143,6 +148,7 @@ module = [
     "sklearn.*",
     "threadpoolctl",
     "jsonschema",
+    "plotly.*",
     "win32api",
     "win32con",
     "win32job",

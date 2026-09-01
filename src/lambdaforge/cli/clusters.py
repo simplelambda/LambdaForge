@@ -35,8 +35,6 @@ from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPo
 
 def run_cluster_command(arguments: argparse.Namespace) -> int:
     """Execute one parsed ``clusters`` action through control-plane services."""
-    if arguments.cluster_command in {"setup", "modify"}:
-        return _run_cluster_wizard(arguments)
     cluster_catalog = ClusterCatalog.load(arguments.catalog)
     if arguments.cluster_command == "add":
         destination = arguments.catalog or (
@@ -277,32 +275,6 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
         )
     )
     return 0
-
-
-def _run_cluster_wizard(arguments: argparse.Namespace) -> int:
-    """Drive the interactive layer through the ordinary parsed cluster commands."""
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise ValueError(
-            "Interactive cluster setup requires a terminal. For automation use "
-            "'lf clusters add/set/unset/credentials' and inspect with 'lf clusters show'."
-        )
-    from lambdaforge.cli.ClusterWizard import ClusterWizard
-    from lambdaforge.cli.parser import build_parser
-
-    def execute(tokens: tuple[str, ...] | list[str] | object) -> int:
-        if not isinstance(tokens, (tuple, list)):
-            raise TypeError("Native cluster wizard commands must be argv sequences.")
-        command = ["clusters"]
-        if arguments.catalog is not None:
-            command.extend(("--catalog", str(arguments.catalog)))
-        command.extend(str(value) for value in tokens)
-        parsed = build_parser().parse_args(command)
-        return run_cluster_command(parsed)
-
-    wizard = ClusterWizard(execute, catalog_path=arguments.catalog)
-    if arguments.cluster_command == "setup":
-        return wizard.setup(offer_test=not arguments.no_test)
-    return wizard.modify(arguments.name)
 
 
 def bootstrap_action(planned: bool, reused: bool) -> str:

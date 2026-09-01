@@ -1,4 +1,4 @@
-# LambdaForge 0.13 manual
+# LambdaForge 0.14 manual
 
 ## Contents
 
@@ -17,6 +17,8 @@
 13. [Clustering](#13-clustering)
 14. [Reusable neural components](#14-reusable-neural-components)
 15. [Architecture and extension boundaries](#15-architecture-and-extension-boundaries)
+16. [Study Analysis](#16-study-analysis)
+17. [Research Console](#17-research-console)
 
 ## 1. Mental model
 
@@ -68,10 +70,10 @@ project/
 ```
 
 `lf --help`, `lf help`, `lf COMMAND --help` and `lf help COMMAND SUBCOMMAND` are equivalent
-successful help routes. For a first remote target, `lf clusters setup` provides an explained
-interactive wizard; `lf clusters modify [NAME]` edits an existing profile. Both invoke only the
-same native cluster subcommands used by scripts and never put password values in argv or YAML.
-Every prompt accepts `0`, `q`, `quit` or `exit`; an unconfirmed prompt is never applied.
+successful help routes. Bare `lf` opens the Research Console on a TTY; redirected execution and
+`lf --json` print help instead. Its Clusters screen edits the same catalog and credential services
+as native commands and never puts passwords in argv or YAML. The 0.13-only
+`top`/`clusters setup`/`clusters modify` routes have been retired.
 
 ## 3. Work API
 
@@ -483,7 +485,7 @@ After their objective values arrive, `sampler: auto` prefers optional BoTorch mi
 falls back to a dependency-light mixed k-NN acquisition if the extra is absent, observations are
 still insufficient or GP fitting is numerically unsafe. `sampler: knn` forces the base backend;
 `sampler: botorch` requests BoTorch but still fails safe to k-NN. Only proposed candidates appear in
-`lf top`. This is a genuinely joint decision model: numeric dimensions, categorical dimensions and
+the Research Console. This is a genuinely joint decision model: numeric dimensions, categorical dimensions and
 conditional active/inactive indicators share one input vector, so posterior predictions can depend
 on interactions. When repeated seeds provide a standard error, it is passed as observation noise;
 qLogNEI then selects from the finite candidate pool while accounting for noisy observations and
@@ -748,7 +750,7 @@ record per internal Run. A Run's existing `work.log`, `metrics.jsonl`, `training
 `result.json` remain authoritative; the index references them and folds only latest scalars and
 state. It never copies model checkpoints, output directories or artifact bytes.
 
-`lf top` uses this hierarchy:
+the Research Console uses this hierarchy:
 
 ```text
 Work
@@ -785,7 +787,7 @@ report `null` uncertainty fields instead of invented certainty. This audit is re
 diagnosis; it never changes recorded objectives or invents the counterfactual result of a genuinely
 pruned Run.
 
-`lf top` consumes the same controller evidence rather than fitting a second HPO model. Its candidate
+the Research Console consumes the same controller evidence rather than fitting a second HPO model. Its candidate
 view shows composite utility mean/standard error, aggregation, same-checkpoint raw and normalized
 components, weights/contributions, constraints and diagnostic Pareto membership. The HPO panel
 shows active/available slots, queued/paused Runs and the latest action's score, controller-value
@@ -841,17 +843,12 @@ Curves are read with a byte bound and reduced to 10–500 representative points 
 endpoints and the exact objective-best epoch; the TUI requests 80. Logs are bounded for interactive refresh and no telemetry reader
 mutates scientific evidence.
 
-The interactive plots follow nvtop's terminal grammar—framed time axes and live curves—but remain
-a small Unicode renderer rather than adding a plotting stack or rewriting the tested polling and
-process-control loop around an asynchronous UI framework. A final semantic ANSI layer adds colour
-only after width calculation, respects `NO_COLOR`, and leaves snapshots/machine output plain.
-Cluster rows contain compact CPU/RAM/GPU history; cluster detail plots whole-cluster CPU, RAM, GPU
-utilization and GPU-memory percentages over `lf top --history SECONDS`, with the current
-LambdaForge-owned share reported separately. Shift+left/right pans long Attempt or raw Run log
-lines while bare left keeps its navigation meaning; `h`/`l` are fallbacks.
+The Textual Research Console consumes these bounded curves without changing their evidence. Rich
+terminal presentation is optional to scientific execution and machine output remains plain JSON.
+Cluster/study resource details use the same persisted resource snapshots and admission reasons.
 
 Collection and presentation are separate. `LightningRunner` retains every bounded finite scalar,
-but projects may select the curves drawn by `lf top` with shell patterns:
+but projects may select the curves drawn by the Research Console with shell patterns:
 
 ```python
 from lambdaforge.training import LightningTrainConfig
@@ -915,7 +912,7 @@ lf logs WORK --run trial-00017-seed-4 --tail 300
 `work.items[].study` contains the compact catalogue and exact Run keys. `show --run` returns
 structured parameters, latest values, down-sampled curves, bounded log, failure and evidence paths;
 `--curve-points N` selects 10–500 points. `logs --run` emits only that Run's log. Poll JSON for a
-headless UI; `--follow` is intentionally reserved for outer logs because `lf top` already provides
+headless UI; `--follow` is intentionally reserved for outer logs because the Research Console already provides
 safe live per-Run refresh.
 
 ## 8. Execution, identity and reuse
@@ -964,7 +961,7 @@ The exact automatic metadata audit is:
 | artifacts and datasets with checksums/IDs | output publisher | fetch, verification, lineage and independent dataset lifecycle |
 | status, failure and resume flag | runner | retry choice and diagnosis |
 | Job ID when scheduled | control plane/supervisor | connect scientific Attempt to scheduler logs/control |
-| allocated/observed usage and progress when available | supervisor/provider | `overview`, `lf top` and performance diagnosis |
+| allocated/observed usage and progress when available | supervisor/provider | `overview`, the Research Console and performance diagnosis |
 
 YAML output declarations, user-controlled fingerprints, scheduler paths in scientific identity,
 duplicate complete package dumps and fabricated allocation/usage fields were excluded because no
@@ -979,25 +976,11 @@ explicit mean-based ranking without guessing metric direction.
 
 ## 10. Clusters and jobs
 
-Humans can configure the same complete profile through an explained terminal flow:
-
-```bash
-lf clusters setup
-lf clusters modify gpu
-```
-
-The wizard covers connection/authentication, workspace/project/dataset paths, storage, managed or
-existing Python, PyTorch/CUDA policy, scheduler dialect and GPU access. Automation uses the native
-`clusters add/set/unset/credentials/test` commands shown below; the wizard calls those operations
-rather than maintaining a second configuration implementation. Backend answers how the process is
-launched: choose Direct for a normal SSH host even when GPU execution is wrapped by `gpu exec`, and
-choose SLURM only for `sbatch`. The later GPU access step configures allocation/claims. Every
-question offers `0`/`q`/`quit`/`exit` without applying the current prompt. In an interactive TTY,
-up/down (or `j`/`k`) changes the focused option, a contextual panel explains exactly what it owns
-and what risk it implies, and Enter selects it. Redirected/non-interactive terminals receive the
-same descriptions in the numbered fallback. GPU access is not a third backend: `exclusive` owns
-local LambdaForge leases, `shared` permits external coexistence subject to site policy,
-`scheduler` trusts a SLURM grant, and `command` preserves the visibility created by a site launcher.
+Humans configure the same profile in bare `lf` → Clusters. Common fields appear first and focused
+options provide contextual meaning/risk; advanced SSH, environment, path and GPU policy fields stay
+progressively disclosed. Save, test, bootstrap and doctor remain separate explicit actions. The
+console calls catalog and credential services directly and never stores passwords in the profile.
+Automation uses the native commands:
 
 ```bash
 lf clusters add gpu --host HOST --user USER --workspace /remote/work \
@@ -1079,7 +1062,7 @@ machine-readable document.
 
 Every normal `lf run` validates and identifies locally, creates a durable preparation Job and
 returns; this is also true for the built-in `local` target. The detached controller then prepares
-the target and asks its scheduler, while `lf top`, `lf show` and `lf logs` remain authoritative.
+the target and asks its scheduler, while the Research Console, `lf show` and `lf logs` remain authoritative.
 `--dry-run` is direct and read-only. `--wait-for-submit` keeps the terminal attached through
 preparation, not through scientific execution. For SSH, preparation resolves runtime, verifies
 declared shared project inputs, builds/cache-checks wheels and bounded-input bundles, and stages one
@@ -1190,7 +1173,7 @@ direct SSH jobs never execute in the shared cache. The embedded controller-side 
 local and staged scientific fingerprints equal. On a remote Work, `source_dir` is this staged,
 installable consumer source context rather than the controller's nonexistent physical path.
 
-`lf top` is the semantic interactive view. Up/down traverse clusters and Work rows as one list.
+the Research Console is the semantic interactive view. Up/down traverse clusters and Work rows as one list.
 For a study, Enter or right arrow drills through Trials, seed Runs and the live Run dashboard; `a`
 opens its outer numbered scheduler Attempts. Other Works drill directly into numbered Attempts and
 full logs. A terminal study without a published study index falls back to its outer Attempts, which
@@ -1251,7 +1234,7 @@ terminal-Attempt compaction used automatically at completion. It retains active 
 unpublished successful artifacts and lightweight evidence, rejects unsafe roots/symlinks and is
 idempotent. This also lets upgraded installations reclaim safe bulk left by older Jobs.
 
-Inside `lf top`, `d` confirms deletion of the selected terminal Work or numbered Attempt;
+Inside the Research Console, `d` confirms deletion of the selected terminal Work or numbered Attempt;
 `D` confirms deletion of every terminal history entry. Active Jobs are never removed. Deletion runs
 outside the terminal event loop, removes the exact provider workspace plus local Job events and
 submission record, and preserves published datasets, caches, environments and unrelated Jobs.
@@ -1260,7 +1243,7 @@ whole-history operation, reporting failures without discarding the affected loca
 
 A narrower automatic retention pass runs at terminal completion. It deletes only partial managed
 artifacts from failed/interrupted Attempts and verified internal duplicates of successful
-`publish_to` outputs. It preserves every lightweight fact needed by `lf top`, `lf logs`, results
+`publish_to` outputs. It preserves every lightweight fact needed by the Research Console, `lf logs`, results
 and reproduction; `retention.json` records reclaimed bytes. Superseded immutable managed
 environments are also pruned after a verified replacement is activated, except the active prefix
 and prefixes referenced by live Jobs. Bootstrap and normal automatic preparation share this rule;
@@ -1274,13 +1257,12 @@ Attempt environment provenance remains after reconstructible environment bytes a
 | `validate` | complete local configuration/class/input validation |
 | `explain` | signature/doc/default/resource explanation |
 | `run` | the only scientific execution command |
-| `top`, `overview` | human live and machine global control-plane views |
+| bare `lf`, `overview` | Textual human console and machine global control-plane view |
 | `show`, `logs`, `cancel`, `retry`, `delete` | semantic Work operations |
 | `jobs ...` | low-level Job control; `clear [--apply]` cleans terminal history |
-| `clusters setup/modify` | explained interactive front end over native cluster operations |
 | `clusters ...`, `doctor`, `resources` | scriptable target setup and diagnosis; bootstrap accepts `--project` and read-only `--dry-run` |
 | `datasets ...` | inspect/verify/place/delete published dataset versions |
-| `results list/show/compare` | query Work Execution results |
+| `results list/show/compare/analyze/report` | query, analyze and export Work Execution evidence |
 | `clean` | preview/apply safe cache and terminal-artifact compaction |
 
 `lf help`, `lf --help`, `lf help clusters add` and conventional nested `--help` all exit zero.
@@ -1420,3 +1402,82 @@ domain helper classes are constructed inside Work code. Runtime extensions shoul
 services behind `self.outputs/metrics/checkpoints/cache/tools/progress`; do not turn Work into a generic
 service locator. New YAML vocabulary is justified only by a genuine researcher-controlled planning
 decision, not by an internal object that can stay in Python.
+
+## 16. Study Analysis
+
+Study Analysis is a deterministic post-hoc layer over persisted study evidence. It does not propose
+Runs and never changes the controller. A terminal study automatically writes
+`EXECUTION/analysis.json`; explicit routes reuse or recompute the same document:
+
+```bash
+lf results analyze EXECUTION
+lf results analyze EXECUTION --recompute --json
+lf results report EXECUTION --output report.html
+```
+
+The HTML route requires `lambdaforge[analysis-report]`; JSON analysis and the console do not. The
+report embeds its data and Plotly runtime and makes no network request.
+
+### 16.1 Evidence semantics
+
+For each Run, `current_observed_objective` is the most recent step where every objective component
+is present, `best_observed_objective` is the best such step, `final_objective` requires terminal
+full fidelity, and `selection_objective` is candidate-level selection evidence. Incomplete
+composites report missing components and the latest complete step. Pruned performance is censored:
+its partial curve and best observation are retained, but no exact final score is invented.
+Candidate statistics use independent full-fidelity seeds, mean/SD/SE and deterministic bootstrap
+95% intervals when at least three values support them. Shared seeds produce paired comparisons;
+screening and fresh-seed confirmation remain separate so a lucky winner is not silently validated.
+
+### 16.2 Effects, coverage and reliability
+
+Analysis fits a deterministic mixed-space predictive surrogate and validates it by leaving complete
+candidates out—not individual epochs or duplicated seeds. It reports RMSE, MAE, rank correlation,
+interval coverage and a quality label. A common reference design supports global functional
+variance importance; a top-quantile distribution divergence answers a different question about
+where good candidates concentrate. Numeric and categorical adjusted responses, pairwise surfaces
+and an interaction matrix expose non-additivity with uncertainty and extrapolation markers.
+
+Coverage includes marginal bins/categories, conditional activation, nearest-reference joint
+distance against a same-size baseline and candidate-pool resolution. Boundary diagnostics use
+centralized conservative thresholds and distinguish possible from likely saturation. Seed
+bootstrap estimates winner probability and regret. Resource telemetry produces objective/cost and
+objective/peak-VRAM Pareto alternatives when comparable data exists. Constraints, objective
+components, pruning audit and confirmation are retained. Findings are deterministic, evidence-
+linked sentences. All effects are observational/predictive, never causal; sparse data, weak CV,
+poor coverage and extrapolation reduce confidence explicitly.
+
+Live documents are `provisional` and cheaper; terminal documents are `final`. An evidence
+fingerprint makes repeated non-recompute calls idempotent. Writes are atomic and versioned so 0.13
+study records remain analyzable when they contain sufficient objective metadata.
+
+### 16.3 Admission evidence
+
+Study telemetry persists structured admission alongside scientific progress: active and queued
+Runs, maximum parallelism, CPU/RAM context, per-GPU free/required VRAM and the exact wait reason.
+`runs_per_gpu` is a ceiling. Capacity pressure queues and polls; it is not a failed Run. Launches on
+one GPU are staggered, while other GPUs continue independently. With two GPUs, five allowed slots
+per device and sufficient resources, the controller may admit ten child Runs; helper probes are
+short-lived and do not consume scientific slots.
+
+## 17. Research Console
+
+Bare `lf` opens the Textual Research Console only when input/output are interactive. Otherwise it
+prints CLI help and exits. The only primary screens are Overview, Work, Studies, Clusters, Datasets
+and Results. `Ctrl+P` opens fuzzy action search, Enter opens a row, Esc backs out and `?` opens
+contextual help. The 0.13 `lf top`, `clusters setup` and `clusters modify` commands are removed;
+scripts retain every non-interactive command.
+
+Overview summarizes known clusters, active Work/Studies, waiting capacity and recent results. Work
+owns authored YAML, Executions, Attempts, logs and advanced Jobs. Studies exposes objective,
+candidate/Run counts, censoring and structured admission, then links to provisional/final Analysis.
+Clusters edits catalog profiles and credentials with progressive explanations and separate
+test/bootstrap/doctor actions. Datasets presents immutable versions/placements. Results lists
+completed Executions and provides compare/analyze/report over `ResultStore`.
+
+The console imports domain services directly; it never executes `lf` through a subprocess. Slow
+filesystem, analysis and provider operations run in daemon workers and generation IDs discard stale
+responses. A provider outage retains the last successful snapshot with a visible stale warning.
+Destructive actions show the exact target, require confirmation and preserve the underlying
+preview/apply, exact-root and symlink-safe rules. Machine clients must consume CLI `--json`, not
+screen text. Plotly remains optional because terminal operation uses bounded persisted JSON.

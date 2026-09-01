@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
@@ -19,7 +18,6 @@ from lambdaforge.cli.common import (
 )
 from lambdaforge.cli.DatasetCommands import DatasetCommands
 from lambdaforge.cli.jobs import follow_job_logs, run_job_command
-from lambdaforge.cli.LiveJobMonitor import LiveJobMonitor
 from lambdaforge.cli.parser import build_parser
 from lambdaforge.cli.scaffold import initialize
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
@@ -82,9 +80,17 @@ class CommandLineInterface:
 
     @classmethod
     def _dispatch(cls, argv: Sequence[str], *, json_output: bool) -> int:
-        arguments = build_parser().parse_args(argv)
+        parser = build_parser()
+        arguments = parser.parse_args(argv)
         arguments.json = bool(getattr(arguments, "json", False) or json_output)
         arguments.verbose = bool(getattr(arguments, "verbose", False))
+        if arguments.command is None:
+            if not arguments.json and sys.stdin.isatty() and sys.stdout.isatty():
+                from lambdaforge.tui.App import run_console
+
+                return run_console()
+            parser.print_help()
+            return 0
         if arguments.command == "init":
             return initialize(
                 arguments.directory, force=arguments.force, template=arguments.template
@@ -113,7 +119,7 @@ class CommandLineInterface:
             )
             cls._render(doctor_report.to_dict(), doctor_report.summary(), arguments.json)
             return doctor_report.exit_code
-        if arguments.command in {"overview", "top"}:
+        if arguments.command == "overview":
             return cls._overview(arguments)
         if arguments.command == "resources":
             service = ResourceService(ClusterCatalog.load(arguments.clusters))
@@ -202,35 +208,18 @@ class CommandLineInterface:
     def _overview(arguments: Any) -> int:
         catalog = ClusterCatalog.load(arguments.clusters)
         service = OverviewService(catalog)
-        if (
-            arguments.command == "top"
-            and not arguments.json
-            and not arguments.once
-            and sys.stdin.isatty()
-            and sys.stdout.isatty()
-            and os.name == "posix"
-        ):
-            return LiveJobMonitor(
-                service,
-                JobService(catalog),
-                interval=arguments.interval,
-                history_seconds=arguments.history,
-            ).run()
-        while True:
-            payload = service.snapshot()
-            if arguments.json:
-                print(json.dumps(payload, indent=None if arguments.follow else 2), flush=True)
-            else:
-                works = payload.get("work", {}).get("items", [])
-                print("WORK  TARGET  STATE  PROGRESS")
-                for work in works:
-                    print(
-                        f"{work.get('name', '-'):<24} {work.get('cluster', '-'):<12} "
-                        f"{work.get('state', '-'):<10} {work.get('progress', '-')}"
-                    )
-            if arguments.command != "top" or arguments.once or not arguments.follow:
-                return 0
-            time.sleep(arguments.interval)
+        payload = service.snapshot()
+        if arguments.json:
+            print(json.dumps(payload, indent=2), flush=True)
+        else:
+            works = payload.get("work", {}).get("items", [])
+            print("WORK  TARGET  STATE  PROGRESS")
+            for work in works:
+                print(
+                    f"{work.get('name', '-'):<24} {work.get('cluster', '-'):<12} "
+                    f"{work.get('state', '-'):<10} {work.get('progress', '-')}"
+                )
+        return 0
 
     @staticmethod
     def _work_operation(arguments: Any) -> int:
@@ -284,7 +273,8 @@ class CommandLineInterface:
                     if arguments.study_run:
                         if arguments.follow:
                             raise ValueError(
-                                "Use lf top for live per-Run logs; machine clients can poll "
+                                "Use the Research Console for live per-Run logs; machine clients "
+                                "can poll "
                                 "'lf show WORK --run KEY --json'."
                             )
                         selected = works.show(arguments.selector)
@@ -329,7 +319,8 @@ class CommandLineInterface:
                     if arguments.study_run:
                         if arguments.follow:
                             raise ValueError(
-                                "Use lf top for live per-Run logs; machine clients can poll "
+                                "Use the Research Console for live per-Run logs; machine clients "
+                                "can poll "
                                 "'lf show WORK --run KEY --json'."
                             )
                         detail = jobs.study_run(
@@ -366,6 +357,31 @@ class CommandLineInterface:
     @staticmethod
     def _results(arguments: Any) -> int:
         store = ResultStore(arguments.root)
+        if arguments.result_command == "analyze":
+            payload = store.analysis(arguments.selector, recompute=arguments.recompute)
+            if arguments.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                winner = payload.get("winner", {}).get("screening_winner")
+                print(
+                    f"{payload['source']['status'].title()} Study Analysis · "
+                    f"{payload['summary']['complete_candidate_count']} complete candidates"
+                )
+                if winner:
+                    print(
+                        f"Screening winner: trial {winner['trial']} "
+                        f"objective={winner['mean']:.6g} n={winner['n']}"
+                    )
+                print(f"Findings: {len(payload.get('findings', []))}")
+            return 0
+        if arguments.result_command == "report":
+            path = store.report(
+                arguments.selector,
+                arguments.output,
+                recompute=arguments.recompute,
+            )
+            print(path)
+            return 0
         if arguments.result_command == "compare":
             print(
                 json.dumps(
@@ -383,7 +399,7 @@ class CommandLineInterface:
             for record in store.list()
         ]
         if arguments.result_command == "list":
-            payload: Any = records
+            result_payload: Any = records
         else:
             selected = [
                 item
@@ -399,8 +415,11 @@ class CommandLineInterface:
                 raise ValueError(
                     f"Result selector must identify exactly one execution; found {len(selected)}."
                 )
-            payload = selected[0]
-        print(json.dumps(payload, indent=2))
+            result_payload = selected[0]
+            analysis = store.analysis_summary(arguments.selector)
+            if analysis is not None:
+                result_payload = {**result_payload, "analysis": analysis}
+        print(json.dumps(result_payload, indent=2))
         return 0
 
     @staticmethod

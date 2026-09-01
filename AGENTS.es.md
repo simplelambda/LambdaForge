@@ -1,6 +1,6 @@
 # Guía de LambdaForge para agentes
 
-Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.13.3. Consulta solo la
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.14.0. Consulta solo la
 sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
 
 ## Arquitectura no negociable
@@ -22,12 +22,13 @@ runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada 
 | Plan sin efectos | `lf run CONFIG --dry-run` |
 | Ejecutar | `lf run CONFIG [--on CLUSTER]` |
 | Nueva Execution deliberada | `lf run CONFIG --rerun` |
-| Monitorizar | `lf top`; `lf overview --json` |
+| Operación interactiva | `lf` sin argumentos (Consola en TTY) |
+| Monitorizar | Consola de investigación; `lf overview --json` |
 | Operar Work | `lf show/logs/cancel/retry/delete SELECTOR`; Run: `show/logs WORK --run CLAVE` |
 | Jobs de bajo nivel | `lf jobs list/show/logs/cancel/retry/delete/clear`; `lf doctor --on CLUSTER` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
-| Resultados | `lf results list/show/compare` |
-| Perfil guiado de clúster | `lf clusters setup`; `lf clusters modify [NOMBRE]` |
+| Resultados | `lf results list/show/compare/analyze/report` |
+| Perfiles de clúster | Consola; `lf clusters add/set/unset/...` para automatización |
 | Limpiar almacenamiento seguro | `lf clean`; aplicar con `--apply` |
 
 Usa `--json` para automatización y `--debug` solo para traceback interno. Los envíos locales y
@@ -87,11 +88,9 @@ los logs y la procedencia se guarda exclusivamente en `environment.json`.
 
 `print()` y el `logging` estándar aparecen en los logs del Job. Usa `self.log()` para narración
 humana con fecha y vaciado inmediato, `self.progress.update()` para avance y `metrics.log()` para
-evidencia numérica. En `lf top`, un estudio avanza Work -> Trial candidato -> Run de seed ->
-curvas/tiempos/log vivo aislado y `a` abre sus Attempts externos. Los demás Works avanzan a Attempt
-numerado/logs o abren un clúster; izquierda vuelve y la vista principal no muestra IDs largos. `d` borra una selección
-terminal confirmada y `D` limpia el historial terminal
-confirmado sin tocar Jobs activos. Los agentes usan `lf overview --json`, `lf logs` y
+evidencia numérica. La Consola presenta modelos de lectura acotados para Work, Studies y Results;
+no coloques ficheros de resultado, llamadas al proveedor ni lógica científica en widgets. Los
+agentes usan `lf overview --json`, `lf logs` y
 `lf jobs clear [--apply]`, nunca parsean el TUI; `work.items[].attempt_history` conserva los IDs
 para automatización. Las rutas del proveedor local pertenecen al Job
 durable y no se recalculan desde el directorio actual del observador.
@@ -143,7 +142,7 @@ telemetría guarda índice GPU lógico y token heredado exacto; nunca infieras n
 físicos desde el campo de visualización.
 
 Agrupa evidencia terminada por rung exacto `(candidato,target,maximum)`; nunca promedies fidelidades
-heterogéneas ni enfrentes rungs incompatibles. `lf top` separa diagnósticos marginales/por pares del
+heterogéneas ni enfrentes rungs incompatibles. la Consola de investigación separa diagnósticos marginales/por pares del
 snapshot `.surrogate_belief` emitido por el sampler real.
 
 La telemetría de estudio es un modelo de lectura acotado, no otro almacén de resultados. Referencia
@@ -169,7 +168,7 @@ Conserva la evidencia `PREEMPT` → `PAUSE` → `RESUME_PREEMPTED`; startup sin 
 protegido y una parada que llega tras alcanzar el target sigue siendo `completed`.
 
 La telemetría adaptativa incluye `hpo_analysis` acotado y las últimas 25 acciones estructuradas del
-`controller`. `lf top` lo abre con `i`; automatización lee
+`controller`. La pantalla Studies lo consume y automatización lee
 `work.items[].study.hpo_analysis/controller`. Trata cada panel por parámetro como asociación
 marginal con cobertura/confianza/advertencias, nunca causalidad ni sustituto del sampler conjunto
 multivariable. Enter/derecha abre la curva de respuesta y el panel acotado de ganancia predictiva
@@ -180,15 +179,8 @@ La calidad retrospectiva del pruner vive en `hpo-control/state.json` → `pruner
 ahorro simulado, falsos prunes, regret y calibración probabilística/de curva sin inventar un
 objective completo para Runs censurados.
 
-`lf top` dibuja series temporales Unicode enmarcadas y con color sin dependencia de plotting; el
-color se aplica tras el layout y respeta `NO_COLOR`. El Trial y Run seleccionados muestran previews
-acotados de parámetros/métricas preservando al menos tres filas de seed; Enter abre el detalle
-completo, sin resúmenes truncados repetidos en las tablas;
-`n`/`p` pagina hasta cuatro curvas, arriba/abajo selecciona época, Enter/derecha abre todos sus
-escalares y `o` alterna la salida bruta. `--history` controla el historial de clúster;
-Mayús+izquierda/derecha desplaza logs brutos e izquierda vuelve.
-Las tablas nombran objective, propuestos/planificados, GPU y época última/óptima; tras reducir curvas se conservan los
-marcadores rojo seleccionado y verde óptimo.
+La Consola sigue siendo útil sin dependencia de plotting. Studies nombra objective,
+propuestos/planificados, GPU y época última/óptima mediante telemetría acotada.
 Lightning elige curvas visibles con `LightningTrainConfig(epoch_chart_include=[...],
 epoch_chart_exclude=[...])` sin perder las restantes. `gpu_mem_mb` es el pico vivo;
 `gpu_reserved_mb`/`gpu_peak_reserved_mb` diagnostican la caché del allocator. Nunca conviertas esa
@@ -207,10 +199,9 @@ command exige `command_prefix` argv del centro, nunca shell; prefiere wrappers a
 `gpu exec`. `claim_command`/`release_command` son una pareja atómica, solo expanden `{gpu_count}` y
 no son válidos con SLURM. En command/scheduler, `CUDA_VISIBLE_DEVICES` heredado son grants opacos:
 nunca se sustituyen ni amplían y una asignación ausente/duplicada/insuficiente falla cerrada.
-`clusters setup/modify` es interfaz humana sobre comandos nativos, no otra implementación. En TTY
-usa flechas/Enter con ayuda contextual; con entrada redirigida imprime la misma ayuda numerada.
-Acepta `0`/`q`/`quit`/`exit` en cada pregunta. Direct frente a SLURM decide cómo se lanza el proceso;
-wrappers/claims GPU son la política `gpu_access` separada, por lo que `gpu exec` normalmente usa
+La Consola edita el mismo catálogo y servicio de credenciales que los comandos nativos y nunca
+invoca `lf` por subprocess. Direct frente a SLURM decide cómo se lanza el proceso; wrappers/claims
+GPU son la política `gpu_access` separada, por lo que `gpu exec` normalmente usa
 Direct. Los entornos gestionados obsoletos se podan tras activar reemplazo verificado y proteger
 Jobs vivos.
 
@@ -225,6 +216,31 @@ familias MLP/CNN, grafos/equivariantes, secuencias/Transformer/Conformer, conjun
 composición, generativos, científicos/implícitos y árboles diferenciables. No añadas un `GNN`
 genérico, alias/factory redundante ni policy de dominio: solo un primitivo reutilizable con contrato
 tensorial preciso y pruebas focalizadas.
+
+## Análisis de estudios y consola
+
+`lambdaforge.analysis.StudyAnalysis` analiza evidencia a posteriori; nunca es otro controlador HPO.
+Los estudios terminales persisten `analysis.json` versionado y atómico; `lf results analyze SELECTOR
+[--recompute] [--json]` usa el mismo núcleo y `results report` solo añade Plotly offline opcional.
+Mantén separados `current_observed_objective`, `best_observed_objective`, `final_objective` y
+`selection_objective`. Una Run podada es evidencia parcial censurada y no recibe score final
+inventado; los componentes ausentes son estructurados.
+
+Con el mismo fingerprint, el análisis es determinista y separa screening de confirmación con seeds
+nuevas. Informa incertidumbre y comparaciones pareadas, CV del surrogate por candidato, importancia
+funcional global y de región superior, respuestas ajustadas, interacciones/superficies, cobertura,
+bordes, resolución del pool, estabilidad, pruning, constraints y Pareto de recursos/componentes.
+Son resúmenes descriptivos/predictivos, no causales. Evidencia escasa, extrapolada o con mala CV
+reduce explícitamente la fiabilidad. En vivo es provisional y al terminar final. La admisión
+persiste capacidad activa/en cola y límites GPU/CPU/RAM; esperar no es fallo y `runs_per_gpu` es un
+máximo.
+
+`lf` sin argumentos abre la Consola Textual solo en un TTY; sin TTY o con `--json` imprime ayuda.
+Las seis pantallas son Overview, Work, Studies, Clusters, Datasets y Results; `Ctrl+P` expone el
+inventario de acciones. Los widgets llaman servicios Python directamente y proveedores lentos van
+fuera del event loop. Conserva el último dato correcto marcado obsoleto tras un fallo transitorio.
+Las acciones destructivas mantienen confirmación y preview/apply. `lf top`,
+`lf clusters setup` y `lf clusters modify` están retirados; no restaures otra UI.
 
 ## Contrato de clustering
 
@@ -245,7 +261,7 @@ changelog; ejecuta pruebas
 focalizadas, `ruff`, `mypy`, una suite local razonable, build de wheel y smoke instalado. Declara de
 forma explícita cualquier test CUDA no ejecutado.
 
-Los logs de Attempts en `lf top` se actualizan automáticamente. Un Work fallido añade tras cualquier
+Los logs de Attempts en la Consola de investigación se actualizan automáticamente. Un Work fallido añade tras cualquier
 tail el tipo/mensaje/fase/ruta del resultado persistido; usa `--verbose` o `--debug` para traceback y
 `e` en la TUI, o `--json` para `failure`/`failures` estructurados. Un estudio terminal sin telemetría
 publicada cae a Attempts/logs numerados. Los modelos inmutables que cruzan procesos spawn deben ser

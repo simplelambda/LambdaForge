@@ -236,9 +236,63 @@ class ObjectiveUtility:
             output["feasible"] = all(bool(value["satisfied"]) for value in constraints.values())
         return output
 
+    def status(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        *,
+        fallback: Mapping[str, int | float],
+    ) -> dict[str, Any]:
+        """Explain whether the persisted stream contains a complete objective checkpoint.
+
+        This is deliberately separate from :meth:`observation`: controller code can continue to
+        treat ``None`` as "not selectable", while human and machine frontends receive the reason
+        instead of an ambiguous dash.
+        """
+        observed = self.observation(records, fallback=fallback)
+        if observed is not None:
+            return {
+                "status": "complete",
+                "missing_components": [],
+                "latest_step": observed.get("current_step"),
+                "latest_complete_step": observed.get("current_step"),
+            }
+        by_step: dict[int | None, set[str]] = {}
+        for record in records:
+            raw = record.get("value")
+            if not _finite(raw):
+                continue
+            name = (
+                f"{record['split']}_{record['name']}"
+                if record.get("split")
+                else str(record.get("name", ""))
+            )
+            raw_step = record.get("step")
+            step = (
+                raw_step if isinstance(raw_step, int) and not isinstance(raw_step, bool) else None
+            )
+            by_step.setdefault(step, set()).add(name)
+        stepped = [step for step in by_step if step is not None]
+        latest_step = max(stepped) if stepped else None
+        present = by_step.get(latest_step, set()) if by_step else set(fallback)
+        return {
+            "status": "incomplete",
+            "missing_components": sorted(set(self.required_metrics) - present),
+            "latest_step": latest_step,
+            "latest_complete_step": None,
+        }
+
     @classmethod
     def normalize(cls, value: Mapping[str, Any]) -> dict[str, Any]:
         """Validate and normalize an authored objective mapping."""
+        # Persisted Work/study records contain the canonical synthetic metric/mode beside
+        # composite components. Accepting that exact representation makes normalization
+        # idempotent without permitting authored mixed legacy/composite objectives.
+        if (
+            isinstance(value.get("metrics"), Mapping)
+            and value.get("metric") == UTILITY_METRIC
+            and value.get("mode") == "max"
+        ):
+            value = {key: item for key, item in value.items() if key not in {"metric", "mode"}}
         allowed = {"metric", "mode", "metrics", "aggregation", "constraints"}
         unknown = set(value) - allowed
         if unknown:

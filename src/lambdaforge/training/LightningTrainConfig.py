@@ -96,7 +96,7 @@ class LightningTrainConfig:
         Optional shell-style key patterns controlling the epoch table.
     epoch_chart_include, epoch_chart_exclude
         Optional shell-style key patterns selecting the scalar curves shown in
-        ``lf top``. Collection remains complete; these fields only control the
+        Research Console. Collection remains complete; these fields only control the
         compact interactive dashboard.
     """
 

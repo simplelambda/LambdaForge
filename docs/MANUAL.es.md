@@ -1,4 +1,4 @@
-# Manual de LambdaForge 0.13
+# Manual de LambdaForge 0.14
 
 [English](MANUAL.md) · Español
 
@@ -19,6 +19,8 @@
 13. [Clustering](#13-clustering)
 14. [Componentes neuronales reutilizables](#14-componentes-neuronales-reutilizables)
 15. [Arquitectura y extensiones](#15-arquitectura-y-extensiones)
+16. [Análisis de estudios](#16-análisis-de-estudios)
+17. [Consola de investigación](#17-consola-de-investigación)
 
 ## 1. Modelo mental
 
@@ -67,11 +69,11 @@ proyecto/
   .lambdaforge/                 # estado gestionado; ignorado por Git
 ```
 
-`lf --help`, `lf help`, `lf COMANDO --help` y `lf help COMANDO SUBCOMANDO` son rutas de ayuda
-equivalentes que terminan con éxito. Para el primer destino remoto, `lf clusters setup` ofrece un
-asistente interactivo explicado; `lf clusters modify [NOMBRE]` edita un perfil. Ambos llaman solo
-a los mismos subcomandos nativos usados por scripts y nunca ponen passwords en argv o YAML. Cada
-pregunta acepta `0`, `q`, `quit` o `exit`; una respuesta sin confirmar no se aplica.
+`lf --help`, `lf help`, `lf COMANDO --help` y `lf help COMANDO SUBCOMANDO` son rutas equivalentes.
+`lf` sin argumentos abre la Consola en un TTY; con redirección o `lf --json` imprime ayuda.
+Clusters edita el mismo catálogo y servicio de credenciales que los comandos nativos y nunca pone
+contraseñas en argv ni YAML. Las rutas de 0.13 `top`, `clusters setup` y `clusters modify` están
+retiradas.
 
 ## 3. API de Work
 
@@ -394,7 +396,7 @@ optimizaciones seguras: inicio Sobol scrambled, propuestas dependientes de resul
 probabilística de seeds, pruning de curvas, convergencia, recuperación acotada y confirmación con
 seeds nuevas. `proposal_pool_size` acota el pool Sobol interno (por defecto hasta 16 veces
 `trials`, máximo 4096), mientras `trials` solo limita candidatos realmente ejecutables. Solo los Trials
-propuestos aparecen en `lf top`. Tras `startup_trials`, `sampler: auto` prefiere GP mixto qLogNEI de
+propuestos aparecen en la Consola de investigación. Tras `startup_trials`, `sampler: auto` prefiere GP mixto qLogNEI de
 BoTorch si está instalado `lambdaforge[adaptive-hpo]` y hay evidencia suficiente; ante dependencia
 ausente o inestabilidad numérica usa el surrogate mixto k-NN determinista. Es un modelo de decisión
 realmente conjunto: números, categorías e indicadores de activación condicional comparten un mismo
@@ -634,7 +636,7 @@ por Run interno. Los `work.log`, `metrics.jsonl`, `training-metrics.jsonl` y `re
 existentes siguen siendo la autoridad; el índice los referencia y resume solo estado y últimos
 escalares. Nunca copia checkpoints de modelos, directorios de output ni bytes de artefactos.
 
-`lf top` presenta esta jerarquía:
+la Consola de investigación presenta esta jerarquía:
 
 ```text
 Work
@@ -671,7 +673,7 @@ intervalo al 90 %. Un estudio pequeño devuelve incertidumbres `null`, no certez
 auditoría retrospectiva: no altera objetivos ni inventa el contrafactual de un Run realmente
 podado.
 
-`lf top` consume esa misma evidencia del controlador, no ajusta otro modelo HPO. La vista de
+la Consola de investigación consume esa misma evidencia del controlador, no ajusta otro modelo HPO. La vista de
 candidato muestra media/error estándar de la utilidad compuesta, agregación, componentes raw y
 normalizados del mismo checkpoint, pesos/contribuciones, constraints y pertenencia Pareto
 diagnóstica. El panel HPO muestra slots activos/disponibles, Runs en cola/pausados y score,
@@ -727,17 +729,12 @@ Las curvas se leen con límite de bytes y se reducen a 10–500 puntos represent
 extremos y la época óptima exacta; el TUI pide 80. El log también está acotado durante el refresco y observar nunca modifica
 la evidencia.
 
-Las gráficas interactivas siguen la gramática visual de nvtop —ejes temporales enmarcados y curvas
-vivas— pero usan un pequeño renderer Unicode, sin añadir una pila de plotting ni sustituir el loop
-probado de polling y procesos por un framework asíncrono. Una capa ANSI semántica final aplica color
-después de calcular anchos, respeta `NO_COLOR` y mantiene planos snapshots y salida máquina. Las
-filas de clúster contienen historiales compactos de CPU/RAM/GPU; el detalle grafica porcentajes
-globales de CPU, RAM, utilización GPU y memoria GPU durante `lf top --history SEGUNDOS`, e informa
-por separado de la cuota LambdaForge actual. Mayús+izquierda/derecha desplaza líneas largas de logs
-de Attempt o salida bruta de Run; izquierda sin modificar vuelve y `h`/`l` son alternativas.
+La Consola Textual consume estas curvas acotadas sin modificar su evidencia. La presentación rica
+es opcional para la ejecución científica y la salida máquina sigue siendo JSON plano. Los detalles
+de recursos usan los mismos snapshots y motivos de admisión persistidos.
 
 Recogida y presentación son independientes. `LightningRunner` conserva todos los escalares finitos
-acotados, pero un proyecto selecciona con patrones shell las curvas que dibuja `lf top`:
+acotados, pero un proyecto selecciona con patrones shell las curvas que dibuja la Consola de investigación:
 
 ```python
 from lambdaforge.training import LightningTrainConfig
@@ -803,7 +800,7 @@ lf logs WORK --run trial-00017-seed-4 --tail 300
 `work.items[].study` contiene catálogo compacto y claves exactas. `show --run` devuelve parámetros,
 últimos valores, curvas reducidas, log acotado, fallo y rutas de evidencia; `--curve-points N` elige
 10–500 puntos. `logs --run` emite solo ese log. Una interfaz headless debe consultar el JSON;
-`--follow` queda para logs externos porque `lf top` ya refresca cada Run de forma segura.
+`--follow` queda para logs externos porque la Consola de investigación ya refresca cada Run de forma segura.
 
 ## 8. Ejecución, identidad y reutilización
 
@@ -832,25 +829,10 @@ calcula count/media/min/max; una clasificación exige `--metric` y dirección ex
 
 ## 10. Clústeres y Jobs
 
-Un usuario puede configurar el perfil completo mediante un flujo explicado en terminal:
-
-```bash
-lf clusters setup
-lf clusters modify gpu
-```
-
-El asistente cubre conexión/autenticación, rutas de workspace/proyecto/datasets, storage, Python
-gestionado o existente, política PyTorch/CUDA, dialecto scheduler y acceso GPU. La automatización
-usa `clusters add/set/unset/credentials/test`; el asistente llama esas operaciones, sin mantener una
-segunda implementación de configuración. Backend responde cómo se lanza el proceso: Direct para
-un host SSH normal incluso si la GPU se obtiene con `gpu exec`, y SLURM solo para `sbatch`. El paso
-posterior de acceso GPU configura reserva/claims. Todas las preguntas ofrecen
-`0`/`q`/`quit`/`exit` sin aplicar la respuesta actual. En un TTY interactivo, arriba/abajo (o
-`j`/`k`) cambia la opción enfocada, un panel contextual explica qué controla y qué riesgo implica,
-y Enter selecciona. Una terminal redirigida recibe las mismas descripciones en el fallback
-numerado. El acceso GPU no es un tercer backend: `exclusive` controla leases locales,
-`shared` permite coexistencia externa si la política del centro lo autoriza, `scheduler` confía en
-el grant de SLURM y `command` preserva la visibilidad creada por el launcher del centro.
+Un usuario configura el perfil en `lf` → Clusters. Primero aparecen campos comunes y cada opción
+enfocada explica significado/riesgo; SSH, entorno, rutas y política GPU avanzados quedan ocultos
+hasta pedirlos. Guardar, test, bootstrap y doctor son acciones explícitas separadas. La Consola usa
+directamente catálogo/credenciales y nunca guarda passwords en el perfil. Para automatización:
 
 ```bash
 lf clusters add gpu --host HOST --user USER --workspace /remote/work \
@@ -1001,7 +983,7 @@ publicar el prefijo. Para que también pip/Torch sea offline se mantiene además
 perfil. Cada plataforma (`linux-64`, `linux-aarch64`, `linux-ppc64le`) necesita su lock/cache.
 `environment: existing` conserva intencionadamente su contrato manual y no instala esta declaración.
 
-`lf top` muestra Works y clústeres semánticos: arriba/abajo recorre. En un estudio Enter/derecha
+la Consola de investigación muestra Works y clústeres semánticos: arriba/abajo recorre. En un estudio Enter/derecha
 avanza por Trials, Runs de seed y su panel vivo; `a` abre los Attempts externos numerados. Los demás
 Works avanzan directamente por Attempts y logs. Un estudio terminal sin índice publicado cae a sus
 Attempts externos, conservando la salida ordinaria y el error aunque el fallo precediera a la
@@ -1054,7 +1036,7 @@ raíces/symlinks inseguros y es idempotente. Esto permite recuperar con segurida
 anteriores tras actualizar. YAML es código confiable y puede importar Python arbitrario;
 LambdaForge no es sandbox.
 
-En `lf top`, `d` confirma el borrado del Work terminal o Attempt seleccionado y `D` confirma la
+En la Consola de investigación, `d` confirma el borrado del Work terminal o Attempt seleccionado y `D` confirma la
 limpieza de todo el historial terminal. Los Jobs activos nunca se borran. La operación se ejecuta
 fuera del loop de teclado, elimina workspace, eventos y registro de envío exactos y conserva
 datasets publicados, caches, entornos y Jobs ajenos. `lf jobs clear` presenta la operación y
@@ -1062,7 +1044,7 @@ datasets publicados, caches, entornos y Jobs ajenos. `lf jobs clear` presenta la
 
 Al terminar existe una retención automática más estrecha: elimina únicamente artefactos
 gestionados parciales de Attempts fallidos/interrumpidos y duplicados internos verificados de
-outputs publicados. Conserva toda evidencia ligera requerida por `lf top`, `lf logs`, resultados y
+outputs publicados. Conserva toda evidencia ligera requerida por la Consola de investigación, `lf logs`, resultados y
 reproducción; `retention.json` registra bytes recuperados. Los entornos inmutables sustituidos
 también se podan tras activar un reemplazo verificado, excepto el activo y los referenciados por
 Jobs vivos. Bootstrap y preparación automática comparten la regla; la procedencia del Attempt
@@ -1076,13 +1058,12 @@ permanece aunque se recojan bytes reconstruibles del entorno.
 | `validate` | validar configuración/clase/entradas localmente |
 | `explain` | explicar firma, defaults y recursos |
 | `run` | única ejecución científica |
-| `top`, `overview` | vista humana viva y vista máquina |
+| `lf` sin argumentos, `overview` | Consola Textual humana y vista máquina |
 | `show`, `logs`, `cancel`, `retry`, `delete` | operaciones semánticas de Work |
 | `jobs ...` | control de bajo nivel; `clear [--apply]` limpia historial terminal |
-| `clusters setup/modify` | interfaz interactiva explicada sobre operaciones nativas |
 | `clusters ...`, `doctor`, `resources` | configuración scriptable; bootstrap admite `--project` y `--dry-run` sin efectos |
 | `datasets ...` | inspección/verificación/placement/borrado de versiones |
-| `results list/show/compare` | consultar resultados de Execution |
+| `results list/show/compare/analyze/report` | consultar, analizar y exportar evidencia |
 | `clean` | preview/aplicación de GC reconstruible |
 
 `lf help`, `lf --help`, `lf help clusters add` y los `--help` anidados terminan con código cero.
@@ -1199,3 +1180,75 @@ dentro del Work. La infraestructura permanece en servicios cohesionados
 `outputs/metrics/checkpoints/cache/tools/progress`. No se introduce otro ejecutable, DSL, Task,
 Source/Transform/Sink ni selector global. Un campo YAML nuevo solo se justifica por una decisión de
 planificación del investigador, no por un objeto interno que puede seguir en Python.
+
+## 16. Análisis de estudios
+
+Es una capa determinista a posteriori sobre evidencia persistida; no propone Runs ni modifica el
+controlador. Un estudio terminal escribe `EXECUTION/analysis.json` automáticamente y estas rutas
+reutilizan o recalculan el mismo documento:
+
+```bash
+lf results analyze EXECUTION
+lf results analyze EXECUTION --recompute --json
+lf results report EXECUTION --output informe.html
+```
+
+HTML requiere `lambdaforge[analysis-report]`; JSON y Consola no. El informe incluye datos y runtime
+Plotly y no usa red.
+
+### 16.1 Semántica de evidencia
+
+`current_observed_objective` es el último step con todos los componentes,
+`best_observed_objective` el mejor, `final_objective` exige estado terminal y fidelidad completa, y
+`selection_objective` es la evidencia del candidato. Un compuesto incompleto declara componentes
+ausentes y último step completo. Una Run podada conserva curva parcial y mejor observación como
+censurada, pero no recibe score final inventado. Por candidato se calculan media, SD, SE e intervalo
+bootstrap 95 % determinista con al menos tres seeds. Las seeds compartidas permiten comparaciones
+pareadas; screening y confirmación con seeds nuevas permanecen separados.
+
+### 16.2 Efectos, cobertura y fiabilidad
+
+Un surrogate determinista de espacio mixto se valida dejando fuera candidatos completos, no épocas
+ni seeds duplicadas. Publica RMSE, MAE, correlación de rangos, cobertura de intervalo y calidad. Un
+diseño de referencia común produce importancia funcional global; la divergencia en el cuantil
+superior describe dónde se concentran buenos candidatos. Respuestas ajustadas numéricas/categóricas,
+superficies por pares y matriz de interacción muestran no aditividad, incertidumbre y extrapolación.
+
+La cobertura incluye bins/categorías marginales, activación condicional, distancia conjunta contra
+baseline del mismo tamaño y resolución del pool. Los bordes usan umbrales conservadores
+centralizados y separan saturación posible de probable. Bootstrap por seeds estima probabilidad y
+regret del ganador. Si hay datos comparables se obtiene Pareto objetivo/coste y objetivo/VRAM.
+Constraints, componentes, pruning y confirmación se conservan. Los findings son deterministas y
+referencian evidencia. Nada se presenta como causal; datos escasos, mala CV, cobertura pobre o
+extrapolación reducen explícitamente la confianza.
+
+En vivo el documento es `provisional` y más barato; al terminar es `final`. Un fingerprint hace
+idempotentes las lecturas sin `--recompute`. La escritura es atómica/versionada y admite estudios
+0.13 con metadata suficiente.
+
+### 16.3 Evidencia de admisión
+
+La telemetría persiste Runs activas/en cola, máximo paralelo, contexto CPU/RAM, VRAM libre/requerida
+por GPU y motivo exacto de espera. `runs_per_gpu` es un máximo. La presión espera y se sondea, no
+falla una Run; se escalonan lanzamientos por GPU y las demás continúan. Con dos GPU, cinco slots por
+dispositivo y recursos suficientes pueden admitirse diez Runs hijas; los probes efímeros no ocupan
+slots científicos.
+
+## 17. Consola de investigación
+
+`lf` abre la Consola Textual solo con entrada/salida interactiva; en otro caso imprime ayuda y sale.
+Las pantallas son Overview, Work, Studies, Clusters, Datasets y Results. `Ctrl+P` busca acciones,
+Enter abre, Esc vuelve y `?` explica el contexto. Se retiraron `lf top`, `clusters setup` y
+`clusters modify`; los scripts conservan todos los comandos no interactivos.
+
+Overview resume clústeres, Work/Studies activos, espera y resultados. Work integra YAML, Execution,
+Attempt, logs y Jobs avanzados. Studies muestra objective, candidatos/Runs, censura y admisión y
+enlaza Analysis provisional/final. Clusters edita catálogo/credenciales con ayuda progresiva y
+acciones separadas test/bootstrap/doctor. Datasets presenta versiones/placements. Results ofrece
+compare/analyze/report mediante `ResultStore`.
+
+La Consola importa servicios de dominio directamente y nunca ejecuta `lf` por subprocess. I/O,
+análisis y proveedores lentos van en workers daemon y los IDs de generación descartan respuestas
+obsoletas. Una caída mantiene el último snapshot marcado stale. Las acciones destructivas muestran
+el objetivo exacto, exigen confirmación y conservan preview/apply, raíz exacta y seguridad frente a
+symlinks. Clientes máquina consumen `--json`, no texto de pantalla. Plotly sigue opcional.

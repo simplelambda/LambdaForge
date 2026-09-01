@@ -1,0 +1,113 @@
+Screen {
+    background: $surface;
+    color: $text;
+}
+
+#console-body {
+    height: 1fr;
+}
+
+#sidebar {
+    width: 22;
+    min-width: 18;
+    background: $panel;
+    border-right: solid $primary-background;
+    padding: 1 1;
+}
+
+#brand {
+    text-style: bold;
+    color: $primary;
+    margin: 0 0 1 1;
+}
+
+.nav-button {
+    width: 100%;
+    margin: 0 0 1 0;
+    text-align: left;
+}
+
+#content {
+    width: 1fr;
+    height: 1fr;
+    padding: 1 2;
+}
+
+.screen-title, .modal-title {
+    text-style: bold;
+    color: $primary;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.status-line {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#screen-table {
+    height: 1fr;
+    border: round $primary-background;
+}
+
+.detail-panel, .help-panel {
+    height: auto;
+    min-height: 3;
+    padding: 1;
+    margin-top: 1;
+    background: $panel;
+    border-left: thick $primary;
+}
+
+ConfirmationDialog, ContextHelp, ClusterEditor {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.65);
+}
+
+.modal-card {
+    width: 64;
+    height: auto;
+    max-height: 90%;
+    padding: 1 2;
+    border: round $primary;
+    background: $surface;
+}
+
+.wide-modal {
+    width: 78;
+}
+
+.modal-actions {
+    height: auto;
+    align-horizontal: right;
+    margin-top: 1;
+}
+
+.modal-actions Button {
+    margin-left: 1;
+}
+
+.section-title {
+    text-style: bold;
+    color: $accent;
+}
+
+.muted {
+    color: $text-muted;
+    height: auto;
+    margin-top: 1;
+}
+
+Screen.narrow #sidebar {
+    width: 16;
+    min-width: 14;
+}
+
+Screen.narrow #content {
+    padding: 0 1;
+}
+
+Screen.narrow .modal-card, Screen.narrow .wide-modal {
+    width: 90%;
+}

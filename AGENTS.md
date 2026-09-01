@@ -1,6 +1,6 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.13.3. Spanish is
+This is the low-token source of truth for agents using or modifying LambdaForge 0.14.0. Spanish is
 in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
 then inspect the public signature or implementation being changed. Current tests and code override
 assumptions.
@@ -26,13 +26,14 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Read-only expansion | `lf run CONFIG --dry-run` |
 | Execute | `lf run CONFIG [--on CLUSTER]` |
 | Deliberate new execution | `lf run CONFIG --rerun` |
-| Monitor semantic work | `lf top`; `lf overview --json` |
+| Interactive operation | bare `lf` (TTY Research Console) |
+| Monitor semantic work | Research Console; `lf overview --json` |
 | Work operations | `lf show/logs/cancel/retry/delete SELECTOR`; study Run: `show/logs WORK --run KEY` |
 | Low-level jobs | `lf jobs list/show/logs/cancel/retry/delete`; `lf jobs clear [--apply]` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
-| Results | `lf results list/show/compare` |
+| Results | `lf results list/show/compare/analyze/report` |
 | Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
-| Guided cluster profile | `lf clusters setup`; `lf clusters modify [NAME]` |
+| Cluster profiles | Research Console; `lf clusters add/set/unset/...` for automation |
 | Preview safe storage cleanup | `lf clean [--on CLUSTER]`; add `--apply` after review |
 | Scaffold | `lf init DIRECTORY` |
 
@@ -138,22 +139,14 @@ scaling, imputation, PCA, thresholds or stability policy in clusterer defaults.
 
 `print()` and standard Python logging are captured by Job logs. Use `self.log()` for timestamped,
 immediately flushed human narration, `self.progress.update()` for completion and `metrics.log()` for
-scientific numeric evidence. In `lf top`, a study drills Work -> Trial candidate -> seed Run ->
-paged curves/epoch table; `o` toggles isolated raw output and `a` opens outer scheduler Attempts.
-For a failed Run, `e` opens the persisted failure/traceback. A terminal declared study with no
-published telemetry must fall back to numbered Attempts/logs rather than hiding its error.
-The selected Trial and seed Run expose bounded parameter/latest-metric previews while preserving at
-least three seed rows; Enter opens complete Run detail. Candidate tables do not repeat truncated
-summaries. `n`/`p` pages at most four curves, up/down selects an epoch, and
-Enter/right expands all its scalars. Other Works drill directly
-to numbered Attempts/logs and left backs out; the primary TUI hides long Job IDs. `d` deletes one confirmed terminal
-selection and `D` clears confirmed terminal history while preserving active Jobs. Automation uses
+scientific numeric evidence. The Research Console presents bounded Work/study/result read models;
+do not put result files, provider calls or scientific logic inside widgets. Automation uses
 `lf overview --json` (`work.items[].attempt_history` retains Job IDs), ordinary `lf logs` and
 preview-first `lf jobs clear [--apply]` instead of parsing the TUI. Local provider paths belong to
 the durable Job and must never be recomputed from the observer's current directory.
-Attempt logs in `lf top` refresh automatically. Failed Work logs append persisted exception
+Failed Work logs append persisted exception
 type/message/phase/result path after any requested tail; request `--verbose` or `--debug` for the
-traceback, press `e` in the TUI, or use `--json` for structured `failure`/`failures`. Immutable
+traceback or use `--json` for structured `failure`/`failures`. Immutable
 runtime/result models crossing a spawned process boundary must remain pickle-safe; never expose a
 raw `mappingproxy` through that boundary. Cache fetch retries incomplete HTTP/
 chunked/gzip transfers and transient statuses from clean unpublished temporaries; never add a
@@ -235,7 +228,7 @@ the original and continuation priorities by 50%. It never kills for scheduling. 
 and a stop arriving after the target still means `completed`.
 
 Adaptive telemetry also includes bounded `hpo_analysis` and the last 25 structured `controller`
-actions. `lf top` opens it with `i`; automation reads
+actions. The Studies screen consumes it and automation reads
 `work.items[].study.hpo_analysis/controller`. Treat per-parameter insights as marginal
 associations with explicit coverage/confidence/caveats, never causal claims or a replacement for
 the joint multivariate sampler. Enter/right opens the selected parameter's bounded response chart
@@ -246,11 +239,8 @@ Retrospective pruner quality lives in `hpo-control/state.json` → `pruner_calib
 simulated savings, false prunes, regret and probability/curve calibration without fabricating a
 full objective for censored Runs.
 
-`lf top` renders colour-coded framed Unicode time-series charts without a plotting dependency;
-colour is post-layout and respects `NO_COLOR`. `--history` controls cluster history;
-Shift+left/right pans raw logs while bare left backs out. Lightning
-study tables label the objective, proposed/planned candidates, GPU and latest/best epoch; charts keep red selected and green
-objective-best markers after bounded downsampling. Lightning
+The Research Console stays useful without a plotting dependency. Lightning
+study views label the objective, proposed/planned candidates, GPU and latest/best epoch. Lightning
 projects choose displayed curves with `LightningTrainConfig(epoch_chart_include=[...],
 epoch_chart_exclude=[...])`; collection remains complete. `gpu_mem_mb` is peak live allocation,
 whereas `gpu_reserved_mb`/`gpu_peak_reserved_mb` are allocator-cache diagnostics. Never use reserved
@@ -261,6 +251,32 @@ reuse. Temporary pressure queues and polls; it is not a scientific failure.
 Do not confuse `self.map` concurrency inside one Work with a YAML parallel group. A parallel group
 uses isolated spawned Work processes inside the enclosing Job's aggregate fixed allocation.
 Exhaustive seed/search is serial; adaptive search owns its allocation and schedules child Runs.
+
+## Study Analysis and console
+
+`lambdaforge.analysis.StudyAnalysis` is post-hoc evidence analysis, never a second HPO controller.
+Terminal studies persist atomic versioned `analysis.json`; `lf results analyze SELECTOR
+[--recompute] [--json]` uses the same core, while `results report` is an optional offline Plotly
+renderer. Keep `current_observed_objective`, `best_observed_objective`, `final_objective` and
+`selection_objective` distinct. A pruned Run is censored partial evidence and has no fabricated
+final score; missing composite components are structured.
+
+For a fixed evidence fingerprint, analysis is deterministic and separates screening from fresh-seed
+confirmation. It reports seed uncertainty and paired comparisons, candidate-level surrogate CV,
+global functional and top-region importance, adjusted responses, pair interactions/surfaces,
+coverage, boundaries, pool resolution, winner stability, pruning quality, constraints and
+resource/component Pareto. These are descriptive/predictive summaries, not causal claims. Sparse,
+extrapolated or poor-CV evidence must lower reliability explicitly. Live analysis is provisional;
+terminal analysis is final. Resource admission persists active/queued capacity and concrete
+GPU/CPU/RAM limitations; waiting is not scientific failure and `runs_per_gpu` is only a ceiling.
+
+Bare `lf` opens the Textual Research Console only on a TTY; non-TTY or no-command `--json` prints
+help. The six primary screens are Overview, Work, Studies, Clusters, Datasets and Results; `Ctrl+P`
+exposes the explicit action inventory. Widgets call Python domain services directly, and slow
+providers run outside the event loop. Preserve last successful data as visibly stale after
+transient failure. Destructive actions retain exact-target confirmation and preview/apply safety.
+`lf top`, `lf clusters setup` and `lf clusters modify` are retired public routes; do not restore a
+second interactive implementation.
 
 ## Neural component route
 
@@ -300,11 +316,10 @@ claim wrapper; never encode it as shell. Prefer a self-contained `gpu exec`-styl
 `claim_command` and `release_command` are an atomic pair; only `{gpu_count}` expands, the direct
 supervisor releases on every terminal path, and persistent claims are invalid with SLURM. In
 command/scheduler modes inherited `CUDA_VISIBLE_DEVICES` tokens are opaque grants: never replace or
-broaden them, and fail closed when missing/duplicate/insufficient. `lf clusters setup/modify` is a
-human front end over native commands, not another profile implementation. TTY choices use
-arrows/Enter with contextual help; redirected input receives numbered help. It accepts
-`0`/`q`/`quit`/`exit` at every prompt. Direct versus SLURM selects process launch; GPU
-wrappers/claims are the separate `gpu_access` policy, so `gpu exec` normally uses Direct. Superseded managed
+broaden them, and fail closed when missing/duplicate/insufficient. The Research Console edits the
+same catalog and credential services as native commands and never shells out to `lf`. Direct versus
+SLURM selects process launch; GPU wrappers/claims are the separate `gpu_access` policy, so
+`gpu exec` normally uses Direct. Superseded managed
 environments are pruned only after a verified replacement is active and live-Job references are protected.
 
 Direct/SLURM jobs retain durable state, heartbeat, logs, usage, cancellation and identity checks.

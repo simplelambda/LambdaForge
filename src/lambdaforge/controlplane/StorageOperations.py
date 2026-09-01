@@ -144,7 +144,7 @@ class StorageOperations:
         A successful published-only artifact is removed only after its published copy
         still matches the persisted SHA-256 and size.  Failed or interrupted Attempts
         lose their partial ``artifacts`` tree, while logs, result envelopes, metrics,
-        provenance and checkpoints remain available to ``lf top`` and ``lf logs``.
+        provenance and checkpoints remain available to the Research Console and ``lf logs``.
         """
         if not job_id.startswith("job-") or any(
             character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in job_id

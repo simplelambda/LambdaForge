@@ -148,7 +148,23 @@ class StudyTelemetry:
             index["finished"] = finished
             index["updated_at_utc"] = _now()
             atomic_json(self.root / "index.json", index)
-        self.refresh()
+        snapshot = self.refresh()
+        if finished:
+            # Analysis cannot alter the controller decision or scientific outcome.
+            try:
+                from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
+
+                StudyAnalysis.persist(
+                    snapshot,
+                    self.root / "analysis.json",
+                    objective=snapshot.get("objective"),
+                    status="final",
+                )
+            except Exception as error:
+                atomic_json(
+                    self.root / "analysis-error.json",
+                    {"type": type(error).__name__, "message": str(error), "at_utc": _now()},
+                )
 
     def candidates_observed(self, trials: Sequence[int]) -> None:
         """Mark proposed candidates whose initial evidence is now terminal."""
@@ -336,6 +352,23 @@ class StudyTelemetry:
                 },
             )
 
+    def admission_state(self, diagnostics: Mapping[str, Any]) -> None:
+        """Publish the current bounded resource-admission explanation."""
+        with self._lock:
+            current = self._read(self.root / "admission.json")
+            recent = [value for value in current.get("recent", ()) if isinstance(value, dict)]
+            event = {**dict(diagnostics), "observed_at_utc": _now()}
+            recent.append(event)
+            atomic_json(
+                self.root / "admission.json",
+                {
+                    "admission_version": 1,
+                    "current": event,
+                    "recent": recent[-25:],
+                    "updated_at_utc": _now(),
+                },
+            )
+
     def refresh(self) -> dict[str, Any]:
         """Fold small per-Run records into the single controller-facing snapshot."""
         with self._lock:
@@ -359,7 +392,7 @@ class StudyTelemetry:
                     state = self._run_state(key)
                     observation = self._observation_state(key)
                     merged = {**dict(descriptor), **state, **observation}
-                    latest, latest_step, best_step, best_objective, live_objective = (
+                    latest, latest_step, best_step, best_objective, live_objective, status = (
                         self._observation_summary(
                             merged,
                             objective=objective,
@@ -368,6 +401,18 @@ class StudyTelemetry:
                     merged["latest_metrics"] = latest
                     if live_objective is not None:
                         merged["objective_observation"] = live_objective
+                    merged["objective_status"] = status
+                    merged["current_observed_objective"] = (
+                        live_objective.get("current") if live_objective is not None else None
+                    )
+                    merged["best_observed_objective"] = best_objective
+                    terminal_comparable = selected_state_is_final(merged)
+                    merged["final_objective"] = best_objective if terminal_comparable else None
+                    if merged.get("state") == "pruned":
+                        merged["objective_censoring"] = {
+                            "censored": True,
+                            "reason": "performance-pruned",
+                        }
                     if latest_step is not None:
                         merged["latest_step"] = latest_step
                     if best_step is not None and best_objective is not None:
@@ -450,6 +495,7 @@ class StudyTelemetry:
                         candidate["pareto_optimal"] = True
                         break
             controller = self._read(self.root / "controller.json")
+            admission = self._read(self.root / "admission.json")
             recent_decisions = [
                 value for value in controller.get("recent", ()) if isinstance(value, Mapping)
             ]
@@ -508,6 +554,7 @@ class StudyTelemetry:
                         "preempted": terminations.get("scheduler_preempted", 0),
                     },
                 },
+                "admission": admission,
                 "cost": {
                     "wall_seconds": total_wall_seconds,
                     "gpu_seconds": total_gpu_seconds,
@@ -575,7 +622,14 @@ class StudyTelemetry:
         run: Mapping[str, Any],
         *,
         objective: Mapping[str, Any],
-    ) -> tuple[dict[str, float], int | None, int | None, float | None, Mapping[str, Any] | None]:
+    ) -> tuple[
+        dict[str, float],
+        int | None,
+        int | None,
+        float | None,
+        Mapping[str, Any] | None,
+        Mapping[str, Any],
+    ]:
         objective_metric = str(objective.get("metric", ""))
         objective_mode = str(objective.get("mode", "max"))
         latest: dict[str, float] = {
@@ -651,10 +705,17 @@ class StudyTelemetry:
         # current into best or otherwise change the terminal meaning.
         persisted = run.get("objective_observation")
         persisted = persisted if isinstance(persisted, Mapping) else None
-        live = (
-            ObjectiveUtility(objective).observation(records, fallback=latest)
-            if objective_metric
-            else None
+        evaluator = ObjectiveUtility(objective) if objective_metric else None
+        live = evaluator.observation(records, fallback=latest) if evaluator is not None else None
+        status = (
+            evaluator.status(records, fallback=latest)
+            if evaluator is not None
+            else {
+                "status": "unavailable",
+                "missing_components": [],
+                "latest_step": latest_step,
+                "latest_complete_step": None,
+            }
         )
         selected_source = persisted if persisted is not None else live
         selected = dict(selected_source) if selected_source is not None else None
@@ -688,7 +749,14 @@ class StudyTelemetry:
                     # Keep the structured observation internally consistent for TUI/API users.
                     selected["best"] = best_objective
                     selected["best_step"] = best_step
-        return latest, latest_step, best_step, best_objective, selected
+        if selected is not None:
+            status = {
+                "status": "complete",
+                "missing_components": [],
+                "latest_step": selected.get("current_step", latest_step),
+                "latest_complete_step": selected.get("current_step", latest_step),
+            }
+        return latest, latest_step, best_step, best_objective, selected, status
 
     @staticmethod
     def _terminal_candidate_state(states: Sequence[Any], *, successful: str) -> str:
@@ -845,8 +913,26 @@ def study_run_key(specification: Mapping[str, Any]) -> str:
     return f"trial-{trial:05d}-seed-{seed_token}"
 
 
+def selected_state_is_final(run: Mapping[str, Any]) -> bool:
+    """Return whether one Run has terminal, comparable scientific evidence."""
+    if run.get("state") != "succeeded" or run.get("termination_type", "completed") != "completed":
+        return False
+    fidelity = run.get("fidelity")
+    if not isinstance(fidelity, Mapping) or not fidelity:
+        return True
+    target = fidelity.get("target")
+    maximum = fidelity.get("maximum")
+    return (
+        isinstance(target, int)
+        and not isinstance(target, bool)
+        and isinstance(maximum, int)
+        and not isinstance(maximum, bool)
+        and target >= maximum
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-__all__ = ["StudyTelemetry", "study_run_key"]
+__all__ = ["StudyTelemetry", "selected_state_is_final", "study_run_key"]

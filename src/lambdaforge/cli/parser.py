@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command")
 
     init = commands.add_parser("init", help="Create an installable Work project.")
     init.add_argument("directory", type=Path)
@@ -65,19 +65,6 @@ def build_parser() -> argparse.ArgumentParser:
     overview = commands.add_parser("overview", help="Machine-readable global Work overview.")
     _cluster_selector(overview)
     overview.add_argument("--json", action="store_true")
-    top = commands.add_parser("top", help="Interactive Work/cluster monitor.")
-    _cluster_selector(top)
-    top.add_argument("--follow", action="store_true")
-    top.add_argument("--once", action="store_true")
-    top.add_argument("--interval", type=float, default=2.0)
-    top.add_argument(
-        "--history",
-        type=float,
-        default=60.0,
-        help="Seconds retained in cluster resource time-series charts (default: 60).",
-    )
-    top.add_argument("--json", action="store_true")
-
     resources = commands.add_parser("resources", help="Inspect cluster resources.")
     resources.add_argument("--on")
     resources.add_argument("--all", action="store_true")
@@ -94,21 +81,6 @@ def build_parser() -> argparse.ArgumentParser:
     clusters = commands.add_parser("clusters", help="Manage execution targets.")
     clusters.add_argument("--catalog", type=Path)
     cluster_commands = clusters.add_subparsers(dest="cluster_command", required=True)
-    setup = cluster_commands.add_parser(
-        "setup",
-        help="Interactively create a complete cluster profile.",
-        description=(
-            "Guided terminal setup using the same clusters add/set/credentials operations "
-            "available for automation."
-        ),
-    )
-    setup.add_argument("--no-test", action="store_true", help="Do not offer lf doctor afterward.")
-    modify = cluster_commands.add_parser(
-        "modify",
-        help="Interactively inspect and edit an existing cluster profile.",
-        description="Guided editor backed by clusters set/unset/credentials operations.",
-    )
-    modify.add_argument("name", nargs="?")
     add = cluster_commands.add_parser("add", help="Create a cluster profile non-interactively.")
     add.add_argument("name")
     add.add_argument("--host")
@@ -249,7 +221,10 @@ def build_parser() -> argparse.ArgumentParser:
             item.add_argument(
                 "--run",
                 dest="study_run",
-                help="Exact study Run key shown by lf top/overview (candidate plus seed).",
+                help=(
+                    "Exact study Run key shown by the Research Console/overview "
+                    "(candidate plus seed)."
+                ),
             )
             item.add_argument("--curve-points", type=int, default=80)
 
@@ -322,4 +297,14 @@ def build_parser() -> argparse.ArgumentParser:
     result_compare.add_argument("--mode", choices=("min", "max"), default="max")
     result_compare.add_argument("--root", type=Path)
     result_compare.add_argument("--json", action="store_true")
+    result_analyze = result_commands.add_parser("analyze")
+    result_analyze.add_argument("selector")
+    result_analyze.add_argument("--root", type=Path)
+    result_analyze.add_argument("--recompute", action="store_true")
+    result_analyze.add_argument("--json", action="store_true")
+    result_report = result_commands.add_parser("report")
+    result_report.add_argument("selector")
+    result_report.add_argument("--output", type=Path, required=True)
+    result_report.add_argument("--root", type=Path)
+    result_report.add_argument("--recompute", action="store_true")
     return parser

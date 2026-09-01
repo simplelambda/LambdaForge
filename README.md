@@ -18,6 +18,8 @@ code.
 6. [Reusable neural models](#reusable-neural-models)
 7. [Composition and adaptive experiments](#composition-and-adaptive-experiments)
 8. [Observe and operate](#observe-and-operate)
+9. [Study Analysis](#study-analysis)
+10. [Research Console](#research-console)
 
 ## Install
 
@@ -27,7 +29,7 @@ projects, or an editable checkout while developing LambdaForge:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.13.3
+python -m pip install lambdaforge==0.14.0
 python -m pip install -e .
 python -m pip check
 lf --version
@@ -46,22 +48,14 @@ lf --help
 lf help
 lf run --help
 lf help clusters add
-lf clusters setup --help
 ```
 
-For interactive use, `lf clusters setup` opens an explained terminal wizard for connection,
-credentials, paths, storage, Python, PyTorch, scheduler and GPU policy. `lf clusters modify`
-selects an existing profile and exposes every advanced profile field. The wizard is only a human
-front end: every change is executed through the same `clusters add`, `set`, `unset`, `credentials`
-and `test` operations documented for scripts. It never places password values in argv or YAML;
-keyring storage invokes the ordinary secure credential command. Non-interactive automation should
-continue using those native subcommands directly. On a real terminal, arrow keys move through
-choices, the focused option explains its operational consequences, and Enter selects it; the
-numbered fallback prints the same help for redirected terminals. `0`, `q`, `quit` or `exit` leaves
-from every prompt without applying that prompt. The execution backend and GPU access are separate: choose
-Direct when the site launches ordinary host processes (including commands wrapped by `gpu exec`),
-and SLURM only when the site actually submits through `sbatch`; configure the GPU wrapper in the
-later GPU access question.
+Run bare `lf` in an interactive terminal to open the Research Console. Its Clusters screen adds and
+edits profiles with contextual explanations, secure credential handling and explicit test,
+bootstrap and doctor steps. Scripts continue to use `lf clusters add/set/unset/credentials/test`
+directly. `lf` with redirected input/output, or `lf --json` without a command, prints CLI help and
+never tries to start a full-screen application. The former `lf top`, `lf clusters setup` and
+`lf clusters modify` entry points were removed in 0.14 so there is only one interactive UI.
 
 Projects that also need native executables can declare them once in `pyproject.toml`; ordinary
 pip-only projects do not need Conda or any additional configuration:
@@ -162,7 +156,7 @@ For hundreds of GB/TB, prefer a managed dataset: exact mirror verification also 
 while a dataset gives reusable content identity and placements.
 
 Submission is asynchronous by default on every target, including `local`: the terminal returns
-after a durable preparation record is created, and `lf top`/`lf logs` reconnect to it. Use
+after a durable preparation record is created, and the Research Console/`lf logs` reconnect to it. Use
 `--wait-for-submit` only when the caller deliberately wants to wait for preparation and scheduler
 acknowledgement. `--dry-run` remains read-only and runs directly because it starts no Job.
 
@@ -308,7 +302,7 @@ version probes live once in `environment.json`.
 Install the optional mature backend and use the uniform Python contract:
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.13.3"
+python -m pip install "lambdaforge[clustering]==0.14.0"
 ```
 
 ```python
@@ -385,7 +379,7 @@ pool supplies reproducible, space-filling candidates;
 after `startup_trials`, observed results choose later candidates. `sampler: auto` uses optional
 BoTorch mixed-GP qLogNEI when `lambdaforge[adaptive-hpo]` is installed and enough evidence exists,
 with a deterministic k-NN fallback for missing dependencies or numerical failures. Only proposed
-Trials appear in `lf top`. The GP sees all encoded dimensions jointly, including conditional
+Trials appear in the Research Console. The GP sees all encoded dimensions jointly, including conditional
 activity and categorical choices, and qLogNEI incorporates the standard error observed across
 seeds. Fidelity is explicit: each `(candidate, exact rung)` becomes a separate observation,
 aggregated only across seeds that reached that same cumulative budget. Numeric spaces use
@@ -412,7 +406,7 @@ objective:
 outside a declared range are clipped. All components must be logged at the same integer `step`:
 LambdaForge never constructs a utility from unrelated best epochs or from independent latest
 values. The resulting utility governs candidate proposals, seed racing, pruning, fidelity,
-confirmation and final ranking. Raw components remain visible, and `lf top` marks the current
+confirmation and final ranking. Raw components remain visible, and the Research Console marks the current
 non-dominated Pareto set as a diagnostic only; Pareto status does not silently replace the utility.
 
 If a high utility can be scientifically
@@ -605,7 +599,7 @@ evaluation protocol and must stay comparable across candidates.
 
 Concurrent training does not require reading one interleaved Job stream. A study is not a special
 Work type: any normal Work declaring `search` or multiple `seeds` is marked as a study during local
-validation, so `lf top` exposes its study screen even while remote preparation is still running.
+validation, so the Research Console exposes its study screen while remote preparation is running.
 It drills down as `Work → Trial (parameter combination) → Seed Run → live dashboard`. The Trial
 screen shows which combinations are pending, active, promoted, eliminated or complete. The Run
 screen also names its assigned GPU index (and machine output retains the exact grant token),
@@ -678,8 +672,7 @@ outer scheduler request, except that per-Run `gpu_memory` supplies this inner ad
 ## Observe and operate
 
 ```bash
-lf top                      # 60-second resource history
-lf top --history 180        # retain three minutes in the live charts
+lf                           # interactive Research Console
 lf overview --json
 lf show WORK
 lf logs WORK --follow
@@ -694,59 +687,16 @@ lf clean                     # preview only
 lf clean --apply
 ```
 
-`lf top` leads with colour-coded clusters and semantic Works and does not put long operational Job
-IDs in the researcher's primary path. It respects `NO_COLOR` and non-interactive output. Up/down
-selects; Enter/right drills into a study's Trials, seed Runs and training dashboard. The overview
-adds compact CPU/RAM/GPU history to each cluster, while cluster detail uses framed time-series
-plots for CPU, RAM, GPU utilization and GPU memory; `--history` controls the window.
+The Research Console is the human interface for live Work, Studies, Clusters, Datasets and Results.
+Its Overview answers what is running, waiting or unhealthy; contextual screens progressively reveal
+Attempts, Runs, logs, resource admission, study evidence and completed results. `Ctrl+P` opens the
+fuzzy command palette, Enter opens a selected row, Esc goes back and `?` explains the current
+context. Slow filesystem/provider work runs outside the UI event loop; a transient provider outage
+keeps the last successful snapshot visibly stale instead of turning it into scientific failure.
+Destructive actions require an explicit confirmation and retain the same preview-first ownership
+rules as their CLI counterparts. Automation must use the stable `--json` commands rather than
+parsing the full-screen interface.
 
-Study screens keep information readable instead of printing JSON rows. Each Trial separates its
-best observed objective and seed/epoch from the current mean across observed seeds. HPO ranks a
-completed Trial by the mean of each seed's best checkpoint, rather than its final overfitted epoch;
-fresh confirmation seeds protect the final choice from a lucky checkpoint. Seed rows show current
-and best objective, latest and best epoch, and the GPU running that seed. The table always reserves
-several seed rows in an ordinary terminal; its bounded metric preview continues in the Run
-dashboard. `pruned` is a terminal cooperative early stop—not a failure or a pause—and the selected
-seed exposes its probability-based reason. Partial pruned curves remain visible as censored
-evidence and `lf top` reports pruning rates by parameter region. They are not treated as exact
-completed objectives by seed racing, surrogate fitting or marginal objective statistics: doing so
-would overstate an unfinished budget. A candidate with any performance-pruned seed remains censored
-as a whole, so earlier successful seeds cannot form a survivor-only mean. Candidate-level
-completion/pruning instead fits a smoothed
-joint survival probability with an uncertainty interval. This softly informs later proposals
-without overcounting seeds or fabricating a score; operational failures are neutral. The
-controller's `hpo-control/state.json` also contains a retrospective `pruner_calibration` report
-with simulated savings, false-prune rate, regret, probability calibration and curve error. `lf top`
-exposes composite components, constraints, the Pareto marker, live slots/actions and the complete
-persisted reason for each performance prune.
-The candidate header distinguishes proposed Trials from the total
-candidate budget, so future adaptive proposals are never presented as decided work. Every
-parameter/metric preview for the selected Trial and seed Run appears in aligned detail panels below
-the table; Enter opens the complete Run detail. A Run displays
-at most four curves at once; `n`/`p` moves to the next/previous clearly numbered curve page without
-keyboard-layout-specific symbols. Below them, up/down selects an epoch in a compact
-metric table: the selected epoch appears as a red point, while the objective-best epoch remains a
-green diamond and highlighted row. Enter/right
-opens every scalar recorded for that epoch. Duration updates while a Run is active; the latest
-measured epoch/validation times are shown as soon as they exist, with an explicitly approximate
-elapsed-per-epoch fallback while timing telemetry is still arriving. Press `o` to switch the lower
-panel to that Run's raw, auto-refreshing output and back to structured epoch metrics.
-When a Run fails, its compact exception remains visible above the curves and `e` opens a
-scrollable failure document with type, message, phase, persisted `result.json` and traceback.
-Press `i` from an adaptive study or Trial to open its live HPO evidence console; left/back returns
-to candidates.
-
-A non-study Work drills into numbered scheduler Attempts and then its complete log; press `a` from
-a study to inspect those outer Attempts. A terminal study that failed before publishing its study
-index opens those Attempts automatically instead of presenting an empty telemetry screen. Open
-logs refresh automatically, follow the end by default
-and preserve manual scroll. Shift+left/right pans long raw log lines horizontally (`h`/`l` are
-fallbacks); `e` shows or hides the persisted traceback and unmodified left returns. Job IDs remain
-available through `lf jobs ...` and in `lf overview --json` for automation and low-level diagnosis.
-Press `d` to permanently delete the selected terminal Work/Job after confirmation; `D` clears all
-terminal history while always preserving active Jobs. Both operations remove exact owned
-workspaces and local history, never published datasets or shared caches/environments. The same
-whole-history operation is machine-accessible through preview-first `lf jobs clear [--apply]`.
 `lf cancel WORK` and `x` on a Work are semantic cancellation: every active scheduler Job grouped
 under that Work is contacted, and each direct supervisor stops the verified process group plus
 reparented/session-owning processes carrying its unique Job identity. Cancellation succeeds only
@@ -765,8 +715,8 @@ allocation (`gpu_mem_mb`) and the PyTorch allocator cache (`gpu_reserved_mb` and
 evidence that live tensors consume that amount. HPO packing remains governed by the explicit
 per-Run `resources.gpu_memory` admission threshold and driver-reported free memory. It fills only
 currently safe slots and keeps the remaining Runs queued. A finished packed Run exits its dedicated
-worker process, releasing the complete CUDA context before that slot is admitted again. Choose which collected curves `lf top`
-renders without discarding the others:
+worker process, releasing the complete CUDA context before that slot is admitted again. Choose
+which collected curves the Research Console renders without discarding the others:
 
 ```python
 config = lf.training.LightningTrainConfig(
@@ -791,3 +741,56 @@ For clusters, datasets, search, result metadata, cleanup ownership and the compl
 their agent [AGENTS.md](AGENTS.md)
 as the concise operational contract; this avoids costly repository crawling and prevents invented
 APIs.
+
+## Study Analysis
+
+Adaptive search answers what to run next; Study Analysis answers what the completed evidence
+supports. A terminal study automatically writes a versioned, atomic `analysis.json`. The same core
+can be run or refreshed explicitly:
+
+```bash
+lf results analyze EXECUTION
+lf results analyze EXECUTION --recompute
+lf results analyze EXECUTION --json
+python -m pip install "lambdaforge[analysis-report]==0.14.0"
+lf results report EXECUTION --output study-report.html
+```
+
+The analysis keeps four objective concepts separate. `current_observed_objective` is the latest
+step at which every required component was present; `best_observed_objective` is the best complete
+observation so far; `final_objective` exists only for a terminal full-fidelity Run; and
+`selection_objective` is the seed-aware candidate quantity used for selection. A pruned Run keeps
+its partial curve and best observation as censored evidence, but never receives a fabricated final
+score. Missing composite components are reported explicitly.
+
+`analysis.json` contains candidate/seed uncertainty (including deterministic bootstrap intervals
+when supported), paired same-seed comparisons, separate screening and confirmation evidence,
+candidate-level surrogate cross-validation, global functional and top-region importance, adjusted
+response curves, pair interactions/surfaces, marginal and joint coverage, boundary saturation,
+candidate-pool resolution, seed/winner stability, pruning quality, constraints, component Pareto
+and resource-efficiency Pareto. Sparse evidence produces an explicit reliability limitation rather
+than a confident-looking claim. Effects are observational predictive summaries, not causal claims;
+poor cross-validation or extrapolated regions are labelled. Live console analysis is
+`PROVISIONAL`; only terminal evidence is `FINAL`.
+
+The optional Plotly report is self-contained and works offline. Plotly is not a base dependency:
+without the extra, execution, JSON analysis and the Research Console remain fully functional.
+
+Resource admission is evidence too. Each study persists the current GPU/CPU/RAM admission state,
+including active capacity, queued Runs, per-GPU free/required VRAM and the concrete wait reason.
+`runs_per_gpu` is a ceiling rather than a demand: with two suitable GPUs and five slots each, ten
+independent Runs may be admitted; unavailable slots wait and are reconsidered after a staggered
+probe instead of failing the study.
+
+## Research Console
+
+Bare `lf` opens the Textual 8.2 Research Console on a TTY. Its six primary destinations are
+Overview, Work, Studies, Clusters, Datasets and Results. The command palette exposes the interactive
+counterpart of every CLI family while calling Python domain services directly—never spawning an
+`lf` subprocess. Study views distinguish incomplete/censored evidence, show current admission and
+link to the persisted analysis; Results can analyze or export the exact same evidence used by the
+CLI. Cluster forms start with human choices and keep passwords out of configuration.
+
+The CLI remains authoritative for scripts and remote automation. `lf --help` lists the exact
+machine-friendly commands; no-command non-TTY invocation prints that help and exits. Users upgrading
+from 0.13 should replace `lf top`, `lf clusters setup` and `lf clusters modify` with bare `lf`.

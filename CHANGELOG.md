@@ -10,6 +10,34 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-01
+
+### Added
+
+- Added deterministic, versioned Study Analysis with exact current/best/final/selection objective
+  semantics, censored-prune handling, seed bootstrap uncertainty, paired comparisons and separate
+  screening/confirmation evidence.
+- Added candidate-level surrogate validation, global functional and top-region importance,
+  adjusted response curves, interaction surfaces/matrix, marginal/joint coverage, boundary and
+  candidate-pool diagnostics, winner stability, constraints, pruning quality and resource Pareto.
+- Added atomic automatic `analysis.json`, `lf results analyze`, machine JSON summaries and optional
+  self-contained offline Plotly reports through `lambdaforge[analysis-report]`.
+- Added structured GPU/CPU/RAM admission evidence so queued Runs explain capacity, per-device VRAM
+  and wait reasons without treating temporary resource pressure as scientific failure.
+- Added the Textual 8.2 Research Console opened by bare `lf`, with Overview, Work, Studies,
+  Clusters, Datasets and Results screens, asynchronous provider loading, stale-data retention,
+  contextual help, command palette and confirmation boundaries.
+
+### Changed
+
+- Made Textual the single interactive architecture and kept automation on stable CLI/JSON domain
+  services. The former `lf top`, `lf clusters setup` and `lf clusters modify` public routes are
+  retired rather than maintaining two UIs.
+- `lf` without a subcommand opens the console only on a TTY; redirected or JSON invocations print
+  help and exit cleanly.
+- Updated all English/Spanish user, manual and agent documentation for the 0.14 workflow and
+  clarified that post-hoc effects are predictive/descriptive rather than causal.
+
 ## [0.13.3] - 2026-09-01
 
 ### Fixed

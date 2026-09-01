@@ -33,7 +33,7 @@ def test_invalid_work_is_local_configuration_error(
         (("help",), "Run reproducible scientific Work"),
         (("help", "clusters", "add"), "--gpu-claim-command"),
         (("clusters", "add", "help"), "--gpu-claim-command"),
-        (("clusters", "help"), "setup"),
+        (("clusters", "help"), "bootstrap"),
     ),
 )
 def test_help_is_a_successful_cli_operation(
