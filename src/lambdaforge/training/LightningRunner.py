@@ -151,6 +151,7 @@ class LightningRunner:
         adaptive_hpo = AdaptiveHpoCallback.from_environment(
             chart_include=self.config.epoch_chart_include,
             chart_exclude=self.config.epoch_chart_exclude,
+            display_names=self.config.epoch_metric_display_names,
         )
         if adaptive_hpo is not None:
             callbacks.append(adaptive_hpo)

@@ -126,17 +126,22 @@ insuficiente es no factible. Un componente de utilidad también puede ser constr
 multiobjetivo ocultos desde otras métricas. `runs_per_gpu` empaqueta Runs spawn independientes dentro de una
 reserva fija y valores >1 exigen `resources.gpu_memory` por Run. Es un umbral vivo de VRAM libre por
 nuevo Run y `runs_per_gpu` solo un máximo: GPU llenas esperan y se sondean, las demás continúan y
-los lanzamientos sobre una GPU se escalonan. Solo se rechaza si ninguna GPU asignada tiene VRAM
+los lanzamientos sobre una GPU se escalonan. No multipliques el umbral por los Runs activos ni
+mantengas una segunda reserva oculta. Solo se rechaza si ninguna GPU asignada tiene VRAM
 total suficiente. Cada Run GPU admitido usa un proceso spawn nuevo de un único worker y termina al
 recibir resultado/error; no restaures pools CUDA persistentes porque sus contextos ociosos retienen
 VRAM y pueden bloquear la cola. El probe de memoria GPU debe seguir siendo un hijo efímero: el
-controlador no debe retener un contexto CUDA por dispositivo ni consumir una plaza científica. Para early stopping registra la
+controlador no debe retener un contexto CUDA por dispositivo ni consumir una plaza científica. Un
+fallo transitorio del probe pausa la admisión y conserva las Runs activas; no debe cancelar todo el
+Study ni admitir desde memoria obsoleta. Para early stopping registra la
 métrica repetida con `step=`; `LightningRunner` lo enlaza, y un loop propio retorna en un límite
 seguro al detectar `self.stop_requested`.
 
 Cada Run adaptativo CPU/GPU posee proceso nuevo de un worker. Un worker perdido/matado o una OOM
 CUDA puede reintentarse como Attempt compatible con checkpoints hasta `failure_retries` (1 por
-defecto, máximo 3); si se repite queda terminal. No reintentes excepciones consumidoras arbitrarias.
+defecto, máximo 3); si se repite queda terminal. Una OOM CUDA reduce el límite de packing en memoria
+por debajo de la concurrencia observada antes de readmitir el reintento; no mates Runs hermanos
+sanos ni reintentes sin límite. No reintentes excepciones consumidoras arbitrarias.
 Un Run agotado deja el Work honestamente fallido, pero no cancela Runs ajenos activos/en cola. La
 telemetría guarda índice GPU lógico y token heredado exacto; nunca infieras ni amplíes dispositivos
 físicos desde el campo de visualización.
@@ -179,8 +184,9 @@ La calidad retrospectiva del pruner vive en `hpo-control/state.json` → `pruner
 ahorro simulado, falsos prunes, regret y calibración probabilística/de curva sin inventar un
 objective completo para Runs censurados.
 
-La Consola sigue siendo útil sin dependencia de plotting. Studies nombra objective,
-propuestos/planificados, GPU y época última/óptima mediante telemetría acotada.
+El runtime científico nunca depende del renderizado; el widget base `textual-plot` de la Consola
+solo visualiza telemetría acotada. Studies nombra objective, propuestos/planificados, GPU y época
+última/óptima mediante telemetría acotada.
 Lightning elige curvas visibles con `LightningTrainConfig(epoch_chart_include=[...],
 epoch_chart_exclude=[...])` sin perder las restantes. `gpu_mem_mb` es el pico vivo;
 `gpu_reserved_mb`/`gpu_peak_reserved_mb` diagnostican la caché del allocator. Nunca conviertas esa
@@ -198,12 +204,18 @@ leases exclusivos en hosts directos; shared admite ocupación externa solo por d
 command exige `command_prefix` argv del centro, nunca shell; prefiere wrappers autocontenidos como
 `gpu exec`. `claim_command`/`release_command` son una pareja atómica, solo expanden `{gpu_count}` y
 no son válidos con SLURM. En command/scheduler, `CUDA_VISIBLE_DEVICES` heredado son grants opacos:
-nunca se sustituyen ni amplían y una asignación ausente/duplicada/insuficiente falla cerrada.
+nunca se sustituyen ni amplían. Una asignación ausente/duplicada falla cerrada; scheduler es exacto,
+mientras un Study adaptativo tras un launcher command puede reducirse a menos tokens heredados.
 La Consola edita el mismo catálogo y servicio de credenciales que los comandos nativos y nunca
 invoca `lf` por subprocess. Direct frente a SLURM decide cómo se lanza el proceso; wrappers/claims
 GPU son la política `gpu_access` separada, por lo que `gpu exec` normalmente usa
 Direct. Los entornos gestionados obsoletos se podan tras activar reemplazo verificado y proteger
 Jobs vivos.
+La modal Add/Edit debe conservar el `ClusterProfile` durable completo: campos guiados para identidad,
+runtime, almacenamiento, SSH y GPU habituales, más YAML Advanced validado para mapas OpenSSH/SLURM
+menos comunes. Antes de persistir atómicamente se revalida con `ClusterProfile.from_mapping`. Nunca
+entra una contraseña en editor/perfil; solo su referencia segura, dejando el secreto al servicio de
+credenciales.
 
 Cancelar un Work debe intentar todos sus Jobs activos. La cancelación directa termina y verifica el
 conjunto completo de procesos propios, incluidos workers reparentados/con sesión nueva identificados
@@ -226,21 +238,62 @@ Mantén separados `current_observed_objective`, `best_observed_objective`, `fina
 `selection_objective`. Una Run podada es evidencia parcial censurada y no recibe score final
 inventado; los componentes ausentes son estructurados.
 
-Con el mismo fingerprint, el análisis es determinista y separa screening de confirmación con seeds
-nuevas. Informa incertidumbre y comparaciones pareadas, CV del surrogate por candidato, importancia
-funcional global y de región superior, respuestas ajustadas, interacciones/superficies, cobertura,
-bordes, resolución del pool, estabilidad, pruning, constraints y Pareto de recursos/componentes.
-Son resúmenes descriptivos/predictivos, no causales. Evidencia escasa, extrapolada o con mala CV
-reduce explícitamente la fiabilidad. En vivo es provisional y al terminar final. La admisión
-persiste capacidad activa/en cola y límites GPU/CPU/RAM; esperar no es fallo y `runs_per_gpu` es un
-máximo.
+Con el mismo fingerprint, el análisis es determinista y separa screening/confirmación. Una seed
+líder no basta para estabilidad empírica; la incertidumbre modelada va aparte. Usa un único orden
+min/max, metadata del CV realmente calculado, predicados `when` exactos y validación de todo punto.
+La fiabilidad combina soporte, calidad CV, cobertura y extrapolación. Indica si la región superior
+es observada/predicha y no atribuyas resolución a un pool no persistido. Confirmación usa el margen
+de equivalencia. Separa coste intrínseco por Run de gasto total del controlador y Pareto científico
+de Pareto de recursos. Todo sigue siendo predictivo/descriptivo, no causal.
+
+`trials` adaptativo es el presupuesto de candidatos y se consume por defecto; cobertura escasa o
+confianza baja del análisis no equivalen a convergencia. La convergencia por racha solo es opt-in
+con `convergence_patience` positivo (cero/omitido la desactiva), y el snapshot terminal debe
+persistir FINISH y su motivo exacto de presupuesto/pool/convergencia antes del análisis final.
+Conserva una sola vez el pool determinista en el estado de planificación. Cada especificación Run
+contiene únicamente sus valores candidato/seed y una definición compacta; nunca copies el pool
+completo en cada una, porque un Study grande válido debe usar memoria lineal.
 
 `lf` sin argumentos abre la Consola Textual solo en un TTY; sin TTY o con `--json` imprime ayuda.
-Las seis pantallas son Overview, Work, Studies, Clusters, Datasets y Results; `Ctrl+P` expone el
-inventario de acciones. Los widgets llaman servicios Python directamente y proveedores lentos van
-fuera del event loop. Conserva el último dato correcto marcado obsoleto tras un fallo transitorio.
-Las acciones destructivas mantienen confirmación y preview/apply. `lf top`,
+Overview separa Cluster, Work ordinario y Study, conserva historial acotado de recursos y no vuelca
+JSON crudo. Las gráficas de recursos y curvas de aprendizaje usan el widget nativo declarado
+`textual-plot`: no añadas otro renderer ni persistas las muestras acotadas de la TUI. El historial
+de recursos usa una ventana fija de cinco minutos y una clave de color externa. Un refresh debe
+conservar panel y clave estable. Clusters
+y Datasets usan tarjetas/secciones semánticas, no JSON de proveedor. Un Work terminal con
+`study_expected` sigue en Studies y usa `study_job_id` para leer el
+Attempt más reciente con telemetría. Las seis pantallas son Overview, Work, Studies, Clusters,
+Datasets y Results. La navegación real es
+`Study -> Trial -> Seed -> Epoch`: Enter/derecha apila y Esc/izquierda o Back desapila. Las migas
+anteriores actúan sobre la misma pila; una lectura remota de Study/Seed muestra carga/error y no
+tablas vacías como evidencia. Seeds conserva
+current/best/final/selection, pruning censurado, páginas de cuatro gráficas seleccionables por ratón
+o `n`/`p`, tabla horizontal con todos los escalares por step, GPU/recursos y
+logs aislados; Analysis consume el JSON persistido. `Ctrl+P` solo anuncia handlers reales: un nombre
+no equivale a paridad. Los widgets llaman servicios Python, el I/O lento sale del event loop y los
+refresh conservan selección/época/scroll. Las acciones destructivas mantienen preview/apply. `lf top`,
 `lf clusters setup` y `lf clusters modify` están retirados; no restaures otra UI.
+Trata `study: null` como evidencia no disponible: abre Study/logs e intenta una recarga acotada, sin
+convertirlo directamente ni degradarlo a Work ordinario.
+Cancelar un Study es una operación sobre el Work semántico y sigue disponible antes de existir
+telemetría. Los fallos recurrentes de refresh/proveedor se muestran inline como estado
+obsoleto/error; nunca producen un aviso emergente en cada intervalo de sondeo.
+HPO consume ese mismo análisis: dominios declarados/observados/prometedores, fiabilidad, respuesta
+con incertidumbre/soporte, dispersión, interacciones e historial completo Acción/Trial/Motivo. No
+ajusta otro modelo ni afirma causalidad. Antes de existir un resultado de Execution usa
+`study.hpo_analysis` vivo y acotado mediante el servicio compartido; no ocultes evidencia por faltar
+Results finales. Cambiar de página de métricas restablece límites automáticos; el zoom manual solo
+afecta a la página visible. Las categorías conservan sus etiquetas reales y pulsar un punto/barra
+muestra su valor exacto. La terminal mantiene la incertidumbre numérica sin pseudobandas engañosas;
+exportaciones Plotly opcionales explícitas pueden mostrar intervalos reales, hover, mapas de calor
+y superficies 3D. La cobertura usa tarjetas/gráficas/tablas acotadas, no JSON crudo, y la ayuda
+contextual explica términos estadísticos. Las decisiones se añaden a
+`study/controller-history.jsonl`: conserva `controller.json.recent` acotado, carga el historial
+completo solo bajo demanda y mantiene el tail disponible en Studies antiguos sin ese fichero. Las
+claves de métrica siguen estables; las etiquetas pueden
+configurarse con `LightningTrainConfig.epoch_metric_display_names`, y la UI nunca expone
+`__lambdaforge_utility__` en vez de «Composite selection score». Las marcas de trial van en columna
+separada.
 
 ## Contrato de clustering
 
@@ -268,3 +321,25 @@ publicada cae a Attempts/logs numerados. Los modelos inmutables que cruzan proce
 pickle-safe; nunca expongas un `mappingproxy` crudo en esa frontera. `cache.fetch` reintenta cortes HTTP/chunked/gzip y
 estados transitorios desde temporales no publicados limpios; no añadas workarounds en el consumidor.
 El progreso humano de bootstrap solo usa stderr y no contamina JSON.
+La Consola usa los mismos servicios de dominio en workers, comparte un factory de proveedores,
+serializa operaciones de clúster y pausa probes de recursos durante bootstrap. Su panel de actividad
+muestra fases/tiempo y admite alturas predefinidas o arrastre; el viewport superior conserva altura
+mínima y scroll. Las confirmaciones de mutación y planes modales muestran secciones semánticas
+acotadas, nunca JSON crudo. Las pantallas raíz ocultas no cargan.
+El indicador de carga raíz solo aparece hasta el primer snapshot correcto. Los refresh posteriores
+conservan el último read model, muestran su antigüedad y lo marcan obsoleto si fallan; filas y logs
+acotados de Work se actualizan en vivo con una sola petición activa por vista.
+El selector de Run Work filtra YAML; recientes combina el historial local de Jobs con un MRU acotado
+que solo persiste ruta/nombre/fecha locales. Explorar/elegir reciente solo rellena un selector. La
+única acción Submit debe volver a validar, explicar y solo después enviar asíncronamente al clúster
+visible capturado; bloquea repeticiones y muestra cada fase. Nunca trates la presencia en MRU como
+validación; representar el preview es solo diagnóstico y nunca puede impedir un envío ya validado.
+No copies la configuración al estado de consola. Los nombres visibles de Work no son
+claves: usa identidades `work_id` exactas para filas y mutaciones, de forma que ejecuciones
+homónimas simultáneas sean independientes.
+Los fallos sintácticos YAML deben ser acotados y ligados a la fuente: ruta, línea/columna, fragmento,
+cursor e indicación una sola vez.
+Summary de Dataset puede leer el índice lógico pero nunca recorrer assets; Stats/Integrity son
+explícitos. El borrado de versión previsualiza todas las ubicaciones, confirma una vez y trata
+`registered_but_missing` como convergencia segura antes de olvidar registros vacíos. El control
+permanece visible y debe mostrar inmediatamente espera/éxito/fallo evitando activaciones duplicadas.

@@ -739,6 +739,12 @@ def test_surrogate_belief_remains_distinct_from_descriptive_diagnostics(
         study.controller_decision({"action": "WAIT", "decision": decision})
 
     snapshot = study.refresh()
+    history = [
+        json.loads(line)
+        for line in (tmp_path / "study" / "controller-history.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
     screen = StudyInsightRenderer.render(
         {"work": {"items": [{"study": snapshot}]}},
         0,
@@ -749,6 +755,10 @@ def test_surrogate_belief_remains_distinct_from_descriptive_diagnostics(
     )
 
     assert snapshot["surrogate_belief"] == belief
+    assert snapshot["controller"]["history_count"] == 31
+    assert len(snapshot["controller"]["recent"]) == 25
+    assert len(history) == 31
+    assert history[0]["action"] == "PROPOSE"
     assert "SURROGATE BELIEF" in screen
     assert "SingleTaskMultiFidelityGP" in screen
     assert "MARGINAL / PAIRWISE DIAGNOSTICS" in screen
@@ -800,6 +810,7 @@ def test_job_service_returns_downsampled_curves_and_only_the_selected_run_log(
                 "kind": "chart-filter",
                 "include": ["val_*", "epoch_time_s"],
                 "exclude": ["*_aux"],
+                "display_names": {"val_loss": "Validation loss"},
             }
         )
         + "\n"
@@ -811,6 +822,10 @@ def test_job_service_returns_downsampled_curves_and_only_the_selected_run_log(
     )
     study_root = job_root / "study"
     study_root.mkdir()
+    (study_root / "controller-history.jsonl").write_text(
+        '{"action":"INITIALIZE","trial":1}\n{"action":"PROMOTE","trial":1}\n',
+        encoding="utf-8",
+    )
     (study_root / "summary.json").write_text(
         json.dumps(
             {
@@ -876,7 +891,12 @@ def test_job_service_returns_downsampled_curves_and_only_the_selected_run_log(
     assert detail["chart_filter"] == {
         "include": ["val_*", "epoch_time_s"],
         "exclude": ["*_aux"],
+        "display_names": {"val_loss": "Validation loss"},
     }
+    assert [action["action"] for action in service.study_actions("job-1")] == [
+        "INITIALIZE",
+        "PROMOTE",
+    ]
     assert len(detail["curves"]["val_loss"]) == 20
     assert detail["curves"]["val_loss"][0]["step"] == 1
     assert detail["curves"]["val_loss"][-1]["step"] == 100
@@ -941,6 +961,7 @@ def test_lightning_bridge_records_scalar_curves_and_validation_timing(tmp_path: 
         path,
         chart_include=["val_*", "epoch_time_s"],
         chart_exclude=["*_aux"],
+        display_names={"val_auprc": "Validation AUPRC"},
     )
     trainer = SimpleNamespace(
         sanity_checking=False,
@@ -959,6 +980,7 @@ def test_lightning_bridge_records_scalar_curves_and_validation_timing(tmp_path: 
         "kind": "chart-filter",
         "include": ["val_*", "epoch_time_s"],
         "exclude": ["*_aux"],
+        "display_names": {"val_auprc": "Validation AUPRC"},
     }
     assert {value["name"] for value in values} >= {
         "train_loss",

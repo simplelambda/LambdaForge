@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,7 @@ def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
                 )
             ]
         )
-        figure.update_layout(title="Top-region importance")
+        figure.update_layout(title="Observed top-region importance")
         sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
     responses = analysis.get("response_curves", {})
     if isinstance(responses, Mapping):
@@ -114,18 +114,12 @@ def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
                 heatmap.update_layout(title=f"Pairwise predictive heatmap: {name}")
                 sections.append(plot(heatmap, include_plotlyjs=False, output_type="div"))
                 if all(isinstance(value, int | float) for value in (*x_values, *y_values)):
-                    surface_3d = go.Figure(
-                        data=[go.Surface(z=z_values, x=x_values, y=y_values)]
-                    )
+                    surface_3d = go.Figure(data=[go.Surface(z=z_values, x=x_values, y=y_values)])
                     surface_3d.update_layout(title=f"Pairwise predictive surface: {name}")
                     sections.append(plot(surface_3d, include_plotlyjs=False, output_type="div"))
     if candidates:
         parameter_names = sorted(
-            {
-                str(name)
-                for candidate in candidates
-                for name in candidate.get("parameters", {})
-            }
+            {str(name) for candidate in candidates for name in candidate.get("parameters", {})}
         )
         dimensions = []
         for name in parameter_names:
@@ -173,9 +167,7 @@ def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
                 go.Bar(
                     x=list(boundaries),
                     y=[
-                        value.get("boundary_enrichment", 0)
-                        if isinstance(value, Mapping)
-                        else 0
+                        value.get("boundary_enrichment", 0) if isinstance(value, Mapping) else 0
                         for value in boundaries.values()
                     ],
                 )
@@ -244,6 +236,22 @@ def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
     )
     raw = html.escape(json.dumps(analysis, indent=2, default=str))
     status = html.escape(str(analysis.get("source", {}).get("status", "unknown")))
+    objective_label = html.escape(_objective_label(analysis))
+    seed_analysis = analysis.get("seed_analysis", {})
+    seed_warning = ""
+    if isinstance(seed_analysis, Mapping) and seed_analysis.get("status") == "insufficient":
+        seed_warning = (
+            '<article class="warning"><h3>Empirical seed stability unavailable</h3><p>'
+            + html.escape(
+                str(
+                    seed_analysis.get(
+                        "interpretation",
+                        "Leading candidates do not have enough repeated-seed evidence.",
+                    )
+                )
+            )
+            + "</p><p>A one-seed bootstrap is not presented as empirical stability.</p></article>"
+        )
     diagnostic = html.escape(
         json.dumps(
             {
@@ -265,7 +273,8 @@ def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
         "details{margin-top:2rem}"
         "pre{white-space:pre-wrap;background:#f5f6f8;padding:1rem}"
         "</style></head><body><h1>LambdaForge Study Analysis</h1>"
-        f"<p>Status: {status}</p>{''.join(sections)}<h2>Diagnostics</h2>"
+        f"<p>Status: {status} · Objective: {objective_label}</p>"
+        f"{seed_warning}{''.join(sections)}<h2>Diagnostics</h2>"
         f"<pre>{diagnostic}</pre><h2>Findings</h2>{finding_html}"
         "<details><summary>Complete reproducible analysis JSON</summary>"
         f"<pre>{raw}</pre></details></body></html>"
@@ -275,4 +284,292 @@ def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
     return path
 
 
-__all__ = ["write_html"]
+def write_metric_html(
+    curves: Mapping[str, Any],
+    names: Sequence[str],
+    output: str | Path,
+    *,
+    display_names: Mapping[str, Any] | None = None,
+) -> Path:
+    """Write exact interactive learning curves for one Run."""
+    try:
+        import plotly.graph_objects as go
+        from plotly.offline import plot
+    except ImportError as error:
+        raise RuntimeError(
+            "Install lambdaforge[analysis-report] to export interactive HTML reports."
+        ) from error
+
+    figure = go.Figure()
+    aliases = display_names or {}
+    for name in names:
+        raw = curves.get(name, ())
+        points = (
+            [value for value in raw if isinstance(value, Mapping)]
+            if isinstance(raw, Sequence)
+            else []
+        )
+        x = [value.get("step") for value in points]
+        y = [value.get("value") for value in points]
+        if not x:
+            continue
+        label = str(aliases.get(name, name)).replace("_", " ").title()
+        figure.add_trace(
+            go.Scatter(
+                x=x,
+                y=y,
+                mode="lines+markers",
+                name=label,
+                hovertemplate=f"epoch=%{{x}}<br>{html.escape(label)}=%{{y:.6g}}<extra></extra>",
+            )
+        )
+    figure.update_layout(
+        title="Learning curves",
+        xaxis_title="Epoch",
+        yaxis_title="Metric value",
+        hovermode="x unified",
+        template="plotly_white",
+    )
+    body = plot(figure, include_plotlyjs="inline", output_type="div")
+    return _write_small_report(output, "LambdaForge learning curves", body)
+
+
+def write_parameter_html(
+    analysis: Mapping[str, Any], parameter: str, output: str | Path
+) -> Path:
+    """Write one parameter response plus its persisted pairwise surfaces."""
+    try:
+        import plotly.graph_objects as go
+        from plotly.offline import plot
+    except ImportError as error:
+        raise RuntimeError(
+            "Install lambdaforge[analysis-report] to export interactive HTML reports."
+        ) from error
+
+    responses = analysis.get("response_curves", {})
+    response = responses.get(parameter, {}) if isinstance(responses, Mapping) else {}
+    points = (
+        [value for value in response.get("points", ()) if isinstance(value, Mapping)]
+        if isinstance(response, Mapping)
+        else []
+    )
+    if not points:
+        live = analysis.get("live_hpo", {})
+        parameters = live.get("parameters", ()) if isinstance(live, Mapping) else ()
+        detail = next(
+            (
+                value
+                for value in parameters
+                if isinstance(value, Mapping) and value.get("parameter") == parameter
+            ),
+            {},
+        )
+        live_response = detail.get("response", {}) if isinstance(detail, Mapping) else {}
+        points = [
+            {
+                "x": value.get("parameter", value.get("label")),
+                "predicted_objective": value.get("objective"),
+                "support_count": value.get("samples", 0),
+            }
+            for value in live_response.get("points", ())
+            if isinstance(value, Mapping)
+        ] if isinstance(live_response, Mapping) else []
+
+    x = [value.get("x", value.get("category")) for value in points]
+    y = [
+        value.get("predicted_objective", value.get("prediction", value.get("effect")))
+        for value in points
+    ]
+    uncertainty = [value.get("uncertainty") for value in points]
+    response_figure = go.Figure()
+    if (
+        points
+        and all(isinstance(value, int | float) for value in y)
+        and all(isinstance(value, int | float) for value in uncertainty)
+    ):
+        numeric_y = [float(value) for value in y if isinstance(value, int | float)]
+        numeric_uncertainty = [
+            float(value) for value in uncertainty if isinstance(value, int | float)
+        ]
+        upper = [
+            value + spread
+            for value, spread in zip(numeric_y, numeric_uncertainty, strict=True)
+        ]
+        lower = [
+            value - spread
+            for value, spread in zip(numeric_y, numeric_uncertainty, strict=True)
+        ]
+        response_figure.add_trace(
+            go.Scatter(
+                x=x,
+                y=upper,
+                mode="lines",
+                line={"width": 0},
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        response_figure.add_trace(
+            go.Scatter(
+                x=x,
+                y=lower,
+                mode="lines",
+                line={"width": 0},
+                fill="tonexty",
+                fillcolor="rgba(0, 160, 210, 0.18)",
+                name="uncertainty",
+                hoverinfo="skip",
+            )
+        )
+    response_figure.add_trace(
+        go.Scatter(
+            x=x,
+            y=y,
+            mode=(
+                "lines+markers"
+                if all(
+                    isinstance(value, int | float) and not isinstance(value, bool)
+                    for value in x
+                )
+                else "markers"
+            ),
+            name="response",
+            customdata=[value.get("support_count", value.get("support", 0)) for value in points],
+            hovertemplate=(
+                f"{html.escape(parameter)}=%{{x}}<br>objective=%{{y:.6g}}"
+                "<br>support=%{customdata}<extra></extra>"
+            ),
+        )
+    )
+    objective_label = _objective_label(analysis)
+    response_figure.update_layout(
+        title=f"Response: {parameter} → {objective_label}",
+        xaxis_title=parameter,
+        yaxis_title=objective_label,
+        template="plotly_white",
+    )
+    sections = [plot(response_figure, include_plotlyjs="inline", output_type="div")]
+
+    interactions = analysis.get("interactions", {})
+    surfaces = interactions.get("surfaces", {}) if isinstance(interactions, Mapping) else {}
+    if isinstance(surfaces, Mapping):
+        for pair_name, surface in surfaces.items():
+            if parameter not in str(pair_name).split("::") or not isinstance(surface, Mapping):
+                continue
+            x_values, y_values = list(surface.get("x", ())), list(surface.get("y", ()))
+            cells = [value for value in surface.get("cells", ()) if isinstance(value, Mapping)]
+            lookup = {(str(value.get("x")), str(value.get("y"))): value for value in cells}
+            z_values = [
+                [
+                    lookup.get((str(left), str(right)), {}).get("predicted_objective")
+                    for left in x_values
+                ]
+                for right in y_values
+            ]
+            heatmap = go.Figure(
+                data=[go.Heatmap(z=z_values, x=x_values, y=y_values, hoverongaps=False)]
+            )
+            heatmap.update_layout(title=f"Pairwise response: {pair_name}", template="plotly_white")
+            sections.append(plot(heatmap, include_plotlyjs=False, output_type="div"))
+            if all(
+                isinstance(value, int | float) and not isinstance(value, bool)
+                for value in (*x_values, *y_values)
+            ):
+                surface_3d = go.Figure(data=[go.Surface(z=z_values, x=x_values, y=y_values)])
+                surface_3d.update_layout(
+                    title=f"3D pairwise response: {pair_name}", template="plotly_white"
+                )
+                sections.append(plot(surface_3d, include_plotlyjs=False, output_type="div"))
+    return _write_small_report(
+        output,
+        f"LambdaForge HPO · {parameter}",
+        "".join(sections),
+    )
+
+
+def write_resource_html(
+    cluster: str, series: Mapping[str, Any], output: str | Path
+) -> Path:
+    """Write hoverable CPU/RAM/GPU histories from the console's bounded samples."""
+    try:
+        import plotly.graph_objects as go
+        from plotly.offline import plot
+    except ImportError as error:
+        raise RuntimeError(
+            "Install lambdaforge[analysis-report] to export interactive HTML reports."
+        ) from error
+
+    sections: list[str] = []
+    for metric in ("cpu", "ram", "gpu"):
+        figure = go.Figure()
+        for owner, label in (("total", "Cluster total"), ("mine", "My LambdaForge jobs")):
+            raw = series.get(f"{owner}_{metric}", ())
+            points = (
+                [value for value in raw if isinstance(value, Sequence) and len(value) >= 2]
+                if isinstance(raw, Sequence) and not isinstance(raw, str | bytes)
+                else []
+            )
+            if not points:
+                continue
+            figure.add_trace(
+                go.Scatter(
+                    x=[value[0] for value in points],
+                    y=[value[1] for value in points],
+                    mode="lines+markers",
+                    name=label,
+                    hovertemplate=(
+                        "seconds before latest=%{x:.0f}<br>usage=%{y:.2f}%<extra>"
+                        + html.escape(label)
+                        + "</extra>"
+                    ),
+                )
+            )
+        figure.update_layout(
+            title=("GPU memory" if metric == "gpu" else metric.upper()),
+            xaxis_title="Seconds before latest sample",
+            yaxis_title="Usage (%)",
+            yaxis={"range": [0, 100]},
+            hovermode="x unified",
+            template="plotly_white",
+        )
+        sections.append(
+            plot(
+                figure,
+                include_plotlyjs="inline" if not sections else False,
+                output_type="div",
+            )
+        )
+    return _write_small_report(
+        output,
+        f"LambdaForge resources · {cluster}",
+        "".join(sections),
+    )
+
+
+def _write_small_report(output: str | Path, title: str, body: str) -> Path:
+    document = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        f"<title>{html.escape(title)}</title><style>"
+        "body{font:16px system-ui;max-width:1400px;margin:auto;padding:2rem;color:#20242b}"
+        "</style></head><body>"
+        f"<h1>{html.escape(title)}</h1>{body}</body></html>"
+    )
+    path = Path(output).expanduser().resolve()
+    atomic_write_text(path, document)
+    return path
+
+
+def _objective_label(analysis: Mapping[str, Any]) -> str:
+    objective = analysis.get("objective", {})
+    if not isinstance(objective, Mapping):
+        return "Selection objective"
+    metrics = objective.get("metrics")
+    if isinstance(metrics, Mapping) and metrics:
+        return "Composite selection score"
+    metric = str(objective.get("metric", "Selection objective"))
+    if metric == "__lambdaforge_utility__":
+        return "Composite selection score"
+    return metric.replace("_", " ").title()
+
+
+__all__ = ["write_html", "write_metric_html", "write_parameter_html", "write_resource_html"]

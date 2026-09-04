@@ -9,58 +9,22 @@ import statistics
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-_INACTIVE = "<inactive>"
+from lambdaforge.analysis.Ordering import best, supported_region
+from lambdaforge.analysis.SearchSpace import (
+    INACTIVE,
+    assign_values,
+    build_space,
+    grid,
+    sample_point,
+    valid_point,
+)
 
 
 def infer_space(
     candidates: Sequence[Mapping[str, Any]], authored: Mapping[str, Any] | None = None
 ) -> dict[str, dict[str, Any]]:
-    """Infer a conservative mixed space, preferring authored bounds when available."""
-    authored = authored or {}
-    names = sorted(
-        {str(name) for candidate in candidates for name in candidate.get("parameters", {})}
-        | {str(name) for name in authored}
-    )
-    output: dict[str, dict[str, Any]] = {}
-    for name in names:
-        configured = authored.get(name)
-        configured = configured if isinstance(configured, Mapping) else {}
-        present = [candidate.get("parameters", {}).get(name, _INACTIVE) for candidate in candidates]
-        active = [value for value in present if value != _INACTIVE]
-        numeric = bool(active) and all(
-            isinstance(value, int | float) and not isinstance(value, bool) for value in active
-        )
-        if numeric:
-            raw_range = configured.get("range")
-            low, high = (
-                (float(raw_range[0]), float(raw_range[1]))
-                if isinstance(raw_range, Sequence)
-                and not isinstance(raw_range, str | bytes)
-                and len(raw_range) == 2
-                else (min(map(float, active)), max(map(float, active)))
-            )
-            output[name] = {
-                "kind": "numeric",
-                "low": low,
-                "high": high,
-                "scale": str(configured.get("scale", "linear")),
-                "integer": all(isinstance(value, int) for value in active),
-                "conditional": len(active) != len(present),
-            }
-        else:
-            authored_values = configured.get("values")
-            values = (
-                list(authored_values)
-                if isinstance(authored_values, Sequence)
-                and not isinstance(authored_values, str | bytes)
-                else sorted({value for value in active}, key=str)
-            )
-            output[name] = {
-                "kind": "categorical",
-                "values": values,
-                "conditional": len(active) != len(present),
-            }
-    return output
+    """Infer a conservative mixed space while preserving exact authored ``when`` rules."""
+    return build_space(candidates, authored)
 
 
 class AnalysisSurrogate:
@@ -74,7 +38,7 @@ class AnalysisSurrogate:
         self.rows = [
             (dict(value.get("parameters", {})), float(value["mean"]))
             for value in candidates
-            if _finite(value.get("mean"))
+            if _finite(value.get("mean")) and valid_point(value.get("parameters", {}), space)
         ]
         self.space = {str(name): dict(rule) for name, rule in space.items()}
 
@@ -122,6 +86,8 @@ def validate_surrogate(
             "spearman": None,
             "interval_coverage_90": None,
             "validation": "leave-one-candidate-out",
+            "validation_method": "leave-one-candidate-out",
+            "fold_count": len(rows),
         }
     actual: list[float] = []
     predicted: list[float] = []
@@ -156,7 +122,9 @@ def validate_surrogate(
         "mae": mae,
         "spearman": _spearman(actual, predicted),
         "interval_coverage_90": covered / len(rows),
-        "validation": "leave-one-candidate-out" if len(rows) < 25 else "deterministic-5-fold",
+        "validation": "leave-one-candidate-out",
+        "validation_method": "leave-one-candidate-out",
+        "fold_count": len(rows),
     }
 
 
@@ -167,6 +135,8 @@ def analyze_effects(
     mode: str,
     fingerprint: str,
     provisional: bool,
+    surrogate_diagnostics: Mapping[str, Any] | None = None,
+    coverage_quality: str | None = None,
 ) -> dict[str, Any]:
     rows = [value for value in candidates if _finite(value.get("mean"))]
     if len(rows) < 2 or not space:
@@ -182,14 +152,27 @@ def analyze_effects(
     main: dict[str, dict[str, Any]] = {}
     groups: dict[str, list[Any]] = {}
     for name, rule in space.items():
-        labels = [_bin(point.get(name, _INACTIVE), rule) for point in reference]
+        labels = [_bin(point.get(name, INACTIVE), rule) for point in reference]
         groups[name] = labels
         explained = _group_variance(labels, predictions)
+        support = sum(name in row.get("parameters", {}) for row in rows)
+        reliability = _reliability(
+            len(rows),
+            model_quality=str((surrogate_diagnostics or {}).get("quality", "insufficient")),
+            support_fraction=support / len(rows),
+            coverage_quality=coverage_quality,
+        )
         main[name] = {
             "importance": explained / total_variance if total_variance > 0 else 0.0,
             "variance": explained,
-            "support": sum(name in row.get("parameters", {}) for row in rows),
-            "reliability": _reliability(len(rows), model_quality=None),
+            "support": support,
+            "reliability": reliability,
+            "reliability_components": {
+                "observations": len(rows),
+                "active_support": support,
+                "surrogate_quality": (surrogate_diagnostics or {}).get("quality"),
+                "coverage_quality": coverage_quality,
+            },
             "interpretation": "predictive association, not a causal effect",
         }
     interactions: list[dict[str, Any]] = []
@@ -208,18 +191,36 @@ def analyze_effects(
                     "importance": variance / total_variance if total_variance > 0 else 0.0,
                     "variance": variance,
                     "support": len(rows),
-                    "reliability": _reliability(len(rows), model_quality=None),
+                    "reliability": _reliability(
+                        len(rows),
+                        model_quality=str(
+                            (surrogate_diagnostics or {}).get("quality", "insufficient")
+                        ),
+                        support_fraction=1.0,
+                        coverage_quality=coverage_quality,
+                    ),
                 }
             )
     interactions.sort(key=lambda value: float(value["importance"]), reverse=True)
     top = top_region_importance(rows, space=space, mode=mode)
     responses = {
-        name: response_curve(name, rows, model=model, space=space, fingerprint=fingerprint)
+        name: response_curve(
+            name,
+            rows,
+            model=model,
+            space=space,
+            fingerprint=fingerprint,
+            mode=mode,
+        )
         for name in space
     }
     surfaces = {
         f"{item['left']}::{item['right']}": pair_surface(
-            str(item["left"]), str(item["right"]), model=model, space=space
+            str(item["left"]),
+            str(item["right"]),
+            model=model,
+            space=space,
+            fingerprint=fingerprint,
         )
         for item in interactions[: min(6, len(interactions))]
     }
@@ -254,9 +255,9 @@ def top_region_importance(
     output: dict[str, Any] = {}
     for name, rule in space.items():
         all_labels = [
-            _bin(value.get("parameters", {}).get(name, _INACTIVE), rule) for value in ordered
+            _bin(value.get("parameters", {}).get(name, INACTIVE), rule) for value in ordered
         ]
-        top_labels = [_bin(value.get("parameters", {}).get(name, _INACTIVE), rule) for value in top]
+        top_labels = [_bin(value.get("parameters", {}).get(name, INACTIVE), rule) for value in top]
         labels = sorted(set(all_labels) | set(top_labels), key=str)
         smooth = 1e-12
         p = [
@@ -269,6 +270,7 @@ def top_region_importance(
         ]
         output[name] = {
             "status": "available",
+            "region_source": "observed-candidate-ranking",
             "importance": _jensen_shannon(p, q),
             "top_count": len(top),
             "total_count": len(ordered),
@@ -285,30 +287,32 @@ def response_curve(
     model: AnalysisSurrogate,
     space: Mapping[str, Mapping[str, Any]],
     fingerprint: str,
+    mode: str,
 ) -> dict[str, Any]:
     rule = space[name]
     if rule["kind"] == "categorical":
-        levels = list(rule.get("values", ())) + ([_INACTIVE] if rule.get("conditional") else [])
+        levels = list(rule.get("values", ())) + ([INACTIVE] if rule.get("conditional") else [])
         raw: list[tuple[Any, float, float, int]] = []
         for level in levels:
             values = []
             uncertainties = []
             for candidate in candidates:
                 parameters = dict(candidate.get("parameters", {}))
-                if level == _INACTIVE:
-                    parameters.pop(name, None)
-                else:
-                    parameters[name] = level
-                category_prediction, category_uncertainty, _distance = model.predict(parameters)
+                assigned = assign_values(parameters, {name: level}, space)
+                if assigned is None:
+                    continue
+                category_prediction, category_uncertainty, _distance = model.predict(assigned)
                 values.append(category_prediction)
                 uncertainties.append(category_uncertainty)
+            if not values:
+                continue
             raw.append(
                 (
                     level,
                     statistics.fmean(values),
                     statistics.fmean(uncertainties),
                     sum(
-                        candidate.get("parameters", {}).get(name, _INACTIVE) == level
+                        candidate.get("parameters", {}).get(name, INACTIVE) == level
                         for candidate in candidates
                     ),
                 )
@@ -350,8 +354,10 @@ def response_curve(
         upper_predictions = []
         upper_uncertainties = []
         for candidate in members:
-            low_parameters = {**candidate.get("parameters", {}), name: lower}
-            high_parameters = {**candidate.get("parameters", {}), name: upper}
+            low_parameters = assign_values(candidate.get("parameters", {}), {name: lower}, space)
+            high_parameters = assign_values(candidate.get("parameters", {}), {name: upper}, space)
+            if low_parameters is None or high_parameters is None:
+                continue
             low_value, _low_uncertainty, _ = model.predict(low_parameters)
             high_value, high_uncertainty, _ = model.predict(high_parameters)
             differences.append(high_value - low_value)
@@ -359,15 +365,9 @@ def response_curve(
             upper_uncertainties.append(high_uncertainty)
         effects.append(statistics.fmean(differences) if differences else 0.0)
         support.append(len(members))
-        estimates.append(
-            statistics.fmean(upper_predictions)
-            if upper_predictions
-            else model.predict({name: upper})[0]
-        )
+        estimates.append(statistics.fmean(upper_predictions) if upper_predictions else float("nan"))
         spreads.append(
-            statistics.fmean(upper_uncertainties)
-            if upper_uncertainties
-            else model.predict({name: upper})[1]
+            statistics.fmean(upper_uncertainties) if upper_uncertainties else float("inf")
         )
     accumulated: list[float] = []
     total = 0.0
@@ -387,12 +387,18 @@ def response_curve(
             edges[1:], accumulated, estimates, support, spreads, strict=True
         )
     ]
-    best = max(points, key=lambda value: value["predicted_objective"]) if points else None
+    eligible = [point for point in points if math.isfinite(float(point["predicted_objective"]))]
+    selected = (
+        best(eligible, key=lambda value: float(value["predicted_objective"]), mode=mode)
+        if eligible
+        else None
+    )
     return {
         "kind": "numeric-ale",
         "status": "available",
         "points": points,
-        "best_supported_region": _supported_region(points, best),
+        "best_supported_point": dict(selected) if selected is not None else None,
+        "best_supported_region": supported_region(points, selected=selected, mode=mode),
     }
 
 
@@ -402,13 +408,30 @@ def pair_surface(
     *,
     model: AnalysisSurrogate,
     space: Mapping[str, Mapping[str, Any]],
+    fingerprint: str,
 ) -> dict[str, Any]:
-    left_values = _grid(space[left], 9)
-    right_values = _grid(space[right], 9)
+    left_values = grid(space[left], 9)
+    right_values = grid(space[right], 9)
+    contexts = reference_set(space, count=32, fingerprint=f"{fingerprint}:{left}:{right}")
     cells = []
     for left_value in left_values:
         for right_value in right_values:
-            predicted, uncertainty, distance = model.predict({left: left_value, right: right_value})
+            valid = next(
+                (
+                    assigned
+                    for context in contexts
+                    if (
+                        assigned := assign_values(
+                            context, {left: left_value, right: right_value}, space
+                        )
+                    )
+                    is not None
+                ),
+                None,
+            )
+            if valid is None:
+                continue
+            predicted, uncertainty, distance = model.predict(valid)
             cells.append(
                 {
                     "x": left_value,
@@ -429,22 +452,7 @@ def reference_set(
     rng = random.Random(seed)
     points: list[dict[str, Any]] = []
     for _ in range(count):
-        point: dict[str, Any] = {}
-        for name, rule in space.items():
-            if rule.get("conditional") and rng.random() < 0.2:
-                continue
-            if rule["kind"] == "numeric":
-                low, high = float(rule["low"]), float(rule["high"])
-                if rule.get("scale") == "log" and low > 0:
-                    value = math.exp(rng.uniform(math.log(low), math.log(high)))
-                else:
-                    value = rng.uniform(low, high)
-                point[name] = int(round(value)) if rule.get("integer") else value
-            else:
-                values = list(rule.get("values", ()))
-                if values:
-                    point[name] = rng.choice(values)
-        points.append(point)
+        points.append(sample_point(space, rng))
     return points
 
 
@@ -474,8 +482,8 @@ def mixed_distance(
 
 
 def _bin(value: Any, rule: Mapping[str, Any]) -> Any:
-    if value == _INACTIVE:
-        return _INACTIVE
+    if value == INACTIVE:
+        return INACTIVE
     if rule["kind"] == "categorical":
         return value
     low, high = float(rule["low"]), float(rule["high"])
@@ -525,36 +533,6 @@ def _quantiles(values: Sequence[float], bins: int) -> list[float]:
     return list(dict.fromkeys(points))
 
 
-def _grid(rule: Mapping[str, Any], count: int) -> list[Any]:
-    if rule["kind"] == "categorical":
-        return list(rule.get("values", ())) + ([_INACTIVE] if rule.get("conditional") else [])
-    low, high = float(rule["low"]), float(rule["high"])
-    if count <= 1 or low == high:
-        return [low]
-    if rule.get("scale") == "log" and low > 0:
-        values = [
-            math.exp(math.log(low) + index * (math.log(high) - math.log(low)) / (count - 1))
-            for index in range(count)
-        ]
-    else:
-        values = [low + index * (high - low) / (count - 1) for index in range(count)]
-    return [int(round(value)) for value in values] if rule.get("integer") else values
-
-
-def _supported_region(
-    points: Sequence[Mapping[str, Any]], best: Mapping[str, Any] | None
-) -> list[float] | None:
-    if best is None:
-        return None
-    threshold = float(best["predicted_objective"]) - max(float(best.get("uncertainty", 0)), 1e-12)
-    supported = [
-        float(point["x"])
-        for point in points
-        if point.get("support_count", 0) > 0 and float(point["predicted_objective"]) >= threshold
-    ]
-    return [min(supported), max(supported)] if supported else None
-
-
 def _spearman(left: Sequence[float], right: Sequence[float]) -> float | None:
     if len(left) < 2:
         return None
@@ -579,12 +557,22 @@ def _ranks(values: Sequence[float]) -> list[float]:
     return ranks
 
 
-def _reliability(observations: int, model_quality: str | None) -> str:
-    if observations >= 24 and model_quality != "poor":
+def _reliability(
+    observations: int,
+    model_quality: str,
+    support_fraction: float,
+    coverage_quality: str | None,
+) -> str:
+    if observations < 8 or model_quality in {"poor", "insufficient"} or support_fraction < 0.25:
+        return "low"
+    if (
+        observations >= 24
+        and model_quality == "good"
+        and coverage_quality == "good"
+        and support_fraction >= 0.5
+    ):
         return "high"
-    if observations >= 8:
-        return "moderate"
-    return "low"
+    return "moderate"
 
 
 def _empty_effects(observations: int) -> dict[str, Any]:

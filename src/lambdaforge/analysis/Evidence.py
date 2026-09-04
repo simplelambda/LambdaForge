@@ -9,6 +9,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from typing import Any, TypeGuard
 
+from lambdaforge.analysis.Ordering import best, signed_improvement
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 
 
@@ -121,7 +122,12 @@ def candidate_statistics(
     return output
 
 
-def winner_summary(candidates: Sequence[Mapping[str, Any]], *, mode: str) -> dict[str, Any]:
+def winner_summary(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    mode: str,
+    equivalence_margin: float | None = None,
+) -> dict[str, Any]:
     comparable = [candidate for candidate in candidates if _finite(candidate.get("mean"))]
     ranked = sorted(
         comparable,
@@ -139,12 +145,41 @@ def winner_summary(candidates: Sequence[Mapping[str, Any]], *, mode: str) -> dic
     )
     confirmed_winner = confirmed[0] if confirmed else None
     status = "not_configured"
+    confirmation_detail: dict[str, Any] | None = None
     if screening is not None and screening.get("confirmation", {}).get("n", 0):
         screen_mean = float(screening["mean"])
         confirm_mean = float(screening["confirmation"]["mean"])
-        tolerance = max(abs(screen_mean) * 0.02, 1e-12)
-        signed = (confirm_mean - screen_mean) * (1 if mode == "max" else -1)
-        status = "regressed" if signed < -tolerance else "confirmed"
+        margin_source = "authored-equivalence-margin"
+        tolerance = equivalence_margin
+        if tolerance is None:
+            tolerance = max(abs(screen_mean) * 0.02, 1e-12)
+            margin_source = "fallback-relative-2-percent"
+        signed = signed_improvement(confirm_mean, screen_mean, mode)
+        screen_se = screening.get("standard_error")
+        confirm_se = screening["confirmation"].get("standard_error")
+        difference_se = (
+            math.sqrt(float(screen_se) ** 2 + float(confirm_se) ** 2)
+            if _finite(screen_se) and _finite(confirm_se)
+            else None
+        )
+        uncertainty = 1.96 * difference_se if difference_se is not None else 0.0
+        if signed + uncertainty < -tolerance:
+            status = "regressed"
+        elif signed - uncertainty > tolerance:
+            status = "improved"
+        elif abs(signed) + uncertainty <= tolerance:
+            status = "confirmed_equivalent"
+        else:
+            status = "inconclusive"
+        confirmation_detail = {
+            "screening_estimate": screen_mean,
+            "confirmation_estimate": confirm_mean,
+            "signed_improvement": signed,
+            "standard_error": difference_se,
+            "equivalence_margin": tolerance,
+            "equivalence_margin_source": margin_source,
+            "status": status,
+        }
     elif confirmed:
         status = "inconclusive"
     elif any(candidate.get("confirmation", {}).get("planned", False) for candidate in candidates):
@@ -154,6 +189,7 @@ def winner_summary(candidates: Sequence[Mapping[str, Any]], *, mode: str) -> dic
         "confirmed_winner": _candidate_ref(confirmed_winner),
         "runner_up": _candidate_ref(runner_up),
         "confirmation_status": status,
+        "confirmation": confirmation_detail,
     }
 
 
@@ -210,6 +246,7 @@ def _normalize_run(raw: Mapping[str, Any], evaluator: ObjectiveUtility) -> dict[
             "latest_step": raw.get("latest_step", observation.get("current_step")),
             "latest_complete_step": observation.get("current_step") if _finite(current) else None,
         }
+    status_mapping = dict(status) if isinstance(status, Mapping) else {}
     fidelity = raw.get("fidelity")
     fidelity = dict(fidelity) if isinstance(fidelity, Mapping) else {}
     full = not fidelity or (
@@ -223,12 +260,12 @@ def _normalize_run(raw: Mapping[str, Any], evaluator: ObjectiveUtility) -> dict[
         and state == "succeeded"
         and full
         and raw.get("termination_type", "completed") == "completed"
+        and status_mapping.get("status") == "complete"
     ):
         final = best
     phase = str(raw.get("phase", raw.get("study_phase", "search")))
     raw_metrics = raw.get("metrics")
     metrics: Mapping[str, Any] = raw_metrics if isinstance(raw_metrics, Mapping) else {}
-    status_mapping = dict(status) if isinstance(status, Mapping) else {}
     return {
         "key": raw.get("key", raw.get("run_id")),
         "seed": raw.get("seed"),
@@ -323,11 +360,46 @@ def _seed_values(candidate: Mapping[str, Any]) -> dict[Any, float]:
 
 def _resource_summary(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     names = ("duration_seconds", "gpu_seconds", "cpu_seconds", "peak_vram", "peak_ram")
-    return {
+    comparable = [
+        run
+        for run in runs
+        if run.get("phase") != "confirmation" and _finite(run.get("final_objective"))
+    ]
+    per_run = {
+        name: statistics.median([float(run[name]) for run in comparable if _finite(run.get(name))])
+        if any(_finite(run.get(name)) for run in comparable)
+        else None
+        for name in names
+    }
+    spend = {
         name: sum(float(run[name]) for run in runs if _finite(run.get(name)))
         if name not in {"peak_vram", "peak_ram"}
         else max((float(run[name]) for run in runs if _finite(run.get(name))), default=None)
         for name in names
+    }
+    spend.update(
+        {
+            "runs_started": sum(
+                _finite(run.get("duration_seconds")) or run.get("state") != "scheduled"
+                for run in runs
+            ),
+            "seeds_purchased": len(
+                {run.get("seed") for run in runs if run.get("seed") is not None}
+            ),
+            "promotions": sum(
+                bool(run.get("fidelity"))
+                and run.get("fidelity", {}).get("target") != run.get("fidelity", {}).get("maximum")
+                for run in runs
+            ),
+        }
+    )
+    return {
+        "intrinsic_per_comparable_run": {
+            **per_run,
+            "matched_run_count": len(comparable),
+            "aggregation": "median-full-fidelity-screening-run",
+        },
+        "controller_spend": spend,
     }
 
 
@@ -383,7 +455,7 @@ def _nested(value: Mapping[str, Any], first: str, second: str) -> Any:
 
 
 def _best(values: Sequence[float], *, mode: str) -> float | None:
-    return (min(values) if mode == "min" else max(values)) if values else None
+    return best(values, key=float, mode=mode) if values else None
 
 
 def _finite(value: Any) -> TypeGuard[int | float]:

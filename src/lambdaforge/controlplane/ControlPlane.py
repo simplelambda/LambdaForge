@@ -34,6 +34,7 @@ from lambdaforge.controlplane.python_runtime import (
 from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
 from lambdaforge.controlplane.StorageService import StorageService
 from lambdaforge.controlplane.TlsTrust import TlsTrust
+from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
 from lambdaforge.controlplane.Transport import Transport
 from lambdaforge.execution.ConfigurationResourceResolver import ConfigurationResourceResolver
 from lambdaforge.execution.ResourceRequest import ResourceRequest
@@ -84,6 +85,22 @@ class ControlPlane:
         descriptor = ConfigurationDescriptor.from_path(config_path)
         request = resources or ConfigurationResourceResolver.resolve(config_path)
         gpu_mode = profile.gpu_access.effective_mode(profile.scheduler)
+        resolution_profile = profile
+        if request.gpu_count > 0:
+            if profile.pytorch.channel == "cpu" or profile.pytorch.require_cuda is False:
+                raise ValueError(
+                    f"Work resources request {request.gpu_count} GPU(s), but cluster "
+                    f"{cluster!r} explicitly permits only a CPU PyTorch environment. Set "
+                    "pytorch.channel=auto (or a compatible CUDA channel) and "
+                    "pytorch.require_cuda=true."
+                )
+            # A concrete scientific GPU request is stronger than profile-level ``auto``.  A
+            # failed site launcher/probe must never be interpreted as permission to build a CPU
+            # environment and submit a job that can only fail later.
+            resolution_profile = replace(
+                profile,
+                pytorch=TorchInstallationPolicy(profile.pytorch.channel, True),
+            )
         if not dry_run and not allow_duplicate:
             self.jobs.refuse_active_execution(
                 descriptor.scientific_identity,
@@ -141,7 +158,7 @@ class ControlPlane:
                     )
                 try:
                     torch_plan = self.cuda_resolver.resolve(
-                        profile, transport, python_executable=runtime.executable
+                        resolution_profile, transport, python_executable=runtime.executable
                     )
                     break
                 except NoCompatibleTorchWheelError:

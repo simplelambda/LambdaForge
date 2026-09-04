@@ -95,6 +95,32 @@ class DatasetOperations:
         }
 
     @classmethod
+    def summary(cls, root: str | Path) -> dict[str, Any]:
+        """Read exact logical distributions without traversing heavyweight assets."""
+        path = Path(root).resolve()
+        manifest = path if path.name == "dataset-artifact.json" else path / "dataset-artifact.json"
+        artifact = DatasetArtifact.read_json(manifest)
+        result: dict[str, Any] = {
+            "dataset_id": artifact.dataset_id,
+            "member_count": artifact.member_count,
+            "splits": dict(artifact.splits),
+            "partitions": dict(artifact.partitions),
+            "targets": {},
+            "partition_targets": {},
+        }
+        relative = artifact.index.get("path")
+        if relative:
+            index_path = (path / str(relative)).resolve(strict=False)
+            if (
+                not index_path.is_relative_to(path)
+                or index_path.is_symlink()
+                or not index_path.is_file()
+            ):
+                raise ValueError("DatasetIndex is missing or unsafe.")
+            result.update(DatasetIndex(index_path).summary())
+        return result
+
+    @classmethod
     def verify(cls, root: str | Path, expected_id: str) -> dict[str, Any]:
         path = Path(root).resolve()
         if path.is_symlink() or not path.exists():
@@ -247,11 +273,13 @@ class DatasetOperations:
         values = tuple(argv if argv is not None else sys.argv[1:])
         if len(values) < 2:
             raise SystemExit(
-                "Usage: DatasetOperations stats|verify|delete|members|member ROOT [ARGS]"
+                "Usage: DatasetOperations summary|stats|verify|delete|members|member ROOT [ARGS]"
             )
         operation, root, *rest = values
         if operation == "inspect":
             payload = cls.inspect(root)
+        elif operation == "summary":
+            payload = cls.summary(root)
         elif operation == "stats":
             payload = cls.stats(root)
         elif operation == "verify" and rest:

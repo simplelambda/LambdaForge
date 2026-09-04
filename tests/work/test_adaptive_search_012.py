@@ -30,6 +30,8 @@ from lambdaforge.work.runner import (
     _gpu_memory_inventory,
     _objective_observation,
     _request_early_stops,
+    _retry_failed_result,
+    _safer_gpu_concurrency,
     _validate_gpu_memory_capacity,
 )
 
@@ -228,9 +230,27 @@ def test_objective_search_enables_full_adaptive_defaults_and_exhaustive_is_expli
     assert policy.min_seeds == 3
     assert policy.early_stopping
     assert policy.sampler == "auto"
-    assert policy.convergence_patience == 8
+    # The authored trial count is consumed by default. Record-only convergence is opt-in because
+    # a streak without a new maximum says nothing about mixed-space coverage.
+    assert policy.convergence_patience == 0
     assert len(policy.confirmation_seeds) == 3
     assert set(policy.confirmation_seeds).isdisjoint({4, 7, 32, 54})
+
+    explicit_convergence = WorkConfig.from_mapping(
+        {
+            **base,
+            "search": {
+                "quality": {"values": [1.0, 2.0]},
+                "convergence_patience": 8,
+                "min_improvement": 0.01,
+            },
+        },
+        source=tmp_path / "explicit-convergence.yaml",
+    )
+    explicit_policy = explicit_convergence.levels[0].runs[0].search_policy
+    assert explicit_policy is not None
+    assert explicit_policy.convergence_patience == 8
+    assert explicit_policy.min_improvement == 0.01
 
     exhaustive = WorkConfig.from_mapping(
         {**base, "search": {"strategy": "exhaustive", "quality": [1.0, 2.0]}},
@@ -341,6 +361,47 @@ def test_seed_racer_uses_shared_evidence_and_drops_dominated_candidates() -> Non
 
     assert {decision.trial for decision in decisions} == {1, 2}
     assert all(decision.completed_seeds == 3 for decision in decisions)
+
+
+def test_adaptive_specifications_do_not_duplicate_the_candidate_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planning memory must grow with Runs, not pool x Runs x pool."""
+    config = WorkConfig.from_mapping(
+        {
+            "name": "compact-planning",
+            "run": "tests.work_cases.AdaptiveScoreWork",
+            "seeds": [1, 2, 3],
+            "search": {
+                "strategy": "adaptive",
+                "trials": 4,
+                "proposal_pool_size": 32,
+                "quality": {"range": [0.0, 1.0]},
+            },
+            "objective": {"metric": "score", "mode": "max"},
+            "resources": {"cpu": 1},
+        },
+        source=tmp_path / "compact-planning.yaml",
+    )
+    captured: list[Mapping[str, Any]] = []
+
+    class PlanningCaptured(RuntimeError):
+        pass
+
+    def capture(specifications: Sequence[Mapping[str, Any]]) -> tuple[WorkResult, ...]:
+        captured.extend(specifications)
+        raise PlanningCaptured
+
+    monkeypatch.setattr("lambdaforge.work.runner._execute_group", capture)
+
+    with pytest.raises(PlanningCaptured):
+        WorkRunner().run(config)
+
+    assert len(captured) == 32 * 3
+    assert len({id(specification["definition"]) for specification in captured}) == 1
+    assert "variants" not in captured[0]["definition"]
+    assert captured[0]["definition"]["has_variants"] is True
 
 
 def test_fresh_confirmation_seeds_select_the_final_candidate(
@@ -506,6 +567,85 @@ def test_adaptive_search_allocates_more_seeds_only_to_promising_candidates(
     assert len(telemetry["candidates"]) == 3
     observed_runs = [run for candidate in telemetry["candidates"] for run in candidate["runs"]]
     assert all(run["log_path"] for run in observed_runs)
+    controller = json.loads((study_path / "controller.json").read_text(encoding="utf-8"))
+    assert controller["last"]["action"] == "FINISH"
+    assert controller["last"]["reason"] == "candidate-budget-reached"
+
+
+def test_default_adaptive_search_consumes_candidate_budget_on_a_flat_objective(
+    tmp_path: Path,
+) -> None:
+    config = WorkConfig.from_mapping(
+        {
+            "name": "flat-adaptive-study",
+            "run": "tests.work_cases.FlatAdaptiveScoreWork",
+            "seeds": [1],
+            "search": {
+                "strategy": "adaptive",
+                "trials": 10,
+                "startup_trials": 1,
+                "max_parallel": 2,
+                "confirmation_seeds": [],
+                "early_stopping": False,
+                "choice": {"values": list(range(10))},
+            },
+            "objective": {"metric": "score", "mode": "max"},
+            "resources": {"cpu": 2},
+        },
+        source=tmp_path / "flat.yaml",
+    )
+
+    result = WorkRunner().run(config)
+
+    assert result.status == "succeeded"
+    assert len({run.trial["index"] for run in result.runs}) == 10
+    decisions = [
+        json.loads(line)
+        for line in (result.execution_dir / "hpo-control" / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert not any(decision["action"] == "STOP_PROPOSING" for decision in decisions)
+    assert decisions[-1]["action"] == "FINISH"
+    assert decisions[-1]["reason"] == "candidate-budget-reached"
+
+
+def test_positive_convergence_patience_remains_an_explicit_early_stop(
+    tmp_path: Path,
+) -> None:
+    config = WorkConfig.from_mapping(
+        {
+            "name": "explicit-convergence-study",
+            "run": "tests.work_cases.FlatAdaptiveScoreWork",
+            "seeds": [1],
+            "search": {
+                "strategy": "adaptive",
+                "trials": 10,
+                "startup_trials": 1,
+                "max_parallel": 1,
+                "confirmation_seeds": [],
+                "early_stopping": False,
+                "convergence_patience": 3,
+                "choice": {"values": list(range(10))},
+            },
+            "objective": {"metric": "score", "mode": "max"},
+            "resources": {"cpu": 1},
+        },
+        source=tmp_path / "explicit-convergence.yaml",
+    )
+
+    result = WorkRunner().run(config)
+    decisions = [
+        json.loads(line)
+        for line in (result.execution_dir / "hpo-control" / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    assert len({run.trial["index"] for run in result.runs}) < 10
+    assert any(decision["action"] == "STOP_PROPOSING" for decision in decisions)
+    assert decisions[-1]["action"] == "FINISH"
+    assert decisions[-1]["reason"] == "explicit-record-convergence"
 
 
 def test_bayesian_provider_failure_is_audited_before_deterministic_fallback(
@@ -596,7 +736,6 @@ def test_gpu_admission_uses_any_device_that_fits_and_waits_without_failing() -> 
         memory,
         active=(0, 0),
         last_launch=(float("-inf"), float("-inf")),
-        admission_budget=(20 * gib, 45 * gib),
         required_bytes=30 * gib,
         runs_per_gpu=3,
         now=100.0,
@@ -610,7 +749,6 @@ def test_gpu_admission_uses_any_device_that_fits_and_waits_without_failing() -> 
             ((20 * gib, 80 * gib), (25 * gib, 80 * gib)),
             active=(0, 1),
             last_launch=(0.0, 90.0),
-            admission_budget=(20 * gib, 45 * gib),
             required_bytes=30 * gib,
             runs_per_gpu=3,
             now=100.0,
@@ -629,7 +767,6 @@ def test_gpu_admission_staggers_same_device_launches_and_respects_packing_cap() 
         memory,
         active=(1,),
         last_launch=(98.0,),
-        admission_budget=(70 * gib,),
         required_bytes=20 * gib,
         runs_per_gpu=3,
         now=100.0,
@@ -640,7 +777,6 @@ def test_gpu_admission_staggers_same_device_launches_and_respects_packing_cap() 
         memory,
         active=(1,),
         last_launch=(90.0,),
-        admission_budget=(70 * gib,),
         required_bytes=20 * gib,
         runs_per_gpu=3,
         now=100.0,
@@ -651,18 +787,16 @@ def test_gpu_admission_staggers_same_device_launches_and_respects_packing_cap() 
         memory,
         active=(3,),
         last_launch=(90.0,),
-        admission_budget=(70 * gib,),
         required_bytes=20 * gib,
         runs_per_gpu=3,
         now=100.0,
         launch_stagger_seconds=5.0,
         usable=(0,),
     )
-    budget_exhausted = _admissible_gpu_slots(
+    live_threshold_allows_another_run = _admissible_gpu_slots(
         memory,
         active=(2,),
         last_launch=(90.0,),
-        admission_budget=(70 * gib,),
         required_bytes=30 * gib,
         runs_per_gpu=4,
         now=100.0,
@@ -673,7 +807,221 @@ def test_gpu_admission_staggers_same_device_launches_and_respects_packing_cap() 
     assert too_soon == ()
     assert ready == (0,)
     assert full == ()
-    assert budget_exhausted == ()
+    assert live_threshold_allows_another_run == (0,)
+
+
+def test_gpu_admission_does_not_double_count_active_run_thresholds() -> None:
+    gib = 1024**3
+
+    slots = _admissible_gpu_slots(
+        ((21 * gib, 80 * gib),),
+        active=(3,),
+        last_launch=(0.0,),
+        required_bytes=20 * gib,
+        runs_per_gpu=5,
+        now=100.0,
+        launch_stagger_seconds=5.0,
+        usable=(0,),
+    )
+
+    assert slots == (0,)
+    assert _safer_gpu_concurrency(5, 4) == 3
+    assert _safer_gpu_concurrency(3, 1) == 1
+
+
+def test_cuda_oom_is_requeued_as_a_new_attempt_before_becoming_terminal(
+    tmp_path: Path,
+) -> None:
+    result = WorkResult(
+        name="study",
+        work_class="tests.work_cases.AdaptiveScoreWork",
+        execution_id="execution-test",
+        run_id="run-test",
+        attempt_id="attempt-0001",
+        attempt_number=1,
+        scientific_fingerprint="sha256:test",
+        status="failed",
+        run_dir=tmp_path,
+        created_at_utc="2026-01-01T00:00:00+00:00",
+        started_at_utc="2026-01-01T00:00:00+00:00",
+        finished_at_utc="2026-01-01T00:00:01+00:00",
+        duration_seconds=1.0,
+        seed=4,
+        trial={"index": 1, "parameters": {}},
+        parameters={},
+        inputs=(),
+        requested_resources=WorkResources(1, 0, 1, 20 * 1024**3, None, 0, 1),
+        failure={"type": "CUDAOutOfMemoryError", "message": "CUDA out of memory"},
+        gpu_index=0,
+        gpu_token="gpu-a",
+        termination_type="resource_failed",
+    )
+    policy = AdaptiveSearchPolicy(failure_retries=1)
+    specification = {
+        "trial_index": 1,
+        "seed": 4,
+        "gpu_index": 0,
+        "gpu_slot": "gpu-a",
+    }
+
+    retry = _retry_failed_result(
+        specification,
+        result,
+        policy=policy,
+        telemetry=None,
+    )
+
+    assert retry is not None
+    assert retry["controller_retry"] == 1
+    assert "gpu_index" not in retry
+    assert retry["gpu_slot"] is None
+    assert (
+        _retry_failed_result(retry, result, policy=policy, telemetry=None)
+        is None
+    )
+
+
+def test_gpu_oom_retry_waits_for_learned_lower_concurrency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    gib = 1024**3
+    attempts: dict[int, int] = {}
+    events: list[str] = []
+    submitted: list[Future[Any]] = []
+    oom_returned = False
+    first_returned = False
+    retry_returned = False
+
+    def outcome(trial: int, *, oom: bool = False) -> WorkResult:
+        return WorkResult(
+            name="study",
+            work_class="tests.work_cases.AdaptiveScoreWork",
+            execution_id="execution-test",
+            run_id=f"run-{trial}",
+            attempt_id=f"attempt-{attempts[trial]:04d}",
+            attempt_number=attempts[trial],
+            scientific_fingerprint=f"sha256:{trial}",
+            status="failed" if oom else "succeeded",
+            run_dir=tmp_path,
+            created_at_utc="2026-01-01T00:00:00+00:00",
+            started_at_utc="2026-01-01T00:00:00+00:00",
+            finished_at_utc="2026-01-01T00:00:01+00:00",
+            duration_seconds=1.0,
+            seed=trial,
+            trial={"index": trial, "parameters": {}},
+            parameters={},
+            inputs=(),
+            requested_resources=WorkResources(1, 0, 1, 20 * gib, None, 0, 1),
+            failure=(
+                {"type": "CUDAOutOfMemoryError", "message": "CUDA out of memory"}
+                if oom
+                else None
+            ),
+            gpu_index=0,
+            gpu_token="gpu-a",
+            termination_type="resource_failed" if oom else "completed",
+        )
+
+    class ControlledPool:
+        def __init__(self, *args: Any, initargs: tuple[str] = (), **kwargs: Any) -> None:
+            del args, kwargs
+            self.slot = initargs[0]
+
+        def submit(self, function: Any, value: dict[str, Any]) -> Future[Any]:
+            del function
+            trial = int(value["trial_index"])
+            attempts[trial] = attempts.get(trial, 0) + 1
+            future: Future[Any] = Future()
+            future.trial = trial  # type: ignore[attr-defined]
+            future.attempt = attempts[trial]  # type: ignore[attr-defined]
+            submitted.append(future)
+            events.append(f"submit-{trial}-{attempts[trial]}")
+            return future
+
+        def shutdown(self, **kwargs: Any) -> None:
+            del kwargs
+
+    def controlled_wait(
+        futures: Sequence[Future[Any]],
+        **kwargs: Any,
+    ) -> tuple[set[Future[Any]], set[Future[Any]]]:
+        nonlocal oom_returned, first_returned, retry_returned
+        del kwargs
+        current = set(futures)
+        if len(submitted) < 3:
+            return set(), current
+        if not oom_returned:
+            selected = next(
+                future
+                for future in current
+                if future.trial == 3 and future.attempt == 1  # type: ignore[attr-defined]
+            )
+            selected.set_result(outcome(3, oom=True))
+            oom_returned = True
+            events.append("oom-3-1")
+            return {selected}, current - {selected}
+        if not first_returned:
+            selected = next(
+                future
+                for future in current
+                if future.trial == 1  # type: ignore[attr-defined]
+            )
+            selected.set_result(outcome(1))
+            first_returned = True
+            events.append("finish-1-1")
+            return {selected}, current - {selected}
+        retry = next(
+            (
+                future
+                for future in current
+                if future.trial == 3 and future.attempt == 2  # type: ignore[attr-defined]
+            ),
+            None,
+        )
+        if retry is not None and not retry_returned:
+            retry.set_result(outcome(3))
+            retry_returned = True
+            events.append("finish-3-2")
+            return {retry}, current - {retry}
+        selected = next(iter(current))
+        selected.set_result(outcome(2))
+        events.append("finish-2-1")
+        return {selected}, current - {selected}
+
+    monkeypatch.setattr(
+        "lambdaforge.work.runner._gpu_memory_inventory",
+        lambda count: ((70 * gib, 80 * gib),),
+    )
+    monkeypatch.setattr("lambdaforge.work.runner.ProcessPoolExecutor", ControlledPool)
+    monkeypatch.setattr("lambdaforge.work.runner.wait", controlled_wait)
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_LAUNCH_STAGGER_SECONDS", 0.0)
+    results: list[WorkResult] = []
+    executors: list[Any] = []
+
+    _execute_gpu_admitted_runs(
+        [{"trial_index": trial, "seed": trial} for trial in (1, 2, 3)],
+        resources=ResourceRequest(gpu_count=1, gpu_memory_bytes=20 * gib),
+        policy=AdaptiveSearchPolicy(
+            runs_per_gpu=3,
+            early_stopping=False,
+            failure_retries=1,
+        ),
+        parallelism=3,
+        visible_gpus=("gpu-a",),
+        objective_metric="score",
+        objective_mode="max",
+        telemetry=None,
+        results=results,
+        executors=executors,
+    )
+
+    assert attempts == {1: 1, 2: 1, 3: 2}
+    assert events.index("finish-1-1") < events.index("submit-3-2")
+    assert len(results) == 3
+    assert all(result.ok for result in results)
+    assert "reducing the study packing ceiling from 3 to 2" in capsys.readouterr().out
 
 
 def test_gpu_admission_rejects_only_a_bound_impossible_on_every_device() -> None:
@@ -934,6 +1282,94 @@ def test_gpu_memory_probe_uses_an_ephemeral_child_process(
     assert _gpu_memory_inventory(2) == ((100, 200), (300, 400))
     assert observed["command"][:2] == [__import__("sys").executable, "-c"]
     assert observed["kwargs"]["timeout"] == 20
+
+
+def test_transient_gpu_probe_failure_pauses_admission_without_losing_active_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gib = 1024**3
+    observations: Any = iter(
+        (
+            ((70 * gib, 80 * gib),),
+            ((70 * gib, 80 * gib),),
+            RuntimeError("temporary CUDA query failure"),
+            ((70 * gib, 80 * gib),),
+        )
+    )
+    submitted: list[int] = []
+    wait_calls = 0
+
+    def inventory(_count: int) -> tuple[tuple[int, int], ...]:
+        value = next(observations)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    class ControlledPool:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def submit(self, function: Any, value: dict[str, Any]) -> Future[Any]:
+            del function
+            submitted.append(int(value["trial_index"]))
+            return Future()
+
+        def shutdown(self, **kwargs: Any) -> None:
+            del kwargs
+
+    def controlled_wait(futures: Any, **kwargs: Any) -> tuple[set[Any], set[Any]]:
+        nonlocal wait_calls
+        del kwargs
+        wait_calls += 1
+        values = set(futures)
+        if wait_calls == 1:
+            return set(), values
+        for future in values:
+            if not future.done():
+                future.set_result(SimpleNamespace(trial={"index": submitted[-1]}))
+        return values, set()
+
+    monkeypatch.setattr("lambdaforge.work.runner._gpu_memory_inventory", inventory)
+    monkeypatch.setattr("lambdaforge.work.runner.ProcessPoolExecutor", ControlledPool)
+    monkeypatch.setattr("lambdaforge.work.runner.wait", controlled_wait)
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_ADMISSION_POLL_SECONDS", 0.0)
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_LAUNCH_STAGGER_SECONDS", 0.0)
+    results: list[Any] = []
+    executors: list[Any] = []
+
+    _execute_gpu_admitted_runs(
+        [{"trial_index": 1, "seed": 4}, {"trial_index": 2, "seed": 7}],
+        resources=ResourceRequest(gpu_count=1, gpu_memory_bytes=20 * gib),
+        policy=AdaptiveSearchPolicy(runs_per_gpu=1, early_stopping=False),
+        parallelism=1,
+        visible_gpus=("gpu-a",),
+        objective_metric="score",
+        objective_mode="max",
+        telemetry=None,
+        results=results,
+        executors=executors,
+    )
+
+    assert submitted == [1, 2]
+    assert len(results) == 2
+    assert executors == []
+
+
+def test_gpu_probe_error_retains_bounded_child_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise subprocess.CalledProcessError(
+            1,
+            ("python", "-c", "probe"),
+            stderr="AssertionError: only 1 CUDA device(s) visible",
+        )
+
+    monkeypatch.setattr("lambdaforge.work.runner.subprocess.run", fail)
+
+    with pytest.raises(RuntimeError, match="only 1 CUDA device"):
+        _gpu_memory_inventory(2)
 
 
 def test_early_stopping_requests_only_the_current_bottom_fraction(tmp_path: Path) -> None:

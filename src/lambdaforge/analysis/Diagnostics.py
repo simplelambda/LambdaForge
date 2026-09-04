@@ -14,9 +14,34 @@ def seed_stability(
 ) -> dict[str, Any]:
     comparable = [value for value in candidates if int(value.get("n", 0)) > 0]
     if len(comparable) < 2:
-        return {"status": "insufficient", "winner_rank_one_fraction": None, "replicates": 0}
+        return {
+            "status": "insufficient",
+            "reason": "insufficient_candidates",
+            "winner_rank_one_fraction": None,
+            "replicates": 0,
+            "empirical": None,
+            "model_based": {"status": "unavailable", "reason": "not_persisted"},
+        }
     ranked = sorted(comparable, key=lambda value: float(value["mean"]), reverse=mode == "max")
     winner = ranked[0]
+    relevant = ranked[: min(3, len(ranked))]
+    repeated = [value for value in relevant if int(value.get("n", 0)) >= 2]
+    if len(repeated) != len(relevant):
+        return {
+            "status": "insufficient",
+            "reason": "insufficient_repeated_seed_evidence",
+            "winner_trial": winner["trial"],
+            "winner_rank_one_fraction": None,
+            "replicates": 0,
+            "relevant_candidate_count": len(relevant),
+            "repeated_seed_candidate_count": len(repeated),
+            "empirical": None,
+            "model_based": {"status": "unavailable", "reason": "not_persisted"},
+            "interpretation": (
+                "Empirical winner stability is unavailable because at least one leading "
+                "candidate has fewer than two completed seeds."
+            ),
+        }
     rng = random.Random(int(hashlib.sha256(fingerprint.encode()).hexdigest()[:16], 16))
     rank_one = 0
     used = max(100, replicates)
@@ -40,24 +65,46 @@ def seed_stability(
         "winner_trial": winner["trial"],
         "winner_rank_one_fraction": rank_one / used,
         "replicates": used,
+        "relevant_candidate_count": len(relevant),
+        "repeated_seed_candidate_count": len(repeated),
+        "empirical": {
+            "method": "candidate-seed-bootstrap",
+            "winner_rank_one_fraction": rank_one / used,
+            "replicates": used,
+        },
+        "model_based": {"status": "unavailable", "reason": "not_persisted"},
         "interpretation": "bootstrap ranking stability, not a probability of the true best model",
     }
 
 
-def resource_analysis(candidates: Sequence[Mapping[str, Any]], *, mode: str) -> dict[str, Any]:
+def resource_analysis(
+    candidates: Sequence[Mapping[str, Any]], *, mode: str, equivalence_margin: float | None = None
+) -> dict[str, Any]:
     targets = ("duration_seconds", "gpu_seconds", "cpu_seconds", "peak_vram", "peak_ram")
     rows = []
     for candidate in candidates:
         if not isinstance(candidate.get("mean"), int | float):
             continue
         cost = candidate.get("resource_cost", {})
+        intrinsic = (
+            cost.get("intrinsic_per_comparable_run", {}) if isinstance(cost, Mapping) else {}
+        )
+        spend = cost.get("controller_spend", {}) if isinstance(cost, Mapping) else {}
         rows.append(
             {
                 "trial": candidate.get("trial"),
                 "objective": candidate.get("mean"),
-                **{name: cost.get(name) if isinstance(cost, Mapping) else None for name in targets},
+                **{
+                    name: intrinsic.get(name) if isinstance(intrinsic, Mapping) else None
+                    for name in targets
+                },
+                "matched_run_count": intrinsic.get("matched_run_count")
+                if isinstance(intrinsic, Mapping)
+                else 0,
             }
         )
+        if isinstance(spend, Mapping):
+            rows[-1]["controller_spend"] = dict(spend)
     pareto: dict[str, list[int]] = {}
     for target in targets:
         valid = [row for row in rows if isinstance(row.get(target), int | float)]
@@ -75,7 +122,11 @@ def resource_analysis(candidates: Sequence[Mapping[str, Any]], *, mode: str) -> 
         winner = (max if mode == "max" else min)(
             rows, key=lambda value: float(str(value["objective"]))
         )
-        margin = max(abs(float(str(winner["objective"]))) * 0.02, 1e-12)
+        margin = (
+            float(equivalence_margin)
+            if equivalence_margin is not None
+            else max(abs(float(str(winner["objective"]))) * 0.02, 1e-12)
+        )
         for row in rows:
             if row is winner:
                 continue
@@ -98,7 +149,26 @@ def resource_analysis(candidates: Sequence[Mapping[str, Any]], *, mode: str) -> 
                         "compared_with_trial": winner["trial"],
                     }
                 )
-    return {"targets": rows, "pareto": pareto, "efficient_alternatives": alternatives}
+    spend_rows = []
+    for row in rows:
+        spend = row.get("controller_spend")
+        spend_rows.append(
+            {"trial": row["trial"], **(dict(spend) if isinstance(spend, Mapping) else {})}
+        )
+    return {
+        "intrinsic_per_run": {"targets": rows, "pareto": pareto},
+        "controller_spend": spend_rows,
+        # Stable aliases for 0.14 readers; both are explicitly intrinsic per comparable Run.
+        "targets": rows,
+        "pareto": pareto,
+        "efficient_alternatives": alternatives,
+        "equivalence_margin": margin if rows else equivalence_margin,
+        "equivalence_margin_source": (
+            "authored-equivalence-margin"
+            if equivalence_margin is not None
+            else "fallback-relative-2-percent"
+        ),
+    }
 
 
 def findings(
@@ -181,7 +251,7 @@ def findings(
                     _finding(
                         "top_region_parameter",
                         "info",
-                        f"{name} is concentrated in the predicted top region",
+                        f"{name} is concentrated in the observed top region",
                         f"Top-region divergence is {float(detail['importance']):.3f}.",
                         [f"support: {detail.get('support', observations)} candidates"],
                         str(detail.get("reliability", "low")),
@@ -257,20 +327,21 @@ def findings(
     if pool.get("resolution_limited"):
         output.append(
             _finding(
-                "candidate_pool_resolution",
+                "observed_candidate_resolution",
                 "warning",
-                "Candidate-pool resolution may limit local refinement",
+                "Observed-candidate resolution may limit local refinement",
                 (
                     "Largest uncovered distance is "
                     f"{pool.get('largest_uncovered_region_approximation')!r}."
                 ),
                 [
-                    f"pool size: {pool.get('candidate_pool_size')}",
+                    f"observed candidates: {pool.get('observed_candidates')}",
                     f"median spacing: {pool.get('median_nearest_neighbour_spacing')!r}",
                 ],
                 "moderate",
-                "The finite pool may be too coarse near the current optimum.",
-                "Increase candidate-pool resolution in the next authored study.",
+                "Observed proposals are too sparse to establish local resolution.",
+                "Increase proposal density in the next authored study; no claim is made about "
+                "unpersisted pool candidates.",
                 support=int(pool.get("observed_candidates", 0)),
             )
         )
@@ -289,6 +360,23 @@ def findings(
                 support=int(seeds.get("replicates", 0)),
             )
         )
+    elif seeds.get("status") == "insufficient":
+        output.append(
+            _finding(
+                "insufficient_seed_stability",
+                "warning",
+                "Empirical winner stability is unavailable",
+                str(seeds.get("interpretation", seeds.get("reason"))),
+                [
+                    f"relevant candidates: {seeds.get('relevant_candidate_count', 0)}",
+                    "A one-seed bootstrap cannot estimate variation between seeds.",
+                ],
+                "low",
+                "The current winner may depend on unobserved seed variability.",
+                "Collect repeated or confirmation seeds for leading candidates.",
+                support=int(seeds.get("repeated_seed_candidate_count", 0)),
+            )
+        )
     if winner.get("confirmation_status") == "regressed":
         output.append(
             _finding(
@@ -305,10 +393,9 @@ def findings(
         )
     false_prune_rate = pruning.get("false_prune_rate")
     regret = pruning.get("regret")
-    if (
-        isinstance(false_prune_rate, int | float)
-        and float(false_prune_rate) > 0.1
-    ) or (isinstance(regret, int | float) and float(regret) > 0):
+    if (isinstance(false_prune_rate, int | float) and float(false_prune_rate) > 0.1) or (
+        isinstance(regret, int | float) and float(regret) > 0
+    ):
         output.append(
             _finding(
                 "pruning_miscalibration",

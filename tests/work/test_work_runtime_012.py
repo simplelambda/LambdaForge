@@ -20,6 +20,23 @@ def _yaml(tmp_path: Path, value: dict[str, object]) -> Path:
     return path
 
 
+def test_malformed_work_yaml_reports_source_location_and_actionable_context(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "broken.yaml"
+    source.write_text("name: broken\nrun: tests.work_cases.Producer\nº\n", encoding="utf-8")
+
+    report = WorkConfig.validate_file(source)
+
+    assert not report.valid
+    diagnostic = "\n".join(report.errors)
+    assert str(source.resolve()) in diagnostic
+    assert "line 3, column 1" in diagnostic
+    assert "3 | º" in diagnostic
+    assert "standalone value" in diagnostic
+    assert "<unicode string>" not in diagnostic
+
+
 def test_only_work_subclasses_are_executable(tmp_path: Path) -> None:
     for target, message in (
         ("tests.work_cases.function_target", "Python function"),

@@ -7,7 +7,8 @@ from typing import Any
 
 from textual.widgets import DataTable
 
-from lambdaforge.tui.screens.Base import DataScreen
+from lambdaforge.tui.screens.Base import DataScreen, EntitySelected
+from lambdaforge.tui.viewmodels import metric_display_name
 
 
 class ResultsScreen(DataScreen):
@@ -27,7 +28,7 @@ class ResultsScreen(DataScreen):
                 str(item.get("execution_id", "-")),
                 str(item.get("status", "unknown")),
                 str(len(item.get("runs", []))),
-                str(best or objective.get("metric", "-")),
+                metric_display_name(best or objective.get("metric", "-")),
                 key=str(item.get("execution_id", item.get("name", "-"))),
             )
 
@@ -53,3 +54,7 @@ class ResultsScreen(DataScreen):
         value = self.last_success[row]
         selector = value.get("execution_id") if isinstance(value, dict) else None
         return str(selector) if selector else None
+
+    def open_row(self, row: int) -> None:
+        if isinstance(self.last_success, list) and 0 <= row < len(self.last_success):
+            self.post_message(EntitySelected("result", self.last_success[row]))

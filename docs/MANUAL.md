@@ -463,6 +463,7 @@ search:
   sampler: auto
   max_runs: 180
   max_time: 12h
+  # Optional record-streak stop; omit to consume the authored candidate budget.
   convergence_patience: 8
   min_improvement: 0.0005
   max_parallel: 2
@@ -480,7 +481,10 @@ Adaptive/numeric spaces build a deterministic scrambled-Sobol pool bounded by
 `proposal_pool_size` (by default up to 16 times `trials`, capped at 4096); `trials` is only the
 maximum number of candidates that may execute. Conditional parameters use `when` and carry
 an explicit active/inactive feature rather than a fake value. This pool is planning state, not a
-list of decided Trials. LambdaForge first proposes at most `startup_trials` space-filling points.
+list of decided Trials. It is retained once and lightweight Run specifications reference only their
+own candidate and seed, so planning memory grows linearly rather than duplicating the pool per Run.
+Large valid values therefore do not require weakening the YAML to avoid planner memory blow-ups.
+LambdaForge first proposes at most `startup_trials` space-filling points.
 After their objective values arrive, `sampler: auto` prefers optional BoTorch mixed-GP qLogNEI and
 falls back to a dependency-light mixed k-NN acquisition if the extra is absent, observations are
 still insufficient or GP fitting is numerically unsafe. `sampler: knn` forces the base backend;
@@ -574,9 +578,15 @@ seed-racing probability and early-stop probability have separate named owners.
 Search evidence and final evidence are separate. `confirmation_top_k` freezes the best search
 candidates and `confirmation_seeds` evaluates them with disjoint seeds. If confirmation is present,
 only its mean selects `summary.best`; otherwise a conservative search bound prevents a lucky
-one-seed candidate from defeating a better-supported candidate. `max_runs`, `max_time`,
-`convergence_patience` and `min_improvement` bound spending. A convergence stop ends new proposals
-but may still resolve seed uncertainty with the remaining budget.
+one-seed candidate from defeating a better-supported candidate. `trials` is the default stopping
+contract: the complete authored candidate budget is proposed unless an explicit Run/time limit is reached.
+`max_runs` and `max_time` bound total spending. `convergence_patience` defaults to zero (disabled).
+Setting it to a positive value explicitly opts into record-streak stopping after that many
+completed, full-fidelity observations fail to improve the incumbent by more than
+`min_improvement`. This simple policy is not evidence of mixed-space coverage and must not be
+enabled merely because HPO confidence is low. Pruning and seed racing remain active independently.
+Every terminal controller event persists whether candidate, Run or time budget, proposal-pool
+exhaustion, explicit convergence or the lack of another useful action ended the Study.
 
 One seed Run has two deliberately different objective values. `current` is the observation at its
 latest reported step and is used for like-for-like curve projection and pruning. `best` is the
@@ -673,10 +683,9 @@ $$
 `runs_per_gpu` is only the per-device maximum. LambdaForge probes every allocated device and fills
 only the slots that pass this check; temporarily unavailable Runs remain queued and the controller
 polls again. Launches on one GPU are separated by five seconds so a new process can materialize its
-allocation before the next observation. The controller also fixes a conservative free-memory
-budget when a device starts a wave and accounts the full declared threshold for every admitted Run,
-even if CUDA has not allocated it yet; the budget resets only after that device has no active
-LambdaForge Run. Every admitted Run has a fresh one-worker spawned process. It is shut down as soon
+allocation before the next observation. Admission then uses the newly observed free VRAM directly;
+it does not multiply `gpu_memory` by the active-Run count or reserve that amount a second time.
+Every admitted Run has a fresh one-worker spawned process. It is shut down as soon
 as its result or error is received, releasing the whole CUDA context; a persistent idle pool could
 retain VRAM and deadlock the Runs waiting for admission. A full or smaller GPU is skipped while other usable GPUs continue. Only a
 threshold above the total VRAM of every allocated device is impossible and fails as configuration.
@@ -692,7 +701,10 @@ Failure isolation follows the Run boundary. CPU and GPU adaptive Runs both use f
 processes, so a killed worker cannot poison a shared pool or cancel unrelated candidates. A worker
 lost before returning a result and CUDA OOM/allocation failures are retried as a new Attempt up to
 `failure_retries` (default 1, allowed 0–3). Compatible checkpoints remain under the same Run and
-are discovered by the retry. A repeated resource failure becomes terminal, and ordinary consumer
+are discovered by the retry. A CUDA OOM also lowers the live study-wide packing ceiling below the
+concurrency observed at failure, so the queued retry cannot immediately recreate the same pressure;
+already-running children are never killed. A repeated resource failure at safer packing becomes
+terminal, and ordinary consumer
 exceptions are never retried blindly because invalid data/code will not improve with repetition.
 Other pending/active Runs continue. The enclosing Work is still reported failed when a Run exhausts
 recovery, preserving honest scientific evidence instead of hiding a missing candidate.
@@ -794,15 +806,17 @@ shows active/available slots, queued/paused Runs and the latest action's score, 
 proxy and cost. A pruned Run expands to its persisted candidate, step/fidelity, prediction uncertainty,
 incumbent, probability, threshold, margin, confirmations and curve method.
 
-Press `i` from the adaptive candidate or Trial screen to open the HPO evidence console. For every
-detected hyperparameter it derives a bounded candidate-level diagnostic: numeric rank direction,
-low/high standardized contrast and possible threshold, or categorical group means and coverage.
+Open the Study's **HPO** tab and select a parameter with Enter/right to inspect its evidence. For
+every detected hyperparameter the summary separates its authored and observed domain, supported
+region, importance and reliability. The detail combines bounded candidate-level diagnostics:
+numeric response and uncertainty or categorical means, empirical dispersion, coverage and
+pairwise predictive gain.
 It labels evidence low/medium/high with conservative sample floors and an association score, and proposes the next
 comparison that would reduce ambiguity. The header separately reports the controller's actual
 latest action plus comparable, provisional and censored counts. Marginal associations can be confounded by correlated parameters, conditional
 activation, unequal seeds or partial fidelity, whereas the sampler reasons over the mixed
 multivariate space. The console therefore says “appears associated”, never causal or guaranteed.
-The header has two deliberately separate blocks. `MARGINAL / PAIRWISE DIAGNOSTICS` contains these
+The controller view keeps two deliberately separate concepts. Parameter and pairwise diagnostics contain these
 descriptive, non-causal summaries. `SURROGATE BELIEF` is the retained lightweight output of the
 actual last GP/k-NN refresh: backend, target fidelity, pending count, leading predicted candidate or
 region and posterior/predictive uncertainty. It is retained independently of the 25-event tail and
@@ -829,13 +843,12 @@ threshold, select a per-candidate threshold or equate them with AUROC/AUPRC. Thr
 part of the Work's evaluation protocol and must remain scientifically comparable.
 
 The Run view is split into two regions. The upper region contains the complete aligned parameter
-list, live duration/timing summary and up to four learning curves. `n` and `p` select the next or
-previous numbered curve page; these plain keys work consistently across keyboard layouts. The lower
-region is an epoch table: up/down selects an epoch, the
-selection is marked red on every applicable curve, the objective-best epoch remains a green marker
-and highlighted row, and Enter/right opens a dedicated view containing
-every scalar for that epoch. `o` switches the lower region to the isolated raw Run output; modified
-left/right pans it horizontally. Duration is computed from `started_at_utc` while active. Measured
+list, live duration/timing summary and up to four learning curves. Compact previous/next buttons and
+a numbered selector provide mouse control; `n` and `p` remain keyboard shortcuts. The epoch table
+puts every recorded scalar in its own column and scrolls horizontally. Up/down selects an epoch,
+the selection is marked red on every applicable curve, and the objective-best epoch remains a green
+marker and highlighted row. Enter/right opens the same evidence vertically when that is easier to
+read. Duration is computed from `started_at_utc` while active. Measured
 `epoch_time_s` and `validation_time_s` replace the labelled elapsed-per-epoch estimate as soon as
 telemetry arrives. Run detail refreshes outside the terminal event loop.
 
@@ -857,12 +870,15 @@ training = LightningTrainConfig(
     epoch_console_include=["train_loss", "val_*", "*_time_s"],
     epoch_chart_include=["val_*", "epoch_time_s", "validation_time_s"],
     epoch_chart_exclude=["*_aux"],
+    epoch_metric_display_names={"val_balanced_accuracy": "Balanced accuracy"},
 )
 ```
 
 `epoch_console_include`/`epoch_console_exclude` select the per-epoch human log table; the chart
 patterns independently select only TUI presentation. CSV selection remains available through
-`epoch_metrics_include`/`epoch_metrics_exclude`.
+`epoch_metrics_include`/`epoch_metrics_exclude`. `epoch_metric_display_names` changes only visible
+Research Console labels; metric identity, objective lookup and stored values remain unchanged.
+Common validation, training and resource names are humanized automatically.
 
 The default order gives the objective first, then `epoch_time_s`, `validation_time_s`, memory,
 validation and training metrics. CUDA memory names are precise: `gpu_mem_mb` is peak live tensor
@@ -880,6 +896,10 @@ available during `preparing`; it explains that telemetry is pending until the cu
 bounded index. This declaration is also present as `work.items[].study_expected` for machine
 clients. `study` remains `null` until live evidence exists. Runs launched by an older worker cannot
 retroactively emit per-Run telemetry and require a new execution with the updated remote runtime.
+The Study workspace keeps cancellation available while `study` is still `null`; it uses the exact
+semantic Work identity and therefore stops every active Attempt without depending on HPO
+telemetry. Refresh failures preserve the last good snapshot and are reported inline without
+recurring toast notifications.
 Several workflow steps, a parallel level and `self.map()` concurrency do not by themselves form a
 parameter study: those Works retain the ordinary Attempt/log navigation and create no study index.
 This semantic inference avoids a presentation-only YAML switch that could contradict execution.
@@ -1015,8 +1035,8 @@ lf clusters set citius-gpu gpu_access '{mode: command, command_prefix: [gpu, exe
 
 The command form is an argv sequence and never invokes a shell. Use it when a center requires a
 wrapper around every GPU command. At CITIUS, `gpu exec` is the preferred self-contained gpuctl
-form because allocation lifetime matches the command. If a site requires a persistent claim, pair
-claim and release atomically:
+form for one GPU because allocation lifetime matches the command. For a multi-GPU Work, or if a
+site requires a persistent claim, pair claim and release atomically:
 
 ```bash
 lf clusters set citius-gpu gpu_access \
@@ -1028,8 +1048,10 @@ inside durable background submission; the direct supervisor releases after succe
 cancellation, and submission failure also attempts release. Persistent claims are rejected for
 SLURM profiles. For command/scheduler access, the child must inherit `CUDA_VISIBLE_DEVICES` from the
 site. LambdaForge treats indices/UUIDs/MIG UUIDs as opaque grants, only narrows them per Run and
-never replaces or broadens them; missing, duplicate or insufficient grants fail closed. The managed
-Python executable is absolute, so no shell/Conda activation must survive the wrapper. `shared` is
+never replaces or broadens them. Missing or duplicate grants fail closed and scheduler allocations
+remain exact. Adaptive Studies behind command launchers may scale down to fewer inherited tokens;
+their parallelism and memory probes use that exact reduced set. The managed Python executable is
+absolute, so no shell/Conda activation must survive the wrapper. `shared` is
 an explicit risk choice for permissive hosts, not a hidden default.
 
 `workspace` and `project_root` are deliberately different. `workspace` is LambdaForge-owned state:
@@ -1426,26 +1448,36 @@ full fidelity, and `selection_objective` is candidate-level selection evidence. 
 composites report missing components and the latest complete step. Pruned performance is censored:
 its partial curve and best observation are retained, but no exact final score is invented.
 Candidate statistics use independent full-fidelity seeds, mean/SD/SE and deterministic bootstrap
-95% intervals when at least three values support them. Shared seeds produce paired comparisons;
-screening and fresh-seed confirmation remain separate so a lucky winner is not silently validated.
+95% intervals when enough repeated evidence supports them. Empirical winner stability is
+`insufficient_evidence` whenever a leading candidate has fewer than two comparable final seeds; a
+one-element bootstrap is never presented as stability. Any pooled/model-based seed uncertainty is
+reported in a separate labelled field. Shared seeds produce paired comparisons; screening and
+fresh-seed confirmation remain separate so a lucky winner is not silently validated. Confirmation
+uses the persisted scientific equivalence margin; a documented 2% fallback exists only for old
+records that did not persist one.
 
 ### 16.2 Effects, coverage and reliability
 
-Analysis fits a deterministic mixed-space predictive surrogate and validates it by leaving complete
-candidates out—not individual epochs or duplicated seeds. It reports RMSE, MAE, rank correlation,
-interval coverage and a quality label. A common reference design supports global functional
-variance importance; a top-quantile distribution divergence answers a different question about
-where good candidates concentrate. Numeric and categorical adjusted responses, pairwise surfaces
-and an interaction matrix expose non-additivity with uncertainty and extrapolation markers.
+Analysis fits a deterministic mixed-space predictive surrogate and validates it with actual
+leave-one-candidate-out predictions—not individual epochs, duplicated seeds or metadata claiming a
+different fold scheme. It reports the exact method/fold count, RMSE, MAE, rank correlation,
+interval coverage and a quality label. One central min/max ordering governs winners, responses,
+regions and confirmation. Exact authored `when` predicates are retained through reference design,
+response and pair generation; invalid inactive/active combinations are rejected rather than
+randomly sampled. A common reference design supports global functional variance importance; an
+observed top-candidate distribution answers a different question about where good observed
+candidates concentrate. Numeric/categorical responses and pair surfaces expose non-additivity with
+uncertainty and extrapolation markers.
 
-Coverage includes marginal bins/categories, conditional activation, nearest-reference joint
-distance against a same-size baseline and candidate-pool resolution. Boundary diagnostics use
-centralized conservative thresholds and distinguish possible from likely saturation. Seed
-bootstrap estimates winner probability and regret. Resource telemetry produces objective/cost and
-objective/peak-VRAM Pareto alternatives when comparable data exists. Constraints, objective
-components, pruning audit and confirmation are retained. Findings are deterministic, evidence-
-linked sentences. All effects are observational/predictive, never causal; sparse data, weak CV,
-poor coverage and extrapolation reduce confidence explicitly.
+Coverage includes observed marginal bins/categories, conditional activation and joint resolution.
+It does not claim coverage of the controller proposal pool unless that pool was actually persisted.
+Boundary diagnostics distinguish possible from likely saturation. Resource telemetry separates
+median intrinsic cost per comparable full-fidelity Run from total controller spend (Runs/seeds/
+promotions and aggregate time); resource Pareto uses only the former. Scientific component Pareto
+remains separate. Constraints, pruning audit and confirmation are retained. Findings are
+deterministic, evidence-linked sentences. All effects are observational/predictive, never causal;
+reliability combines support, CV quality, coverage and extrapolation, so poor validation cannot
+produce a high-confidence finding merely because many rows exist.
 
 Live documents are `provisional` and cheaper; terminal documents are `final`. An evidence
 fingerprint makes repeated non-recompute calls idempotent. Writes are atomic and versioned so 0.13
@@ -1458,26 +1490,130 @@ Runs, maximum parallelism, CPU/RAM context, per-GPU free/required VRAM and the e
 `runs_per_gpu` is a ceiling. Capacity pressure queues and polls; it is not a failed Run. Launches on
 one GPU are staggered, while other GPUs continue independently. With two GPUs, five allowed slots
 per device and sufficient resources, the controller may admit ten child Runs; helper probes are
-short-lived and do not consume scientific slots.
+short-lived and do not consume scientific slots. A transient probe error is an observation outage,
+not a scientific failure: new admission pauses, active child processes remain untouched and the
+probe retries. Its bounded stdout/stderr is preserved for diagnosis. A persistent outage becomes
+terminal only after there are no active Runs and the bounded retry budget is exhausted.
 
 ## 17. Research Console
 
 Bare `lf` opens the Textual Research Console only when input/output are interactive. Otherwise it
 prints CLI help and exits. The only primary screens are Overview, Work, Studies, Clusters, Datasets
-and Results. `Ctrl+P` opens fuzzy action search, Enter opens a row, Esc backs out and `?` opens
-contextual help. The 0.13 `lf top`, `clusters setup` and `clusters modify` commands are removed;
-scripts retain every non-interactive command.
+and Results. Enter/right pushes the selected entity workspace; Esc/left pops one level; Home returns
+to the root; `?` explains scientific markers. This is a real navigation stack, not a generic JSON
+modal. The 0.13 `lf top`, `clusters setup` and `clusters modify` commands are removed; scripts retain
+every non-interactive command.
 
-Overview summarizes known clusters, active Work/Studies, waiting capacity and recent results. Work
-owns authored YAML, Executions, Attempts, logs and advanced Jobs. Studies exposes objective,
-candidate/Run counts, censoring and structured admission, then links to provisional/final Analysis.
-Clusters edits catalog profiles and credentials with progressive explanations and separate
-test/bootstrap/doctor actions. Datasets presents immutable versions/placements. Results lists
-completed Executions and provides compare/analyze/report over `ResultStore`.
+Overview contains three independent panels for Clusters, ordinary Work and Studies. Its tables use
+short progress phrases, while the selection panel formats semantic facts rather than dumping JSON.
+Cluster selection accumulates a bounded live CPU/RAM/GPU history and reports both whole-cluster
+load and the personal LambdaForge share when observable; requested allocation stays distinct from
+measured use. Refresh reconstructs read models without changing the focused panel or exact entity.
+The centered loading state is used only until the first successful snapshot. Every later refresh
+keeps that snapshot on screen, reports its age in a compact footer and marks a transient failure as
+stale. The Work browser and bounded Work logs poll live with one in-flight request per view.
+The same dashboard appears in the Clusters browser and cluster workspace. Terminal Studies remain
+Studies and retain their last telemetry-producing Attempt; a terminal `study: null` read model is
+valid and opens a degraded Study/log view while the service attempts one bounded telemetry reload.
+The sidebar Exit button and root `q` binding are explicit.
+
+Overview enters a Work, Study or cluster directly. The main scientific hierarchy is `Study → Trial
+→ Seed → Epoch`: Trials can be searched/sorted and distinguish selection/current/best evidence;
+Seeds distinguish latest/best/final objective and censored partial evidence; Curves draw at most
+four configured metrics per page (`n`/`p`), preserve all metrics in tables, and mark selected/best/
+latest epochs. Epoch detail shows every same-step scalar. Active Seed telemetry and isolated logs
+refresh without resetting a deliberately selected epoch or a user's log scroll position.
+Study and Seed workspaces show an explicit loading indicator during remote reads, then reveal their
+content atomically or report a retrieval failure; an empty table is therefore never used as a
+loading placeholder. Every previous breadcrumb segment is clickable and uses the same real screen
+stack as the Back button.
+
+Study Overview combines status, candidate/Run counts, current leader, compute time, objective
+history, Run-state distribution and leading parameters. Run-state bars have their exact counts
+printed below them; the chart never asks the user to estimate a small count from a large axis.
+Trial marks have a separate column, so
+winner/Pareto/censored symbols never cover the identifier. The HPO tab summarizes strategy,
+human-readable objective, evidence and scheduler. Its parameter table separates authored and
+observed domains, best supported region, importance and confidence. Opening a parameter shows its
+predictive response with uncertainty bounds, observed support and dispersion, plus persisted
+pairwise interaction diagnostics. Before a final Execution exists, the same panel consumes the
+bounded live HPO snapshot and labels observed response plus numeric/verbal confidence explicitly;
+it refreshes without waiting for Study completion. These are predictive associations, not causal
+effects. Terminal charts retain categorical labels and show exact point/bar values on click. They
+omit ambiguous uncertainty pseudo-lines; numeric uncertainty remains in the evidence table. An
+explicit **Interactive HTML** action uses optional Plotly for hoverable learning curves, genuine
+shaded uncertainty, interaction heatmaps and numeric 3D surfaces. Coverage is presented as cards,
+marginal bars and exact authored/observed support tables rather than raw JSON. Contextual `?` help
+defines objective, importance, reliability, confidence, joint gain, coverage and stop semantics.
+The full
+persisted controller sequence is an Action / Trial / Reason table; opening a row shows its complete
+stored thresholds and inputs.
+
+Study tabs also expose actual controller/scheduler/pruning/admission evidence, Resources, logs and
+Analysis. Analysis uses the persisted document and has
+Summary, Parameters, Interactions, Coverage, Seeds, Pareto and Findings views; it never fits a
+second controller model in a widget. Work owns Executions/Attempts/logs and links Studies. Cluster
+workspaces expose test/doctor/bootstrap, redacted credentials, GPU policy, resources and storage.
+Dataset Summary asynchronously reads exact split and per-split primary-target counts from the
+logical index. This does not recurse through large assets. Members automatically loads at most 200
+records when opened. Physical Stats and Integrity expose a centered explanation and explicit action
+in their own tabs because a tree walk or checksum verification may be expensive. The always-visible
+DatasetVersion delete control immediately reports preview/apply state, blocks repeat activation,
+previews all placements and then requires explicit confirmation.
+`registered_but_missing` is a convergent stale-registration cleanup: already-absent bytes are not
+treated as a filesystem failure, and the empty logical record is removed from controller and target
+registries. Results reuse the same analysis evidence and can recompute/export it.
 
 The console imports domain services directly; it never executes `lf` through a subprocess. Slow
-filesystem, analysis and provider operations run in daemon workers and generation IDs discard stale
-responses. A provider outage retains the last successful snapshot with a visible stale warning.
+filesystem, analysis and provider operations run in daemon workers; refreshes for the same view do
+not overlap, so a slow remote probe cannot multiply SSH/provider calls. Hidden root browsers do not
+load until selected. **Run Work** offers a YAML-filtered directory tree and a bounded list composed
+from existing local Job history plus persistent MRU choices. Browse and recent selection both fill
+one path field without launching. The single Submit action validates, explains and only then
+submits to the captured visible cluster selection; its busy state disables repeat actions and
+reports the active phase. Validation transitions directly into enqueueing, and failure to render a
+complex bounded preview cannot suppress submission or its visible result. The MRU file contains only absolute local paths,
+display names and timestamps, filters missing files, and never copies authored YAML or data. An
+invalid YAML is kept in the launch dialog and shown once with source path, exact line/column,
+bounded excerpt and an actionable hint. Work display names are not identifiers: simultaneous
+local/remote executions use distinct `work_id` row keys, and cancel/delete passes that exact
+identity to the domain service. One
+shared provider factory reuses the console transport, and cluster
+operations are serialized; live resource probes pause during doctor/bootstrap. The cluster activity
+panel shows every bootstrap phase plus elapsed liveness, offers three preset heights and can be
+resized by dragging its separator. Its upper content is an independently scrollable viewport with
+a protected minimum height; an enlarged log therefore cannot hide actions, tabs or evidence beyond
+recovery. Applying bootstrap requires confirmation; mutation confirmations and the modal Work plan
+use bounded semantic sections instead of serialized JSON. Plan bootstrap stays read-only. A provider outage retains
+the last successful snapshot with a visible stale warning.
+The Add/Edit cluster modal is a complete editor for the durable `ClusterProfile`, not a reduced
+setup wizard. Guided tabs own transport/authentication references, execution backend, workspace/
+project/data identity, Python/environment/PyTorch policy, storage retention, SSH connection policy
+and `gpu_access`. Command access exposes its argv prefix and atomic claim/release pair; the text is
+parsed with `shlex` into argv and never executed through a shell. Advanced YAML round-trips
+`ssh_options`, the general command prefix, scheduler options, resource mapping, scheduler
+directives/commands and job-script policy. Guided fields take explicit precedence. The assembled
+mapping is passed through `ClusterProfile.from_mapping` before atomic persistence, while password
+values remain exclusively in the credential service.
 Destructive actions show the exact target, require confirmation and preserve the underlying
 preview/apply, exact-root and symlink-safe rules. Machine clients must consume CLI `--json`, not
-screen text. Plotly remains optional because terminal operation uses bounded persisted JSON.
+screen text. `Ctrl+P` lists only actions with real handlers; the auditable support table explicitly
+labels other routes CLI-only instead of claiming parity from a button/name. Plotly remains optional
+because terminal operation uses bounded persisted JSON.
+
+Resource history and learning curves are rendered by the declared native `textual-plot` widget,
+using automatic numeric ticks, Braille-resolution lines and interactive pan/zoom. Resource charts
+use a fixed five-minute window labelled `5m` through `now`; their colour key sits above the plots
+instead of covering data. Seed plots retain four-metric pages and overlay the selected epoch in red
+and the objective-best epoch in green. Changing page restores automatic bounds for the new metrics
+instead of retaining a prior metric's pan/zoom. LambdaForge owns only bounded samples and semantic
+series; it does not implement axes or
+rasterization. Every nested workspace has a visible **Back to …** control in addition to keyboard
+navigation. The sidebar visibly separates Action, Browse and Session controls. Cluster and Dataset details use
+compact cards and bounded semantic sections rather than unformatted provider/manifest JSON.
+Pruned Run/seed cells describe absent terminal evidence as `not final · pruned` and absent partial
+observations as `not observed`; `unavailable` remains reserved for actual retrieval/capability gaps.
+
+The old `LiveJobMonitor` implementation is not a public interface. It remains temporarily as a
+regression oracle while advanced routes still classified `CLI-ONLY BY DESIGN` are migrated; it may
+be deleted only after equivalent service-backed flows and tests exist in Textual.

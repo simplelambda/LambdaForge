@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from lambdaforge.analysis.Effects import mixed_distance, reference_set
+from lambdaforge.analysis.SearchSpace import valid_point
 
 BOUNDARY_THRESHOLDS: dict[str, float] = {
     "edge_fraction": 0.10,
@@ -26,13 +27,16 @@ def analyze_coverage(
     space: Mapping[str, Mapping[str, Any]],
     mode: str,
     fingerprint: str,
+    proposal_pool_size: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Return coverage, candidate-pool resolution and boundary saturation."""
-    observed = [dict(value.get("parameters", {})) for value in candidates]
+    raw_observed = [dict(value.get("parameters", {})) for value in candidates]
+    observed = [value for value in raw_observed if valid_point(value, space)]
     full = [
         dict(value.get("parameters", {}))
         for value in candidates
         if isinstance(value.get("mean"), int | float)
+        and valid_point(value.get("parameters", {}), space)
     ]
     marginal = {
         name: _marginal(name, rule, observed=observed, full=full) for name, rule in space.items()
@@ -65,15 +69,22 @@ def analyze_coverage(
     }
     spacing = _pair_spacing(observed, space)
     pool = {
-        "candidate_pool_size": len(candidates),
+        "kind": "observed-candidate-resolution",
         "observed_candidates": len(observed),
-        "pool_coverage": len(full) / len(candidates) if candidates else 0.0,
+        "invalid_observed_candidates": len(raw_observed) - len(observed),
+        "proposal_pool_size": proposal_pool_size,
+        "proposal_pool_points_persisted": False,
+        "proposal_pool_coverage": None,
         "median_nearest_neighbour_spacing": statistics.median(spacing) if spacing else None,
         "largest_uncovered_region_approximation": max(attempted_distances, default=None),
         "resolution_limited": bool(
             spacing
             and attempted_distances
             and max(attempted_distances) > max(0.35, statistics.median(spacing) * 2)
+        ),
+        "interpretation": (
+            "Resolution of proposed/observed candidates only; the unpersisted sampler pool "
+            "is not characterized."
         ),
     }
     boundaries = {

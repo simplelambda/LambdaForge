@@ -60,7 +60,11 @@ class CudaCompatibilityResolver:
                 "bootstrap; python.strategy=existing never installs or changes system Python. "
                 "Use python.strategy=auto or managed to permit a user-space runtime."
             )
-        driver, capabilities = self._nvidia(profile, transport)
+        driver, capabilities = self._nvidia(
+            profile,
+            transport,
+            strict_launcher=profile.pytorch.require_cuda is True,
+        )
         has_cuda = driver is not None and bool(capabilities)
         required = profile.pytorch.require_cuda
         require_cuda = has_cuda if required is None else required
@@ -219,7 +223,11 @@ class CudaCompatibilityResolver:
 
     @classmethod
     def _nvidia(
-        cls, profile: ClusterProfile, transport: Transport
+        cls,
+        profile: ClusterProfile,
+        transport: Transport,
+        *,
+        strict_launcher: bool = False,
     ) -> tuple[str | None, tuple[str, ...]]:
         result = transport.run(
             profile.gpu_access.wrap(
@@ -236,6 +244,23 @@ class CudaCompatibilityResolver:
                 raise RuntimeError(
                     "NVIDIA GPUs are visible but driver/compute capability could not be queried "
                     "safely. Set an explicit reviewed pytorch.channel or provide a wheelhouse."
+                )
+            if (
+                strict_launcher
+                and profile.gpu_access.effective_mode(profile.scheduler) == "command"
+            ):
+                detail = (
+                    result.stderr.strip()
+                    or visible.stderr.strip()
+                    or result.stdout.strip()
+                    or visible.stdout.strip()
+                    or "the launcher returned a non-zero status without output"
+                )
+                raise RuntimeError(
+                    "The configured site GPU launcher failed before CUDA could be inspected: "
+                    f"{detail[-1200:]}. The launcher must establish the allocation and export "
+                    "CUDA_VISIBLE_DEVICES; LambdaForge will not fall back to CPU or guess physical "
+                    "GPU indices."
                 )
             return None, ()
         drivers: set[str] = set()

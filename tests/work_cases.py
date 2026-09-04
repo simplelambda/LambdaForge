@@ -77,6 +77,14 @@ class AdaptiveScoreWork(lf.Work):
         return {"score": quality}
 
 
+class FlatAdaptiveScoreWork(lf.Work):
+    """Constant-objective fixture for candidate-budget termination tests."""
+
+    def run(self, choice: int = 0) -> dict[str, int | float]:
+        self.metrics.log("score", 0.5, step=1)
+        return {"choice": choice, "score": 0.5}
+
+
 class ConfirmationFailureWork(lf.Work):
     """Fail one dedicated confirmation seed to exercise unbiased incomplete selection."""
 

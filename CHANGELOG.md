@@ -10,6 +10,158 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+### Fixed
+
+- Expanded the Research Console cluster editor from six basic fields to the complete durable
+  profile: authentication references, runtime/PyTorch, storage/SSH retention, every GPU-access
+  policy field and validated advanced OpenSSH/SLURM mappings now round-trip without silent loss.
+  Invalid combinations remain in the modal with a validation error and are never persisted.
+- Prevented GPU-requesting Works from silently resolving a CPU-only managed PyTorch environment
+  when a site command launcher fails. Adaptive command-launched Studies now scale concurrency down
+  to the exact non-empty `CUDA_VISIBLE_DEVICES` grant when it is smaller than the requested ceiling,
+  while scheduler grants remain exact and no physical GPU identifier is ever inferred.
+- Removed quadratic adaptive-study planning amplification: the deterministic candidate pool is no
+  longer copied into every candidate/seed specification, so large valid HPO budgets reach their
+  first Run with linear planner memory.
+- Kept exact semantic Study cancellation available before the worker publishes telemetry. Periodic
+  Study/Seed provider failures now remain as inline stale/error state instead of emitting repeated
+  notifications on every refresh.
+- Kept every root Research Console snapshot visible during background refresh. The loading
+  indicator is now first-load-only, a compact age line reports the last successful update, and a
+  failed refresh retains the previous data explicitly instead of replacing it with a loading view.
+- Made the Work browser state table and bounded Work log viewer refresh live without overlapping
+  probes; unchanged or temporarily unavailable logs retain their last readable snapshot.
+- Made validated recent-Work submission transition visibly and atomically into asynchronous
+  enqueueing. Rendering a complex validation/explanation preview can no longer strand the launch
+  modal before submission: authored brackets/backticks are rendered as literal text rather than
+  Textual markup, and validation/submission failures remain actionable in place.
+- Prevented same-name local and remote Work executions from crashing Work/Overview tables with a
+  duplicate Textual row key. The console now keys rows and cancel/delete operations by exact
+  semantic `work_id`, while preserving the human name purely as a label.
+- Made DatasetVersion deletion visible from every dataset tab and stateful from the first click:
+  preview/apply waiting, cancellation, failure and success are explicit, and duplicate activation
+  is blocked while an operation is running.
+- Replaced the three competing Run Work actions with one guarded Submit flow. Recent and browsed
+  YAMLs now populate the same selector; Submit always validates and explains before launch,
+  reports its phase and cannot be repeated while active.
+- Removed the hidden per-wave VRAM reservation that double-counted `gpu_memory` for active Runs and
+  could cap an 80 GiB GPU at three 20 GiB-threshold trainings despite enough live free memory. GPU
+  admission now follows the documented per-launch free-VRAM threshold and launch stagger. A CUDA
+  OOM remains isolated and retryable, but now lowers the live Study packing ceiling below the
+  failing concurrency before requeueing, while unrelated Runs continue unchanged.
+- Disabled implicit record-streak convergence by default. Adaptive Studies now consume their
+  authored candidate budget unless an explicit Run/time limit or opt-in positive
+  `convergence_patience` stops proposals; sparse multidimensional coverage is no longer mistaken
+  for convergence. The terminal FINISH event is persisted before the final analysis and records
+  the exact candidate/Run/time/pool/convergence reason.
+- Preserved categorical HPO labels in terminal plots, removed misleading uncertainty pseudo-lines
+  and made plotted points/bars report exact values when clicked.
+- Reset every reused learning-curve plot to automatic data limits when changing metric pages, so a
+  prior metric's manual pan/zoom cannot hide the next metric's different value range.
+- Made HPO parameter evidence available while a Study is still running and has no final Execution
+  result. The console now falls back to the bounded live Study analysis, refreshes it periodically,
+  shows numeric plus verbal confidence and retains response/support/dispersion/interaction detail.
+- Made the root Studies browser refresh live and immediately after submission while preserving its
+  selected Study; replaced the unbounded trial/admission JSON preview that collapsed the table with
+  a compact objective, Run-state, leader and admission summary.
+- Replaced duplicated raw PyYAML scanner output in **Run Work** with one source-aware validation
+  panel containing the actual file, line, column, bounded source excerpt, caret and corrective hint.
+- Kept cluster actions, tabs and evidence reachable while enlarging the activity console by giving
+  the upper workspace a protected, independently scrollable viewport.
+- Replaced raw JSON in mutation confirmations, action notifications and modal Work previews with a
+  shared bounded semantic renderer.
+- Prevented interactive cluster bootstrap from competing with hidden-screen loads or live resource
+  probes. The console now shares one provider factory, serializes cluster operations and pauses
+  polling until the operation completes, matching the reliable standalone CLI path.
+- Made whole-DatasetVersion deletion converge when placement bytes were manually removed: stale
+  target/controller registrations are cleaned and no empty version remains in the browser.
+- Replaced misleading `unavailable` values for intentionally pruned Run evidence with explicit
+  pruned/not-observed wording.
+- Fixed failed-Study navigation when the bounded Work read model contains `study: null`; the Study
+  workspace now opens its Logs tab after the bounded reload confirms that no telemetry was
+  published, exposing preparation/runtime diagnostics instead of trapping the user behind a raw
+  `KeyError` message.
+- Preserved the focused Overview panel and stable selected entity across asynchronous refreshes,
+  eliminating jumps from a selected cluster to the first Study.
+- Corrected personal CPU share normalization (process percent divided by host core count) and made
+  the GPU comparison like-for-like by plotting total and personal VRAM percentages.
+- Prevented one transient CUDA memory-probe failure from terminating an adaptive Study. Admission
+  now pauses safely while active Runs continue, retries observation, records the bounded probe
+  cause and fails only after a persistent outage with no active Run left to protect.
+- Preserved terminal Study identity and its last observed trials/seeds/HPO telemetry across terse
+  provider reconciliation, so a failed Study never falls back into the ordinary Work-only view.
+- Corrected Study Analysis minimization ordering, truthful leave-one-candidate-out validation
+  metadata, exact conditional domains, insufficient one-seed stability, surrogate-aware
+  reliability, observed-region coverage wording, equivalence-margin confirmation and the
+  distinction between intrinsic per-Run efficiency and total controller spend.
+- Fixed Research Console row activation and replaced generic detail modals with a real navigation
+  stack. Enter/right now opens Work, Study, cluster, dataset or result workspaces and Esc/left pops
+  exactly one level.
+
+### Added
+
+- Added contextual statistical help, a visual Coverage dashboard, a pairwise interaction matrix
+  and explicit offline Plotly exports for Study, parameter, learning-curve and resource views.
+  Interactive reports provide exact hover values, genuine uncertainty shading, heatmaps and
+  numeric 3D surfaces without adding Plotly to the base runtime.
+- Replaced raw Seed, Pareto and Findings analysis blocks with summary cards, separate scientific
+  and resource trade-off tables, and drill-down recommendations.
+- Added a YAML-filtered file browser and bounded recent-Work list, seeded from local Job history and
+  persistent MRU choices, to **Run Work**; Enter revalidates and directly submits to the visibly
+  selected cluster.
+- Added a phase-streaming cluster activity console with elapsed feedback, three size presets, a
+  draggable separator, clear control and exact apply confirmation.
+- Added exact logical split/target summaries, automatic bounded member loading, contextual
+  Stats/Integrity actions and confirmed whole-version deletion to Dataset workspaces.
+- Added exact numeric Run-state counts below Study Overview bars.
+- Added explicit remote-loading and retrieval-error states for Study and Seed workspaces, plus
+  clickable ancestor breadcrumbs backed by the real navigation stack.
+- Rebuilt the Study Overview with semantic status/trial/leader/compute cards, objective and Run-state
+  charts, and a compact leading-parameter table. Trial marks now occupy a dedicated column.
+- Rebuilt the HPO workspace around authored versus observed domains, best-supported regions,
+  importance/reliability, parameter response and uncertainty plots, observed support/dispersion,
+  pairwise diagnostics and the complete persisted Action/Trial/Reason history with decision
+  drill-down.
+- Added automatic human metric labels and optional
+  `LightningTrainConfig.epoch_metric_display_names`; labels never alter raw metric identity or
+  objective evaluation, and the internal composite key is presented as “Composite selection
+  score”.
+- Replaced handcrafted resource sparklines with the native `textual-plot` widget, providing
+  human-readable fixed time ticks, Braille-resolution CPU/RAM/GPU lines, an external colour key and
+  pan/zoom. The reusable
+  dashboard now appears in Overview, the Clusters browser and each cluster workspace.
+- Migrated Study learning curves to the same native plotting widget, retaining four-metric pages
+  while adding automatic axes, interactive navigation and explicit green-best/red-selected epoch
+  markers. Stale editable environments show a reinstall notice instead of retaining a second chart
+  renderer.
+- Stabilized cluster charts on a fixed five-minute `5m`→`now` axis and moved the total/personal key
+  outside the data area. Added mouse-friendly curve page controls, complete horizontally scrollable
+  epoch metric tables and a visible contextual Back button to every nested workspace.
+- Flattened the Exit control styling so focus no longer draws a competing inner variant block.
+- Separated sidebar Action/Browse/Session controls, compacted contextual buttons and introduced
+  visual summary cards plus bounded semantic detail for Clusters and Datasets instead of raw JSON.
+- Reused the last Overview resource snapshot in the Clusters browser, avoiding a second set of
+  remote probes merely to draw the same root-screen data.
+- Rebuilt the Research Console Overview as three separate Cluster, Work and Study panels with
+  concise progress, formatted selection summaries, live CPU/RAM/GPU history, truthful personal
+  usage context and a persistent visible Exit control. Refreshes never overlap, preventing a slow
+  cluster from causing duplicate provider connections.
+- Added the complete Study → Trial → Seed → Epoch console route with bounded live curves, pages of
+  four selected metrics, current/best/final/selection objective semantics, censored-prune markers,
+  GPU/resource evidence, isolated logs and exact same-epoch scalar inspection.
+- Added navigable Study Analysis views for summary, parameter associations, interactions, observed
+  coverage, empirical/model-based seed uncertainty, scientific/resource Pareto and findings. The
+  TUI and HTML report consume the same versioned `analysis.json`.
+- Added direct service-backed Work, cluster, dataset and result operations with exact preview and
+  confirmation boundaries for destructive actions. The command palette now lists only actions
+  with a real handler; the parity inventory labels remaining routes explicitly as CLI-only.
+
+### Internal
+
+- Kept the unreachable legacy `LiveJobMonitor` module temporarily as a regression oracle for
+  bounded telemetry/rendering while advanced CLI-only operations are migrated. No public `lf top`
+  route was restored; deleting it before genuine parity would discard tested behavior.
+
 ## [0.14.0] - 2026-09-01
 
 ### Added

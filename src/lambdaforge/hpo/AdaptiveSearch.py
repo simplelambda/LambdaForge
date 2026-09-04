@@ -91,7 +91,10 @@ class AdaptiveSearchPolicy:
     confirmation_seeds: tuple[int, ...] = ()
     max_runs: int | None = None
     max_time_seconds: float | None = None
-    convergence_patience: int = 8
+    # Zero is deliberate: ``trials`` is the authored candidate budget.  Merely observing a
+    # sequence without a new record is not evidence that the mixed search space is covered.
+    # Researchers may opt into record-based convergence by setting this field explicitly.
+    convergence_patience: int = 0
     min_improvement: float = 0.0
     sampler: str = "auto"
     fidelity: FidelityPolicy | None = None
@@ -240,7 +243,7 @@ class AdaptiveSearchPolicy:
             confirmation_seeds=tuple(raw_confirmation),
             max_runs=int(max_runs) if max_runs is not None else None,
             max_time_seconds=max_time,
-            convergence_patience=int(value.get("convergence_patience", 8)),
+            convergence_patience=int(value.get("convergence_patience", 0)),
             min_improvement=float(value.get("min_improvement", 0.0)),
             sampler=str(value.get("sampler", "auto")).lower(),
             fidelity=(

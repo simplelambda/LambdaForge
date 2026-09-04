@@ -19,7 +19,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, as_completed, wait
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -73,6 +73,7 @@ from lambdaforge.work.study import StudyTelemetry
 _GPU_ADMISSION_POLL_SECONDS = 1.0
 _GPU_LAUNCH_STAGGER_SECONDS = 5.0
 _GPU_WAIT_LOG_SECONDS = 30.0
+_GPU_PROBE_FAILURE_LIMIT = 12
 _PRUNER_AUDIT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
@@ -272,23 +273,29 @@ class WorkRunner:
             groups: list[list[dict[str, Any]]] = []
             for definition in level.runs:
                 parameters = self._resolve_references(definition.parameters, named_outputs)
+                # Keep the candidate pool exactly once in ``RunDefinition``.  Embedding a fresh
+                # copy of every candidate in every seed/candidate specification made adaptive
+                # planning quadratic in the proposal-pool size (4096 candidates x 10 seeds used
+                # tens of GiB before the first Run could start).  Child Runs need only know
+                # whether this specification belongs to a parameterized trial.
+                definition_payload = {
+                    "name": definition.name,
+                    "work_class": definition.work_class,
+                    "resources": definition.resources.to_dict(),
+                    "has_variants": definition.variants != ({},),
+                    "objective": dict(definition.objective or {}),
+                    "search_policy": (
+                        definition.search_policy.to_dict()
+                        if definition.search_policy is not None
+                        else None
+                    ),
+                    "study_expected": definition.study_expected,
+                }
                 specifications: list[dict[str, Any]] = []
                 for trial_index, variant, seed in self._expanded(definition):
                     specifications.append(
                         {
-                            "definition": {
-                                "name": definition.name,
-                                "work_class": definition.work_class,
-                                "resources": definition.resources.to_dict(),
-                                "variants": [dict(item) for item in definition.variants],
-                                "objective": dict(definition.objective or {}),
-                                "search_policy": (
-                                    definition.search_policy.to_dict()
-                                    if definition.search_policy is not None
-                                    else None
-                                ),
-                                "study_expected": definition.study_expected,
-                            },
+                            "definition": definition_payload,
                             "parameters": {**parameters, **dict(variant)},
                             "trial_parameters": dict(variant),
                             "seed": seed,
@@ -857,7 +864,6 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         str(definition_value["work_class"]),
         {},
         ResourceRequest.from_mapping(definition_value["resources"]),
-        variants=tuple(definition_value["variants"]),
         objective=definition_value.get("objective") or None,
         search_policy=(
             AdaptiveSearchPolicy.from_search(raw_policy)
@@ -916,7 +922,11 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         resources,
     )
     trial_parameters = dict(specification.get("trial_parameters", {}))
-    trial = WorkTrial(trial_index, trial_parameters) if definition.variants != ({},) else None
+    trial = (
+        WorkTrial(trial_index, trial_parameters)
+        if bool(definition_value.get("has_variants", False))
+        else None
+    )
     raw_fidelity = specification.get("hpo_fidelity")
     fidelity = (
         WorkFidelity(
@@ -2066,12 +2076,6 @@ def _execute_adaptive_group(
         )
         execute(confirmation, active)
 
-    if telemetry is not None:
-        telemetry.candidate_states(
-            active=tuple(proposal_numbers[trial] for trial in active),
-            ranked=tuple(proposal_numbers[trial] for trial in ranked),
-            finished=True,
-        )
     final_pruning_audit = (
         _pruner_calibration(
             outcomes,
@@ -2084,15 +2088,46 @@ def _execute_adaptive_group(
         if policy.early_stopping
         else {"status": "disabled"}
     )
+    budget_exhausted = allowance() <= 0
+    time_exhausted = not within_time()
+    candidate_budget_reached = len(proposed) >= candidate_budget
+    candidate_pool_exhausted = len(proposed) >= len(all_trials)
+    finish_reason = (
+        "run-budget-exhausted"
+        if budget_exhausted
+        else "time-budget-exhausted"
+        if time_exhausted
+        else "candidate-budget-reached"
+        if candidate_budget_reached
+        else "candidate-pool-exhausted"
+        if candidate_pool_exhausted
+        else "explicit-record-convergence"
+        if search_converged
+        else "no-scientifically-useful-action"
+    )
+    # Persist FINISH before producing the terminal Study snapshot.  Consumers must be able to
+    # distinguish budget exhaustion from an explicitly requested early convergence policy.
     record_decision(
         "FINISH",
+        reason=finish_reason,
         completed_runs=len(outcomes),
+        proposed_candidates=len(proposed),
+        candidate_budget=candidate_budget,
         ranked_public_trials=[public_trial(trial) for trial in ranked],
         confirmed_public_trials=[public_trial(trial) for trial in active],
-        budget_exhausted=allowance() <= 0,
-        time_exhausted=not within_time(),
+        candidate_budget_reached=candidate_budget_reached,
+        candidate_pool_exhausted=candidate_pool_exhausted,
+        budget_exhausted=budget_exhausted,
+        time_exhausted=time_exhausted,
+        convergence_enabled=policy.convergence_patience > 0,
         pruning_audit=final_pruning_audit,
     )
+    if telemetry is not None:
+        telemetry.candidate_states(
+            active=tuple(proposal_numbers[trial] for trial in active),
+            ranked=tuple(proposal_numbers[trial] for trial in ranked),
+            finished=True,
+        )
     return tuple(outcomes)
 
 
@@ -2117,9 +2152,23 @@ def _execute_adaptive_dispatch(
     if not specifications:
         return ()
     control_root = Path(specifications[0]["execution_dir"]) / "hpo-control"
-    prepared: list[dict[str, Any]] = []
-    per_run = _adaptive_run_resources(resources, parallelism)
     visible_gpus = _visible_gpu_tokens(resources.gpu_count)
+    effective_resources = resources
+    effective_parallelism = parallelism
+    if resources.gpu_count and len(visible_gpus) < resources.gpu_count:
+        effective_resources = replace(resources, gpu_count=len(visible_gpus))
+        effective_parallelism = min(
+            parallelism,
+            len(visible_gpus) * policy.runs_per_gpu,
+        )
+        print(
+            f"[hpo] site granted {len(visible_gpus)} of the requested "
+            f"{resources.gpu_count} GPU(s); continuing within the exact inherited allocation "
+            f"with at most {effective_parallelism} concurrent Run(s).",
+            flush=True,
+        )
+    prepared: list[dict[str, Any]] = []
+    per_run = _adaptive_run_resources(effective_resources, effective_parallelism)
 
     def prepare_specification(specification: Mapping[str, Any]) -> dict[str, Any]:
         trial = int(specification["trial_index"])
@@ -2169,9 +2218,9 @@ def _execute_adaptive_dispatch(
         if resources.gpu_count:
             _execute_gpu_admitted_runs(
                 prepared,
-                resources=resources,
+                resources=effective_resources,
                 policy=policy,
-                parallelism=parallelism,
+                parallelism=effective_parallelism,
                 visible_gpus=visible_gpus,
                 objective_metric=objective_metric,
                 objective_mode=objective_mode,
@@ -2377,9 +2426,26 @@ def _retry_failed_result(
         return None
     if result.ok or result.pruned or not isinstance(result.failure, Mapping):
         return None
+    if not _is_gpu_memory_failure(result):
+        return None
+    kind = str(result.failure.get("type", ""))
+    return _new_retry(
+        specification,
+        reason=f"{kind or 'resource failure'}: {result.failure.get('message', '')}",
+        policy=policy,
+        telemetry=telemetry,
+    )
+
+
+def _is_gpu_memory_failure(result: WorkResult) -> bool:
+    """Recognize allocation failures that can benefit from safer GPU packing."""
+    if not isinstance(result, WorkResult):
+        return False
+    if result.ok or result.pruned or not isinstance(result.failure, Mapping):
+        return False
     kind = str(result.failure.get("type", ""))
     message = str(result.failure.get("message", "")).lower()
-    resource_failure = kind in {"OutOfMemoryError", "CUDAOutOfMemoryError"} or any(
+    return kind in {"OutOfMemoryError", "CUDAOutOfMemoryError"} or any(
         marker in message
         for marker in (
             "cuda out of memory",
@@ -2387,14 +2453,11 @@ def _retry_failed_result(
             "hip out of memory",
         )
     )
-    if not resource_failure:
-        return None
-    return _new_retry(
-        specification,
-        reason=f"{kind or 'resource failure'}: {result.failure.get('message', '')}",
-        policy=policy,
-        telemetry=telemetry,
-    )
+
+
+def _safer_gpu_concurrency(current_limit: int, failed_active_runs: int) -> int:
+    """Learn a lower packing ceiling after an OOM at the observed concurrency."""
+    return min(current_limit, max(1, failed_active_runs - 1))
 
 
 def _new_retry(
@@ -2535,7 +2598,7 @@ def _execute_gpu_admitted_runs(
     """Launch only Runs that currently fit, waiting through temporary VRAM pressure."""
     required = resources.gpu_memory_bytes
     memory = (
-        _gpu_memory_inventory(resources.gpu_count)
+        _initial_gpu_memory_inventory(resources.gpu_count)
         if required > 0
         else tuple((0, 0) for _ in range(resources.gpu_count))
     )
@@ -2545,8 +2608,9 @@ def _execute_gpu_admitted_runs(
     pending: dict[Any, tuple[dict[str, Any], int, ProcessPoolExecutor]] = {}
     active = [0] * resources.gpu_count
     last_launch = [float("-inf")] * resources.gpu_count
-    admission_budget = [0] * resources.gpu_count
+    effective_runs_per_gpu = policy.runs_per_gpu
     next_wait_log = 0.0
+    consecutive_probe_failures = 0
     while queued or pending:
         done: set[Any] = set()
         if pending:
@@ -2579,12 +2643,26 @@ def _execute_gpu_admitted_runs(
                         queued.clear()
                         queued.extend(replacement)
             else:
+                memory_failure = _is_gpu_memory_failure(result)
                 retry = _retry_failed_result(
                     value,
                     result,
                     policy=policy,
                     telemetry=telemetry,
                 )
+                if memory_failure:
+                    previous_limit = effective_runs_per_gpu
+                    effective_runs_per_gpu = _safer_gpu_concurrency(
+                        effective_runs_per_gpu,
+                        active[slot],
+                    )
+                    if effective_runs_per_gpu < previous_limit:
+                        print(
+                            f"[hpo] CUDA OOM observed with {active[slot]} active Run(s) on "
+                            f"GPU {visible_gpus[slot]}; reducing the study packing ceiling "
+                            f"from {previous_limit} to {effective_runs_per_gpu} Run(s) per GPU",
+                            flush=True,
+                        )
                 if retry is not None:
                     queued.append(retry)
                 else:
@@ -2637,21 +2715,58 @@ def _execute_gpu_admitted_runs(
             continue
 
         now = time.monotonic()
-        memory = (
-            _gpu_memory_inventory(resources.gpu_count)
-            if required > 0
-            else tuple((0, 0) for _ in range(resources.gpu_count))
-        )
-        for index in usable:
-            if active[index] == 0:
-                admission_budget[index] = memory[index][0]
+        if required > 0:
+            try:
+                memory = _gpu_memory_inventory(resources.gpu_count)
+            except RuntimeError as error:
+                # Observation is not execution.  A transient NVML/driver/CUDA probe
+                # failure must never tear down healthy Runs that are already using the
+                # allocation.  Fail closed for admission, preserve those children and
+                # retry.  Once no child remains, a bounded failure makes a persistent
+                # loss of the GPU grant visible instead of waiting forever.
+                consecutive_probe_failures += 1
+                if now >= next_wait_log:
+                    print(
+                        "[hpo] GPU admission probe unavailable; no new Run will start "
+                        f"until observation recovers ({consecutive_probe_failures}/"
+                        f"{_GPU_PROBE_FAILURE_LIMIT}): {error}",
+                        flush=True,
+                    )
+                    next_wait_log = now + _GPU_WAIT_LOG_SECONDS
+                if telemetry is not None:
+                    telemetry.admission_state(
+                        {
+                            "status": "probe-unavailable",
+                            "safe_to_launch": False,
+                            "consecutive_failures": consecutive_probe_failures,
+                            "reason": str(error),
+                            "active_runs": len(pending),
+                            "queued_runs": len(queued),
+                        }
+                    )
+                if not pending and consecutive_probe_failures >= _GPU_PROBE_FAILURE_LIMIT:
+                    raise RuntimeError(
+                        "CUDA GPU admission remained unavailable for "
+                        f"{consecutive_probe_failures} consecutive probes while Runs were "
+                        f"waiting. Last cause: {error}"
+                    ) from error
+                time.sleep(_GPU_ADMISSION_POLL_SECONDS)
+                continue
+            else:
+                if consecutive_probe_failures:
+                    print(
+                        "[hpo] GPU admission probe recovered; queued Runs may start again.",
+                        flush=True,
+                    )
+                consecutive_probe_failures = 0
+        else:
+            memory = tuple((0, 0) for _ in range(resources.gpu_count))
         slots = _admissible_gpu_slots(
             memory,
             active=active,
             last_launch=last_launch,
-            admission_budget=admission_budget,
             required_bytes=required,
-            runs_per_gpu=policy.runs_per_gpu,
+            runs_per_gpu=effective_runs_per_gpu,
             now=now,
             launch_stagger_seconds=_GPU_LAUNCH_STAGGER_SECONDS,
             usable=usable,
@@ -2662,7 +2777,8 @@ def _execute_gpu_admitted_runs(
                     memory,
                     active=active,
                     required_bytes=required,
-                    runs_per_gpu=policy.runs_per_gpu,
+                    runs_per_gpu=effective_runs_per_gpu,
+                    configured_runs_per_gpu=policy.runs_per_gpu,
                     max_parallel=policy.max_parallel,
                     pending=len(queued),
                     visible_gpus=visible_gpus,
@@ -2702,7 +2818,7 @@ def _execute_gpu_admitted_runs(
                 f"[hpo] admitted trial={value['trial_index']} seed={value.get('seed')} "
                 f"on GPU {visible_gpus[slot]}: {memory_state}"
                 f"active={active[slot]}/"
-                f"{policy.runs_per_gpu}",
+                f"{effective_runs_per_gpu}",
                 flush=True,
             )
             launched = True
@@ -2711,7 +2827,7 @@ def _execute_gpu_admitted_runs(
             states = ", ".join(
                 f"GPU {visible_gpus[index]} "
                 f"{'free=' + _memory_text(memory[index][0]) + ' ' if required else ''}"
-                f"active={active[index]}/{policy.runs_per_gpu}"
+                f"active={active[index]}/{effective_runs_per_gpu}"
                 for index in usable
             )
             print(
@@ -2761,9 +2877,32 @@ def _gpu_memory_inventory(gpu_count: int) -> tuple[tuple[int, int], ...]:
             raise ValueError("CUDA probe returned malformed memory records.")
         return observed
     except Exception as error:
+        detail = ""
+        if isinstance(error, subprocess.CalledProcessError):
+            output = (error.stderr or error.stdout or "").strip()
+            if output:
+                detail = f" Probe output: {output[-1200:]}"
         raise RuntimeError(
             "CUDA GPU admission could not read current device memory safely."
+            f"{detail}"
         ) from error
+
+
+def _initial_gpu_memory_inventory(gpu_count: int) -> tuple[tuple[int, int], ...]:
+    """Require a safe baseline, tolerating a short transient CUDA observation failure."""
+    last_error: RuntimeError | None = None
+    for attempt in range(1, 4):
+        try:
+            return _gpu_memory_inventory(gpu_count)
+        except RuntimeError as error:
+            last_error = error
+            if attempt < 3:
+                time.sleep(_GPU_ADMISSION_POLL_SECONDS)
+    assert last_error is not None
+    raise RuntimeError(
+        "CUDA GPU admission could not establish a safe initial memory baseline after "
+        f"3 probes. Last cause: {last_error}"
+    ) from last_error
 
 
 def _validate_gpu_memory_capacity(memory: Sequence[tuple[int, int]], required_bytes: int) -> None:
@@ -2783,7 +2922,6 @@ def _admissible_gpu_slots(
     *,
     active: Sequence[int],
     last_launch: Sequence[float],
-    admission_budget: Sequence[int],
     required_bytes: int,
     runs_per_gpu: int,
     now: float,
@@ -2797,7 +2935,6 @@ def _admissible_gpu_slots(
         if active[index] < runs_per_gpu
         and now - last_launch[index] >= launch_stagger_seconds
         and (required_bytes <= 0 or memory[index][0] >= required_bytes)
-        and (required_bytes <= 0 or (active[index] + 1) * required_bytes <= admission_budget[index])
     )
 
 
@@ -2807,6 +2944,7 @@ def _gpu_admission_diagnostics(
     active: Sequence[int],
     required_bytes: int,
     runs_per_gpu: int,
+    configured_runs_per_gpu: int | None = None,
     max_parallel: int | None,
     pending: int,
     visible_gpus: Sequence[str],
@@ -2816,12 +2954,15 @@ def _gpu_admission_diagnostics(
     """Describe why queued Runs can or cannot consume each allocated GPU."""
     allowed = set(usable)
     ready = set(admissible)
+    configured_limit = configured_runs_per_gpu or runs_per_gpu
     devices: list[dict[str, Any]] = []
     for index, (free, total) in enumerate(memory):
         if index not in allowed:
             reason = "gpu_unavailable"
         elif active[index] >= runs_per_gpu:
-            reason = "runs_per_gpu"
+            reason = (
+                "oom_backoff" if runs_per_gpu < configured_limit else "runs_per_gpu"
+            )
         elif required_bytes > 0 and free < required_bytes:
             reason = "insufficient_free_vram"
         elif index not in ready:
@@ -2840,13 +2981,15 @@ def _gpu_admission_diagnostics(
                 "total": total,
                 "active_runs": active[index],
                 "runs_per_gpu": runs_per_gpu,
+                "configured_runs_per_gpu": configured_limit,
                 "retryable": reason not in {"gpu_unavailable"},
             }
         )
     return {
         "pending_runs": pending,
         "max_parallel": max_parallel,
-        "runs_per_gpu": runs_per_gpu,
+        "runs_per_gpu": configured_limit,
+        "effective_runs_per_gpu": runs_per_gpu,
         "devices": devices,
         "summary": ("admissible" if ready else "waiting_for_resources" if pending else "idle"),
     }
@@ -2872,7 +3015,12 @@ def _adaptive_parallelism(resources: ResourceRequest, policy: AdaptiveSearchPoli
 
 
 def _visible_gpu_tokens(gpu_count: int) -> tuple[str, ...]:
-    """Return only GPUs inherited from an external allocation, failing closed when required."""
+    """Return only GPUs inherited from an external allocation, failing closed when absent.
+
+    A command launcher may grant fewer devices than the outer adaptive-study ceiling (for example
+    when an opportunistic second GPU is unavailable).  In that mode the controller safely scales
+    down to the observed tokens.  Scheduler allocations remain exact contracts.
+    """
     raw = os.environ.get("CUDA_VISIBLE_DEVICES")
     mode = os.environ.get("LAMBDAFORGE_GPU_ACCESS_MODE", "")
     inherited = tuple(value.strip() for value in (raw or "").split(",") if value.strip())
@@ -2882,7 +3030,7 @@ def _visible_gpu_tokens(gpu_count: int) -> tuple[str, ...]:
     if inherited:
         if len(set(inherited)) != len(inherited):
             raise RuntimeError("CUDA_VISIBLE_DEVICES contains duplicate allocated GPU tokens.")
-        if len(inherited) < gpu_count:
+        if len(inherited) < gpu_count and mode != "command":
             raise RuntimeError(
                 f"CUDA_VISIBLE_DEVICES grants {len(inherited)} GPU(s), but the Work requests "
                 f"{gpu_count}; refusing to invent or broaden the allocation."

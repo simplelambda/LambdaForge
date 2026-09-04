@@ -567,6 +567,33 @@ class JobService:
         _profile, transport, _scheduler = self._provider(record)
         return self._load_study_summary(record, transport)
 
+    def study_actions(self, job_id: str) -> tuple[dict[str, Any], ...]:
+        """Read the complete append-only HPO decision history on explicit demand."""
+        record = self.get(job_id, refresh=False)
+        _profile, transport, _scheduler = self._provider(record)
+        path = PurePosixPath(record.work_dir).parent / "study" / "controller-history.jsonl"
+        text, truncated = self._read_bounded_file(transport, path, limit=16 * 1024 * 1024)
+        if truncated:
+            raise RuntimeError(
+                f"Controller history exceeds the 16 MiB interactive read limit: {path}"
+            )
+        actions: list[dict[str, Any]] = []
+        for line_number, line in enumerate(text.splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    f"Corrupt controller history for {job_id} at line {line_number}."
+                ) from error
+            if not isinstance(value, dict):
+                raise RuntimeError(
+                    f"Invalid controller history for {job_id} at line {line_number}."
+                )
+            actions.append(value)
+        return tuple(actions)
+
     def study_run(
         self,
         job_id: str,
@@ -632,7 +659,7 @@ class JobService:
             failure.setdefault("phase", diagnostic.get("operation") or "Work.run")
             failure["result_path"] = str(result_path) if result_path is not None else None
         observations: list[dict[str, Any]] = []
-        chart_filter: dict[str, list[str]] = {}
+        chart_filter: dict[str, Any] = {}
         metrics_truncated = False
         for path in metric_paths:
             text, truncated = self._read_bounded_file(transport, path, limit=16 * 1024 * 1024)
@@ -650,6 +677,11 @@ class JobService:
                         for field in ("include", "exclude")
                         if isinstance(value.get(field), list)
                     }
+                    if isinstance(value.get("display_names"), Mapping):
+                        chart_filter["display_names"] = {
+                            str(name): str(label)
+                            for name, label in value["display_names"].items()
+                        }
                     continue
                 metric = value.get("value")
                 step = value.get("step")
@@ -705,12 +737,24 @@ class JobService:
             "gpu_token": selected.get("gpu_token"),
             "parameters": candidate_parameters or dict(selected.get("parameters", {})),
             "objective": dict(objective),
+            "current_observed_objective": selected.get("current_observed_objective"),
+            "best_observed_objective": selected.get(
+                "best_observed_objective", best_objective
+            ),
+            "final_objective": selected.get("final_objective"),
+            "objective_status": dict(selected.get("objective_status", {}))
+            if isinstance(selected.get("objective_status"), Mapping)
+            else {},
+            "current_step": selected.get("latest_step"),
             "best_step": best_step,
             "best_objective": best_objective,
             "chart_filter": chart_filter,
             "started_at_utc": selected.get("started_at_utc"),
             "finished_at_utc": selected.get("finished_at_utc"),
             "duration_seconds": selected.get("duration_seconds"),
+            "resources": dict(selected.get("resources", {}))
+            if isinstance(selected.get("resources"), Mapping)
+            else {},
             "failure": failure,
             "prune_reason": selected.get("prune_reason"),
             "latest_metrics": {**dict(selected.get("latest_metrics", {})), **latest},
@@ -1081,12 +1125,27 @@ class JobService:
                     previous = None
                 now = datetime.now(timezone.utc).isoformat()
                 state = JobState(str(state_value.get("state", JobState.UNKNOWN.value)))
+                previous_remote = (
+                    previous.metadata.get("remote_state", {}) if previous is not None else {}
+                )
+                previous_remote = (
+                    dict(previous_remote) if isinstance(previous_remote, Mapping) else {}
+                )
+                # Provider state files contain the current scheduler/supervisor facts,
+                # not every piece of scientific telemetry observed earlier.  Merging
+                # preserves durable Study evidence when a terminal inventory is terser
+                # than the preceding live refresh.
+                reconciled_remote = {**previous_remote, **dict(state_value)}
+                if isinstance(previous_remote.get("study"), Mapping) and not isinstance(
+                    state_value.get("study"), Mapping
+                ):
+                    reconciled_remote["study"] = dict(previous_remote["study"])
                 record = (
                     previous.with_updates(
                         state=state,
                         metadata={
                             **dict(previous.metadata),
-                            "remote_state": dict(state_value),
+                            "remote_state": reconciled_remote,
                             "last_refresh_at_utc": now,
                         },
                         updated_at_utc=now,
@@ -1103,7 +1162,15 @@ class JobService:
                         resources=request.get("resources", {}),
                         created_at_utc=str(request.get("created_at_utc", now)),
                         updated_at_utc=now,
-                        metadata={"reconciled": True, "remote_state": state_value},
+                        metadata={
+                            "reconciled": True,
+                            "remote_state": reconciled_remote,
+                            **(
+                                {"study_expected": request["study_expected"]}
+                                if isinstance(request.get("study_expected"), bool)
+                                else {}
+                            ),
+                        },
                         job_type="command",
                     )
                 )

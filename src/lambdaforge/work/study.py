@@ -337,7 +337,9 @@ class StudyTelemetry:
         with self._lock:
             current = self._read(self.root / "controller.json")
             recent = [value for value in current.get("recent", ()) if isinstance(value, dict)]
-            recent.append(dict(event))
+            persisted_event = dict(event)
+            self._append_controller_event(persisted_event)
+            recent.append(persisted_event)
             belief = event.get("surrogate_belief")
             if not isinstance(belief, Mapping):
                 belief = current.get("surrogate_belief")
@@ -347,10 +349,29 @@ class StudyTelemetry:
                     "controller_telemetry_version": 1,
                     "last": dict(event),
                     "recent": recent[-25:],
+                    "history_count": int(current.get("history_count", 0)) + 1,
                     "surrogate_belief": dict(belief) if isinstance(belief, Mapping) else None,
                     "updated_at_utc": _now(),
                 },
             )
+
+    def _append_controller_event(self, event: Mapping[str, Any]) -> None:
+        """Append one complete decision without making the live summary unbounded."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self.root / "controller-history.jsonl"
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            payload = (
+                json.dumps(dict(event), sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            with os.fdopen(descriptor, "ab", closefd=False) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(descriptor)
 
     def admission_state(self, diagnostics: Mapping[str, Any]) -> None:
         """Publish the current bounded resource-admission explanation."""

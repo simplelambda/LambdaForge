@@ -185,7 +185,12 @@
             {"type": "string", "pattern": "^\\s*[0-9]+(?:\\.[0-9]+)?\\s*[smhd]\\s*$"}
           ]
         },
-        "convergence_patience": {"type": "integer", "minimum": 0},
+        "convergence_patience": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Optional number of full-fidelity non-record results before proposals stop; zero disables record-streak convergence and consumes the candidate budget."
+        },
         "min_improvement": {"type": "number", "minimum": 0},
         "sampler": {"enum": ["auto", "knn", "botorch"]},
         "fidelity": {

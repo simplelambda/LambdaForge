@@ -28,6 +28,45 @@ _TOP_FIELDS = frozenset(
 _RUN_FIELDS = frozenset({"name", "run", "with", "resources", "seeds", "search", "objective"})
 
 
+class WorkYamlError(yaml.YAMLError):
+    """Readable syntax error for an authored Work YAML document."""
+
+
+def _yaml_error_message(source: Path, text: str, error: yaml.YAMLError) -> str:
+    """Turn PyYAML parser internals into a bounded, source-aware diagnostic."""
+    problem = str(getattr(error, "problem", "") or "invalid YAML syntax").strip().rstrip(".")
+    context = str(getattr(error, "context", "") or "").strip().rstrip(".")
+    problem_mark = getattr(error, "problem_mark", None)
+    context_mark = getattr(error, "context_mark", None)
+    mark = (
+        context_mark
+        if context.lower() == "while scanning a simple key" and context_mark is not None
+        else problem_mark or context_mark
+    )
+    lines = text.splitlines()
+    location = ""
+    excerpt = ""
+    hint = "Review the indicated YAML indentation, key and ':' separator."
+    if mark is not None:
+        line_number = int(mark.line) + 1
+        column_number = int(mark.column) + 1
+        location = f" at line {line_number}, column {column_number}"
+        if 0 <= int(mark.line) < len(lines):
+            raw_line = lines[int(mark.line)].expandtabs(4)
+            visible_line = raw_line[:160]
+            caret_column = min(max(int(mark.column), 0), len(visible_line))
+            excerpt = f"\n  {line_number:>4} | {visible_line}\n       | {' ' * caret_column}^"
+            if raw_line.strip() and ":" not in raw_line:
+                hint = (
+                    "This line is a standalone value. Remove it if it is accidental, or write "
+                    "it as a YAML key followed by ':'."
+                )
+    detail = problem
+    if context and context.lower() not in problem.lower():
+        detail = f"{problem} ({context})"
+    return f"Invalid YAML in {source}{location}: {detail}.{excerpt}\nHint: {hint}"
+
+
 @dataclass(frozen=True, slots=True)
 class WorkValidationReport:
     """Side-effect-free validation facts for one Work document."""
@@ -119,7 +158,11 @@ class WorkConfig:
     def from_yaml(cls, path: str | Path) -> WorkConfig:
         """Parse and validate one current Work YAML document."""
         source = Path(path).expanduser().resolve()
-        value = yaml.safe_load(source.read_text(encoding="utf-8"))
+        text = source.read_text(encoding="utf-8")
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError as error:
+            raise WorkYamlError(_yaml_error_message(source, text, error)) from error
         if not isinstance(value, Mapping):
             raise TypeError("LambdaForge YAML must contain one mapping.")
         return cls.from_mapping(value, source=source)
@@ -211,7 +254,12 @@ class WorkConfig:
         try:
             config = cls.from_yaml(source)
         except Exception as error:
-            return WorkValidationReport(source, None, False, (f"{type(error).__name__}: {error}",))
+            message = (
+                str(error)
+                if isinstance(error, WorkYamlError)
+                else f"{type(error).__name__}: {error}"
+            )
+            return WorkValidationReport(source, None, False, (message,))
         errors = config.validation_errors(check_inputs=True)
         classes = tuple(run.work_class for level in config.levels for run in level.runs)
         return WorkValidationReport(source, config.name, not errors, tuple(errors), classes)

@@ -98,6 +98,9 @@ class LightningTrainConfig:
         Optional shell-style key patterns selecting the scalar curves shown in
         Research Console. Collection remains complete; these fields only control the
         compact interactive dashboard.
+    epoch_metric_display_names
+        Optional mapping from raw metric keys to concise labels used only by the Research
+        Console. Metric identity, objective lookup and persisted values remain unchanged.
     """
 
     max_epochs: int = 10
@@ -140,6 +143,7 @@ class LightningTrainConfig:
     epoch_console_exclude: list[str] | None = None
     epoch_chart_include: list[str] | None = None
     epoch_chart_exclude: list[str] | None = None
+    epoch_metric_display_names: dict[str, str] | None = None
     trainer_kwargs: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
@@ -181,5 +185,14 @@ class LightningTrainConfig:
                 raise TypeError(f"{field_name} must be a list of patterns, not a string.")
             if patterns is not None:
                 setattr(self, field_name, [str(pattern) for pattern in patterns])
+
+        if self.epoch_metric_display_names is not None:
+            if not isinstance(self.epoch_metric_display_names, dict):
+                raise TypeError("epoch_metric_display_names must be a mapping of metric to label.")
+            self.epoch_metric_display_names = {
+                str(name): str(label).strip()
+                for name, label in self.epoch_metric_display_names.items()
+                if str(label).strip()
+            }
 
         self.trainer_kwargs = dict(self.trainer_kwargs or {})

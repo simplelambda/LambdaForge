@@ -414,6 +414,11 @@ class DatasetService:
                 payload.update(method(Path(placement.root), record, schema))
         return payload
 
+    def summary(self, selector: str, *, cluster: str | None = None) -> dict[str, Any]:
+        """Return exact logical counts without hashing or walking dataset asset trees."""
+        _, placement = self._physical_placement(selector, cluster)
+        return self._operation(placement.cluster, "summary", placement.root)
+
     def members(
         self,
         selector: str,
@@ -599,6 +604,62 @@ class DatasetService:
             resolution.state.value,
             consumers,
         )
+
+    def delete_version(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
+        """Preview or remove every placement and then forget one logical DatasetVersion.
+
+        The operation deliberately converges when a registered placement directory was
+        already removed outside LambdaForge.  Reachability, immutable identity and active
+        consumers are still checked for every remaining placement before any mutation.
+        """
+        try:
+            record = self.show(selector)
+        except UnknownDatasetError:
+            return {
+                "dataset": selector,
+                "safe": True,
+                "applied": bool(apply),
+                "already_deleted": True,
+                "placements": [],
+                "action": "NOOP",
+            }
+        plans = [
+            self.delete(record.key, cluster=value.cluster, apply=False)
+            for value in record.placements
+        ]
+        safe = all(plan.safe for plan in plans)
+        if not record.placements:
+            safe = True
+        payload = {
+            "dataset": record.key,
+            "dataset_id": record.dataset_id,
+            "safe": safe,
+            "applied": False,
+            "already_deleted": False,
+            "action": "DELETE_DATASET_VERSION",
+            "placements": [plan.to_dict() for plan in plans],
+            "will_remove": [
+                "every safe managed placement listed below",
+                "controller and target registry entries for this exact DatasetVersion",
+            ],
+            "will_preserve": [
+                "consumer project files",
+                "other DatasetVersions and unrelated managed data",
+            ],
+        }
+        if apply:
+            if not safe:
+                reasons = [reason for plan in plans for reason in plan.reasons]
+                raise UnsafeDatasetOperationError(
+                    "DatasetVersion deletion is unsafe: " + " ".join(reasons)
+                )
+            for plan in plans:
+                self.delete(record.key, cluster=plan.cluster, apply=True)
+                if plan.cluster != "local":
+                    self._forget_remote(record.key, plan.cluster)
+            self.registry.discard(record.key)
+            payload["applied"] = True
+        return payload
 
     def reconcile(self, selector: str, *, cluster: str, apply: bool = False) -> dict[str, Any]:
         """Preview or apply only identity-preserving placement-index repairs."""
@@ -1101,12 +1162,38 @@ class DatasetService:
         if result.returncode:
             raise RuntimeError(f"Could not remove remote dataset registration: {result.stderr}")
 
+    def _forget_remote(self, selector: str, cluster: str) -> None:
+        """Idempotently remove the logical record after all target placements are gone."""
+        profile = self.clusters.get(cluster)
+        assert profile.storage is not None
+        transport = self.factory.transport(profile)
+        registry = str(PurePosixPath(profile.storage.state_root) / "datasets.json")
+        code = (
+            "import sys; from lambdaforge.data import DatasetRegistry; "
+            "DatasetRegistry(sys.argv[1]).discard(sys.argv[2])"
+        )
+        result = transport.run(
+            (
+                *profile.command_prefix,
+                self._python(cluster, transport),
+                "-c",
+                code,
+                registry,
+                selector,
+            ),
+            timeout=30.0,
+        )
+        if result.returncode:
+            raise RuntimeError(f"Could not forget remote dataset registration: {result.stderr}")
+
     def _operation(
         self, cluster: str, operation: str, root: str, *arguments: str
     ) -> dict[str, Any]:
         if cluster == "local":
             if operation == "inspect":
                 return DatasetOperations.inspect(root)
+            if operation == "summary":
+                return DatasetOperations.summary(root)
             if operation == "stats":
                 return DatasetOperations.stats(root)
             if operation == "verify":

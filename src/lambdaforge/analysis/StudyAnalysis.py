@@ -21,7 +21,7 @@ from lambdaforge.analysis.Evidence import (
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.work.atomic import atomic_write_json
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 
 
 class StudyAnalysis:
@@ -51,27 +51,36 @@ class StudyAnalysis:
         bootstrap_replicates = (
             2000 if resolved_status == "final" else provisional_bootstrap_replicates
         )
+        policy = cls._search_policy(source)
+        equivalence_margin = cls._equivalence_margin(policy)
         aggregates = candidate_statistics(
             candidates,
             mode=mode,
             fingerprint=fingerprint,
             bootstrap_replicates=bootstrap_replicates,
         )
-        winner = winner_summary(aggregates, mode=mode)
+        winner = winner_summary(
+            aggregates,
+            mode=mode,
+            equivalence_margin=equivalence_margin,
+        )
         space = infer_space(aggregates, authored_space)
         surrogate = validate_surrogate(aggregates, space)
+        coverage, pool, boundaries = analyze_coverage(
+            aggregates,
+            space=space,
+            mode=mode,
+            fingerprint=fingerprint,
+            proposal_pool_size=cls._proposal_pool_size(source, policy),
+        )
         effects = analyze_effects(
             aggregates,
             space=space,
             mode=mode,
             fingerprint=fingerprint,
             provisional=resolved_status == "provisional",
-        )
-        coverage, pool, boundaries = analyze_coverage(
-            aggregates,
-            space=space,
-            mode=mode,
-            fingerprint=fingerprint,
+            surrogate_diagnostics=surrogate,
+            coverage_quality=str(coverage.get("joint", {}).get("quality", "insufficient")),
         )
         seeds = seed_stability(
             aggregates,
@@ -79,7 +88,11 @@ class StudyAnalysis:
             fingerprint=fingerprint,
             replicates=bootstrap_replicates,
         )
-        resources = resource_analysis(aggregates, mode=mode)
+        resources = resource_analysis(
+            aggregates,
+            mode=mode,
+            equivalence_margin=equivalence_margin,
+        )
         comparisons = cls._comparisons(aggregates, winner=winner, mode=mode)
         constraint_summary = cls._constraints(aggregates)
         pareto = cls._component_pareto(aggregates, normalized_objective)
@@ -107,6 +120,7 @@ class StudyAnalysis:
             },
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "objective": normalized_objective,
+            "search_space": space,
             "summary": {
                 "candidate_count": len(aggregates),
                 "complete_candidate_count": sum(
@@ -146,6 +160,11 @@ class StudyAnalysis:
                 "fidelity_policy": "full-fidelity terminal Runs only for final ranking",
                 "pruned_policy": (
                     "retained as censored observed evidence, excluded from final seed means"
+                ),
+                "top_region_source": "observed-candidate-ranking",
+                "resource_cost_policy": (
+                    "intrinsic median per comparable full-fidelity Run is separate from "
+                    "controller total spend"
                 ),
             },
         }
@@ -341,6 +360,48 @@ class StudyAnalysis:
                 "note": "Retrospective CurveEvidence audit was not persisted for this study.",
             }
         return {"status": "unavailable"}
+
+    @staticmethod
+    def _search_policy(source: Mapping[str, Any]) -> dict[str, Any]:
+        controller = source.get("controller")
+        if not isinstance(controller, Mapping):
+            return {}
+        recent = controller.get("recent", ())
+        if isinstance(recent, Sequence) and not isinstance(recent, str | bytes):
+            for event in reversed(recent):
+                if (
+                    isinstance(event, Mapping)
+                    and event.get("action") == "INITIALIZE"
+                    and isinstance(event.get("policy"), Mapping)
+                ):
+                    return dict(event["policy"])
+        latest = controller.get("last")
+        if isinstance(latest, Mapping) and isinstance(latest.get("policy"), Mapping):
+            return dict(latest["policy"])
+        return {}
+
+    @staticmethod
+    def _equivalence_margin(policy: Mapping[str, Any]) -> float | None:
+        seed_racing = policy.get("seed_racing")
+        if isinstance(seed_racing, Mapping) and isinstance(
+            seed_racing.get("equivalence_margin"), int | float
+        ):
+            return float(seed_racing["equivalence_margin"])
+        value = policy.get("equivalence_margin")
+        return float(value) if isinstance(value, int | float) else None
+
+    @staticmethod
+    def _proposal_pool_size(source: Mapping[str, Any], policy: Mapping[str, Any]) -> int | None:
+        value = policy.get("proposal_pool_size")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        controller = source.get("controller")
+        recent = controller.get("recent", ()) if isinstance(controller, Mapping) else ()
+        if isinstance(recent, Sequence) and not isinstance(recent, str | bytes):
+            for event in reversed(recent):
+                if isinstance(event, Mapping) and isinstance(event.get("proposal_pool_size"), int):
+                    return int(event["proposal_pool_size"])
+        return None
 
 
 __all__ = ["ANALYSIS_VERSION", "StudyAnalysis"]

@@ -6,6 +6,7 @@ import shlex
 import stat
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
+from threading import Lock
 from typing import Any
 
 from lambdaforge.controlplane.CommandResult import CommandResult
@@ -48,6 +49,7 @@ class PasswordSshTransport(Transport):
         self._password_provider = password_provider
         self._paramiko_module = paramiko_module
         self._client: Any | None = None
+        self._connection_lock = Lock()
 
     def __repr__(self) -> str:
         return (
@@ -123,50 +125,57 @@ class PasswordSshTransport(Transport):
 
     def close(self) -> None:
         """Close the reusable SSH connection, if opened."""
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        with self._connection_lock:
+            if self._client is not None:
+                self._client.close()
+                self._client = None
 
     def _connection(self) -> Any:
         if self._client is not None:
             return self._client
-        module = self._paramiko_module or self._import_paramiko()
-        client = module.SSHClient()
-        client.load_system_host_keys()
-        if self.known_hosts is not None:
-            if not self.known_hosts.is_file():
-                raise RuntimeError(
-                    f"Configured known_hosts file does not exist: {self.known_hosts}."
+        # Console services intentionally share one transport.  Serialize the lazy
+        # Paramiko handshake so simultaneous overview/resource/dataset requests do
+        # not authenticate several clients and race to replace ``_client``.
+        with self._connection_lock:
+            if self._client is not None:
+                return self._client
+            module = self._paramiko_module or self._import_paramiko()
+            client = module.SSHClient()
+            client.load_system_host_keys()
+            if self.known_hosts is not None:
+                if not self.known_hosts.is_file():
+                    raise RuntimeError(
+                        f"Configured known_hosts file does not exist: {self.known_hosts}."
+                    )
+                client.load_host_keys(str(self.known_hosts))
+            client.set_missing_host_key_policy(module.RejectPolicy())
+            password = self._password_provider()
+            try:
+                client.connect(
+                    hostname=self.host,
+                    port=self.port,
+                    username=self.user,
+                    password=password,
+                    timeout=self.timeout,
+                    banner_timeout=self.banner_timeout,
+                    auth_timeout=self.auth_timeout,
+                    look_for_keys=False,
+                    allow_agent=False,
                 )
-            client.load_host_keys(str(self.known_hosts))
-        client.set_missing_host_key_policy(module.RejectPolicy())
-        password = self._password_provider()
-        try:
-            client.connect(
-                hostname=self.host,
-                port=self.port,
-                username=self.user,
-                password=password,
-                timeout=self.timeout,
-                banner_timeout=self.banner_timeout,
-                auth_timeout=self.auth_timeout,
-                look_for_keys=False,
-                allow_agent=False,
-            )
-        except Exception as error:
-            client.close()
-            message = SecretRedactor.redact(error, (password,))
-            raise RuntimeError(
-                f"Password SSH authentication/host-key verification failed for {self.host!r}: "
-                f"{message}"
-            ) from None
-        finally:
-            del password
-        transport = client.get_transport() if hasattr(client, "get_transport") else None
-        if transport is not None and self.keepalive > 0:
-            transport.set_keepalive(int(self.keepalive))
-        self._client = client
-        return client
+            except Exception as error:
+                client.close()
+                message = SecretRedactor.redact(error, (password,))
+                raise RuntimeError(
+                    f"Password SSH authentication/host-key verification failed for {self.host!r}: "
+                    f"{message}"
+                ) from None
+            finally:
+                del password
+            transport = client.get_transport() if hasattr(client, "get_transport") else None
+            if transport is not None and self.keepalive > 0:
+                transport.set_keepalive(int(self.keepalive))
+            self._client = client
+            return client
 
     @staticmethod
     def _import_paramiko() -> Any:

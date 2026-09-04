@@ -348,6 +348,9 @@ class DatasetIndex:
         partitions: dict[str, Counter[str]] = defaultdict(Counter)
         asset_types: Counter[str] = Counter()
         targets: dict[str, Counter[str]] = defaultdict(Counter)
+        partition_targets: dict[str, dict[str, dict[str, Counter[str]]]] = defaultdict(
+            lambda: defaultdict(lambda: defaultdict(Counter))
+        )
         members = 0
         missing_assets = 0
         for member in self:
@@ -356,6 +359,12 @@ class DatasetIndex:
                 partitions[name][str(value)] += 1
             for name, value in member.targets.items():
                 targets[name][json.dumps(value, sort_keys=True, default=str)] += 1
+            for partition_name, partition_value in member.partitions.items():
+                selected = partition_targets[partition_name][str(partition_value)]
+                for target_name, target_value in member.targets.items():
+                    selected[target_name][
+                        json.dumps(target_value, sort_keys=True, default=str)
+                    ] += 1
             for asset in member.assets.values():
                 asset_types[asset.kind] += 1
                 if asset.sha256 is None:
@@ -367,6 +376,16 @@ class DatasetIndex:
             },
             "targets": {
                 name: dict(sorted(counts.items())) for name, counts in sorted(targets.items())
+            },
+            "partition_targets": {
+                partition_name: {
+                    partition_value: {
+                        target_name: dict(sorted(counts.items()))
+                        for target_name, counts in sorted(target_values.items())
+                    }
+                    for partition_value, target_values in sorted(partition_values.items())
+                }
+                for partition_name, partition_values in sorted(partition_targets.items())
             },
             "asset_types": dict(sorted(asset_types.items())),
             "assets_without_checksum": missing_assets,

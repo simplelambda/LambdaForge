@@ -6,7 +6,7 @@ import json
 import math
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,7 @@ class AdaptiveHpoCallback(CallbackBase):
         chart_include: Sequence[str] | None = None,
         chart_exclude: Sequence[str] | None = None,
         objective: ObjectiveUtility | None = None,
+        display_names: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.metric = metric
@@ -34,6 +35,9 @@ class AdaptiveHpoCallback(CallbackBase):
         self.training_metrics_path = training_metrics_path
         self.chart_include = tuple(str(value) for value in chart_include or ())
         self.chart_exclude = tuple(str(value) for value in chart_exclude or ())
+        self.display_names = {
+            str(name): str(label) for name, label in (display_names or {}).items()
+        }
         self.objective = objective
         self._validation_started: float | None = None
         self._epoch_started: float | None = None
@@ -47,6 +51,7 @@ class AdaptiveHpoCallback(CallbackBase):
         *,
         chart_include: Sequence[str] | None = None,
         chart_exclude: Sequence[str] | None = None,
+        display_names: Mapping[str, str] | None = None,
     ) -> AdaptiveHpoCallback | None:
         metric = os.environ.get("LAMBDAFORGE_HPO_OBJECTIVE")
         metrics = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
@@ -65,9 +70,10 @@ class AdaptiveHpoCallback(CallbackBase):
             Path(metrics) if adaptive and metrics else None,
             Path(stop) if adaptive and stop else None,
             Path(training) if training else None,
-            chart_include,
-            chart_exclude,
-            ObjectiveUtility(decoded) if isinstance(decoded, dict) else None,
+            chart_include=chart_include,
+            chart_exclude=chart_exclude,
+            objective=ObjectiveUtility(decoded) if isinstance(decoded, dict) else None,
+            display_names=display_names,
         )
 
     def on_train_epoch_start(self, trainer: Any, *_: Any) -> None:
@@ -127,14 +133,19 @@ class AdaptiveHpoCallback(CallbackBase):
             return
         self.training_metrics_path.parent.mkdir(parents=True, exist_ok=True)
         with self.training_metrics_path.open("a", encoding="utf-8") as handle:
-            if not self._chart_filter_written and (self.chart_include or self.chart_exclude):
+            if not self._chart_filter_written and (
+                self.chart_include or self.chart_exclude or self.display_names
+            ):
+                chart_record: dict[str, Any] = {
+                    "kind": "chart-filter",
+                    "include": list(self.chart_include),
+                    "exclude": list(self.chart_exclude),
+                }
+                if self.display_names:
+                    chart_record["display_names"] = self.display_names
                 handle.write(
                     json.dumps(
-                        {
-                            "kind": "chart-filter",
-                            "include": list(self.chart_include),
-                            "exclude": list(self.chart_exclude),
-                        },
+                        chart_record,
                         sort_keys=True,
                         separators=(",", ":"),
                     )

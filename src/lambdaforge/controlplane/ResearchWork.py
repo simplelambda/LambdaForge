@@ -66,6 +66,7 @@ class ResearchWork:
     updated_at_utc: str
     study: Mapping[str, Any] | None = None
     study_expected: bool = False
+    study_job_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stable additive read-model payload used by TUI and wrappers."""
@@ -90,6 +91,7 @@ class ResearchWork:
             "updated_at_utc": self.updated_at_utc,
             "study": copy.deepcopy(self.study) if self.study is not None else None,
             "study_expected": self.study_expected,
+            "study_job_id": self.study_job_id,
         }
 
 
@@ -135,12 +137,29 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
         )
         remote = primary.metadata.get("remote_state", {})
         remote = remote if isinstance(remote, dict) else {}
-        study_value = remote.get("study")
-        observed_study = dict(study_value) if isinstance(study_value, Mapping) else None
-        declared_study = primary.metadata.get("study_expected")
+        observed_study: dict[str, Any] | None = None
+        study_job_id: str | None = None
+        # Terminal provider reconciliation may contain less detail than an earlier
+        # live observation.  Study identity and telemetry are durable history, so use
+        # the newest Attempt that actually observed them instead of making a failed
+        # Study disappear into the generic Work list.
+        for candidate_record in reversed(ordered):
+            candidate_remote = candidate_record.metadata.get("remote_state", {})
+            if not isinstance(candidate_remote, Mapping):
+                continue
+            study_value = candidate_remote.get("study")
+            if isinstance(study_value, Mapping):
+                observed_study = dict(study_value)
+                study_job_id = candidate_record.job_id
+                break
+        declared_studies = [
+            value.metadata.get("study_expected")
+            for value in ordered
+            if isinstance(value.metadata.get("study_expected"), bool)
+        ]
         study_expected = (
-            declared_study
-            if isinstance(declared_study, bool)
+            any(declared_studies)
+            if declared_studies
             else _is_parameter_study_summary(observed_study)
         )
         study = observed_study if study_expected else None
@@ -188,6 +207,7 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
                 max(record.updated_at_utc for record in ordered),
                 study,
                 study_expected,
+                study_job_id,
             )
         )
     return tuple(sorted(output, key=lambda value: value.updated_at_utc, reverse=True))

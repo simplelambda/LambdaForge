@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.jobs import JobRecord, JobState
@@ -139,6 +141,109 @@ def test_research_work_ignores_legacy_single_run_telemetry_for_normal_work() -> 
     assert works["preprocessing"]["study"] is None
     assert works["training"]["study_expected"] is True
     assert works["training"]["study"] is not None
+
+
+def test_failed_latest_attempt_preserves_study_identity_and_last_telemetry() -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    study = {
+        "study_telemetry_version": 1,
+        "planned_runs": 4,
+        "candidates": [{"trial": 1, "runs": [{"seed": 4}, {"seed": 7}]}],
+    }
+    live = JobRecord(
+        "job-study-live",
+        "local",
+        "local",
+        "provider-live",
+        JobState.FAILED,
+        ("python", "work.py"),
+        "/tmp/work",
+        {},
+        now,
+        now,
+        metadata={
+            "name": "training",
+            "scientific_identity": "sha256:study-history",
+            "study_expected": True,
+            "remote_state": {"study": study},
+        },
+        job_type="work",
+    )
+    terminal_retry = live.with_updates(
+        job_id="job-study-terminal",
+        scheduler_id="provider-terminal",
+        retry_of=live.job_id,
+        metadata={
+            "name": "training",
+            "scientific_identity": "sha256:study-history",
+            "study_expected": True,
+            "remote_state": {"state": "failed"},
+        },
+    )
+
+    work = aggregate_research_work((live, terminal_retry))[0].to_dict()
+
+    assert work["state"] == "failed"
+    assert work["study_expected"] is True
+    assert work["study"] == study
+    assert work["study_job_id"] == live.job_id
+
+
+def test_terminal_reconciliation_merges_provider_state_without_erasing_study(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = ClusterProfile("local", workspace=str(tmp_path))
+    catalog = ClusterCatalog({"local": profile})
+    store = JobStore(tmp_path / "jobs")
+    service = JobService(catalog, store)
+    now = datetime.now(timezone.utc).isoformat()
+    study = {
+        "study_telemetry_version": 1,
+        "planned_runs": 2,
+        "candidates": [{"trial": 1, "runs": [{"seed": 4}, {"seed": 7}]}],
+    }
+    store.write(
+        JobRecord(
+            "job-study",
+            "local",
+            "local",
+            "job-study",
+            JobState.RUNNING,
+            ("python", "work.py"),
+            str(tmp_path / "work"),
+            {},
+            now,
+            now,
+            metadata={
+                "name": "training",
+                "study_expected": True,
+                "remote_state": {"state": "running", "study": study},
+            },
+            job_type="work",
+        )
+    )
+    monkeypatch.setattr(
+        service,
+        "_inventory",
+        lambda _name: (
+            {
+                "request": {
+                    "job_id": "job-study",
+                    "command": ["python", "work.py"],
+                    "work_dir": str(tmp_path / "work"),
+                    "resources": {},
+                    "created_at_utc": now,
+                },
+                "state": {"state": "failed", "exit_code": 1},
+            },
+        ),
+    )
+
+    reconciled = service.reconcile(all_clusters=True)[0]
+
+    remote = reconciled.metadata["remote_state"]
+    assert remote["state"] == "failed"
+    assert remote["study"] == study
 
 
 def test_work_delete_previews_then_removes_only_exact_owned_job(tmp_path: Path) -> None:

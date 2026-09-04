@@ -151,6 +151,28 @@ runtime/result models crossing a spawned process boundary must remain pickle-saf
 raw `mappingproxy` through that boundary. Cache fetch retries incomplete HTTP/
 chunked/gzip transfers and transient statuses from clean unpublished temporaries; never add a
 consumer-side retry workaround. Human bootstrap progress is stderr-only and machine JSON is clean.
+The Research Console calls the same domain services in workers, shares one provider factory,
+serializes cluster operations and pauses resource probes during bootstrap. Its activity panel
+streams phases/elapsed liveness and is preset/drag resizable; the upper viewport stays scrollable
+with a protected minimum height. Mutation confirmations and modal plans render bounded semantic
+sections, never raw JSON. Hidden root screens must not load.
+Root loading indicators are first-snapshot-only. Later probes retain the last good read model,
+display its age and mark it stale on failure; Work rows and bounded Work logs refresh live with at
+most one request in flight per view.
+Run Work's picker filters to YAML; recents merge existing local Job history with a bounded MRU that
+persists only local path/name/time metadata.
+Browse/recent selection only populates one selector. The single Submit action must revalidate,
+explain and only then asynchronously submit to the captured visible cluster; disable repeated
+activation and expose every phase. Preview rendering is diagnostic only and must never block an
+already validated submission. Never treat MRU presence as validation or copy authored
+configuration into console state. Work display names are not keys: use exact `work_id` identities
+for rows and mutation selectors so simultaneous same-name executions remain independent.
+Keep YAML syntax failures source-aware and bounded: path, line/column, excerpt, caret and hint once.
+Dataset Summary may read the logical index but must not walk assets; Stats/Integrity remain explicit.
+Whole-version deletion previews every placement, confirms once and treats
+`registered_but_missing` as safe stale-index convergence before forgetting empty records. Its
+control remains visible and must immediately expose pending/success/failure state while preventing
+duplicate activation.
 Parameter studies are ordinary Works declaring `search` or multiple `seeds`, not a
 training-specific kind. `work.items[].study_expected` is available before execution telemetry;
 `study` becomes non-null
@@ -189,7 +211,8 @@ LCB evidence is infeasible. A utility component may also be constrained. Never
 infer guardrails or hidden multi-objective weights from other metrics. `runs_per_gpu` packs independent spawned Runs inside the fixed outer
 reservation; values >1 require per-Run `resources.gpu_memory`. This is a live free-VRAM threshold
 per new Run, while `runs_per_gpu` is only a maximum: temporarily full GPUs wait and are polled,
-other devices continue, and same-device launches are staggered. Reject only when no allocated GPU
+other devices continue, and same-device launches are staggered. Do not multiply the threshold by
+the active-Run count or maintain a second hidden reservation. Reject only when no allocated GPU
 has enough total VRAM. Every admitted GPU Run uses a fresh one-worker spawned process that exits on
 result/error; never restore a persistent CUDA pool because idle contexts retain VRAM and can
 deadlock queued Runs. GPU memory probing must remain a short-lived child process: the controller
@@ -199,7 +222,9 @@ safe boundary when `self.stop_requested` is true.
 
 Every adaptive CPU/GPU Run owns a fresh one-worker process. A lost/killed worker and CUDA OOM may
 retry as a new checkpoint-compatible Attempt up to `failure_retries` (default 1, max 3); a repeat is
-terminal. Never retry arbitrary consumer exceptions. One exhausted Run makes the enclosing Work
+terminal. A CUDA OOM lowers the in-memory study packing ceiling below the observed failing
+concurrency before the retry is readmitted; do not kill healthy siblings or retry forever. Never
+retry arbitrary consumer exceptions. One exhausted Run makes the enclosing Work
 honestly failed but must not cancel unrelated active/queued Runs. Telemetry records logical GPU
 index and exact inherited token; never infer or broaden physical devices from that display field.
 
@@ -239,8 +264,9 @@ Retrospective pruner quality lives in `hpo-control/state.json` → `pruner_calib
 simulated savings, false prunes, regret and probability/curve calibration without fabricating a
 full objective for censored Runs.
 
-The Research Console stays useful without a plotting dependency. Lightning
-study views label the objective, proposed/planned candidates, GPU and latest/best epoch. Lightning
+The scientific runtime never depends on rendering; the Research Console's base `textual-plot`
+widget only visualizes bounded telemetry. Lightning study views label the objective,
+proposed/planned candidates, GPU and latest/best epoch. Lightning
 projects choose displayed curves with `LightningTrainConfig(epoch_chart_include=[...],
 epoch_chart_exclude=[...])`; collection remains complete. `gpu_mem_mb` is peak live allocation,
 whereas `gpu_reserved_mb`/`gpu_peak_reserved_mb` are allocator-cache diagnostics. Never use reserved
@@ -262,19 +288,67 @@ renderer. Keep `current_observed_objective`, `best_observed_objective`, `final_o
 final score; missing composite components are structured.
 
 For a fixed evidence fingerprint, analysis is deterministic and separates screening from fresh-seed
-confirmation. It reports seed uncertainty and paired comparisons, candidate-level surrogate CV,
-global functional and top-region importance, adjusted responses, pair interactions/surfaces,
-coverage, boundaries, pool resolution, winner stability, pruning quality, constraints and
-resource/component Pareto. These are descriptive/predictive summaries, not causal claims. Sparse,
-extrapolated or poor-CV evidence must lower reliability explicitly. Live analysis is provisional;
-terminal analysis is final. Resource admission persists active/queued capacity and concrete
-GPU/CPU/RAM limitations; waiting is not scientific failure and `runs_per_gpu` is only a ceiling.
+confirmation. One leading seed is insufficient empirical stability; model-based seed uncertainty is
+separate. A central min/max order is mandatory. Surrogate metadata must describe the validation
+actually computed. Preserve authored conditional `when` predicates and validate every generated
+point. Reliability combines support, CV quality, coverage and extrapolation. Top-region findings
+must say observed or predicted; never imply an unpersisted proposal pool was measured. Confirmation
+uses the scientific equivalence margin. Keep per-comparable-Run intrinsic resources separate from
+total controller spend and scientific Pareto separate from resource Pareto. All effects remain
+descriptive/predictive, not causal. Live analysis is provisional; terminal analysis is final.
+
+Adaptive `trials` is the candidate budget and must be consumed by default; sparse coverage or low
+analysis confidence is not convergence. Record-streak convergence is opt-in only through a positive
+`convergence_patience` (zero/omitted disables it), and every terminal controller snapshot must
+persist FINISH plus its exact budget/pool/explicit-convergence reason before final analysis.
+Keep the deterministic proposal pool once in planning state. Per-Run specifications contain only
+their candidate/seed values and a compact definition; never embed or copy the complete pool into
+each specification, because valid large Studies must have linear planner memory.
 
 Bare `lf` opens the Textual Research Console only on a TTY; non-TTY or no-command `--json` prints
-help. The six primary screens are Overview, Work, Studies, Clusters, Datasets and Results; `Ctrl+P`
-exposes the explicit action inventory. Widgets call Python domain services directly, and slow
-providers run outside the event loop. Preserve last successful data as visibly stale after
+help. Overview has separate Cluster, ordinary Work and Study panels, bounded resource history and
+no raw JSON preview. Resource and learning-curve plots use the declared native `textual-plot`
+widget; do not add a second chart renderer or persist the TUI's bounded samples. Resource history
+uses a fixed five-minute window and an external colour key. Refresh must preserve focused panel and
+stable entity key. Cluster and Dataset views use semantic cards/bounded sections, not provider JSON.
+Root loading indicators are first-snapshot-only; subsequent refreshes retain and age the last good
+snapshot. Work rows and bounded Work logs poll live with one request in flight per view.
+A terminal `study_expected` Work remains in Studies and uses `study_job_id` to
+read the latest telemetry-bearing Attempt. The six primary screens are Overview, Work, Studies,
+Clusters, Datasets and Results. Real
+navigation is `Study -> Trial -> Seed -> Epoch`; Enter/right pushes, while Esc/left or the Back
+button pops one level; ancestor breadcrumbs pop the same real stack. Remote Study/Seed reads must
+show loading/error states rather than empty evidence. Seed views preserve
+current/best/final/selection semantics, censored prunes,
+four-chart pages selectable by mouse or `n`/`p`, a horizontally scrollable all-scalar epoch table,
+GPU/resources and isolated logs. Analysis views consume the persisted JSON.
+The HPO tab consumes that same analysis: authored/observed/promising parameter domains, reliability,
+response uncertainty/support, empirical dispersion, pair interactions and the complete persisted
+Action/Trial/Reason controller history. It must not fit another model or imply causality.
+Before an Execution result exists, use the bounded live `study.hpo_analysis` through the shared
+analysis service; never hide live parameter evidence merely because final Results are unavailable.
+Metric page changes reset reused plots to automatic limits; user pan/zoom applies only to the
+currently displayed page. Plot categories with their real labels and expose exact point/bar values
+on click. Keep terminal uncertainty numeric rather than drawing misleading pseudo-bands; explicit
+optional Plotly exports may show genuine shaded intervals, hover, pairwise heatmaps and numeric 3D
+surfaces. Coverage uses bounded cards/charts/tables, not raw JSON, and contextual help explains
+statistical terms. Decisions append to `study/controller-history.jsonl`; keep
+`controller.json.recent` bounded, load the full
+history only on explicit drill-down and retain the available tail for legacy Studies without that
+file. Internal
+metric keys remain stable; human labels may be supplied by
+`LightningTrainConfig.epoch_metric_display_names`, and automatic labels must never expose
+`__lambdaforge_utility__` instead of “Composite selection score”. Keep trial markers in a separate
+column from identifiers.
+`Ctrl+P` may list only operations with functioning handlers; inventory names are not parity.
+Widgets call Python domain services directly, and slow providers run outside the event loop.
+Preserve selection/epoch/log scroll across refresh and last good data as visibly stale after a
 transient failure. Destructive actions retain exact-target confirmation and preview/apply safety.
+Treat `study: null` as unavailable evidence: open the Study/log workspace and attempt a bounded
+service reload instead of converting it blindly or demoting it to ordinary Work.
+Study cancellation is a semantic Work operation and must remain available before telemetry exists.
+Recurring refresh/provider failures render inline stale/error state; they must not emit a toast on
+every polling interval.
 `lf top`, `lf clusters setup` and `lf clusters modify` are retired public routes; do not restore a
 second interactive implementation.
 
@@ -307,7 +381,9 @@ Keep `Transport` and `Scheduler` provider boundaries. OpenSSH multiplexing reuse
 ControlMaster for its configured idle period. Credentials stay in interactive/keyring/env sources
 and never enter argv, YAML, bundles, state or logs. Managed Python environments are immutable,
 user-space and wheel-identified; do not modify system Python, CUDA, drivers or shell startup files.
-CUDA usability requires an actual tensor probe, not `nvidia-smi` alone.
+CUDA usability requires an actual tensor probe, not `nvidia-smi` alone. Transient HPO GPU-memory
+probe errors pause admission and preserve active Runs; never turn one observation failure into
+whole-Study cancellation or launch from stale memory data.
 
 Cluster `gpu_access.mode` is `auto|scheduler|exclusive|shared|command`. Auto selects scheduler for
 SLURM and exclusive cooperative leases for direct hosts. Shared admits external occupancy only when
@@ -316,11 +392,18 @@ claim wrapper; never encode it as shell. Prefer a self-contained `gpu exec`-styl
 `claim_command` and `release_command` are an atomic pair; only `{gpu_count}` expands, the direct
 supervisor releases on every terminal path, and persistent claims are invalid with SLURM. In
 command/scheduler modes inherited `CUDA_VISIBLE_DEVICES` tokens are opaque grants: never replace or
-broaden them, and fail closed when missing/duplicate/insufficient. The Research Console edits the
+broaden them. Missing/duplicate grants fail closed; scheduler grants are exact, while an adaptive
+Study behind a command launcher may safely scale down to fewer non-empty inherited tokens. The
+Research Console edits the
 same catalog and credential services as native commands and never shells out to `lf`. Direct versus
 SLURM selects process launch; GPU wrappers/claims are the separate `gpu_access` policy, so
 `gpu exec` normally uses Direct. Superseded managed
 environments are pruned only after a verified replacement is active and live-Job references are protected.
+The Add/Edit modal must round-trip the complete durable `ClusterProfile`: guided common identity,
+runtime, storage, SSH and GPU policies plus validated Advanced YAML for uncommon OpenSSH/SLURM
+mappings. Revalidate with `ClusterProfile.from_mapping` before atomic persistence. Never put a
+password value in editor/profile state; edit only its safe reference and leave secret mutation to
+the credential service.
 
 Direct/SLURM jobs retain durable state, heartbeat, logs, usage, cancellation and identity checks.
 Provider outage is unknown state, not scientific failure. Do not contact a real cluster or run a

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
+from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.JobObservation import JobObservation
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.ResearchWork import aggregate_research_work
@@ -17,13 +18,18 @@ from lambdaforge.data.DatasetService import DatasetService
 class OverviewService:
     """Compose existing services; do not create another source of truth."""
 
-    def __init__(self, catalog: ClusterCatalog | None = None) -> None:
+    def __init__(
+        self,
+        catalog: ClusterCatalog | None = None,
+        factory: ControlPlaneFactory | None = None,
+    ) -> None:
         self.catalog = catalog or ClusterCatalog.load()
+        self.factory = factory or ControlPlaneFactory()
 
     def snapshot(self) -> dict[str, Any]:
-        jobs = JobService(self.catalog)
-        resources = ResourceService(self.catalog)
-        datasets = DatasetService(clusters=self.catalog)
+        jobs = JobService(self.catalog, factory=self.factory)
+        resources = ResourceService(self.catalog, self.factory)
+        datasets = DatasetService(clusters=self.catalog, factory=self.factory)
         with ThreadPoolExecutor(max_workers=3) as executor:
             job_future = executor.submit(self._jobs, jobs)
             resource_future = executor.submit(resources.all)

@@ -219,6 +219,39 @@ def test_matching_active_environment_receipt_avoids_requerying_wheel_indexes() -
     assert not any("index" in command for command in transport.commands)
 
 
+def test_command_gpu_launcher_failure_is_not_silently_treated_as_cpu() -> None:
+    class FailedLauncherTransport(Transport):
+        def run(
+            self,
+            command: Sequence[str],
+            *,
+            cwd: str | Path | None = None,
+        ) -> CommandResult:
+            del cwd
+            if "platform.machine()" in " ".join(command):
+                return CommandResult(0, "3.11\nx86_64\n")
+            return CommandResult(
+                2,
+                "",
+                "[gpuctl] ERROR: argument --gpu-slot: GPU slot must be a positive integer",
+            )
+
+        def put(self, source: str | Path, destination: str | Path) -> None:
+            del source, destination
+
+    profile = ClusterProfile(
+        "claimed",
+        transport="ssh",
+        host="cluster.invalid",
+        workspace="/work",
+        gpu_access={"mode": "command", "command_prefix": ["gpu", "exec"]},
+        pytorch=TorchInstallationPolicy("auto", True),
+    )
+
+    with pytest.raises(RuntimeError, match="gpu-slot.*will not fall back to CPU"):
+        CudaCompatibilityResolver().resolve(profile, FailedLauncherTransport())
+
+
 def test_missing_compatible_wheel_fails_instead_of_falling_back_to_wrong_cuda() -> None:
     transport = ResolutionTransport(driver="535.183.01", capabilities=("6.1",), python="3.13")
     profile = ClusterProfile(

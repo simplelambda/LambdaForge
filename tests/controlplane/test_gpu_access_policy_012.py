@@ -84,7 +84,7 @@ def test_shared_direct_admission_ignores_only_external_occupancy(
     assert ProcessSupervisor._acquire_gpus(tmp_path, identity, 1, allow_external_use=True) == (0,)
 
 
-def test_external_gpu_allocations_are_narrowed_but_never_invented(
+def test_external_command_gpu_allocations_are_narrowed_and_may_scale_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LAMBDAFORGE_GPU_ACCESS_MODE", "command")
@@ -94,11 +94,18 @@ def test_external_gpu_allocations_are_narrowed_but_never_invented(
     assert _visible_gpu_tokens(1) == ("GPU-allocated-a",)
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-allocated-a")
-    with pytest.raises(RuntimeError, match="refusing to invent or broaden"):
-        _visible_gpu_tokens(2)
+    assert _visible_gpu_tokens(2) == ("GPU-allocated-a",)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
     with pytest.raises(RuntimeError, match="did not provide CUDA_VISIBLE_DEVICES"):
         _visible_gpu_tokens(1)
+
+
+def test_scheduler_gpu_allocations_remain_exact(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAMBDAFORGE_GPU_ACCESS_MODE", "scheduler")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-allocated-a")
+
+    with pytest.raises(RuntimeError, match="refusing to invent or broaden"):
+        _visible_gpu_tokens(2)
 
 
 def test_direct_exclusive_mode_keeps_legacy_physical_discovery_without_a_wrapper(
