@@ -82,6 +82,28 @@ it never installs software during scientific execution. See the manual for exact
 
 ## First Work
 
+Working on several projects? Run `lf` inside each project's directory (or a subdirectory).
+`lf project --json` shows the selected root and ID. Virtual environments choose Python dependencies;
+the nearest `pyproject.toml` chooses the LambdaForge project. Jobs, Works, Studies and recent YAMLs
+are filtered by that project; local results and dataset indexes stay below its `.lambdaforge`.
+Cluster profiles and credentials can be shared. New remote jobs, registry state and caches live
+under `<workspace>/.lambdaforge/projects/<project-id>/`. GPU/resource leases remain shared, so two
+projects still compete for the same hardware safely.
+
+`lf init` writes a stable ID automatically. In an existing project, configure one **before the
+first submission** if the same remote namespace must survive checkout moves:
+
+```toml
+[tool.lambdaforge]
+project_id = "my-research-project"
+```
+
+Otherwise LambdaForge derives a readable ID from the resolved local root; identical folder/package
+names at different locations remain separate. Reusing an explicit ID deliberately shares the remote
+namespace. Use a project-local `lambdaforge.clusters.yaml` to override `project_root` for that
+project's remote mirror without repeating host/authentication fields. See
+[project isolation and upgrade behavior](docs/MANUAL.md#18-project-isolation).
+
 A YAML file executes only a class inheriting `lambdaforge.Work`. `run()` is its single lifecycle
 method and its annotated Python signature is the source of parameter names, defaults and types.
 
@@ -375,8 +397,11 @@ expands finite values or reproducible numeric ranges; `objective` defines either
 or an explicit fixed-range composite utility. Whenever `search` has an `objective`, omitting `strategy`
 enables the complete safe adaptive policy: Sobol startup, result-dependent proposals, probabilistic
 seed racing, curve pruning, convergence detection and fresh-seed confirmation. A scrambled Sobol
-pool supplies reproducible, space-filling candidates;
-after `startup_trials`, observed results choose later candidates. `sampler: auto` uses optional
+pool supplies reproducible, space-filling candidates. When `startup_trials` is omitted, the first
+wave grows from the historical ten-point floor to the safe execution parallelism (bounded by
+`trials`), so each initially available slot receives a distinct candidate. An explicit
+`startup_trials` remains authoritative. After that wave, observed results choose later candidates.
+`sampler: auto` uses optional
 BoTorch mixed-GP qLogNEI when `lambdaforge[adaptive-hpo]` is installed and enough evidence exists,
 with a deterministic k-NN fallback for missing dependencies or numerical failures. Only proposed
 Trials appear in the Research Console. The GP sees all encoded dimensions jointly, including conditional
@@ -438,8 +463,8 @@ enables paired differences; a candidate receives another seed only while its pro
 within `seed_racing.equivalence_margin` of the incumbent is at least
 `seed_racing.probability_threshold`. The final
 winner uses a conservative search bound, or preferably the mean of disjoint
-`confirmation_seeds` on a frozen top-K. By default LambdaForge starts with up to three authored
-seeds per candidate and generates three deterministic fresh confirmation seeds; every default can
+`confirmation_seeds` on a frozen top-K. By default LambdaForge starts with one authored seed per
+candidate and generates three deterministic fresh confirmation seeds; every default can
 still be overridden explicitly.
 Confirmation Runs never receive performance pruning or opportunistic preemption. If a required
 seed fails or cannot run within the global budget, `summary.confirmation.status` is `incomplete`,
@@ -472,6 +497,7 @@ search:
   trials: 40
   proposal_pool_size: 640
   min_seeds: 1
+  # Optional exact override; omitted means max(10, safe parallel slots), bounded by trials.
   startup_trials: 10
   seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.002}
   confirmation_top_k: 2
@@ -519,6 +545,9 @@ launches on whichever devices currently fit, and leaves the rest of the Runs que
 while VRAM is temporarily busy and staggers launches on the same device so the preceding process
 can materialize its allocation. The threshold is evaluated against current free VRAM for every
 launch; it is not multiplied by the number of active Runs or treated as a hidden reservation.
+When several GPUs can accept one globally available Run, the least-loaded/longest-idle device is
+selected rather than preferring GPU index zero. While eligible scientific actions and candidate/Run
+budget remain, every completed Run triggers immediate replanning to keep safe slots occupied.
 Each packed Run owns a fresh spawned process which exits as
 soon as the Run finishes; LambdaForge does not reuse an idle CUDA worker because its surviving
 device context could retain VRAM and deadlock queued Runs. One full GPU therefore never fails the complete study, and a
@@ -527,8 +556,10 @@ of every allocated GPU is rejected as impossible. CPU-only adaptive studies can 
 with `max_parallel`. The memory observer runs in a short-lived child process, so it does not leave
 an idle CUDA context on each device and never consumes one of the `runs_per_gpu` scientific slots.
 If a child nevertheless raises CUDA OOM, only that Run becomes `retrying`: its failed Attempt is
-retained, the controller lowers the effective packing ceiling below the concurrency that caused the
-OOM, and a checkpoint-compatible Attempt waits in the queue. Healthy Runs continue. Recovery is
+retained, the controller lowers only that device's effective packing ceiling below the concurrency
+that caused the OOM, and a checkpoint-compatible Attempt waits in the queue. Healthy Runs and other
+GPUs continue at their own limits. After one complete stable turnover at the reduced ceiling, the
+device cautiously tests one additional slot, still subject to live free VRAM. Retry recovery is
 bounded by `failure_retries`; an OOM that repeats even at safer packing becomes honest terminal
 evidence rather than an infinite retry loop.
 Repeated `self.metrics.log("val_auprc", value, step=epoch)` observations enable
@@ -583,6 +614,35 @@ period and a newly available action beats both its original priority and continu
 confirmation and unscored startup coverage are immune. `PREEMPT`, `PAUSE` and
 `RESUME_PREEMPTED` records preserve the old/new priorities and reason without treating the pause
 as negative model evidence.
+
+Adaptive HPO has two simultaneous goals: find strong configurations and learn how the authored
+search space behaves. LambdaForge therefore maintains two different quantities. **Optimization
+opportunity** (`O`) is the remaining practical improvement predicted by the joint surrogate;
+**scientific uncertainty** (`K`) is the unresolved entropy of explicit parameter and pairwise
+interaction questions. Both are normalized from current evidence, converted into automatic
+weights, and divided by observed incremental cost when actions compete. There is no trial-count
+phase switch and no extra YAML confidence knob: optimization can regain priority whenever a new
+observation makes practical improvement plausible again.
+
+Every parameter question ends in one structured conclusion—preferred value/region, practically
+equivalent, weak preference, flat, context-dependent, no clear preference, or unresolved. Pairwise
+questions distinguish material/weak interaction, additive evidence and unresolved evidence. Here
+**confidence** means the fraction of deterministic candidate-level, shared-seed-aware evidence
+realizations that reproduce that exact displayed conclusion. It is not coverage, effect size, a
+p-value or a frequentist confidence interval. Consequently, sufficient evidence can support both
+“flat” and “context-dependent” with high confidence. Coverage and missing conditional support are
+reported separately, and all effects remain predictive/descriptive rather than causal.
+
+The **practical optimal region** contains observed configurations whose uncertainty-aware regret is
+compatible with the authored equivalence margin. It reports which parameters are constrained and
+which remain flexible inside that region. Outside startup, the controller may issue a
+`DESIGNED_PROBE`: a valid unobserved candidate chosen to resolve a parameter or interaction, with a
+matched counterfactual preferred when the conditional space permits it. Its decision record names
+the question, predicted performance value, expected uncertainty reduction, match quality, cost and
+alternatives. Seed racing uses pooled within-candidate variance only—never between-candidate
+spread—replicates the incumbent when its uncertainty limits comparisons, and prefers an unused
+shared seed when that improves paired incumbent/challenger evidence. Clearly inferior candidates
+may therefore stop after one seed while useful comparisons receive more.
 
 Every adaptive Run owns a separate worker process, on CPU and GPU. A normal exception fails only
 that Run. A lost/killed worker or CUDA allocation OOM is retried up to `failure_retries` times

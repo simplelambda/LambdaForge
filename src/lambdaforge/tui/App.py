@@ -1031,6 +1031,9 @@ class LambdaForgeApp(App[None]):
     def __init__(self, services: ConsoleServices | None = None) -> None:
         super().__init__()
         self.services = services or ConsoleServices()
+        project = getattr(getattr(self.services, "catalog", None), "project", None)
+        if project is not None:
+            self.sub_title = f"Project: {project.project_id}"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)

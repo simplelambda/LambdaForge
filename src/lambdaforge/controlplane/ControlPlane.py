@@ -78,6 +78,12 @@ class ControlPlane:
     ) -> tuple[JobHandle, ExecutionBundle]:
         """Build/cache a bundle, stage it and submit the normal remote run command."""
         notify = progress or (lambda _phase: None)
+        if self.catalog.project is not None and not self.catalog.project.owns_source(
+            str(Path(config_path).resolve())
+        ):
+            raise ValueError(
+                "The YAML belongs to another project. Run lf from that project's directory."
+            )
         notify("validation")
         profile = self.catalog.get(cluster)
         assert profile.storage is not None

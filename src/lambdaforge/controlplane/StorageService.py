@@ -145,6 +145,12 @@ class StorageService:
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
         descriptor = profile.storage.to_dict()
+        if profile.transport != "local" and self.catalog.project is not None:
+            # Resolve through the scoped store first; historic Jobs retain their original root.
+            record = self.jobs.get(job_id, refresh=False)
+            if record.cluster != cluster:
+                raise ValueError("Job belongs to a different cluster.")
+            descriptor["run_root"] = self.jobs.job_root(record)
         if local_run_root is not None:
             if profile.transport != "local":
                 raise ValueError("A per-Job local run root cannot override remote storage.")

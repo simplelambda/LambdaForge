@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import yaml
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.ExecutionProfile import ExecutionProfile
+from lambdaforge.ProjectContext import ProjectContext
 
 
 class ClusterCatalog:
@@ -25,19 +27,24 @@ class ClusterCatalog:
         *,
         sources: Mapping[str, Path | None] | None = None,
         shadowed_sources: Mapping[str, tuple[Path, ...]] | None = None,
+        project: ProjectContext | None = None,
     ) -> None:
         self._profiles = dict(profiles)
+        self.project = project
         self._execution_profiles = dict(execution_profiles or {})
         self._sources = dict(sources or {})
         self._shadowed_sources = dict(shadowed_sources or {})
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> ClusterCatalog:
+    def load(
+        cls, path: str | Path | None = None, *, project: ProjectContext | None = None
+    ) -> ClusterCatalog:
         """Merge user < project < explicit catalogs and always provide local."""
         explicit = path
         if explicit is None and os.environ.get("LAMBDAFORGE_CLUSTERS"):
             explicit = os.environ["LAMBDAFORGE_CLUSTERS"]
-        candidates = [cls.user_path(), cls.project_path()]
+        project = project or ProjectContext.discover()
+        candidates = [cls.user_path(), project.root / "lambdaforge.clusters.yaml"]
         if explicit is not None:
             candidates.append(Path(explicit).expanduser().resolve())
         unique: list[Path] = []
@@ -48,6 +55,7 @@ class ClusterCatalog:
         profiles: dict[str, ClusterProfile] = {
             "local": ClusterProfile("local", python=sys.executable)
         }
+        descriptors: dict[str, dict[str, Any]] = {}
         execution_profiles: dict[str, ExecutionProfile] = {}
         sources: dict[str, Path | None] = {"local": None}
         shadowed: dict[str, list[Path]] = {}
@@ -65,7 +73,8 @@ class ClusterCatalog:
                 previous = sources.get(key)
                 if previous is not None:
                     shadowed.setdefault(key, []).append(previous)
-                profiles[key] = ClusterProfile.from_mapping(key, descriptor)
+                descriptors[key] = cls._merge(descriptors.get(key, {}), descriptor)
+                profiles[key] = ClusterProfile.from_mapping(key, descriptors[key])
                 sources[key] = source
             raw_execution = value.get("profiles", {})
             if not isinstance(raw_execution, Mapping):
@@ -79,7 +88,21 @@ class ClusterCatalog:
             execution_profiles,
             sources=sources,
             shadowed_sources={key: tuple(values) for key, values in shadowed.items()},
+            project=project,
         )
+
+    @staticmethod
+    def _merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+        """Let project catalogs override a mirror/path without repeating host credentials."""
+        result = dict(base)
+        for key, value in override.items():
+            previous = result.get(key)
+            result[key] = (
+                ClusterCatalog._merge(previous, value)
+                if isinstance(previous, Mapping) and isinstance(value, Mapping)
+                else value
+            )
+        return result
 
     @staticmethod
     def user_path() -> Path:
@@ -107,6 +130,17 @@ class ClusterCatalog:
 
     def get(self, name: str) -> ClusterProfile:
         """Return one named profile or raise a useful error."""
+        profile = self.definition(name)
+        if self.project is not None and profile.transport == "ssh":
+            assert profile.storage is not None
+            storage = profile.storage.for_project(
+                self.project.project_id, workspace=profile.workspace
+            )
+            return replace(profile, storage=storage)
+        return profile
+
+    def definition(self, name: str) -> ClusterProfile:
+        """Return the authored profile for editing, without derived project paths."""
         try:
             return self._profiles[name]
         except KeyError as error:
@@ -119,7 +153,7 @@ class ClusterCatalog:
 
     def inspect(self, name: str) -> dict[str, Any]:
         """Return a redaction-safe profile with precedence and auth status."""
-        profile = self.get(name)
+        profile = self.definition(name)
         reference = profile.auth.credential
         auth_status = (
             "openssh-managed"
@@ -130,8 +164,11 @@ class ClusterCatalog:
             if reference.startswith("env:")
             else "keyring-reference"
         )
+        effective_storage = self.get(name).storage
         return {
             "profile": profile.to_dict(),
+            "project": self.project.to_dict() if self.project else None,
+            "effective_storage": effective_storage.to_dict() if effective_storage else None,
             "source": str(self.source(name)) if self.source(name) is not None else "built-in",
             "shadowed_sources": [str(item) for item in self._shadowed_sources.get(name, ())],
             "authentication_status": auth_status,
@@ -154,14 +191,14 @@ class ClusterCatalog:
     def for_data_environment(self, environment: str) -> ClusterProfile:
         """Resolve a transfer destination by profile name or data environment."""
         if environment in self._profiles:
-            return self._profiles[environment]
+            return self.get(environment)
         matches = tuple(
             profile
             for profile in self._profiles.values()
             if profile.data_environment == environment
         )
         if len(matches) == 1:
-            return matches[0]
+            return self.get(matches[0].name)
         if len(matches) > 1:
             raise ValueError(
                 f"Data environment {environment!r} is ambiguous across "

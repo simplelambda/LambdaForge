@@ -235,7 +235,7 @@ def test_persistence_is_idempotent_for_the_same_evidence(tmp_path: Path) -> None
     second = StudyAnalysis.persist(source, path)
     assert first == second
     assert path.read_bytes() == original_bytes
-    assert second["analysis_version"] == 2
+    assert second["analysis_version"] == 3
 
 
 def test_empirical_seed_stability_requires_repeated_leading_seeds() -> None:

@@ -21,6 +21,7 @@
 15. [Arquitectura y extensiones](#15-arquitectura-y-extensiones)
 16. [Análisis de estudios](#16-análisis-de-estudios)
 17. [Consola de investigación](#17-consola-de-investigación)
+18. [Aislamiento por proyecto](#18-aislamiento-por-proyecto)
 
 ## 1. Modelo mental
 
@@ -398,8 +399,11 @@ seeds nuevas. `proposal_pool_size` acota el pool Sobol interno (por defecto hast
 `trials`, máximo 4096), mientras `trials` solo limita candidatos realmente ejecutables. Solo los Trials
 propuestos aparecen en la Consola de investigación. El pool se conserva una sola vez y cada
 especificación ligera referencia únicamente su candidato y seed, por lo que la memoria de
-planificación crece linealmente y no obliga a debilitar un YAML válido. Tras `startup_trials`,
-`sampler: auto` prefiere GP mixto qLogNEI de
+planificación crece linealmente y no obliga a debilitar un YAML válido. Si se omite
+`startup_trials`, LambdaForge propone primero `min(trials, max(10, paralelismo_seguro))` candidatos
+distintos que cubren el espacio. Así conserva el mínimo estadístico histórico y llena la primera
+oleada disponible; la presión temporal de VRAM aún puede impedir admitirlos todos de inmediato. Un
+`startup_trials` positivo explícito sustituye ese ancho automático. Después, `sampler: auto` prefiere GP mixto qLogNEI de
 BoTorch si está instalado `lambdaforge[adaptive-hpo]` y hay evidencia suficiente; ante dependencia
 ausente o inestabilidad numérica usa el surrogate mixto k-NN determinista. Es un modelo de decisión
 realmente conjunto: números, categorías e indicadores de activación condicional comparten un mismo
@@ -459,9 +463,12 @@ Una única utilidad gobierna adquisición, seeds, pruning, fidelidad, confirmaci
 constraints siguen siendo guardas duras separadas. Componentes, contribuciones y frente Pareto
 diagnóstico permanecen visibles sin convertirse en una segunda política oculta.
 
-Por defecto se inicia con hasta tres seeds declaradas por candidato y se generan tres seeds de
-confirmación deterministas y disjuntas. Puede cambiarse cada valor y `confirmation_seeds: []`
-desactiva expresamente la confirmación. El orden compartido permite diferencias pareadas
+Por defecto se inicia con una seed declarada por candidato y se generan tres seeds de confirmación
+deterministas y disjuntas. Puede cambiarse cada valor y `confirmation_seeds: []` desactiva
+expresamente la confirmación. El ruido de seed se calibra solo con resultados repetidos dentro de
+cada candidato, tras estimar efectos de seeds comunes a varios candidatos; la dispersión entre
+candidatos nunca se rebautiza como ruido aleatorio. Antes de esa calibración una estimación de una
+sola seed conserva incertidumbre explícita. El orden compartido permite diferencias pareadas
 
 $$
 d_s=Y(i,s)-Y(i^\star,s).
@@ -494,8 +501,9 @@ y el ranking final. Así una época tardía sobreajustada no infravalora un Run 
 punto temprano prometedor tampoco rescata un Run parcial podado. El valor HPO de un Trial es la
 media de los mejores valores por seed, nunca la seed más afortunada. Las seeds frescas de
 confirmación y la cota conservadora reducen el sesgo de validar repetidamente. El suelo inicial por
-defecto es de hasta tres seeds declaradas por Trial propuesto: permite estimar variabilidad sin
-gastar todas las seeds en una configuración claramente dominada.
+defecto es una seed declarada por Trial propuesto: permite cubrir candidatos y después comprar
+únicamente las repeticiones, comparaciones con el incumbent y pares que aportan evidencia, en lugar
+de gastar tres seeds indiscriminadamente.
 Confirmación nunca recibe pruning de rendimiento ni preemption oportunista. Si falta o falla una
 seed requerida, persiste `summary.confirmation.status=incomplete` y
 `confirmation_incomplete=true`; la media sesgada del subconjunto superviviente nunca selecciona el
@@ -506,11 +514,20 @@ El diario append-only `hpo-control/decisions.jsonl` explica inicialización, sur
 snapshot compacto; `summary.adaptive_controller` enlaza ambos sin copiar modelos ni checkpoints.
 
 El bucle de adquisición está dirigido por eventos, no por barreras. Cada observación terminal
-reevalúa `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` y `RESUME_PREEMPTED`. Su `controller_value`
-común es una heurística acotada, no ganancia de información: ADD_SEED usa reducción relativa del
-error estándar; START_NEW combina cobertura, escasez y exploración periódica acotada; promociones
-usan la raíz de la fidelidad normalizada restante. La prioridad divide ese valor por el coste
-temporal incremental observado. Startup puede entrelazarse con decisiones del modelo. Identidades
+reevalúa `START_NEW`, `DESIGNED_PROBE`, `ADD_SEED`, `PROMOTE_FIDELITY` y `RESUME_PREEMPTED`.
+Equilibra dos cantidades derivadas de la evidencia:
+
+- oportunidad de optimización \(O\): mejora práctica posterior aún disponible en el pool finito;
+- incertidumbre científica \(K\): entropía normalizada de conclusiones no resueltas sobre
+  parámetros e interacciones por pares.
+
+Su magnitud relativa produce pesos automáticos de rendimiento/comprensión; ningún número de trials,
+cambio de fase o umbral YAML oculto controla la transición. Cada acción registra valor de
+rendimiento, reducción esperada de entropía, coste incremental observado y prioridad. Son scores de
+diseño empírico-bayesianos auditables, no ganancia de información Shannon calibrada. Un probe puede
+superar a un candidato algo mejor predicho si su contrafactual emparejado resuelve más incertidumbre
+material por coste; si vuelve a aumentar la mejora práctica, optimización recupera prioridad.
+Startup puede entrelazarse con decisiones del modelo. Identidades
 y fidelidades pendientes condicionan el surrogate. La cola no despachada es provisional: nueva
 evidencia puede sustituir una acción con coste científico cero y registrar
 `CANCEL_QUEUED_ACTION`, prioridades y motivo. Cada acción guarda valor, score, coste y alternativas.
@@ -522,6 +539,34 @@ segura y después reanuda el mismo Run y target de fidelidad desde checkpoint; n
 por esta optimización. El diario distingue `PREEMPT`, `PAUSE`, `CONTINUE` y `RESUME_PREEMPTED` con
 prioridades antiguas/nuevas y el cambio de evidencia. `scheduler_preempted` es neutral, nunca
 pruning de rendimiento.
+
+### Preguntas científicas, confianza y regiones prácticas
+
+El controlador y el `StudyAnalysis` final llaman al mismo `ScientificQuestionAnalyzer`; la TUI no
+ajusta otro modelo explicativo. Cada parámetro tiene exactamente una conclusión actual:
+`PREFERRED`, `PREFERRED_REGION`, `PRACTICALLY_EQUIVALENT`, `WEAK_PREFERENCE`, `FLAT`,
+`CONTEXT_DEPENDENT`, `NO_CLEAR_PREFERENCE` o `UNRESOLVED`. Cada par elegible se clasifica como
+interacción material/débil, aditiva o no resuelta. Los parámetros condicionales muestran soporte
+activo e inactivo, y cada contrafactual generado se valida contra los predicados `when` declarados.
+
+`confidence` es la estabilidad empírica determinista de esa conclusión exacta bajo remuestreo
+acotado delete-d por candidato y resultados conscientes de seeds compartidas. Por eso puede crecer
+para un resultado plano o contextual bien respaldado. Está separada de cobertura, magnitud del
+efecto, fiabilidad y resolución Monte Carlo; no es un p-valor ni un intervalo frecuentista al 95 %.
+El snapshot registra método, cantidad de remuestreos y evidencia ausente para poder auditarla.
+
+Si se declara un margen de equivalencia, la región óptima práctica conserva candidatos cuyo regret
+con incertidumbre es compatible y clasifica cada parámetro como restringido o flexible en ella. Sin
+ese margen LambdaForge no inventa una tolerancia científica porcentual. `DESIGNED_PROBE` apunta a
+una pregunta no resuelta y prefiere una comparación cercana; persiste preguntas, calidad del match,
+objective predicho, reducción de incertidumbre, coste y alternativas descartadas. El alcance queda
+limitado al pool determinista finito y preguntas predictivas por pares: no amplía fronteras del
+dominio, no afirma causalidad ni sustituye la confirmación con seeds frescas.
+Desde el checkout, `python -m benchmarks.hpo_scientific_design` ejecuta la regresión CPU
+determinista de la suite: el selector antiguo solo de optimización y el nuevo diseño científico
+reciben el mismo presupuesto en paisajes suave, de interacción y feature plana. Informa regret
+simple y conclusiones resueltas; el límite de aceptación es la tolerancia de regret práctica, no la
+afirmación de que una política gana en todo paisaje sintético.
 
 ### 7.1 Sweeps exactos sin HPO
 
@@ -581,7 +626,11 @@ ocupa únicamente slots que cumplen la condición; los Runs sin hueco permanecen
 a sondear. Los lanzamientos en una misma GPU se separan cinco segundos para que el nuevo proceso
 materialice su asignación antes de observar otra vez. Después se usa directamente la nueva VRAM
 libre observada: `gpu_memory` no se multiplica por la cantidad de Runs activos ni se reserva por
-segunda vez. Cada Run admitido tiene un proceso spawn nuevo con un único worker, que se
+segunda vez. Las GPU elegibles se ordenan por Runs activos y tiempo desde su último lanzamiento.
+Así, cuando solo queda un slot global, el índice cero no gana siempre ni deja sin trabajo otro
+dispositivo concedido. Mientras queden presupuestos de candidatos/Runs/tiempo, cada evento terminal
+replantea inmediatamente y aporta una acción de reemplazo; la confianza baja del análisis posterior
+no es una condición implícita de parada. Cada Run admitido tiene un proceso spawn nuevo con un único worker, que se
 cierra al recibir resultado o error y libera el contexto CUDA completo. Un pool ocioso persistente
 retendría VRAM y podría bloquear la cola. Una GPU llena o pequeña se omite mientras las demás continúan. Solo un umbral
 mayor que la VRAM total de todas las GPU asignadas es imposible y falla como configuración. Las
@@ -597,9 +646,10 @@ El aislamiento sigue el límite de Run. Tanto en CPU como GPU cada Run adaptativ
 nuevo de un worker: matar uno no rompe un pool compartido ni cancela candidatos ajenos. Un worker
 perdido antes de devolver resultado y una OOM/asignación CUDA se reintentan como Attempt nuevo hasta
 `failure_retries` (1 por defecto, rango 0–3), conservando checkpoints compatibles bajo el mismo
-Run. Una OOM CUDA también reduce el límite vivo de packing de todo el estudio por debajo de la
-concurrencia observada al fallar, de forma que el reintento en cola no reproduce inmediatamente la
-misma presión; nunca se matan hijos que siguen sanos. Si el impedimento se repite con packing más
+Run. Una OOM CUDA reduce solo el límite vivo del dispositivo afectado por debajo de la concurrencia
+observada al fallar, evitando que una GPU limitada frene a sus hermanas sanas. Cuando esa GPU
+completa una rotación estable entera en el límite reducido, el controlador prueba exactamente un
+slot adicional, todavía sujeto a la admisión por VRAM libre viva. Nunca se matan hijos sanos. Si el impedimento se repite con packing más
 seguro queda terminal; las excepciones normales de datos o código no se repiten a ciegas. Los demás
 Runs activos o pendientes continúan. El Work exterior sigue quedando
 fallido si un Run agota recuperación, para no ocultar evidencia científica incompleta.
@@ -1078,6 +1128,7 @@ permanece aunque se recojan bytes reconstruibles del entorno.
 | Comando | Propósito único |
 |---|---|
 | `init` | crear proyecto Work instalable |
+| `project` | mostrar raíz e identidad de almacenamiento del proyecto actual |
 | `validate` | validar configuración/clase/entradas localmente |
 | `explain` | explicar firma, defaults y recursos |
 | `run` | única ejecución científica |
@@ -1374,3 +1425,59 @@ de forma esperable; `unavailable` queda reservado para fallos reales de recupera
 La implementación antigua `LiveJobMonitor` no es una interfaz pública. Se conserva temporalmente
 como oráculo de regresión mientras existan rutas avanzadas clasificadas `CLI-ONLY BY DESIGN`; solo
 se borrará cuando Textual tenga flujos y pruebas equivalentes respaldados por servicios.
+
+## 18. Aislamiento por proyecto
+
+LambdaForge selecciona un proyecto consumidor buscando el `pyproject.toml` más cercano desde el
+directorio actual. El entorno virtual selecciona paquetes Python; **no** selecciona el estado de
+LambdaForge. Usa `lf project` (o `lf project --json`) antes de operar desde una shell desconocida
+para ver la raíz y el identificador exactos.
+
+Los proyectos creados con `lf init` reciben un identificador estable. Un proyecto existente puede
+declararlo antes del siguiente envío:
+
+```toml
+[tool.lambdaforge]
+project_id = "diseno-proteinas"
+```
+
+Debe tener entre 1 y 80 letras, dígitos, `_` o `-`, empezando por letra o dígito. Sin este campo se
+deriva de la ruta local resuelta: dos checkouts con el mismo nombre siguen aislados. Mover el
+checkout cambia el ID derivado; añade antes un ID explícito si debe conservarse el namespace
+remoto. Usar deliberadamente el mismo ID explícito en dos checkouts comparte su namespace.
+
+La frontera de propiedad es:
+
+| Estado | Ámbito |
+|---|---|
+| perfiles de clúster y referencias a credenciales | compartidos; el clúster se configura una vez |
+| leases cooperativos de GPU/procesos | compartidos por host; dos proyectos no sobreasignan hardware |
+| Jobs del controlador, grupos y YAML recientes | solo el proyecto actual |
+| resultados, datasets y caché local | proyecto actual bajo `.lambdaforge/` |
+| Jobs, estado, datasets, entornos y caché remotos | namespace del proyecto actual |
+
+Con almacenamiento remoto por defecto, el trabajo nuevo usa
+`<workspace>/.lambdaforge/projects/<project-id>/{state,cache,jobs}`. Una raíz personalizada mantiene
+la frontera añadiendo `projects/<project-id>`. Son rutas operativas: el ID de proyecto no entra en la
+identidad científica. La raíz compartida de leases queda intencionadamente fuera.
+
+El catálogo de usuario `~/.config/lambdaforge/clusters.yaml` sigue siendo la fuente común para host,
+autenticación y políticas del centro. El `lambdaforge.clusters.yaml` del proyecto es un overlay
+recursivo, por lo que puede declarar solo su mirror remoto:
+
+```yaml
+clusters:
+  gpu:
+    project_root: /scratch/usuario/diseno-proteinas
+```
+
+La Consola, `lf overview`, las operaciones Work, Results y Datasets usan el mismo contexto. Un
+selector de otro proyecto no existe en el actual y no puede accionarse. Así, dos Works homónimos de
+proyectos distintos nunca son el mismo objeto del control plane; dentro de cada proyecto mandan los
+IDs exactos.
+
+La actualización no destruye ni mueve datos. Un Job legado solo se descubre si la ruta YAML que
+registró pertenece al proyecto actual, y se reconecta usando sus rutas de proveedor/Work ya
+persistidas. No se copia entre proyectos ni se trasladan directorios remotos automáticamente. Los
+nuevos envíos usan el layout con namespace; perfiles, credenciales y leases compartidos no requieren
+migración.

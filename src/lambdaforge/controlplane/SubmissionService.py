@@ -43,6 +43,10 @@ class SubmissionService:
     ) -> JobHandle:
         """Persist and launch preparation without blocking on the selected execution target."""
         source = Path(config).expanduser().resolve()
+        if self.catalog.project is not None and not self.catalog.project.owns_source(str(source)):
+            raise ValueError(
+                "The YAML belongs to another project. Run lf from that project's directory."
+            )
         if not source.is_file():
             raise FileNotFoundError(f"Configuration does not exist: {source}")
         profile = self.catalog.get(cluster)
@@ -97,6 +101,7 @@ class SubmissionService:
             "group_id": group_id,
             "allow_duplicate": allow_duplicate,
             "job_store": str(self.jobs.store.root),
+            "project": self.jobs.store.project.to_dict() if self.jobs.store.project else None,
         }
         temporary = request_path.with_name(f".{request_path.name}.{uuid4().hex}.tmp")
         try:

@@ -200,11 +200,24 @@ in `hpo-control/decisions.jsonl` and `state.json`. Confirmation is immune to per
 pruning/preemption; an incomplete set persists `confirmation_incomplete` and cannot select a
 survivor-only mean. `trials` is the executed-candidate budget and
 `proposal_pool_size` the larger deterministic pool. Event-driven refill compares `START_NEW`,
-`ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` by an auditable controller-value proxy per
-observed incremental cost after every terminal event; never call this calibrated information gain.
+`DESIGNED_PROBE`, `ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` after every terminal event.
+It automatically balances posterior practical-improvement opportunity O with unresolved-question
+entropy K per observed incremental cost; neither is a calibrated information gain or a user-facing
+confidence value.
 Startup is not a barrier, undispatched queue entries are provisional/replanned with explicit
 `CANCEL_QUEUED_ACTION`, and pending `(candidate, seed, fidelity)` identities prevent duplicates. Root `search.reduction_factor` and
 `search.confidence` are removed in favour of separately owned fidelity/seed/pruning controls.
+Omitted `startup_trials` resolves to `min(trials, max(10, safe parallelism))`; an explicit value is
+authoritative. Interleave first seeds across distinct startup candidates before extra seeds.
+`ScientificQuestionAnalyzer` is the one shared live/final source for parameter conclusions,
+pairwise interactions and the practical optimal region. Scientific `confidence` means stability of
+the exact displayed conclusion under deterministic candidate-level/shared-seed resampling—not
+coverage, effect size, a p-value or a frequentist interval. Seed noise comes only from
+within-candidate repetitions; prioritize shared seeds, incumbent replication and matched valid
+counterfactual probes when they reduce an important comparison. Persist purpose, target questions,
+O/K, automatic weights, cost and alternatives. Do not add phase/confidence weights or thresholds to
+YAML, claim causality, invent a practical margin, expand authored domains, or replace fresh-seed
+confirmation.
 `objective.constraints.METRIC.min/max` are explicit same-checkpoint guardrails. Across seeds,
 `seed_aggregation` is legacy `mean`, `worst` or `lcb` with optional `confidence`; missing/insufficient
 LCB evidence is infeasible. A utility component may also be constrained. Never
@@ -222,8 +235,10 @@ safe boundary when `self.stop_requested` is true.
 
 Every adaptive CPU/GPU Run owns a fresh one-worker process. A lost/killed worker and CUDA OOM may
 retry as a new checkpoint-compatible Attempt up to `failure_retries` (default 1, max 3); a repeat is
-terminal. A CUDA OOM lowers the in-memory study packing ceiling below the observed failing
-concurrency before the retry is readmitted; do not kill healthy siblings or retry forever. Never
+terminal. A CUDA OOM lowers only that GPU's in-memory packing ceiling below the observed failing
+concurrency before the retry is readmitted; after one full stable turnover it may test one extra
+slot, still behind live-VRAM admission. Prefer least-loaded/longest-idle admissible GPUs so a free
+global slot cannot starve higher indices. Do not kill healthy siblings or retry forever. Never
 retry arbitrary consumer exceptions. One exhausted Run makes the enclosing Work
 honestly failed but must not cancel unrelated active/queued Runs. Telemetry records logical GPU
 index and exact inherited token; never infer or broaden physical devices from that display field.
@@ -361,6 +376,18 @@ Do not add a generic `GNN`, redundant alias/factory or domain policy; add only a
 with a precise tensor contract and focused conformance tests.
 
 ## Identity, attempts and ownership
+
+The nearest `pyproject.toml`, not the active virtual environment, selects `ProjectContext`.
+`[tool.lambdaforge].project_id` is an optional stable 1–80 character ID; otherwise derive it from
+the resolved root. User cluster profiles/credential references and per-host GPU/process leases are
+shared. Controller Jobs/groups/recents, local results/dataset indexes/cache, and remote
+state/cache/jobs/datasets/environments are project-scoped. Default remote paths are below
+`<workspace>/.lambdaforge/projects/<project-id>`; custom roots append `projects/<project-id>`, while
+the lease root remains unscoped. Project catalogs recursively overlay the shared user profile so a
+mirror can change without copying credentials/site policy. Never persist derived effective roots
+back into an authored profile. Legacy Jobs are visible only when their recorded source belongs to
+the current nearest project and must reconnect with recorded provider/work paths; never move old
+remote bytes implicitly.
 
 Hierarchy: Work -> Execution -> Run -> Attempt -> Job. Scientific identity includes Work import
 path, consumer code identity, normalized parameters, file hashes, dataset content IDs, seed and

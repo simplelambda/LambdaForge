@@ -633,7 +633,7 @@ def test_hpo_renderer_recomputes_an_old_remote_analysis_snapshot_locally() -> No
     analysis, parameters = StudyInsightRenderer.analysis(payload, 0)
 
     assert analysis is not None
-    assert analysis["analysis_version"] == 4
+    assert analysis["analysis_version"] == 5
     assert len(parameters[0]["response"]["points"]) == 3
     screen = StudyParameterInsightRenderer.render(
         payload,

@@ -23,6 +23,10 @@ mínima, impacto y si requiere entrada no confiable. Nunca adjuntes credenciales
 - Entradas, outputs, cache/checkpoints y limpieza comprueban containment y symlinks en su capa. Un
   dataset se elimina solo tras volver a verificar manifest, identidad y raíz exacta; inconsistencias
   o estado inaccesible fallan de forma cerrada.
+- El `pyproject.toml` más cercano selecciona un namespace de proyecto. Jobs, selecciones recientes y
+  estado operativo local/remoto se aíslan por ID; credenciales, perfiles y leases de recursos del
+  host siguen compartidos. Esto evita control accidental entre proyectos, pero no es una frontera
+  del sistema operativo frente a código hostil ejecutado por el mismo usuario.
 - El `project_root` de un clúster es almacenamiento persistente propiedad del investigador y queda
   fuera de la limpieza de LambdaForge. Los inputs grandes solo se mapean por ruta relativa al
   proyecto y deben coincidir en tipo, bytes y SHA-256 antes del envío y otra vez en el worker. Un

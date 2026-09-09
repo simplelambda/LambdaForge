@@ -7,6 +7,8 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from lambdaforge.hpo.ScientificDesign import SeedNoiseModel
+
 
 @dataclass(frozen=True, slots=True)
 class CandidateEstimate:
@@ -15,6 +17,7 @@ class CandidateEstimate:
     mean: float
     standard_error: float
     samples: int
+    seed_noise_calibrated: bool = False
 
     def probability_at_least(self, threshold: float) -> float:
         """Return ``P(mean >= threshold)`` without requiring SciPy."""
@@ -33,14 +36,19 @@ class SeedRaceDecision:
     expected_uncertainty_reduction: float
     completed_seeds: int
     current_standard_error: float
+    purpose: str = "ADD_SEED"
+    recommended_seed: int | None = None
+    comparison_trials: tuple[int, ...] = ()
+    information_value: float = 0.0
 
 
 class AdaptiveSeedRacer:
     """Allocate shared seeds using probability of practical competitiveness.
 
-    The model deliberately stays small: completed seed outcomes estimate a random-effects mean,
-    while a pooled between-seed variance prevents one-observation candidates from becoming
-    spuriously certain.  Shared seeds are compared as paired differences whenever possible.
+    Completed seed outcomes estimate a hierarchical random-effects mean. Between-candidate spread
+    is never used as seed noise: before within-candidate evidence exists, uncertainty remains
+    explicitly uncalibrated and replication receives calibration value. Shared seeds are compared
+    as paired differences whenever possible.
     """
 
     def __init__(
@@ -67,18 +75,23 @@ class AdaptiveSeedRacer:
     def estimates(
         self, outcomes: Mapping[int, Mapping[int | None, float]]
     ) -> dict[int, CandidateEstimate]:
-        """Estimate every candidate using one shared pooled seed-variance prior."""
-        pooled = self._pooled_variance(outcomes)
+        """Estimate candidates with pooled *within-candidate* seed variance only."""
+        noise = SeedNoiseModel.fit(outcomes)
         estimates: dict[int, CandidateEstimate] = {}
         for trial, values_by_seed in outcomes.items():
             values = tuple(float(value) for value in values_by_seed.values())
             if not values:
                 continue
-            variance = statistics.variance(values) if len(values) > 1 else pooled
+            variance = statistics.variance(values) if len(values) > 1 else noise.variance
             estimates[int(trial)] = CandidateEstimate(
                 statistics.fmean(values),
-                math.sqrt(max(variance, self.variance_floor) / len(values)),
+                (
+                    math.sqrt(max(variance, self.variance_floor) / len(values))
+                    if variance is not None
+                    else math.inf
+                ),
                 len(values),
+                noise.calibrated,
             )
         return estimates
 
@@ -87,8 +100,9 @@ class AdaptiveSeedRacer:
         outcomes: Mapping[int, Mapping[int | None, float]],
         *,
         eligible: Sequence[int] | None = None,
+        available_seeds: Mapping[int, Sequence[int]] | None = None,
     ) -> tuple[SeedRaceDecision, ...]:
-        """Rank candidates for an additional seed by expected uncertainty reduction."""
+        """Rank extra seeds by uncertainty reduction in incumbent/challenger comparisons."""
         estimates = self.estimates(outcomes)
         if not estimates:
             return ()
@@ -98,37 +112,76 @@ class AdaptiveSeedRacer:
             else min(estimates, key=lambda trial: estimates[trial].mean)
         )
         allowed = set(estimates) if eligible is None else set(eligible)
-        decisions: list[SeedRaceDecision] = []
-        for trial in sorted(allowed & estimates.keys()):
-            probability = (
+        competitor_probabilities: dict[int, float] = {}
+        for trial, estimate in estimates.items():
+            competitor_probabilities[trial] = (
                 1.0
                 if trial == incumbent
                 else self._probability_competitive(
                     outcomes.get(trial, {}),
                     outcomes.get(incumbent, {}),
-                    estimates[trial],
+                    estimate,
                     estimates[incumbent],
                 )
             )
+        decisions: list[SeedRaceDecision] = []
+        for trial in sorted(allowed & estimates.keys()):
+            probability = competitor_probabilities[trial]
             if probability < self.probability_threshold:
                 continue
             estimate = estimates[trial]
-            next_error = estimate.standard_error * math.sqrt(
-                estimate.samples / (estimate.samples + 1)
+            comparisons = tuple(
+                other
+                for other in sorted(estimates)
+                if other != trial
+                and (
+                    trial == incumbent
+                    or other == incumbent
+                    or competitor_probabilities[other] >= self.probability_threshold
+                )
             )
-            reduction = max(0.0, estimate.standard_error - next_error)
-            # Uncertainty matters most close to the decision boundary.  The incumbent remains
-            # eligible so its own mean can be estimated rather than treating it as known truth.
-            boundary_weight = max(1e-9, 4.0 * probability * (1.0 - probability))
-            if trial == incumbent:
-                boundary_weight = max(boundary_weight, 0.25)
+            pair_values = [
+                self._comparison_information(
+                    trial,
+                    other,
+                    outcomes,
+                    estimates,
+                    competitor_probabilities,
+                    incumbent,
+                )
+                for other in comparisons
+            ]
+            information = 1.0 - math.prod(1.0 - min(1.0, max(0.0, value)) for value in pair_values)
+            reduction = information * (
+                estimate.standard_error if math.isfinite(estimate.standard_error) else 1.0
+            )
+            recommended_seed = self._recommended_shared_seed(
+                trial,
+                comparisons,
+                outcomes,
+                available_seeds or {},
+                competitor_probabilities,
+            )
+            purpose = (
+                "CALIBRATE_SEED_NOISE"
+                if not estimate.seed_noise_calibrated
+                else "ADD_SHARED_SEED"
+                if recommended_seed is not None
+                else "REPLICATE_INCUMBENT"
+                if trial == incumbent
+                else "ADD_SEED"
+            )
             decisions.append(
                 SeedRaceDecision(
                     trial,
                     probability,
-                    reduction * boundary_weight,
+                    reduction,
                     estimate.samples,
                     estimate.standard_error,
+                    purpose,
+                    recommended_seed,
+                    comparisons,
+                    information,
                 )
             )
         return tuple(
@@ -165,28 +218,63 @@ class AdaptiveSeedRacer:
         else:
             mean = sign * (candidate.mean - incumbent.mean)
             error = math.sqrt(candidate.standard_error**2 + incumbent.standard_error**2)
+        if not math.isfinite(error):
+            return 0.5
         if error <= 0:
             return 1.0 if mean >= -self.margin else 0.0
         return 1.0 - statistics.NormalDist(mean, error).cdf(-self.margin)
 
-    def _pooled_variance(self, outcomes: Mapping[int, Mapping[int | None, float]]) -> float:
-        variances: list[tuple[int, float]] = []
-        all_values: list[float] = []
-        for values_by_seed in outcomes.values():
-            values = [float(value) for value in values_by_seed.values()]
-            all_values.extend(values)
-            if len(values) > 1:
-                variances.append((len(values) - 1, statistics.variance(values)))
-        weight = sum(item[0] for item in variances)
-        if weight:
-            return max(
-                sum(degrees * variance for degrees, variance in variances) / weight,
-                self.variance_floor,
+    def _comparison_information(
+        self,
+        trial: int,
+        other: int,
+        outcomes: Mapping[int, Mapping[int | None, float]],
+        estimates: Mapping[int, CandidateEstimate],
+        probabilities: Mapping[int, float],
+        incumbent: int,
+    ) -> float:
+        left, right = estimates[trial], estimates[other]
+        if not left.seed_noise_calibrated or not right.seed_noise_calibrated:
+            uncertainty = 1.0
+        else:
+            variance = left.standard_error**2 + right.standard_error**2
+            shared = set(outcomes.get(trial, {})) & set(outcomes.get(other, {})) - {None}
+            if len(shared) >= 2:
+                differences = [
+                    float(outcomes[trial][seed]) - float(outcomes[other][seed]) for seed in shared
+                ]
+                variance = max(
+                    statistics.variance(differences) / len(differences), self.variance_floor
+                )
+            uncertainty = 1.0 - math.exp(
+                -math.sqrt(variance) / max(self.margin, math.sqrt(variance), 1e-12)
             )
-        if len(all_values) > 1:
-            return max(statistics.variance(all_values), self.variance_floor)
-        scale = max(abs(all_values[0]) * 0.1, 1.0) if all_values else 1.0
-        return max(scale**2, self.variance_floor)
+        # Candidate weights vanish naturally as practical competitiveness vanishes.  The incumbent
+        # is valuable against every plausible challenger rather than being penalized for p~=1.
+        weight = probabilities[other] if trial == incumbent else probabilities[trial]
+        sample_reduction = 1.0 - math.sqrt(left.samples / (left.samples + 1.0))
+        return min(
+            1.0, max(0.0, weight * uncertainty * max(sample_reduction, 1.0 / (left.samples + 1.0)))
+        )
+
+    @staticmethod
+    def _recommended_shared_seed(
+        trial: int,
+        comparisons: Sequence[int],
+        outcomes: Mapping[int, Mapping[int | None, float]],
+        available: Mapping[int, Sequence[int]],
+        probabilities: Mapping[int, float],
+    ) -> int | None:
+        attempted = set(outcomes.get(trial, {}))
+        allowed = set(available.get(trial, ())) - attempted
+        if not allowed:
+            return None
+        scores: dict[int, float] = {}
+        for other in comparisons:
+            for seed in set(outcomes.get(other, {})) & allowed - {None}:
+                assert isinstance(seed, int)
+                scores[seed] = scores.get(seed, 0.0) + probabilities.get(other, 0.0)
+        return max(scores, key=lambda seed: (scores[seed], -seed)) if scores else None
 
 
 __all__ = ["AdaptiveSeedRacer", "CandidateEstimate", "SeedRaceDecision"]

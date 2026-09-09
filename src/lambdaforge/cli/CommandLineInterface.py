@@ -30,6 +30,7 @@ from lambdaforge.controlplane.StorageService import StorageService
 from lambdaforge.controlplane.SubmissionService import SubmissionService
 from lambdaforge.controlplane.WorkService import WorkService
 from lambdaforge.diagnostics import DiagnosticContext
+from lambdaforge.ProjectContext import ProjectContext
 from lambdaforge.work import ResultStore, WorkConfig, WorkRunner
 
 
@@ -95,6 +96,14 @@ class CommandLineInterface:
             return initialize(
                 arguments.directory, force=arguments.force, template=arguments.template
             )
+        if arguments.command == "project":
+            project = ProjectContext.discover()
+            cls._render(
+                project.to_dict(),
+                f"Project: {project.project_id}\nRoot: {project.root}",
+                arguments.json,
+            )
+            return 0
         if arguments.command == "validate":
             validation = WorkConfig.validate_file(arguments.config)
             cls._render(validation.to_dict(), validation.summary(), arguments.json)

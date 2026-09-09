@@ -152,7 +152,7 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
         else:
             print_storage([value])
         return 0 if cluster_storage.online else 1
-    cluster_profile = cluster_catalog.get(arguments.name)
+    cluster_profile = cluster_catalog.definition(arguments.name)
     if arguments.cluster_command in {"set", "unset", "remove"}:
         source = cluster_catalog.source(cluster_profile.name)
         if source is None:

@@ -19,9 +19,10 @@ from lambdaforge.analysis.Evidence import (
     winner_summary,
 )
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
+from lambdaforge.hpo.ScientificDesign import ScientificQuestionAnalyzer
 from lambdaforge.work.atomic import atomic_write_json
 
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3
 
 
 class StudyAnalysis:
@@ -97,6 +98,13 @@ class StudyAnalysis:
         constraint_summary = cls._constraints(aggregates)
         pareto = cls._component_pareto(aggregates, normalized_objective)
         pruning = cls._pruning(source)
+        scientific_understanding = ScientificQuestionAnalyzer.analyze(
+            aggregates,
+            normalized_objective,
+            practical_margin=equivalence_margin,
+            fingerprint=fingerprint,
+            final=resolved_status == "final",
+        )
         generated_findings = findings(
             candidates=aggregates,
             surrogate=surrogate,
@@ -149,6 +157,12 @@ class StudyAnalysis:
             "boundaries": boundaries,
             "surrogate": surrogate,
             "pruning": pruning,
+            "scientific_understanding": scientific_understanding,
+            "parameter_conclusions": scientific_understanding["parameter_questions"],
+            "interaction_conclusions": scientific_understanding["interaction_questions"],
+            "practical_optimal_region": scientific_understanding["practical_optimal_region"],
+            "optimization_opportunity": scientific_understanding["optimization_opportunity"],
+            "scientific_uncertainty": scientific_understanding["scientific_uncertainty"],
             "resources": resources,
             "pareto": pareto,
             "constraints": constraint_summary,
@@ -382,6 +396,11 @@ class StudyAnalysis:
 
     @staticmethod
     def _equivalence_margin(policy: Mapping[str, Any]) -> float | None:
+        practical = policy.get("practical_equivalence_margin")
+        if isinstance(practical, int | float) and not isinstance(practical, bool):
+            return float(practical)
+        if "practical_equivalence_margin" in policy:
+            return None
         seed_racing = policy.get("seed_racing")
         if isinstance(seed_racing, Mapping) and isinstance(
             seed_racing.get("equivalence_margin"), int | float

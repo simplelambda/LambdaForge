@@ -19,6 +19,7 @@
 15. [Architecture and extension boundaries](#15-architecture-and-extension-boundaries)
 16. [Study Analysis](#16-study-analysis)
 17. [Research Console](#17-research-console)
+18. [Project isolation](#18-project-isolation)
 
 ## 1. Mental model
 
@@ -484,7 +485,11 @@ an explicit active/inactive feature rather than a fake value. This pool is plann
 list of decided Trials. It is retained once and lightweight Run specifications reference only their
 own candidate and seed, so planning memory grows linearly rather than duplicating the pool per Run.
 Large valid values therefore do not require weakening the YAML to avoid planner memory blow-ups.
-LambdaForge first proposes at most `startup_trials` space-filling points.
+If `startup_trials` is omitted, LambdaForge first proposes
+`min(trials, max(10, safe_parallelism))` distinct space-filling points. This preserves the
+historical statistical floor and fills the available first wave; it does not promise that temporary
+VRAM pressure can admit every point immediately. An explicit positive `startup_trials` overrides
+the automatic width.
 After their objective values arrive, `sampler: auto` prefers optional BoTorch mixed-GP qLogNEI and
 falls back to a dependency-light mixed k-NN acquisition if the extra is absent, observations are
 still insufficient or GP fitting is numerically unsafe. `sampler: knn` forces the base backend;
@@ -551,11 +556,13 @@ diagnostic Pareto front are retained; Pareto status never becomes a second hidde
 With an objective, omitted `strategy` means `adaptive`, even with one seed. This activates all safe
 optimizations by default: Sobol startup, adaptive proposals, seed racing, curve pruning,
 convergence detection, bounded failure recovery and fresh-seed confirmation. Unless authored,
-`min_seeds` is up to three available search seeds and three deterministic disjoint confirmation
-seeds are generated; use `confirmation_seeds: []` only to deliberately disable final confirmation.
+`min_seeds` is one available search seed and three deterministic disjoint confirmation seeds are
+generated; use `confirmation_seeds: []` only to deliberately disable final confirmation.
 Search and seed evidence are interleaved. For candidate \(i\), seed outcomes estimate a
-random-effects mean \(\hat\mu_i\) with pooled between-seed variance when only one observation
-exists. Shared seed order
+random-effects mean \(\hat\mu_i\). Seed noise is calibrated only from repeated outcomes within a
+candidate, after estimating effects of seeds shared by several candidates; spread between
+candidates is never relabelled as random seed noise. Before that calibration, a one-seed estimate
+remains explicitly uncertain. Shared seed order
 allows the paired differences
 
 $$
@@ -595,8 +602,9 @@ racing, the surrogate and final ranking. Consequently a late overfitting epoch d
 underestimate a completed Run, while a promising early point cannot save a cooperatively pruned
 partial Run. A Trial's HPO value is the mean of the per-seed best values—not the single luckiest
 seed. Fresh confirmation seeds and the conservative search bound limit repeated-validation bias.
-The default initial floor is up to three authored seeds per proposed Trial: enough to estimate
-seed variability without spending all declared seeds on a clearly dominated configuration.
+The default initial floor is one authored seed per proposed Trial. That is enough to begin broad
+candidate coverage; the controller then buys the repeated, incumbent and paired evidence that is
+actually valuable instead of spending three seeds indiscriminately.
 Confirmation is never performance-pruned or opportunistically preempted. Missing or failed
 required confirmation seeds persist `summary.confirmation.status=incomplete` and
 `confirmation_incomplete=true`; no survivor-only confirmation mean becomes the selected model.
@@ -608,11 +616,21 @@ finish events. `hpo-control/state.json` is the compact latest replay snapshot. B
 not checkpoints or model bytes.
 
 The acquisition loop is event-driven rather than round-barrier based. Each terminal observation
-re-evaluates `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` for every free slot.
-Their common `controller_value` is explicitly a bounded heuristic, not information gain: ADD_SEED
-uses relative standard-error reduction near the ranking boundary; START_NEW uses fixed coverage,
-observation-sparsity and bounded periodic-exploration terms; fidelity actions use the square root of
-remaining normalized fidelity. Priority divides this value by observed incremental wall-clock cost.
+re-evaluates `START_NEW`, `DESIGNED_PROBE`, `ADD_SEED`, `PROMOTE_FIDELITY` and
+`RESUME_PREEMPTED` for every free slot. It balances two evidence-derived quantities:
+
+- optimization opportunity \(O\): posterior practical improvement still available in the finite
+  proposal pool;
+- scientific uncertainty \(K\): normalized entropy of unresolved parameter and pairwise
+  interaction conclusions.
+
+Their relative magnitude supplies automatic performance/understanding weights; no authored trial
+count, phase boundary or hidden YAML threshold controls the transition. Each action records its
+performance value, expected reduction of question entropy, observed incremental cost and resulting
+priority. These are auditable empirical-Bayes design scores—not calibrated Shannon information
+gain. A designed probe may rank above a slightly better predicted candidate when its matched
+counterfactual resolves materially more uncertainty per unit cost; a later increase in practical
+improvement makes optimization dominant again.
 Startup work is submitted gradually and can interleave with model-directed decisions. Pending
 identities and exact target fidelities condition the surrogate and prevent duplicate queued seeds.
 Undispatched actions form a mutable dispatch buffer. After new evidence, a stale queued action may
@@ -628,6 +646,37 @@ fidelity target from its checkpoint. It never kills the worker for this optimiza
 log distinguishes `PREEMPT`, terminal `PAUSE`, `CONTINUE` and `RESUME_PREEMPTED`, including old/new
 priorities and the evidence change. `scheduler_preempted` remains neutral evidence, never a
 performance prune.
+
+### Scientific questions, confidence and practical regions
+
+The controller and final `StudyAnalysis` call the same `ScientificQuestionAnalyzer`; the TUI does
+not fit a competing explanation model. Each parameter has exactly one current conclusion:
+`PREFERRED`, `PREFERRED_REGION`, `PRACTICALLY_EQUIVALENT`, `WEAK_PREFERENCE`, `FLAT`,
+`CONTEXT_DEPENDENT`, `NO_CLEAR_PREFERENCE` or `UNRESOLVED`. Each eligible pair is similarly
+classified as material/weak interaction, additive or unresolved. Conditional parameters report
+active and inactive support explicitly, and every generated counterfactual is validated against
+the authored `when` predicates.
+
+`confidence` is the deterministic empirical stability of that exact conclusion under bounded
+candidate-level delete-d and shared-seed-aware outcome resampling. It can therefore rise for a
+well-supported flat or contextual result. It is deliberately separate from search-space coverage,
+effect magnitude, reliability and Monte Carlo resolution; it is not a p-value or a frequentist
+95% interval. The snapshot records the resampling method/count and missing evidence so an observer
+can audit why confidence is low.
+
+When an equivalence margin is authored, the practical optimal region retains candidates whose
+uncertainty-aware regret is compatible with it and reports each parameter as constrained or
+flexible inside the region. Without such a margin LambdaForge does not invent a percentage-based
+scientific tolerance. `DESIGNED_PROBE` targets a named unresolved parameter or interaction and
+prefers a close matched comparison; its decision persists target questions, match quality,
+predicted objective, uncertainty reduction, cost and rejected alternatives. The implementation is
+bounded to the existing deterministic finite proposal pool and pairwise predictive questions. It
+does not expand domain boundaries, claim causal effects, or replace fresh-seed confirmation.
+From a source checkout, `python -m benchmarks.hpo_scientific_design` runs the deterministic CPU
+regression used by the test suite: old optimization-only and scientific-design selectors receive
+the same candidate budget on smooth, interaction and flat-feature landscapes. It reports simple
+regret and conclusions resolved; the acceptance bound is the authored practical-regret tolerance,
+not an assertion that one policy wins every synthetic landscape.
 
 ### 7.1 Exact sweeps without HPO
 
@@ -685,6 +734,10 @@ only the slots that pass this check; temporarily unavailable Runs remain queued 
 polls again. Launches on one GPU are separated by five seconds so a new process can materialize its
 allocation before the next observation. Admission then uses the newly observed free VRAM directly;
 it does not multiply `gpu_memory` by the active-Run count or reserve that amount a second time.
+Eligible GPUs are ordered by current active-Run count and time since their last launch. Therefore,
+when only one global slot is free, GPU index zero cannot repeatedly win and starve another granted
+device. Within the remaining candidate/Run/time budgets, each terminal event replans immediately
+and supplies a replacement action; low post-hoc analysis confidence is not an early-stop signal.
 Every admitted Run has a fresh one-worker spawned process. It is shut down as soon
 as its result or error is received, releasing the whole CUDA context; a persistent idle pool could
 retain VRAM and deadlock the Runs waiting for admission. A full or smaller GPU is skipped while other usable GPUs continue. Only a
@@ -701,9 +754,11 @@ Failure isolation follows the Run boundary. CPU and GPU adaptive Runs both use f
 processes, so a killed worker cannot poison a shared pool or cancel unrelated candidates. A worker
 lost before returning a result and CUDA OOM/allocation failures are retried as a new Attempt up to
 `failure_retries` (default 1, allowed 0–3). Compatible checkpoints remain under the same Run and
-are discovered by the retry. A CUDA OOM also lowers the live study-wide packing ceiling below the
-concurrency observed at failure, so the queued retry cannot immediately recreate the same pressure;
-already-running children are never killed. A repeated resource failure at safer packing becomes
+are discovered by the retry. A CUDA OOM lowers only the affected device's live packing ceiling
+below the concurrency observed at failure, so one constrained GPU cannot throttle its healthy
+siblings. After that GPU completes one full stable turnover at the reduced ceiling, the controller
+tests exactly one additional slot; normal live-free-VRAM admission still applies. Already-running
+children are never killed. A repeated resource failure at safer packing becomes
 terminal, and ordinary consumer
 exceptions are never retried blindly because invalid data/code will not improve with repetition.
 Other pending/active Runs continue. The enclosing Work is still reported failed when a Run exhausts
@@ -1276,6 +1331,7 @@ Attempt environment provenance remains after reconstructible environment bytes a
 | Command | Unique purpose |
 |---|---|
 | `init` | scaffold an installable Work project |
+| `project` | show the current project root and storage identity |
 | `validate` | complete local configuration/class/input validation |
 | `explain` | signature/doc/default/resource explanation |
 | `run` | the only scientific execution command |
@@ -1617,3 +1673,61 @@ observations as `not observed`; `unavailable` remains reserved for actual retrie
 The old `LiveJobMonitor` implementation is not a public interface. It remains temporarily as a
 regression oracle while advanced routes still classified `CLI-ONLY BY DESIGN` are migrated; it may
 be deleted only after equivalent service-backed flows and tests exist in Textual.
+
+## 18. Project isolation
+
+LambdaForge selects one consumer project from the nearest `pyproject.toml`, starting at the current
+directory. A virtual environment selects Python packages; it does **not** select LambdaForge state.
+Use `lf project` (or `lf project --json`) before operating from an unfamiliar shell to see the exact
+root and project ID.
+
+New projects created by `lf init` receive a stable identifier. Existing projects may declare one
+before their next submission:
+
+```toml
+[tool.lambdaforge]
+project_id = "protein-design"
+```
+
+It must contain 1–80 letters, digits, `_` or `-`, beginning with a letter or digit. Without this
+field LambdaForge derives an ID from the resolved local root, so two checkouts with the same folder
+name remain isolated. Moving such a checkout changes its derived ID; add an explicit ID first if
+the remote namespace must survive relocation. Giving two checkouts the same explicit ID is an
+intentional request to share their LambdaForge namespace.
+
+The ownership boundary is:
+
+| State | Scope |
+|---|---|
+| user cluster profiles and credential references | shared, so a cluster is configured once |
+| cooperative GPU/process leases | shared per host, so projects cannot over-allocate one device |
+| controller Jobs, groups and recent YAML choices | current project only |
+| local results, datasets and reconstructible cache | current project under `.lambdaforge/` |
+| remote Jobs, state, datasets, environments and cache | current project namespace |
+
+For default remote storage, new work uses
+`<workspace>/.lambdaforge/projects/<project-id>/{state,cache,jobs}`. A custom storage root keeps the
+same ownership boundary by adding `projects/<project-id>`. These are operational paths; scientific
+identity and result reuse do not include the project ID. The shared lease root deliberately remains
+outside the project namespace.
+
+The user catalog at `~/.config/lambdaforge/clusters.yaml` remains the common source for host,
+authentication and site policies. A project's `lambdaforge.clusters.yaml` is a recursive overlay,
+so it can define only its remote mirror while inheriting the rest:
+
+```yaml
+clusters:
+  gpu:
+    project_root: /scratch/user/protein-design
+```
+
+The Research Console, `lf overview`, Work operations, Results and Dataset services all use the same
+project context. A selector from another project is absent rather than actionable. This prevents a
+same-name Work in two projects from becoming the same control-plane object; exact IDs remain the
+identity within each project.
+
+The upgrade is non-destructive. Legacy controller Job records are discovered only when their
+recorded source YAML belongs to the current nearest project, and their recorded provider/work paths
+are used to reconnect. They are not copied between projects and existing remote directories are not
+moved automatically. New submissions use the namespaced layout. Profiles, credentials and shared
+hardware leases require no migration.

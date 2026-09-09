@@ -105,6 +105,8 @@ class StudyTelemetry:
                             "key": key,
                             "seed": specification.get("seed"),
                             "phase": specification.get("hpo_phase", "search"),
+                            "purpose": specification.get("hpo_probe_purpose", "OPTIMIZE"),
+                            "target_questions": list(specification.get("hpo_target_questions", ())),
                             "fidelity": dict(specification.get("hpo_fidelity", {})),
                             "state": "scheduled",
                         }
@@ -202,6 +204,8 @@ class StudyTelemetry:
                 "trial": int(specification["trial_index"]),
                 "seed": specification.get("seed"),
                 "phase": specification.get("hpo_phase", "search"),
+                "purpose": specification.get("hpo_probe_purpose", "OPTIMIZE"),
+                "target_questions": list(specification.get("hpo_target_questions", ())),
                 "fidelity": dict(specification.get("hpo_fidelity", {})),
                 "parameters": dict(specification.get("trial_parameters", {})),
                 "run_dir": str(run_dir.resolve()),
@@ -237,6 +241,8 @@ class StudyTelemetry:
                 "trial": int(specification["trial_index"]),
                 "seed": result.seed,
                 "phase": result.study_phase or specification.get("hpo_phase", "search"),
+                "purpose": specification.get("hpo_probe_purpose", "OPTIMIZE"),
+                "target_questions": list(specification.get("hpo_target_questions", ())),
                 "fidelity": dict(result.fidelity or {}),
                 "parameters": dict(specification.get("trial_parameters", {})),
                 "run_id": result.run_id,
@@ -584,6 +590,7 @@ class StudyTelemetry:
                     StudyInsightAnalyzer.analyze(
                         candidates,
                         objective,
+                        practical_margin=_practical_margin(initialization),
                     )
                     if str(index.get("strategy", "")) == "adaptive"
                     else None
@@ -924,6 +931,20 @@ class StudyTelemetry:
             and all(bool(value["satisfied"]) for value in summary.values()),
             "constraints": summary,
         }
+
+
+def _practical_margin(initialization: Mapping[str, Any]) -> float | None:
+    policy = initialization.get("policy", {})
+    if not isinstance(policy, Mapping):
+        return None
+    value = policy.get("practical_equivalence_margin")
+    return (
+        float(value)
+        if isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        else None
+    )
 
 
 def study_run_key(specification: Mapping[str, Any]) -> str:

@@ -76,6 +76,12 @@ class ClusterService:
         report("Inspecting the cluster profile and consumer project metadata.")
         profile = self.catalog.get(cluster)
         project_root = self._project_root(project)
+        if (
+            self.catalog.project is not None
+            and project_root is not None
+            and project_root != self.catalog.project.root
+        ):
+            raise ValueError("Bootstrap from the consumer project's directory to select its scope.")
         native_specification = NativeEnvironmentSpecification.discover(project_root)
         requirements = self._requirements(project_root, native_specification)
         assert profile.storage is not None

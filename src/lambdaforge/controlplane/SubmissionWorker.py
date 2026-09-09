@@ -15,6 +15,7 @@ from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.JobStore import JobStore
 from lambdaforge.execution.ResourceRequest import ResourceRequest
+from lambdaforge.ProjectContext import ProjectContext
 
 
 def serve(request_path: str | Path) -> int:
@@ -25,7 +26,13 @@ def serve(request_path: str | Path) -> int:
         raise ValueError(f"Invalid LambdaForge submission request: {path}")
     job_id = str(value["job_id"])
     cluster = str(value["cluster"])
-    store = JobStore(str(value["job_store"]))
+    raw_project = value.get("project")
+    project = (
+        ProjectContext(Path(str(raw_project["root"])), str(raw_project["project_id"]))
+        if isinstance(raw_project, Mapping)
+        else None
+    )
+    store = JobStore(str(value["job_store"]), project=project)
     jobs = JobService(ClusterCatalog({cluster: ClusterProfile(cluster)}), store=store)
     try:
         raw_profile = value.get("profile")

@@ -558,8 +558,31 @@ def test_adaptive_search_allocates_more_seeds_only_to_promising_candidates(
     for run in result.runs:
         quality = float(run.trial["parameters"]["quality"])
         seeds_by_quality.setdefault(quality, set()).add(run.seed)
-    assert seeds_by_quality[3.0] == {1, 2, 3, 4}
+    # One shared repeat calibrates within-candidate seed noise.  Once that repeat shows the
+    # incumbent is stable, the controller must not spend the remaining seeds mechanically.
+    assert seeds_by_quality[3.0] == {1, 2}
     assert len(seeds_by_quality[1.0]) == 1
+    decisions = [
+        json.loads(line)
+        for line in (result.execution_dir / "hpo-control" / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    calibration = [
+        decision for decision in decisions if decision.get("action") == "CALIBRATE_SEED_NOISE"
+    ]
+    assert len(calibration) == 1
+    repeat_actions = {
+        "CALIBRATE_SEED_NOISE",
+        "ADD_SHARED_SEED",
+        "REPLICATE_INCUMBENT",
+        "ADD_SEED",
+    }
+    assert all(
+        float(decision["controller_value"]) > 0.0
+        for decision in decisions
+        if decision.get("action") in repeat_actions
+    )
     telemetry = json.loads((study_path / "summary.json").read_text(encoding="utf-8"))
     assert telemetry["strategy"] == "adaptive"
     assert telemetry["counts"]["scheduled_runs"] == len(result.runs)
@@ -875,10 +898,7 @@ def test_cuda_oom_is_requeued_as_a_new_attempt_before_becoming_terminal(
     assert retry["controller_retry"] == 1
     assert "gpu_index" not in retry
     assert retry["gpu_slot"] is None
-    assert (
-        _retry_failed_result(retry, result, policy=policy, telemetry=None)
-        is None
-    )
+    assert _retry_failed_result(retry, result, policy=policy, telemetry=None) is None
 
 
 def test_gpu_oom_retry_waits_for_learned_lower_concurrency(
@@ -915,9 +935,7 @@ def test_gpu_oom_retry_waits_for_learned_lower_concurrency(
             inputs=(),
             requested_resources=WorkResources(1, 0, 1, 20 * gib, None, 0, 1),
             failure=(
-                {"type": "CUDAOutOfMemoryError", "message": "CUDA out of memory"}
-                if oom
-                else None
+                {"type": "CUDAOutOfMemoryError", "message": "CUDA out of memory"} if oom else None
             ),
             gpu_index=0,
             gpu_token="gpu-a",
@@ -1021,7 +1039,9 @@ def test_gpu_oom_retry_waits_for_learned_lower_concurrency(
     assert events.index("finish-1-1") < events.index("submit-3-2")
     assert len(results) == 3
     assert all(result.ok for result in results)
-    assert "reducing the study packing ceiling from 3 to 2" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "reducing the study packing ceiling for that device from 3 to 2" in output
+    assert "cautiously restoring it from 2 to 3" in output
 
 
 def test_gpu_admission_rejects_only_a_bound_impossible_on_every_device() -> None:

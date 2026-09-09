@@ -25,6 +25,10 @@ required. Do not include real credentials or private datasets.
   containment and symbolic-link boundaries at their owning layer. Managed dataset deletion also
   revalidates the exact immutable manifest identity inside the configured dataset root immediately
   before removing bytes; stale, conflicting or unreachable index state fails closed.
+- The nearest `pyproject.toml` selects a project namespace. Jobs, recent choices and operational
+  local/remote state are isolated by project ID, while credentials, cluster definitions and
+  host-wide resource leases remain shared. This prevents accidental cross-project control; it is
+  not an operating-system security boundary between mutually hostile code running as one user.
 - A cluster `project_root` is researcher-owned persistent storage, outside LambdaForge cleanup.
   Large typed inputs map there only by project-relative path and must match local kind, byte count
   and SHA-256 both before submission and again in the worker. Relative remote output publication

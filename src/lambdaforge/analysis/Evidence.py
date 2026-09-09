@@ -149,11 +149,12 @@ def winner_summary(
     if screening is not None and screening.get("confirmation", {}).get("n", 0):
         screen_mean = float(screening["mean"])
         confirm_mean = float(screening["confirmation"]["mean"])
-        margin_source = "authored-equivalence-margin"
-        tolerance = equivalence_margin
-        if tolerance is None:
-            tolerance = max(abs(screen_mean) * 0.02, 1e-12)
-            margin_source = "fallback-relative-2-percent"
+        margin_source = (
+            "authored-equivalence-margin"
+            if equivalence_margin is not None
+            else "not-authored-zero-difference-only"
+        )
+        tolerance = equivalence_margin or 0.0
         signed = signed_improvement(confirm_mean, screen_mean, mode)
         screen_se = screening.get("standard_error")
         confirm_se = screening["confirmation"].get("standard_error")
@@ -167,7 +168,7 @@ def winner_summary(
             status = "regressed"
         elif signed - uncertainty > tolerance:
             status = "improved"
-        elif abs(signed) + uncertainty <= tolerance:
+        elif equivalence_margin is not None and abs(signed) + uncertainty <= tolerance:
             status = "confirmed_equivalent"
         else:
             status = "inconclusive"

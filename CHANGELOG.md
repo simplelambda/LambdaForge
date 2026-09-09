@@ -12,6 +12,11 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Made adaptive GPU scheduling work-conserving and fair: automatic Sobol startup now fills the safe
+  parallel width with distinct candidates, globally free slots prefer the least-loaded/longest-idle
+  granted GPU, and an OOM backs off only its device before evidence-based gradual recovery.
+  `gpu_memory` remains solely a live free-VRAM threshold for each new launch, never a multiplied
+  per-active-Run reservation.
 - Expanded the Research Console cluster editor from six basic fields to the complete durable
   profile: authentication references, runtime/PyTorch, storage/SSH retention, every GPU-access
   policy field and validated advanced OpenSSH/SLURM mappings now round-trip without silent loss.
@@ -100,6 +105,22 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Added a unified scientific-design layer to adaptive HPO. Live control and final analysis now
+  share structured parameter/interaction questions, practical-optimal-region evidence and one
+  auditable confidence meaning: stability of the exact conclusion under candidate-level and
+  shared-seed-aware resampling.
+- Added automatic performance-versus-understanding allocation. The event-driven controller weighs
+  posterior practical-improvement opportunity against unresolved-question entropy per observed
+  cost, can schedule matched parameter/interaction `DESIGNED_PROBE` actions, and returns to
+  optimization when improvement becomes plausible without adding YAML phase knobs.
+- Added hierarchical within-candidate seed-noise calibration, deliberate shared-seed comparisons,
+  incumbent/challenger replication and persisted action purpose/question/O/K evidence. A
+  deterministic same-budget CPU benchmark guards optimization regret while measuring scientific
+  conclusions resolved.
+- Added automatic consumer-project isolation based on the nearest `pyproject.toml`, an optional
+  stable `[tool.lambdaforge].project_id`, `lf project`, project-owned controller/MRU and remote
+  state namespaces, recursively layered per-project cluster mirrors, and safe filtered access to
+  legacy Jobs. Cluster profiles, credentials and host-wide GPU/process leases remain shared.
 - Added contextual statistical help, a visual Coverage dashboard, a pairwise interaction matrix
   and explicit offline Plotly exports for Study, parameter, learning-curve and resource views.
   Interactive reports provide exact hover values, genuine uncertainty shading, heatmaps and

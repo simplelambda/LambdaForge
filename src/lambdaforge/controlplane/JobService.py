@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import shlex
 from collections.abc import Mapping, Sequence
@@ -41,7 +42,7 @@ class JobService:
         factory: ControlPlaneFactory | None = None,
     ) -> None:
         self.catalog = catalog or ClusterCatalog.load()
-        self.store = store or JobStore()
+        self.store = store or JobStore(project=self.catalog.project)
         self.factory = factory or ControlPlaneFactory()
 
     def submit(
@@ -84,6 +85,8 @@ class JobService:
             **(dict(reserved.metadata) if reserved is not None else {}),
             **dict(metadata or {}),
         }
+        assert profile.storage is not None
+        record_metadata["provider_storage"] = profile.storage.to_dict()
         if profile.transport == "local":
             assert profile.storage is not None
             record_metadata["local_workspace"] = profile.workspace
@@ -679,8 +682,7 @@ class JobService:
                     }
                     if isinstance(value.get("display_names"), Mapping):
                         chart_filter["display_names"] = {
-                            str(name): str(label)
-                            for name, label in value["display_names"].items()
+                            str(name): str(label) for name, label in value["display_names"].items()
                         }
                     continue
                 metric = value.get("value")
@@ -738,9 +740,7 @@ class JobService:
             "parameters": candidate_parameters or dict(selected.get("parameters", {})),
             "objective": dict(objective),
             "current_observed_objective": selected.get("current_observed_objective"),
-            "best_observed_objective": selected.get(
-                "best_observed_objective", best_objective
-            ),
+            "best_observed_objective": selected.get("best_observed_objective", best_objective),
             "final_objective": selected.get("final_objective"),
             "objective_status": dict(selected.get("objective_status", {}))
             if isinstance(selected.get("objective_status"), Mapping)
@@ -1241,6 +1241,12 @@ class JobService:
         """
         profile = self.catalog.get(record.cluster)
         if profile.transport != "local":
+            recorded = record.metadata.get("provider_storage")
+            if isinstance(recorded, Mapping) and recorded.get("run_root"):
+                return str(recorded["run_root"])
+            remote_work = PurePosixPath(record.work_dir)
+            if remote_work.name == "work" and remote_work.parent.name == record.job_id:
+                return str(remote_work.parent.parent)
             assert profile.storage is not None
             return profile.storage.job_root
         storage = record.metadata.get("local_storage")
@@ -1274,6 +1280,17 @@ class JobService:
     def _provider(self, record: JobRecord) -> tuple[Any, Any, Any]:
         """Resolve a provider using per-Job local roots and current remote credentials."""
         profile = self.catalog.get(record.cluster)
+        if profile.transport != "local":
+            recorded = record.metadata.get("provider_storage")
+            assert profile.storage is not None
+            authored_storage = self.catalog.definition(record.cluster).storage
+            assert authored_storage is not None
+            remote_storage = (
+                ClusterStoragePolicy.from_mapping(recorded, workspace=profile.workspace)
+                if isinstance(recorded, Mapping)
+                else replace(authored_storage, run_root=self.job_root(record))
+            )
+            profile = replace(profile, storage=remote_storage)
         if profile.transport == "local":
             storage = record.metadata.get("local_storage")
             workspace = str(record.metadata.get("local_workspace") or profile.workspace)
@@ -1319,12 +1336,18 @@ class JobService:
             return str(resolved)
 
         assert profile.storage is not None
+        shared_state = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
         storage = replace(
             profile.storage,
             state_root=str(anchored(profile.storage.state_root)),
             cache_root=str(anchored(profile.storage.cache_root)),
             run_root=str(anchored(profile.storage.run_root)),
             dataset_root=anchored(profile.storage.dataset_root),
+            lease_root=(
+                str(anchored(profile.storage.lease_root))
+                if profile.storage.lease_root is not None
+                else str((shared_state / "lambdaforge" / "leases").resolve())
+            ),
         )
         return replace(profile, workspace=str(anchored(profile.workspace)), storage=storage)
 

@@ -11,6 +11,11 @@ metadata empaquetada.
 
 ### Corregido
 
+- Hecha equitativa y work-conserving la planificación GPU adaptativa: el startup Sobol automático
+  llena el ancho paralelo seguro con candidatos distintos, los slots globales libres priorizan la
+  GPU concedida menos cargada/más ociosa y una OOM reduce solo su dispositivo antes de recuperarse
+  gradualmente con evidencia. `gpu_memory` sigue siendo únicamente un umbral de VRAM libre viva por
+  lanzamiento nuevo, nunca una reserva multiplicada por Runs activos.
 - Ampliado el editor de clúster de la Consola desde seis campos básicos al perfil durable completo:
   referencias de autenticación, runtime/PyTorch, retención de almacenamiento/SSH, toda la política
   GPU y los mapas OpenSSH/SLURM avanzados validados se conservan sin pérdidas silenciosas. Las
@@ -96,6 +101,22 @@ metadata empaquetada.
 
 ### Añadido
 
+- Añadida una capa unificada de diseño científico al HPO adaptativo. Control live y análisis final
+  comparten preguntas estructuradas de parámetros/interacciones, región óptima práctica y un único
+  significado auditable de confianza: estabilidad de la conclusión exacta bajo remuestreo por
+  candidato y consciente de seeds compartidas.
+- Añadida asignación automática entre rendimiento y comprensión. El controlador por eventos
+  pondera oportunidad posterior de mejora práctica frente a entropía de preguntas no resueltas por
+  coste observado, puede programar `DESIGNED_PROBE` emparejados y vuelve a optimizar si reaparece
+  mejora plausible, sin nuevos knobs YAML de fases.
+- Añadidas calibración jerárquica del ruido dentro de candidato, comparaciones con seeds compartidas,
+  replicación de incumbent/challengers y evidencia persistida de propósito/pregunta/O/K. Un
+  benchmark CPU determinista a igual presupuesto protege el regret mientras mide conclusiones
+  científicas resueltas.
+- Añadido aislamiento automático del proyecto consumidor mediante el `pyproject.toml` más cercano,
+  un `[tool.lambdaforge].project_id` estable opcional, `lf project`, namespaces propios para
+  controlador/MRU/estado remoto, mirrors de clúster superpuestos recursivamente y acceso filtrado
+  seguro a Jobs legados. Perfiles, credenciales y leases GPU/proceso del host siguen compartidos.
 - Añadidos ayuda estadística contextual, dashboard visual de Coverage, matriz de interacciones y
   exportaciones Plotly offline explícitas para Study, parámetros, curvas y recursos. Los informes
   ofrecen hover exacto, incertidumbre sombreada real, mapas de calor y superficies 3D sin añadir

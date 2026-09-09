@@ -12,6 +12,7 @@ from typing import Any
 
 from lambdaforge.analysis.Report import write_html
 from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
+from lambdaforge.ProjectContext import ProjectContext
 from lambdaforge.work.config import WorkConfig
 from lambdaforge.work.failure import render_scientific_failures, scientific_failures
 from lambdaforge.work.models import atomic_json
@@ -22,7 +23,9 @@ class ResultStore:
 
     def __init__(self, root: str | Path | None = None) -> None:
         configured = root or os.environ.get("LAMBDAFORGE_RUN_ROOT")
-        self.root = Path(configured or Path.cwd() / ".lambdaforge" / "runs").resolve()
+        self.root = Path(
+            configured or ProjectContext.discover().root / ".lambdaforge" / "runs"
+        ).resolve()
 
     def list(self) -> tuple[dict[str, Any], ...]:
         """Return valid current Execution envelopes without guessing partial state."""

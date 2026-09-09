@@ -32,6 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true")
     commands = parser.add_subparsers(dest="command")
+    project = commands.add_parser(
+        "project", help="Show the current project identity and discovered root."
+    )
+    project.add_argument("--json", action="store_true")
 
     init = commands.add_parser("init", help="Create an installable Work project.")
     init.add_argument("directory", type=Path)
@@ -62,7 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
     _cluster_selector(doctor)
     doctor.add_argument("--json", action="store_true")
 
-    overview = commands.add_parser("overview", help="Machine-readable global Work overview.")
+    overview = commands.add_parser(
+        "overview", help="Machine-readable current-project Work overview."
+    )
     _cluster_selector(overview)
     overview.add_argument("--json", action="store_true")
     resources = commands.add_parser("resources", help="Inspect cluster resources.")

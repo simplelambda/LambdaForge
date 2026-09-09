@@ -35,7 +35,7 @@ from lambdaforge.data.DatasetResolver import DatasetResolver
 from lambdaforge.EnvironmentManifest import EnvironmentManifest
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservation
-from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy, ControllerValuePolicy
+from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
 from lambdaforge.hpo.BayesianSampler import BayesianSampler
 from lambdaforge.hpo.CurveEvidence import CompletedCurve, audit_pruner, predict_curve
@@ -44,6 +44,11 @@ from lambdaforge.hpo.ObjectiveUtility import (
     aggregate_constraint,
     constraint_satisfied,
     pareto_front,
+)
+from lambdaforge.hpo.ScientificDesign import (
+    ExperimentalDesignPolicy,
+    ScientificQuestionAnalyzer,
+    SeedNoiseModel,
 )
 from lambdaforge.hpo.SurvivalModel import (
     SurvivalAcquisitionPolicy,
@@ -1148,6 +1153,11 @@ def _execute_adaptive_group(
         by_trial.setdefault(int(specification["trial_index"]), []).append(specification)
     all_trials = sorted(by_trial)
     candidate_budget = min(policy.candidate_budget, len(all_trials))
+    startup_trial_count = _adaptive_startup_trial_count(
+        policy,
+        parallelism=parallelism,
+        candidate_budget=candidate_budget,
+    )
     control_root = Path(str(specifications[0]["execution_dir"])) / "hpo-control"
     control_root.mkdir(parents=True, exist_ok=True)
     decisions_path = control_root / "decisions.jsonl"
@@ -1161,7 +1171,7 @@ def _execute_adaptive_group(
         nonlocal decision_number
         decision_number += 1
         event = {
-            "event_version": 1,
+            "event_version": 2,
             "decision": decision_number,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "action": action,
@@ -1191,20 +1201,24 @@ def _execute_adaptive_group(
         )
     print(
         f"[hpo] action-adaptive search: candidate_budget={candidate_budget} "
-        f"proposal_pool={len(all_trials)} startup={min(policy.startup_trials, candidate_budget)} "
+        f"proposal_pool={len(all_trials)} startup={startup_trial_count} "
         f"seeds={seed_count} "
         f"parallel={parallelism} runs_per_gpu={policy.runs_per_gpu}",
         flush=True,
     )
-    controller_values = ControllerValuePolicy()
     record_decision(
         "INITIALIZE",
         candidate_budget=candidate_budget,
         proposal_pool_size=len(all_trials),
+        startup_trials_configured=policy.startup_trials,
+        startup_trials_effective=startup_trial_count,
         search_seed_budget=seed_count,
         slots_total=parallelism,
         policy=policy.to_dict(),
-        controller_value_policy=controller_values.to_dict(),
+        controller_value_policy={
+            "meaning": "automatic-performance-and-scientific-value-per-observed-cost",
+            "manual_weights": False,
+        },
         survival_acquisition=SurvivalAcquisitionPolicy().to_dict(),
     )
     candidate_parameters = {
@@ -1275,9 +1289,14 @@ def _execute_adaptive_group(
             values.append(value)
         return values
 
-    def next_seed_specification(pool_trial: int) -> dict[str, Any] | None:
+    def next_seed_specification(
+        pool_trial: int, *, preferred_seed: int | None = None
+    ) -> dict[str, Any] | None:
         attempted = {result.seed for result in completed[pool_trial]}
-        for raw in by_trial[pool_trial]:
+        available = list(by_trial[pool_trial])
+        if preferred_seed is not None:
+            available.sort(key=lambda value: value.get("seed") != preferred_seed)
+        for raw in available:
             value = prepared(pool_trial, raw)
             if raw.get("seed") not in attempted and scheduling_key(value) not in scheduled_run_keys:
                 return value
@@ -1349,6 +1368,50 @@ def _execute_adaptive_group(
                 objective=objective,
                 racer=racer,
             )
+        )
+
+    def scientific_snapshot() -> dict[str, Any]:
+        candidates: list[dict[str, Any]] = []
+        for pool_trial in proposed:
+            runs = []
+            for result in completed[pool_trial]:
+                runs.append(
+                    {
+                        "seed": result.seed,
+                        "phase": result.study_phase,
+                        "state": (
+                            "pruned"
+                            if result.termination_type == "performance_pruned"
+                            else result.status
+                        ),
+                        "final_objective": (
+                            _result_objective(result, metric)
+                            if result.termination_type == "completed"
+                            else None
+                        ),
+                        "best_observed_objective": _result_objective(result, metric),
+                        "fidelity": dict(result.fidelity or {}),
+                        "censored": result.termination_type == "performance_pruned",
+                    }
+                )
+            candidates.append(
+                {
+                    "trial": pool_trial,
+                    "parameters": candidate_parameters[pool_trial],
+                    "runs": runs,
+                    "state": (
+                        "pruned"
+                        if runs and all(value["state"] == "pruned" for value in runs)
+                        else "observed"
+                    ),
+                }
+            )
+        return ScientificQuestionAnalyzer.analyze(
+            candidates,
+            objective,
+            practical_margin=policy.scientific_margin,
+            fingerprint=str(specifications[0]["execution_id"]),
+            candidate_pool=candidate_parameters,
         )
 
     def propose(count: int) -> tuple[int, ...]:
@@ -1493,10 +1556,11 @@ def _execute_adaptive_group(
         )
 
     def persist_state() -> None:
+        scientific = scientific_snapshot()
         atomic_json(
             state_path,
             {
-                "state_version": 1,
+                "state_version": 2,
                 "updated_at_utc": datetime.now(timezone.utc).isoformat(),
                 "proposed_pool_trials": list(proposed),
                 "public_trial_map": {
@@ -1515,6 +1579,7 @@ def _execute_adaptive_group(
                     if policy.early_stopping
                     else None
                 ),
+                "scientific_understanding": scientific,
                 "runs": [
                     {
                         "trial": int((result.trial or {"index": 0})["index"]),
@@ -1542,6 +1607,9 @@ def _execute_adaptive_group(
         ]
         default_cost = statistics.fmean(durations) if durations else 1.0
         options: list[tuple[float, int, str, dict[str, Any], dict[str, Any]]] = []
+        scientific = scientific_snapshot()
+        optimization_weight = float(scientific["optimization_weight"])
+        information_weight = float(scientific["information_weight"])
 
         provisional_values = values_by_trial(final_only=False)
         eligible = [trial for trial in proposed if next_seed_specification(trial) is not None]
@@ -1549,12 +1617,36 @@ def _execute_adaptive_group(
         # This is an event-driven wait, not a round barrier: unrelated new candidates may still
         # fill a free slot below, and the next completion immediately replans every queued action.
         seed_decisions = (
-            racer.decisions(provisional_values, eligible=eligible)
+            racer.decisions(
+                provisional_values,
+                eligible=eligible,
+                available_seeds={
+                    trial: [
+                        int(value["seed"])
+                        for value in by_trial[trial]
+                        if isinstance(value.get("seed"), int)
+                        and not isinstance(value.get("seed"), bool)
+                    ]
+                    for trial in eligible
+                },
+            )
             if len(provisional_values) >= 2 or not pending_observations
             else ()
         )
+        seed_noise = SeedNoiseModel.fit(provisional_values)
+        calibration_inflight = not seed_noise.calibrated and any(
+            inflight_by_trial.get(trial, 0) > 0 and bool(values)
+            for trial, values in provisional_values.items()
+        )
         for decision in seed_decisions:
-            specification = next_seed_specification(decision.trial)
+            # One repeated candidate is sufficient to identify the initial within-candidate noise
+            # scale.  If that calibration is already running, do not spend another slot repeating
+            # an arbitrary (possibly poor) candidate before its evidence arrives.
+            if decision.purpose == "CALIBRATE_SEED_NOISE" and calibration_inflight:
+                continue
+            specification = next_seed_specification(
+                decision.trial, preferred_seed=decision.recommended_seed
+            )
             if specification is None:
                 continue
             candidate_costs = [
@@ -1563,25 +1655,54 @@ def _execute_adaptive_group(
                 if result.duration_seconds > 0
             ]
             cost = statistics.fmean(candidate_costs) if candidate_costs else default_cost
-            value_proxy = min(
-                1.0,
-                decision.expected_uncertainty_reduction
-                / max(decision.current_standard_error, 1e-9),
+            information_value = min(1.0, max(0.0, decision.information_value))
+            optimization_value = information_value * max(
+                decision.probability_competitive,
+                1.0 - decision.probability_competitive,
+            )
+            cost_ratio = cost / max(default_cost, 1e-9)
+            value_proxy = (
+                optimization_weight * optimization_value + information_weight * information_value
             )
             options.append(
                 (
-                    value_proxy / max(cost, 1e-9),
+                    value_proxy / max(cost_ratio, 1e-9),
                     1,
-                    "ADD_SEED",
+                    decision.purpose,
                     specification,
                     {
+                        "purpose": decision.purpose,
                         "probability_competitive": decision.probability_competitive,
-                        "current_standard_error": decision.current_standard_error,
+                        "current_standard_error": (
+                            decision.current_standard_error
+                            if math.isfinite(decision.current_standard_error)
+                            else None
+                        ),
                         "expected_uncertainty_reduction": (decision.expected_uncertainty_reduction),
+                        "optimization_value": optimization_value,
+                        "information_value": information_value,
                         "controller_value": value_proxy,
-                        "value_basis": "seed-mean-standard-error-reduction-near-boundary",
+                        "value_basis": ("incumbent-challenger-comparison-uncertainty-reduction"),
                         "expected_cost_seconds": cost,
+                        "cost_ratio": cost_ratio,
                         "completed_seeds": decision.completed_seeds,
+                        "recommended_shared_seed": decision.recommended_seed,
+                        "comparison_trials": list(decision.comparison_trials),
+                        "target_questions": [
+                            f"Which of Trial {decision.trial} and its challengers is "
+                            "practically competitive?"
+                        ],
+                        "reason": (
+                            "calibrate within-candidate seed noise without using "
+                            "between-candidate spread"
+                            if decision.purpose == "CALIBRATE_SEED_NOISE"
+                            else "reduce uncertainty in incumbent/challenger comparisons "
+                            "using paired evidence"
+                            if decision.purpose == "ADD_SHARED_SEED"
+                            else "reduce uncertainty in the incumbent before declaring it stable"
+                            if decision.purpose == "REPLICATE_INCUMBENT"
+                            else "reduce uncertainty in a practically relevant candidate comparison"
+                        ),
                     },
                 )
             )
@@ -1595,6 +1716,37 @@ def _execute_adaptive_group(
             for decision in racer.decisions(rung_values, eligible=proposed)
         )
         competitive = {decision.trial for decision in provisional}
+        if seed_count == 1 and comparable_rungs:
+            # With one explicitly authored seed, that shared seed is the complete estimand rather
+            # than an uncalibrated population mean. Promote only the best practical set at a rung;
+            # when more seeds exist, the conservative probabilistic racer remains authoritative.
+            latest_rung = max(
+                comparable_rungs,
+                key=lambda rung: (rung[0] / max(1, rung[1]), rung),
+            )
+            rung_values = comparable_rungs[latest_rung]
+            rung_fraction = latest_rung[0] / max(1, latest_rung[1])
+            # Do not promote the only completed candidate while a peer at the same rung is still
+            # running.  This is a local comparison wait, not a global round barrier: unrelated
+            # candidate and seed actions may still fill other slots.
+            rung_means = (
+                {
+                    trial: statistics.fmean(values.values())
+                    for trial, values in rung_values.items()
+                    if values
+                }
+                if len(rung_values) >= 2 or rung_fraction not in pending_fidelities
+                else {}
+            )
+            if rung_means:
+                best_rung_value = (max if mode == "max" else min)(rung_means.values())
+                margin = policy.scientific_margin or 0.0
+                competitive = {
+                    trial
+                    for trial, value in rung_means.items()
+                    if (best_rung_value - value if mode == "max" else value - best_rung_value)
+                    <= margin
+                }
         latest_by_seed: dict[tuple[int, int | None], WorkResult] = {}
         for trial in proposed:
             for result in completed[trial]:
@@ -1618,10 +1770,19 @@ def _execute_adaptive_group(
             cost = max(1e-9, base_cost * incremental_fraction)
             maximum = max(1, int(fidelity["maximum"]))
             fidelity_gain = max(0.0, min(1.0, (target - current) / maximum))
-            value_proxy = controller_values.fidelity_uncertainty_weight * math.sqrt(fidelity_gain)
+            information_value = min(
+                1.0,
+                float(scientific["scientific_uncertainty"]) * math.sqrt(fidelity_gain),
+            )
+            optimization_value = min(1.0, math.sqrt(fidelity_gain))
+            combined_value = (
+                optimization_weight * optimization_value + information_weight * information_value
+            )
+            value_proxy = combined_value
+            cost_ratio = cost / max(default_cost, 1e-9)
             options.append(
                 (
-                    value_proxy / cost,
+                    combined_value / max(cost_ratio, 1e-9),
                     2,
                     (
                         "RESUME_PREEMPTED"
@@ -1631,10 +1792,18 @@ def _execute_adaptive_group(
                     specification,
                     {
                         "controller_value": value_proxy,
-                        "value_basis": "remaining-fidelity-uncertainty-proxy",
+                        "optimization_value": optimization_value,
+                        "information_value": information_value,
+                        "value_basis": "fidelity-evidence-value-under-current-study-balance",
                         "expected_cost_seconds": cost,
+                        "cost_ratio": cost_ratio,
                         "current": current,
                         "target": target,
+                        "purpose": "PROMOTE_FIDELITY",
+                        "target_questions": [],
+                        "reason": (
+                            "higher-fidelity evidence remains competitive per incremental cost"
+                        ),
                     },
                 )
             )
@@ -1642,42 +1811,85 @@ def _execute_adaptive_group(
         proposal: tuple[int, ...] = ()
         if len(proposed) < candidate_budget and not search_converged:
             proposal = propose(1)
-        if proposal:
-            exploration_bonus = (
-                controller_values.periodic_exploration_bonus
-                if len(outcomes) % max(2, parallelism) == 0
-                else 0.0
+        if len(proposed) < candidate_budget and provisional_values and not search_converged:
+            costs_by_trial = {
+                trial: statistics.fmean(
+                    result.duration_seconds
+                    for result in completed[trial]
+                    if result.duration_seconds > 0
+                )
+                for trial in proposed
+                if any(result.duration_seconds > 0 for result in completed[trial])
+            }
+            designed = ExperimentalDesignPolicy(
+                candidate_parameters,
+                mode=mode,
+                practical_margin=policy.scientific_margin,
+            ).rank(
+                provisional_values,
+                selected=proposed,
+                scientific_state=scientific,
+                costs=costs_by_trial,
             )
-            value_proxy = (
-                controller_values.new_region_base
-                + controller_values.observation_sparsity_weight / math.sqrt(1 + len(observations()))
-                + exploration_bonus
-            )
+            candidates_to_value = list(designed[:1])
+            if proposal:
+                optimization_candidate = next(
+                    (value for value in designed if value.trial == proposal[0]), None
+                )
+                if optimization_candidate is not None and all(
+                    value.trial != optimization_candidate.trial for value in candidates_to_value
+                ):
+                    candidates_to_value.append(optimization_candidate)
+            for design in candidates_to_value:
+                specification = initial_specifications(design.trial)[0]
+                specification["hpo_probe_purpose"] = design.purpose
+                specification["hpo_target_questions"] = list(design.target_questions)
+                evidence = design.to_dict()
+                evidence["pool_trial"] = design.trial
+                options.append(
+                    (
+                        design.score,
+                        0,
+                        str(evidence["action"]),
+                        specification,
+                        evidence,
+                    )
+                )
+        elif proposal:
+            # No comparable outcome exists yet; preserve deterministic space-filling startup.
             specification = initial_specifications(proposal[0])[0]
             options.append(
                 (
-                    value_proxy / max(default_cost, 1e-9),
+                    1.0,
                     0,
                     "START_NEW",
                     specification,
                     {
-                        "controller_value": value_proxy,
-                        "value_basis": "new-region-coverage-and-observation-sparsity-proxy",
+                        "purpose": "EXPLORE_COVERAGE",
+                        "optimization_value": None,
+                        "information_value": None,
                         "expected_cost_seconds": default_cost,
+                        "cost_ratio": 1.0,
                         "pool_trial": proposal[0],
-                        "exploration_bonus": exploration_bonus,
+                        "target_questions": [],
+                        "reason": "collect the first comparable objective evidence",
                     },
                 )
             )
+        options = [value for value in options if value[0] > 1e-12]
         if not options:
             return "WAIT", [], {"reason": "no-scientifically-useful-action"}
         score, _tie, action, specification, evidence = max(
             options, key=lambda value: (value[0], -value[1], -int(value[3]["trial_index"]))
         )
-        if action == "START_NEW":
+        if action in {"START_NEW", "DESIGNED_PROBE"}:
             pool_trial = int(evidence["pool_trial"])
             proposed.append(pool_trial)
             specifications = initial_specifications(pool_trial)[:capacity]
+            if action == "DESIGNED_PROBE":
+                for value in specifications:
+                    value["hpo_probe_purpose"] = evidence.get("purpose")
+                    value["hpo_target_questions"] = list(evidence.get("target_questions", ()))
         else:
             specifications = [specification]
         alternatives = [
@@ -1686,6 +1898,8 @@ def _execute_adaptive_group(
                 "trial": int(value[3]["trial_index"]),
                 "score": value[0],
                 "controller_value": value[4].get("controller_value"),
+                "optimization_value": value[4].get("optimization_value"),
+                "information_value": value[4].get("information_value"),
                 "expected_cost_seconds": value[4].get("expected_cost_seconds"),
             }
             for value in sorted(options, key=lambda item: item[0], reverse=True)[:6]
@@ -1697,7 +1911,14 @@ def _execute_adaptive_group(
                 **evidence,
                 "score": score,
                 "alternatives": alternatives,
-                "reason": "highest-controller-value-per-incremental-cost",
+                "optimization_opportunity": scientific["optimization_opportunity"],
+                "scientific_uncertainty": scientific["scientific_uncertainty"],
+                "optimization_weight": optimization_weight,
+                "information_weight": information_weight,
+                "study_phase": scientific["phase"],
+                "reason": evidence.get(
+                    "reason", "highest combined performance-and-information value per cost"
+                ),
                 "pending_context": [
                     {"trial": trial, "target_fidelity": fidelity}
                     for trial, fidelity in sorted(pending_fidelity_by_trial.items())[:12]
@@ -1978,9 +2199,14 @@ def _execute_adaptive_group(
                         else None
                     ),
                 )
+            decision_evidence = {
+                key: value
+                for key, value in evidence.items()
+                if key not in {"action", "trial", "seed"}
+            }
             record_decision(
                 action,
-                **evidence,
+                **decision_evidence,
                 trial=int(specifications[0]["trial_index"]),
                 seed=specifications[0].get("seed"),
                 completed_runs=len(outcomes),
@@ -2024,7 +2250,7 @@ def _execute_adaptive_group(
         if telemetry is not None and observed_trials:
             telemetry.candidates_observed(observed_trials)
 
-    startup = selector.initial(min(policy.startup_trials, candidate_budget))
+    startup = selector.initial(startup_trial_count)
     proposed.extend(startup)
     record_decision(
         "START_NEW",
@@ -2032,7 +2258,19 @@ def _execute_adaptive_group(
         pool_trials=list(startup),
         public_trials=[public_trial(trial) for trial in startup],
     )
-    startup_specs = [value for trial in startup for value in initial_specifications(trial)]
+    # Fill the first wave with distinct space-filling candidates before scheduling a second seed
+    # for any candidate.  This gives the sampler broad evidence and avoids leaving expensive
+    # parallel hardware idle during startup.
+    startup_by_trial = [initial_specifications(trial) for trial in startup]
+    startup_specs = [
+        values[seed_index]
+        for seed_index in range(max((len(values) for values in startup_by_trial), default=0))
+        for values in startup_by_trial
+        if seed_index < len(values)
+    ]
+    for value in startup_specs:
+        value["hpo_probe_purpose"] = "EXPLORE_COVERAGE"
+        value["hpo_target_questions"] = ["Establish broad initial search-space evidence"]
     # Deferred startup Runs remain a provisional planning pool. Only specifications handed to the
     # dispatcher enter ``scheduled_run_keys``; this lets every result re-rank the undispatched tail.
     startup_width = max(1, min(parallelism, allowance(), len(startup_specs)))
@@ -2608,7 +2846,10 @@ def _execute_gpu_admitted_runs(
     pending: dict[Any, tuple[dict[str, Any], int, ProcessPoolExecutor]] = {}
     active = [0] * resources.gpu_count
     last_launch = [float("-inf")] * resources.gpu_count
-    effective_runs_per_gpu = policy.runs_per_gpu
+    # OOM evidence belongs to the device on which it was observed.  A single externally loaded or
+    # unusually constrained GPU must not throttle healthy siblings for the remainder of a Study.
+    effective_runs_per_gpu = [policy.runs_per_gpu] * resources.gpu_count
+    stable_runs_after_backoff = [0] * resources.gpu_count
     next_wait_log = 0.0
     consecutive_probe_failures = 0
     while queued or pending:
@@ -2651,16 +2892,37 @@ def _execute_gpu_admitted_runs(
                     telemetry=telemetry,
                 )
                 if memory_failure:
-                    previous_limit = effective_runs_per_gpu
-                    effective_runs_per_gpu = _safer_gpu_concurrency(
-                        effective_runs_per_gpu,
+                    previous_limit = effective_runs_per_gpu[slot]
+                    effective_runs_per_gpu[slot] = _safer_gpu_concurrency(
+                        effective_runs_per_gpu[slot],
                         active[slot],
                     )
-                    if effective_runs_per_gpu < previous_limit:
+                    stable_runs_after_backoff[slot] = 0
+                    if effective_runs_per_gpu[slot] < previous_limit:
                         print(
                             f"[hpo] CUDA OOM observed with {active[slot]} active Run(s) on "
                             f"GPU {visible_gpus[slot]}; reducing the study packing ceiling "
-                            f"from {previous_limit} to {effective_runs_per_gpu} Run(s) per GPU",
+                            f"for that device from {previous_limit} to "
+                            f"{effective_runs_per_gpu[slot]} Run(s)",
+                            flush=True,
+                        )
+                elif (
+                    isinstance(result, WorkResult)
+                    and (result.ok or result.pruned)
+                    and (effective_runs_per_gpu[slot] < policy.runs_per_gpu)
+                ):
+                    # One full turnover at the learned lower ceiling is direct evidence that the
+                    # device is stable there. Probe exactly one additional slot next; live free
+                    # VRAM still has to satisfy the normal per-launch threshold.
+                    stable_runs_after_backoff[slot] += 1
+                    if stable_runs_after_backoff[slot] >= effective_runs_per_gpu[slot]:
+                        previous_limit = effective_runs_per_gpu[slot]
+                        effective_runs_per_gpu[slot] += 1
+                        stable_runs_after_backoff[slot] = 0
+                        print(
+                            f"[hpo] GPU {visible_gpus[slot]} completed one stable turnover at "
+                            f"the reduced packing ceiling; cautiously restoring it from "
+                            f"{previous_limit} to {effective_runs_per_gpu[slot]} Run(s)",
                             flush=True,
                         )
                 if retry is not None:
@@ -2818,7 +3080,7 @@ def _execute_gpu_admitted_runs(
                 f"[hpo] admitted trial={value['trial_index']} seed={value.get('seed')} "
                 f"on GPU {visible_gpus[slot]}: {memory_state}"
                 f"active={active[slot]}/"
-                f"{effective_runs_per_gpu}",
+                f"{effective_runs_per_gpu[slot]}",
                 flush=True,
             )
             launched = True
@@ -2827,7 +3089,7 @@ def _execute_gpu_admitted_runs(
             states = ", ".join(
                 f"GPU {visible_gpus[index]} "
                 f"{'free=' + _memory_text(memory[index][0]) + ' ' if required else ''}"
-                f"active={active[index]}/{effective_runs_per_gpu}"
+                f"active={active[index]}/{effective_runs_per_gpu[index]}"
                 for index in usable
             )
             print(
@@ -2883,8 +3145,7 @@ def _gpu_memory_inventory(gpu_count: int) -> tuple[tuple[int, int], ...]:
             if output:
                 detail = f" Probe output: {output[-1200:]}"
         raise RuntimeError(
-            "CUDA GPU admission could not read current device memory safely."
-            f"{detail}"
+            f"CUDA GPU admission could not read current device memory safely.{detail}"
         ) from error
 
 
@@ -2923,19 +3184,23 @@ def _admissible_gpu_slots(
     active: Sequence[int],
     last_launch: Sequence[float],
     required_bytes: int,
-    runs_per_gpu: int,
+    runs_per_gpu: int | Sequence[int],
     now: float,
     launch_stagger_seconds: float,
     usable: Sequence[int],
 ) -> tuple[int, ...]:
-    """Return devices that can accept one Run now without treating pressure as failure."""
-    return tuple(
+    """Return devices that can accept one Run now, least-loaded and longest-idle first."""
+    candidates = (
         index
         for index in usable
-        if active[index] < runs_per_gpu
+        if active[index] < _gpu_run_limit(runs_per_gpu, index)
         and now - last_launch[index] >= launch_stagger_seconds
         and (required_bytes <= 0 or memory[index][0] >= required_bytes)
     )
+    # Stable index order used to starve a higher-index GPU whenever only one global slot became
+    # free.  Prefer lower load, then the device that has waited longest, with index only as the
+    # deterministic final tie-breaker.
+    return tuple(sorted(candidates, key=lambda index: (active[index], last_launch[index], index)))
 
 
 def _gpu_admission_diagnostics(
@@ -2943,7 +3208,7 @@ def _gpu_admission_diagnostics(
     *,
     active: Sequence[int],
     required_bytes: int,
-    runs_per_gpu: int,
+    runs_per_gpu: int | Sequence[int],
     configured_runs_per_gpu: int | None = None,
     max_parallel: int | None,
     pending: int,
@@ -2954,15 +3219,16 @@ def _gpu_admission_diagnostics(
     """Describe why queued Runs can or cannot consume each allocated GPU."""
     allowed = set(usable)
     ready = set(admissible)
-    configured_limit = configured_runs_per_gpu or runs_per_gpu
+    configured_limit = configured_runs_per_gpu or (
+        runs_per_gpu if isinstance(runs_per_gpu, int) else max(runs_per_gpu, default=1)
+    )
     devices: list[dict[str, Any]] = []
     for index, (free, total) in enumerate(memory):
+        device_limit = _gpu_run_limit(runs_per_gpu, index)
         if index not in allowed:
             reason = "gpu_unavailable"
-        elif active[index] >= runs_per_gpu:
-            reason = (
-                "oom_backoff" if runs_per_gpu < configured_limit else "runs_per_gpu"
-            )
+        elif active[index] >= device_limit:
+            reason = "oom_backoff" if device_limit < configured_limit else "runs_per_gpu"
         elif required_bytes > 0 and free < required_bytes:
             reason = "insufficient_free_vram"
         elif index not in ready:
@@ -2980,7 +3246,7 @@ def _gpu_admission_diagnostics(
                 "available": free,
                 "total": total,
                 "active_runs": active[index],
-                "runs_per_gpu": runs_per_gpu,
+                "runs_per_gpu": device_limit,
                 "configured_runs_per_gpu": configured_limit,
                 "retryable": reason not in {"gpu_unavailable"},
             }
@@ -2989,10 +3255,25 @@ def _gpu_admission_diagnostics(
         "pending_runs": pending,
         "max_parallel": max_parallel,
         "runs_per_gpu": configured_limit,
-        "effective_runs_per_gpu": runs_per_gpu,
+        "effective_runs_per_gpu": min(
+            (_gpu_run_limit(runs_per_gpu, index) for index in usable),
+            default=configured_limit,
+        ),
+        "effective_runs_per_gpu_by_device": {
+            visible_gpus[index] if index < len(visible_gpus) else str(index): _gpu_run_limit(
+                runs_per_gpu, index
+            )
+            for index in range(len(memory))
+        },
+        "gpu_memory_semantics": "live-free-vram-threshold-per-new-run-not-a-reservation",
         "devices": devices,
         "summary": ("admissible" if ready else "waiting_for_resources" if pending else "idle"),
     }
+
+
+def _gpu_run_limit(value: int | Sequence[int], index: int) -> int:
+    """Return one device's current packing ceiling from scalar or per-device state."""
+    return value if isinstance(value, int) else int(value[index])
 
 
 def _memory_text(value: int) -> str:
@@ -3012,6 +3293,22 @@ def _adaptive_parallelism(resources: ResourceRequest, policy: AdaptiveSearchPoli
     )
     maximum = min(int(derived), policy.max_parallel) if policy.max_parallel else int(derived)
     return max(1, maximum)
+
+
+def _adaptive_startup_trial_count(
+    policy: AdaptiveSearchPolicy,
+    *,
+    parallelism: int,
+    candidate_budget: int,
+) -> int:
+    """Resolve the distinct space-filling startup width.
+
+    An explicit ``startup_trials`` remains authoritative.  Automatic startup retains the
+    historical ten-candidate statistical floor but grows to the number of executable slots, so
+    increasing safe parallelism cannot accidentally leave hardware idle before evidence exists.
+    """
+    requested = policy.startup_trials if policy.startup_trials is not None else max(10, parallelism)
+    return min(candidate_budget, requested)
 
 
 def _visible_gpu_tokens(gpu_count: int) -> tuple[str, ...]:

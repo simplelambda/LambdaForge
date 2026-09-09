@@ -39,6 +39,7 @@ class OverviewService:
             dataset_values = dataset_future.result()
         return {
             "snapshot_version": 1,
+            "project": self.catalog.project.to_dict() if self.catalog.project else None,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "clusters": [value.to_dict() for value in resource_values],
             "jobs": {

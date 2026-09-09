@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from pathlib import Path
 
 from packaging.version import Version
@@ -19,6 +21,9 @@ def _framework_requirement() -> str:
 
 def initialize(directory: Path, *, force: bool, template: str = "minimal") -> int:
     """Create a minimal installable consumer project without overwriting by default."""
+    resolved = directory.expanduser().resolve()
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "-", resolved.name).strip("-")[:40] or "project"
+    project_id = f"{slug}-{hashlib.sha256(str(resolved).encode()).hexdigest()[:16]}"
     files = {
         "pyproject.toml": f"""[build-system]
 requires = ["setuptools>=75"]
@@ -29,6 +34,9 @@ name = "my-ai-project"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = ["{_framework_requirement()}"]
+
+[tool.lambdaforge]
+project_id = "{project_id}"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -567,6 +567,15 @@ class StudyWorkspace(ResearchWorkspace):
         latest = controller.get("last", {}) if isinstance(controller, Mapping) else {}
         scheduler = controller.get("scheduler", {}) if isinstance(controller, Mapping) else {}
         belief = self.study.get("surrogate_belief") or controller.get("surrogate_belief", {})
+        understanding = self._scientific_understanding()
+        unresolved = understanding.get("unresolved_questions", ())
+        top_question = (
+            unresolved[0].get("question")
+            if isinstance(unresolved, Sequence)
+            and unresolved
+            and isinstance(unresolved[0], Mapping)
+            else "No unresolved question is currently prioritized."
+        )
         return (
             "CONTROLLER\n"
             f"Last action          {latest.get('action', 'unavailable')}\n"
@@ -583,6 +592,11 @@ class StudyWorkspace(ResearchWorkspace):
             f"Backend              {(belief or {}).get('backend', 'unavailable')}\n"
             f"Observations         {(belief or {}).get('observations', 'unavailable')}\n"
             f"Target fidelity      {(belief or {}).get('target_fidelity', 'unavailable')}\n\n"
+            "SCIENTIFIC UNDERSTANDING\n"
+            f"Optimization O       {format_value(understanding.get('optimization_opportunity'))}\n"
+            f"Uncertainty K        {format_value(understanding.get('scientific_uncertainty'))}\n"
+            f"Observational phase  {str(understanding.get('phase', 'learning')).replace('-', ' ')}\n"
+            f"Priority question    {top_question}\n\n"
             "The controller view exposes exact persisted state. Action history is shown in its "
             "own table; parameter effects are predictive associations, not causal claims."
         )
@@ -591,9 +605,9 @@ class StudyWorkspace(ResearchWorkspace):
         controller = self.study.get("controller", {})
         latest = controller.get("last", {}) if isinstance(controller, Mapping) else {}
         scheduler = controller.get("scheduler", {}) if isinstance(controller, Mapping) else {}
-        belief = self.study.get("surrogate_belief") or controller.get("surrogate_belief", {})
         counts = self.study.get("counts", {})
         objective = self.study.get("objective", {})
+        understanding = self._scientific_understanding()
         stop_summary = self._controller_stop_summary(controller)
         controller_status = stop_summary or f"Last: {latest.get('action', 'No decision yet')}"
         self.query_one("#hpo-strategy-card", Static).update(
@@ -609,7 +623,9 @@ class StudyWorkspace(ResearchWorkspace):
         self.query_one("#hpo-evidence-card", Static).update(
             "[b]EVIDENCE[/b]\n"
             f"{counts.get('candidates', 0)} candidates · {counts.get('completed_runs', 0)} complete\n"
-            f"{(belief or {}).get('observations', 'unavailable')} surrogate observations"
+            f"O={format_value(understanding.get('optimization_opportunity'))} · "
+            f"K={format_value(understanding.get('scientific_uncertainty'))} · "
+            f"{str(understanding.get('phase', 'learning')).replace('-', ' ')}"
         )
         self.query_one("#hpo-scheduler-card", Static).update(
             "[b]SCHEDULER[/b]\n"
@@ -617,6 +633,19 @@ class StudyWorkspace(ResearchWorkspace):
             f"{scheduler.get('slots_total', 'unavailable')} slots\n"
             f"{scheduler.get('queued', counts.get('queued_runs', 0))} waiting"
         )
+
+    def _scientific_understanding(self) -> Mapping[str, Any]:
+        if isinstance(self.analysis, Mapping):
+            value = self.analysis.get("scientific_understanding")
+            if isinstance(value, Mapping):
+                return value
+        live = self.study.get("hpo_analysis", {})
+        if isinstance(live, Mapping):
+            value = live.get("scientific_understanding")
+            if isinstance(value, Mapping):
+                return value
+            return live
+        return {}
 
     @staticmethod
     def _controller_stop_summary(controller: Any) -> str | None:
@@ -673,29 +702,44 @@ class StudyWorkspace(ResearchWorkspace):
         coverage = self.analysis.get("coverage", {})
         marginal = coverage.get("marginal", {}) if isinstance(coverage, Mapping) else {}
         responses = self.analysis.get("response_curves", {})
+        conclusions = self.analysis.get("parameter_conclusions", ())
+        if not conclusions:
+            understanding = self.analysis.get("scientific_understanding", {})
+            conclusions = (
+                understanding.get("parameter_questions", ())
+                if isinstance(understanding, Mapping)
+                else ()
+            )
         live = self.analysis.get("live_hpo", {})
-        live_parameters = live.get("parameters", ()) if isinstance(live, Mapping) else ()
-        live_by_name = {
+        if not conclusions and isinstance(live, Mapping):
+            conclusions = live.get("parameter_questions", live.get("parameters", ()))
+        conclusions_by_name = {
             str(value.get("parameter")): value
-            for value in live_parameters
+            for value in conclusions
             if isinstance(value, Mapping) and value.get("parameter") is not None
         }
         names = list(space) if isinstance(space, Mapping) else []
         if not names and isinstance(importance, Mapping):
             names = list(importance)
-        names.extend(name for name in live_by_name if name not in names)
+        names.extend(name for name in conclusions_by_name if name not in names)
         self._hpo_parameters = [str(name) for name in names]
         table = self.query_one("#hpo-parameter-table", DataTable)
         table.clear(columns=True)
         table.add_columns(
-            "Parameter", "Search space", "Observed", "Promising", "Importance", "Confidence"
+            "Parameter",
+            "Search space",
+            "Observed",
+            "Promising",
+            "Conclusion",
+            "Confidence",
+            "Region role",
         )
         for name in self._hpo_parameters:
             rule = space.get(name, {}) if isinstance(space, Mapping) else {}
             observed = marginal.get(name, {}) if isinstance(marginal, Mapping) else {}
             response = responses.get(name, {}) if isinstance(responses, Mapping) else {}
             detail = importance.get(name, {}) if isinstance(importance, Mapping) else {}
-            live_detail = live_by_name.get(name, {})
+            live_detail = conclusions_by_name.get(name, {})
             confidence = live_detail.get("confidence")
             confidence_label = live_detail.get(
                 "confidence_label",
@@ -710,12 +754,19 @@ class StudyWorkspace(ResearchWorkspace):
                     self.study.get("objective", {}),
                     live_detail=live_detail,
                 ),
-                format_value(detail.get("importance") if isinstance(detail, Mapping) else None),
+                str(live_detail.get("summary", "Still learning")),
                 (
                     f"{float(confidence):.0%} · {str(confidence_label).title()}"
                     if isinstance(confidence, int | float) and not isinstance(confidence, bool)
                     else str(confidence_label).title()
                 ),
+                str(
+                    (
+                        live_detail.get("practical_region", {})
+                        if isinstance(live_detail.get("practical_region"), Mapping)
+                        else {}
+                    ).get("classification", "unresolved")
+                ).replace("-", " ").title(),
                 key=name,
             )
         loading = self.query_one("#hpo-analysis-loading")
@@ -1546,7 +1597,7 @@ class HpoParameterWorkspace(ResearchWorkspace):
             )
         )
         self.query_one("#hpo-detail-reliability", Static).update(
-            "[b]RELIABILITY[/b]\n"
+            "[b]CONCLUSION STABILITY[/b]\n"
             + (
                 f"{float(confidence):.0%} · {str(reliability).title()} · "
                 if isinstance(confidence, int | float) and not isinstance(confidence, bool)
@@ -1578,9 +1629,10 @@ class HpoParameterWorkspace(ResearchWorkspace):
                 f"How to read {self.parameter}",
                 "Search space is what the YAML allowed. Observed coverage is what actually ran. "
                 "Promising region is a predictive association conditional on the sampled context, "
-                "not a causal rule. Reliability combines available support and validation evidence; "
-                "low reliability means the correct next action is usually targeted sampling, not a "
-                "strong conclusion. Click terminal points or bars for exact values. The HTML report "
+                "not a causal rule. Confidence is the fraction of plausible evidence resamples that "
+                "preserve this exact qualitative conclusion (including which value is preferred); "
+                "coverage is reported separately. A flat response can therefore have high confidence. "
+                "Click terminal points or bars for exact values. The HTML report "
                 "adds hover labels, zoom, a real uncertainty band, heatmaps and numeric 3D surfaces.",
             )
         elif event.button.id == "hpo-parameter-export":
@@ -1595,8 +1647,20 @@ class HpoParameterWorkspace(ResearchWorkspace):
             )
 
     def _live_detail(self) -> Mapping[str, Any]:
+        direct = self.analysis.get("parameter_conclusions", ())
+        if not direct:
+            scientific = self.analysis.get("scientific_understanding", {})
+            direct = (
+                scientific.get("parameter_questions", ())
+                if isinstance(scientific, Mapping)
+                else ()
+            )
         live = self.analysis.get("live_hpo", {})
-        parameters = live.get("parameters", ()) if isinstance(live, Mapping) else ()
+        parameters = direct or (
+            live.get("parameter_questions", live.get("parameters", ()))
+            if isinstance(live, Mapping)
+            else ()
+        )
         return next(
             (
                 value
@@ -1609,18 +1673,26 @@ class HpoParameterWorkspace(ResearchWorkspace):
     @staticmethod
     def _live_response(detail: Mapping[str, Any]) -> dict[str, Any]:
         response = detail.get("response", {})
-        raw_points = response.get("points", ()) if isinstance(response, Mapping) else ()
+        raw_points = (
+            response.get("points", ())
+            if isinstance(response, Mapping)
+            else response
+            if isinstance(response, Sequence) and not isinstance(response, str | bytes)
+            else ()
+        )
         points = []
         for point in raw_points if isinstance(raw_points, Sequence) else ():
             if not isinstance(point, Mapping):
                 continue
-            coordinate = point.get("parameter")
+            coordinate = point.get("parameter", point.get("value"))
             converted = {
-                "predicted_objective": point.get("objective"),
-                "support_count": point.get("samples", 0),
+                "predicted_objective": point.get("objective", point.get("mean")),
+                "lower": point.get("lower"),
+                "upper": point.get("upper"),
+                "support_count": point.get("samples", point.get("support_count", 0)),
             }
             converted["category" if coordinate is None else "x"] = (
-                point.get("label") if coordinate is None else coordinate
+                point.get("label", point.get("value")) if coordinate is None else coordinate
             )
             points.append(converted)
         return {"points": points, "source": "live-observed"}
@@ -1679,6 +1751,35 @@ class HpoParameterWorkspace(ResearchWorkspace):
                 format_value(item.get("predictive_gain", item.get("gain", item.get("importance")))),
                 str(item.get("reliability", "low")).title(),
                 str(item.get("support", "—")),
+            )
+            rendered += 1
+        if rendered:
+            return
+        scientific_pairs = self.analysis.get("interaction_conclusions", ())
+        if not scientific_pairs:
+            scientific = self.analysis.get("scientific_understanding", {})
+            scientific_pairs = (
+                scientific.get("interaction_questions", ())
+                if isinstance(scientific, Mapping)
+                else ()
+            )
+        for item in scientific_pairs:
+            if not isinstance(item, Mapping):
+                continue
+            names = [str(value) for value in item.get("parameters", ())]
+            if self.parameter not in names:
+                continue
+            other = next((value for value in names if value != self.parameter), self.parameter)
+            confidence = item.get("confidence")
+            table.add_row(
+                other.replace("_", " ").title(),
+                format_value(item.get("materiality")),
+                (
+                    f"{float(confidence):.0%} · {str(item.get('confidence_label', 'low')).title()}"
+                    if isinstance(confidence, int | float) and not isinstance(confidence, bool)
+                    else str(item.get("confidence_label", "low")).title()
+                ),
+                str((item.get("support") or {}).get("completed_candidates", "—")),
             )
             rendered += 1
         if rendered:

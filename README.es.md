@@ -142,6 +142,29 @@ preparación y al scheduler, no al cálculo científico; `--dry-run` sigue siend
 
 ## Servicios y operación
 
+Para trabajar en varios proyectos, ejecuta `lf` dentro de la carpeta de cada uno o sus subcarpetas.
+`lf project --json` muestra la raíz y el identificador actuales. El entorno virtual selecciona las
+dependencias Python; el `pyproject.toml` más cercano selecciona el proyecto de LambdaForge. Jobs,
+Works, Studies y YAML recientes se filtran por proyecto; resultados e índice de datasets locales
+permanecen en su `.lambdaforge`. Los perfiles de clúster y las credenciales se pueden compartir.
+Los nuevos jobs, registros y cachés remotos viven bajo
+`<workspace>/.lambdaforge/projects/<project-id>/`. Las reservas de GPU y recursos siguen compartidas
+para coordinar ambos proyectos sobre el mismo hardware.
+
+`lf init` escribe un ID estable automáticamente. En un proyecto existente, configúralo **antes del
+primer envío** si debe conservar el mismo namespace remoto al mover el repositorio:
+
+```toml
+[tool.lambdaforge]
+project_id = "mi-proyecto-de-investigacion"
+```
+
+Sin ese campo, se deriva un ID legible de la raíz local resuelta; dos carpetas o paquetes con el
+mismo nombre en rutas distintas quedan separados. Reutilizar un ID explícito comparte deliberadamente
+el espacio remoto. Un `lambdaforge.clusters.yaml` local al proyecto permite sobrescribir
+`project_root` para su espejo remoto sin repetir host ni autenticación. Véase
+[aislamiento y actualización de proyectos](docs/MANUAL.es.md#18-aislamiento-por-proyecto).
+
 Durante `run()`, `config`, `inputs`, `resources`, `seed`, `trial`, `source_dir` y `resuming` son
 inmutables. `outputs`, `metrics`, `checkpoints`, `cache`, `tools` y `progress` son servicios
 gestionados;
@@ -304,9 +327,11 @@ crea Runs independientes; `search` expande variantes y `objective` define una m�
 una utilidad compuesta explícita de rangos fijos. Siempre que `search` tenga `objective`, omitir `strategy` activa la
 política adaptativa segura completa: inicio Sobol, propuestas dependientes de resultados, carrera
 probabilística de seeds, pruning de curvas, detección de convergencia y confirmación con seeds
-nuevas. Un pool Sobol scrambled proporciona puntos
-reproducibles que cubren el espacio; tras `startup_trials`, los resultados eligen los candidatos
-siguientes. `sampler: auto` usa qLogNEI con GP mixto de BoTorch si está instalado el extra
+nuevas. Un pool Sobol scrambled proporciona puntos reproducibles que cubren el espacio. Si se omite
+`startup_trials`, la primera oleada crece desde el mínimo histórico de diez hasta el paralelismo
+seguro de ejecución (acotado por `trials`), de modo que cada slot inicialmente disponible recibe
+un candidato distinto. Un `startup_trials` explícito sigue siendo autoritativo. Después, los
+resultados eligen los candidatos siguientes. `sampler: auto` usa qLogNEI con GP mixto de BoTorch si está instalado el extra
 `lambdaforge[adaptive-hpo]` y existe evidencia suficiente, con fallback k-NN determinista ante una
 dependencia ausente o un fallo numérico. El GP ve conjuntamente todas las dimensiones codificadas,
 incluidas categorías y activación condicional, y qLogNEI incorpora el error estándar entre seeds.
@@ -366,7 +391,7 @@ diferencias pareadas; se añade una seed solo mientras la probabilidad de estar 
 `seed_racing.equivalence_margin` del incumbent alcance
 `seed_racing.probability_threshold`. El ganador usa una cota
 conservadora de búsqueda o, preferiblemente, la media de `confirmation_seeds` nuevas sobre un top-K
-congelado. Por defecto LambdaForge empieza con hasta tres seeds declaradas por candidato y genera
+congelado. Por defecto LambdaForge empieza con una seed declarada por candidato y genera
 tres seeds de confirmación deterministas y nuevas; cada valor puede sobrescribirse expresamente.
 Los Runs de confirmación nunca reciben pruning de rendimiento ni preemption oportunista. Si falla
 una seed requerida o no cabe en el presupuesto global, `summary.confirmation.status` queda
@@ -396,6 +421,7 @@ search:
   trials: 40
   proposal_pool_size: 640
   min_seeds: 1
+  # Override exacto opcional; omitido significa max(10, slots seguros), acotado por trials.
   startup_trials: 10
   seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.002}
   confirmation_top_k: 2
@@ -442,7 +468,10 @@ obligación de iniciar inmediatamente la concurrencia máxima. LambdaForge sonde
 asignadas, lanza donde quepa y mantiene el resto en cola. Si la VRAM está ocupada vuelve a sondear y
 separa temporalmente lanzamientos sobre el mismo dispositivo para dejar materializar la asignación
 anterior. El umbral se compara con la VRAM libre actual en cada lanzamiento: no se multiplica por
-el número de Runs activos ni actúa como una reserva oculta. Cada Run empaquetado posee un proceso
+el número de Runs activos ni actúa como una reserva oculta. Si varias GPU admiten el único Run global disponible,
+se elige la menos cargada y que más tiempo lleva sin recibir uno, no siempre el índice cero. Mientras
+queden acciones científicas elegibles y presupuesto de candidatos/Runs, cada finalización provoca
+una replanificación inmediata para ocupar los slots seguros. Cada Run empaquetado posee un proceso
 spawn nuevo que termina al acabar el Run; no se reutiliza un worker CUDA ocioso cuyo contexto
 podría retener VRAM y bloquear para siempre la cola.
 Una GPU llena no falla todo el estudio; si otra admite dos de cuatro slots, ejecuta
@@ -451,8 +480,10 @@ En CPU puede limitarse la concurrencia con `max_parallel`. El observador de memo
 hijo efímero, así que no deja un contexto CUDA ocioso en cada dispositivo ni consume una plaza
 científica de `runs_per_gpu`.
 Si aun así un hijo sufre CUDA OOM, solo ese Run pasa a `retrying`: se conserva el Attempt fallido,
-el controlador reduce el límite efectivo de packing por debajo de la concurrencia que provocó el
-OOM y encola un Attempt compatible con checkpoints. Los Runs sanos continúan. La recuperación está
+el controlador reduce solo el límite efectivo del dispositivo que sufrió la OOM por debajo de la
+concurrencia observada y encola un Attempt compatible con checkpoints. Los Runs sanos y las demás
+GPU continúan con sus propios límites. Tras completar una rotación estable en el límite reducido,
+ese dispositivo prueba cautelosamente un slot adicional, siempre sujeto a la VRAM libre viva. La recuperación está
 acotada por `failure_retries`; un OOM repetido incluso con packing más seguro queda como evidencia
 terminal honesta en vez de crear un bucle infinito.
 `self.metrics.log("val_auprc", valor, step=epoch)` permite pruning basado en probabilidad. Una
@@ -504,6 +535,36 @@ una alternativa nueva supera tanto su prioridad original como el valor de contin
 de histéresis del 50 %. La petición es cooperativa en una frontera segura, nunca mata el proceso;
 confirmación y la cobertura startup sin score son inmunes. Los eventos `PREEMPT`, `PAUSE` y
 `RESUME_PREEMPTED` conservan prioridades y motivo sin convertir la pausa en evidencia negativa.
+
+El HPO adaptativo tiene dos objetivos simultáneos: encontrar configuraciones fuertes y aprender
+cómo se comporta el espacio de búsqueda declarado. LambdaForge mantiene por ello dos cantidades
+distintas. La **oportunidad de optimización** (`O`) es la mejora práctica restante predicha por el
+surrogate conjunto; la **incertidumbre científica** (`K`) es la entropía aún no resuelta de
+preguntas explícitas sobre parámetros e interacciones por pares. Ambas se normalizan con la
+evidencia actual, producen pesos automáticos y se dividen por el coste incremental observado al
+competir las acciones. No existe un cambio de fase por número de trials ni otro umbral de confianza
+en YAML: la optimización vuelve a ganar prioridad si una observación hace plausible otra mejora.
+
+Cada pregunta de parámetro termina en una conclusión estructurada: valor/región preferida,
+equivalencia práctica, preferencia débil, plano, dependiente del contexto, sin preferencia clara o
+no resuelta. Las preguntas por pares distinguen interacción material/débil, evidencia aditiva y no
+resuelta. Aquí **confianza** es la fracción de realizaciones deterministas de evidencia, con
+remuestreo por candidato y seeds compartidas, que reproduce exactamente la conclusión mostrada. No
+es cobertura, tamaño de efecto, p-valor ni intervalo de confianza frecuentista. Por ello, con
+evidencia suficiente tanto «plano» como «dependiente del contexto» pueden tener confianza alta. La
+cobertura y el soporte condicional ausente se muestran aparte; los efectos son descriptivos o
+predictivos, nunca causales.
+
+La **región óptima práctica** contiene configuraciones observadas cuyo regret con incertidumbre es
+compatible con el margen de equivalencia declarado. Indica qué parámetros están restringidos y
+cuáles son flexibles dentro de ella. Tras el arranque, el controlador puede emitir un
+`DESIGNED_PROBE`: un candidato válido no observado elegido para resolver un parámetro o interacción,
+prefiriendo un contrafactual emparejado cuando el espacio condicional lo permite. Su decisión
+registra pregunta, valor de rendimiento, reducción esperada de incertidumbre, calidad del match,
+coste y alternativas. La carrera de seeds usa solo varianza dentro de cada candidato—nunca
+dispersión entre candidatos—, replica el incumbent si su incertidumbre limita comparaciones y
+prefiere una seed compartida aún no usada cuando mejora la comparación pareada. Un candidato
+claramente inferior puede quedarse así con una seed y una comparación útil recibir más.
 
 Cada Run adaptativo posee un proceso separado tanto en CPU como GPU. Una excepción normal falla
 solo ese Run. Un worker perdido/matado o una OOM de asignación CUDA se reintenta hasta

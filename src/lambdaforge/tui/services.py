@@ -248,7 +248,7 @@ class ConsoleServices:
 
     def set_cluster_credential(self, name: str, secret: str) -> dict[str, Any]:
         """Store a password in the OS keyring and persist only its reference."""
-        profile = self.catalog.get(name)
+        profile = self.catalog.definition(name)
         source = self.catalog.source(name)
         if source is None or name == "local":
             raise ValueError("The selected cluster has no writable credential profile.")
@@ -265,7 +265,7 @@ class ConsoleServices:
 
     def delete_cluster_credential(self, name: str) -> dict[str, Any]:
         """Delete a keyring secret and leave password authentication interactive."""
-        profile = self.catalog.get(name)
+        profile = self.catalog.definition(name)
         source = self.catalog.source(name)
         reference = profile.auth.credential
         if source is None or not reference or not reference.startswith("keyring:"):

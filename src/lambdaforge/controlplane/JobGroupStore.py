@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from lambdaforge.controlplane.jobs import JobGroup
+from lambdaforge.ProjectContext import ProjectContext
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 
 
@@ -16,7 +17,14 @@ class JobGroupStore:
 
     def __init__(self, root: str | Path | None = None) -> None:
         state = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-        self.root = Path(root or state / "lambdaforge" / "job-groups").resolve()
+        self.root = Path(
+            root
+            or state
+            / "lambdaforge"
+            / "projects"
+            / ProjectContext.discover().project_id
+            / "job-groups"
+        ).resolve()
 
     def put(self, group: JobGroup) -> JobGroup:
         self.root.mkdir(parents=True, exist_ok=True)

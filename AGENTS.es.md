@@ -114,12 +114,25 @@ LightningRunner enlaza epochs. Decisiones/snapshot viven en `hpo-control/decisio
 `state.json`. Confirmación es inmune a pruning/preemption; un conjunto incompleto persiste
 `confirmation_incomplete` y no selecciona una media solo de supervivientes. `trials` limita
 candidatos ejecutados y `proposal_pool_size` el pool determinista
-mayor. El refill por eventos compara `START_NEW`, `ADD_SEED`, `PROMOTE_FIDELITY` y
-`RESUME_PREEMPTED` mediante un proxy auditable de valor del controlador por coste incremental
-observado; nunca lo llames ganancia de información calibrada. Startup no es barrera, la cola no
+mayor. El refill por eventos compara `START_NEW`, `DESIGNED_PROBE`, `ADD_SEED`,
+`PROMOTE_FIDELITY` y `RESUME_PREEMPTED` tras cada evento terminal. Equilibra automáticamente la
+oportunidad de mejora práctica posterior O con la entropía K de preguntas no resueltas por coste
+incremental observado; ninguna es ganancia de información calibrada ni confianza mostrada al
+usuario. Startup no es barrera, la cola no
 despachada es provisional y registra `CANCEL_QUEUED_ACTION` al replanificar; las identidades
 pendientes `(candidato, seed, fidelidad)` evitan duplicados. Se eliminan
 `search.reduction_factor` y `search.confidence` raíz en favor de controles separados.
+Si se omite, `startup_trials` resuelve a `min(trials, max(10, paralelismo seguro))`; un valor
+explícito manda. Intercala primeras seeds entre candidatos startup distintos antes de seeds extra.
+`ScientificQuestionAnalyzer` es la única fuente compartida live/final de conclusiones de parámetros,
+interacciones por pares y región óptima práctica. `confidence` científica significa estabilidad de
+la conclusión exacta bajo remuestreo determinista por candidato/seeds compartidas, no cobertura,
+tamaño de efecto, p-valor ni intervalo frecuentista. El ruido de seed procede solo de repeticiones
+dentro de candidato; prioriza seeds compartidas, replicar el incumbent y probes contrafactuales
+válidos emparejados si reducen una comparación importante. Persiste propósito, preguntas objetivo,
+O/K, pesos automáticos, coste y alternativas. No añadas fases/pesos/umbrales de confianza a YAML,
+afirmes causalidad, inventes margen práctico, amplíes dominios declarados ni sustituyas confirmación
+con seeds frescas.
 `objective.constraints.METRICA.min/max` declara guardas del mismo checkpoint. Entre seeds,
 `seed_aggregation` es `mean` legacy, `worst` o `lcb` con `confidence`; evidencia ausente o LCB
 insuficiente es no factible. Un componente de utilidad también puede ser constraint. Nunca infieras guardas o pesos
@@ -139,9 +152,11 @@ seguro al detectar `self.stop_requested`.
 
 Cada Run adaptativo CPU/GPU posee proceso nuevo de un worker. Un worker perdido/matado o una OOM
 CUDA puede reintentarse como Attempt compatible con checkpoints hasta `failure_retries` (1 por
-defecto, máximo 3); si se repite queda terminal. Una OOM CUDA reduce el límite de packing en memoria
-por debajo de la concurrencia observada antes de readmitir el reintento; no mates Runs hermanos
-sanos ni reintentes sin límite. No reintentes excepciones consumidoras arbitrarias.
+defecto, máximo 3); si se repite queda terminal. Una OOM CUDA reduce solo el límite de packing de
+esa GPU por debajo de la concurrencia observada antes de readmitir el reintento; tras una rotación
+estable completa puede probar un slot adicional, siempre tras admisión de VRAM viva. Prioriza GPU
+admisibles menos cargadas y más ociosas para no dejar sin trabajo índices altos. No mates Runs
+hermanos sanos ni reintentes sin límite. No reintentes excepciones consumidoras arbitrarias.
 Un Run agotado deja el Work honestamente fallido, pero no cancela Runs ajenos activos/en cola. La
 telemetría guarda índice GPU lógico y token heredado exacto; nunca infieras ni amplíes dispositivos
 físicos desde el campo de visualización.
@@ -294,6 +309,20 @@ claves de métrica siguen estables; las etiquetas pueden
 configurarse con `LightningTrainConfig.epoch_metric_display_names`, y la UI nunca expone
 `__lambdaforge_utility__` en vez de «Composite selection score». Las marcas de trial van en columna
 separada.
+
+## Identidad y aislamiento por proyecto
+
+El `pyproject.toml` más cercano, no el entorno virtual activo, selecciona `ProjectContext`.
+`[tool.lambdaforge].project_id` es un ID estable opcional de 1–80 caracteres; si falta se deriva de
+la raíz resuelta. Los perfiles/referencias de credenciales de usuario y leases GPU/proceso por host
+se comparten. Jobs/grupos/recientes del controlador, resultados/índices dataset/caché locales y
+estado/caché/jobs/datasets/entornos remotos se aíslan por proyecto. Las rutas remotas por defecto
+quedan bajo `<workspace>/.lambdaforge/projects/<project-id>`; las personalizadas añaden
+`projects/<project-id>` y la raíz de leases queda sin aislar. El catálogo del proyecto se superpone
+recursivamente al perfil de usuario, permitiendo cambiar el mirror sin copiar credenciales o
+política del centro. Nunca persistas rutas efectivas derivadas en el perfil escrito. Un Job legado
+solo es visible si su source pertenece al proyecto más cercano y se reconecta mediante rutas de
+proveedor/Work registradas; nunca muevas bytes remotos antiguos implícitamente.
 
 ## Contrato de clustering
 

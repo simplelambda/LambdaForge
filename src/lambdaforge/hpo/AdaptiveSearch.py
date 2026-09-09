@@ -83,10 +83,15 @@ class AdaptiveSearchPolicy:
     early_stopping_confirmations: int = 2
     early_stopping_probability_threshold: float = 0.05
     early_stopping_equivalence_margin: float = 0.0
-    startup_trials: int = 10
+    # ``None`` means automatic: preserve the historical ten-point floor while opening enough
+    # distinct space-filling candidates to occupy the configured execution parallelism.
+    startup_trials: int | None = None
     failure_retries: int = 1
     seed_probability_threshold: float = 0.1
     equivalence_margin: float = 0.0
+    # Internal provenance: ``None`` means no scientific practical-equivalence scale was authored.
+    # The legacy fields remain accepted and feed this one authority during parsing.
+    practical_margin: float | None = None
     confirmation_top_k: int = 1
     confirmation_seeds: tuple[int, ...] = ()
     max_runs: int | None = None
@@ -103,7 +108,6 @@ class AdaptiveSearchPolicy:
         for name in (
             "runs_per_gpu",
             "min_seeds",
-            "startup_trials",
             "confirmation_top_k",
             "candidate_budget",
             "proposal_pool_size",
@@ -111,6 +115,12 @@ class AdaptiveSearchPolicy:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"search.{name} must be a positive integer.")
+        if self.startup_trials is not None and (
+            isinstance(self.startup_trials, bool)
+            or not isinstance(self.startup_trials, int)
+            or self.startup_trials < 1
+        ):
+            raise ValueError("search.startup_trials must be a positive integer or omitted.")
         if self.max_parallel is not None and (
             isinstance(self.max_parallel, bool) or self.max_parallel < 1
         ):
@@ -139,6 +149,10 @@ class AdaptiveSearchPolicy:
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"search.{name} must be finite and non-negative.")
+        if self.practical_margin is not None and (
+            not math.isfinite(self.practical_margin) or self.practical_margin < 0
+        ):
+            raise ValueError("The practical equivalence margin must be finite and non-negative.")
         if len(self.confirmation_seeds) != len(set(self.confirmation_seeds)):
             raise ValueError("search.confirmation_seeds cannot contain duplicates.")
         if any(
@@ -179,6 +193,13 @@ class AdaptiveSearchPolicy:
         unknown_seed = set(raw_seed_racing) - {"probability_threshold", "equivalence_margin"}
         if unknown_seed:
             raise ValueError(f"Unknown search.seed_racing field(s): {sorted(unknown_seed)}.")
+        seed_margin_authored = (
+            "equivalence_margin" in raw_seed_racing or "equivalence_margin" in value
+        )
+        seed_margin = float(
+            raw_seed_racing.get("equivalence_margin", value.get("equivalence_margin", 0.0))
+        )
+        early_margin_authored = isinstance(raw_early, Mapping) and "equivalence_margin" in raw_early
         if isinstance(raw_early, bool):
             early, min_step, early_probability, early_margin = raw_early, 3, 0.05, 0.0
         elif isinstance(raw_early, Mapping):
@@ -195,11 +216,26 @@ class AdaptiveSearchPolicy:
             min_step = int(raw_early.get("min_step", 3))
             confirmations = int(raw_early.get("confirmations", 2))
             early_probability = float(raw_early.get("probability_threshold", 0.05))
-            early_margin = float(raw_early.get("equivalence_margin", 0.0))
+            early_margin = float(raw_early.get("equivalence_margin", seed_margin))
         else:
             raise TypeError("search.early_stopping must be true/false or a mapping.")
         if isinstance(raw_early, bool):
             confirmations = 2
+            if seed_margin_authored:
+                early_margin = seed_margin
+        if (
+            seed_margin_authored
+            and early_margin_authored
+            and not math.isclose(seed_margin, early_margin, rel_tol=0.0, abs_tol=0.0)
+        ):
+            raise ValueError(
+                "search.seed_racing.equivalence_margin and "
+                "search.early_stopping.equivalence_margin describe the same scientific practical "
+                "difference and cannot disagree."
+            )
+        practical_margin = (
+            seed_margin if seed_margin_authored else early_margin if early_margin_authored else None
+        )
         candidate_budget = int(value.get("trials", 20))
         proposal_pool_size = int(
             value.get("proposal_pool_size", max(candidate_budget, min(4096, candidate_budget * 16)))
@@ -229,16 +265,17 @@ class AdaptiveSearchPolicy:
             early_stopping_confirmations=confirmations,
             early_stopping_probability_threshold=early_probability,
             early_stopping_equivalence_margin=early_margin,
-            startup_trials=int(value.get("startup_trials", 10)),
+            startup_trials=(
+                int(value["startup_trials"]) if value.get("startup_trials") is not None else None
+            ),
             failure_retries=int(value.get("failure_retries", 1)),
             seed_probability_threshold=float(
                 raw_seed_racing.get(
                     "probability_threshold", value.get("seed_probability_threshold", 0.1)
                 )
             ),
-            equivalence_margin=float(
-                raw_seed_racing.get("equivalence_margin", value.get("equivalence_margin", 0.0))
-            ),
+            equivalence_margin=seed_margin,
+            practical_margin=practical_margin,
             confirmation_top_k=int(value.get("confirmation_top_k", 1)),
             confirmation_seeds=tuple(raw_confirmation),
             max_runs=int(max_runs) if max_runs is not None else None,
@@ -274,6 +311,7 @@ class AdaptiveSearchPolicy:
                 "probability_threshold": self.seed_probability_threshold,
                 "equivalence_margin": self.equivalence_margin,
             },
+            "practical_equivalence_margin": self.scientific_margin,
             "confirmation_top_k": self.confirmation_top_k,
             "confirmation_seeds": list(self.confirmation_seeds),
             "max_runs": self.max_runs,
@@ -283,6 +321,13 @@ class AdaptiveSearchPolicy:
             "sampler": self.sampler,
             "fidelity": self.fidelity.to_dict() if self.fidelity is not None else None,
         }
+
+    @property
+    def scientific_margin(self) -> float | None:
+        """Return the one authored scientific equivalence scale, if one exists."""
+        if self.practical_margin is not None:
+            return self.practical_margin
+        return self.equivalence_margin if self.equivalence_margin > 0 else None
 
 
 SEARCH_POLICY_FIELDS = frozenset(

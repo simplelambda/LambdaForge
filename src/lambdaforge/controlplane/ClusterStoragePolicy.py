@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -18,6 +18,7 @@ class ClusterStoragePolicy:
     dataset_root: str | None = None
     cache_max_bytes: int | None = None
     cache_max_age_seconds: float | None = None
+    lease_root: str | None = None
 
     @classmethod
     def from_mapping(
@@ -26,6 +27,7 @@ class ClusterStoragePolicy:
         source = dict(value or {})
         base = PurePosixPath(workspace) / ".lambdaforge"
         return cls(
+            lease_root=str(source["lease_root"]) if source.get("lease_root") else None,
             state_root=str(source.get("state_root", base / "state")),
             cache_root=str(source.get("cache_root", base / "cache")),
             run_root=str(source.get("run_root", base / "jobs")),
@@ -71,6 +73,7 @@ class ClusterStoragePolicy:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **({"lease_root": self.lease_root} if self.lease_root else {}),
             "state_root": self.state_root,
             "cache_root": self.cache_root,
             "run_root": self.run_root,
@@ -78,6 +81,24 @@ class ClusterStoragePolicy:
             "cache_max_size": self.cache_max_bytes,
             "cache_max_age": self.cache_max_age_seconds,
         }
+
+    def for_project(self, project_id: str, *, workspace: str) -> ClusterStoragePolicy:
+        """Scope operational storage while retaining host-wide cooperative leases."""
+        base = PurePosixPath(workspace) / ".lambdaforge"
+
+        def scoped(path: str, default: str) -> str:
+            if PurePosixPath(path) == base / default:
+                return str(base / "projects" / project_id / default)
+            return str(PurePosixPath(path) / "projects" / project_id)
+
+        return replace(
+            self,
+            state_root=scoped(self.state_root, "state"),
+            cache_root=scoped(self.cache_root, "cache"),
+            run_root=scoped(self.run_root, "jobs"),
+            dataset_root=(scoped(self.dataset_root, "datasets") if self.dataset_root else None),
+            lease_root=self.lease_root or self.state_root,
+        )
 
     @staticmethod
     def _bytes(value: object) -> int:

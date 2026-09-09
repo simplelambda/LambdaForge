@@ -95,9 +95,13 @@ class ProcessScheduler(Scheduler):
             "gpu_access": self.profile.gpu_access.to_dict(),
             "storage": self.storage.to_dict(),
             "cache_root": self.storage.cache_root,
-            "lease_root": str(PurePosixPath(self.storage.state_root) / "gpu-leases"),
-            "resource_lease_root": str(PurePosixPath(self.storage.state_root) / "process-leases"),
-            "dataset_registry": str(PurePosixPath(self.storage.state_root) / "datasets.json"),
+            "lease_root": str(
+                PurePosixPath(self.storage.lease_root or self.storage.state_root) / "gpu-leases"
+            ),
+            "resource_lease_root": str(
+                PurePosixPath(self.storage.lease_root or self.storage.state_root) / "process-leases"
+            ),
+            "dataset_registry": self._dataset_registry(work_dir),
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
         }
         with tempfile.TemporaryDirectory(prefix="lambdaforge-process-request-") as temporary:
@@ -114,6 +118,13 @@ class ProcessScheduler(Scheduler):
             command=launch,
             work_dir=str(scientific_work),
         )
+
+    def _dataset_registry(self, work_dir: str | Path) -> str:
+        if self.profile.transport == "local":
+            from lambdaforge.data.DatasetRegistry import DatasetRegistry
+
+            return str(DatasetRegistry.project_path(work_dir))
+        return str(PurePosixPath(self.storage.state_root) / "datasets.json")
 
     def state(self, scheduler_id: str) -> JobState:
         value = self._state_payload(scheduler_id)

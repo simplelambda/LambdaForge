@@ -118,14 +118,10 @@ def resource_analysis(
             )
         ]
     alternatives: list[dict[str, Any]] = []
+    margin = float(equivalence_margin) if equivalence_margin is not None else None
     if rows:
         winner = (max if mode == "max" else min)(
             rows, key=lambda value: float(str(value["objective"]))
-        )
-        margin = (
-            float(equivalence_margin)
-            if equivalence_margin is not None
-            else max(abs(float(str(winner["objective"]))) * 0.02, 1e-12)
         )
         for row in rows:
             if row is winner:
@@ -135,7 +131,8 @@ def resource_analysis(
             )
             winner_gpu, row_gpu = winner.get("gpu_seconds"), row.get("gpu_seconds")
             if (
-                signed_gap <= margin
+                margin is not None
+                and signed_gap <= margin
                 and isinstance(winner_gpu, int | float)
                 and isinstance(row_gpu, int | float)
                 and winner_gpu > 0
@@ -162,11 +159,9 @@ def resource_analysis(
         "targets": rows,
         "pareto": pareto,
         "efficient_alternatives": alternatives,
-        "equivalence_margin": margin if rows else equivalence_margin,
+        "equivalence_margin": margin,
         "equivalence_margin_source": (
-            "authored-equivalence-margin"
-            if equivalence_margin is not None
-            else "fallback-relative-2-percent"
+            "authored-equivalence-margin" if equivalence_margin is not None else "not-authored"
         ),
     }
 

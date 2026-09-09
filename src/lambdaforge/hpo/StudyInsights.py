@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import statistics
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, TypeVar
+from copy import deepcopy
+from threading import Lock
+from typing import Any, ClassVar, TypeVar
+
+from lambdaforge.hpo.ScientificDesign import ScientificQuestionAnalyzer
 
 _T = TypeVar("_T")
 
@@ -23,12 +29,20 @@ class StudyInsightAnalyzer:
     MAX_PARAMETERS = 64
     MAX_RELATIONSHIP_CANDIDATES = 96
     MAX_RELATIONSHIP_PARAMETERS = 24
+    _CACHE_LIMIT = 16
+    _cache: ClassVar[OrderedDict[str, dict[str, Any]]] = OrderedDict()
+    _cache_lock: ClassVar[Lock] = Lock()
 
     @classmethod
     def analyze(
         cls,
         candidates: Sequence[Mapping[str, Any]],
         objective: Mapping[str, Any],
+        *,
+        practical_margin: float | None = None,
+        fingerprint: str | None = None,
+        candidate_pool: Mapping[int, Mapping[str, Any]] | None = None,
+        final: bool = False,
     ) -> dict[str, Any]:
         """Return one compact JSON-shaped HPO interpretation snapshot."""
         composite = isinstance(objective.get("metrics"), Mapping)
@@ -37,6 +51,26 @@ class StudyInsightAnalyzer:
         if not metric or mode not in {"min", "max"}:
             return cls._empty(metric, mode, "Objective metadata is not available yet.")
         bounded = cls._bounded(candidates, cls.MAX_CANDIDATES)
+        cache_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "candidates": bounded,
+                    "objective": dict(objective),
+                    "practical_margin": practical_margin,
+                    "fingerprint": fingerprint,
+                    "candidate_pool": candidate_pool,
+                    "final": final,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        ).hexdigest()
+        with cls._cache_lock:
+            cached = cls._cache.get(cache_key)
+            if cached is not None:
+                cls._cache.move_to_end(cache_key)
+                return deepcopy(cached)
         observations: list[tuple[Mapping[str, Any], float, bool]] = []
         pruning_observations: list[tuple[Mapping[str, Any], bool]] = []
         provisional = censored = failed = infeasible = 0
@@ -140,8 +174,27 @@ class StudyInsightAnalyzer:
         actionable = [value for value in insights if value["status"] == "actionable"]
         selected = max(insights, key=lambda value: float(value["priority"]), default=None)
         complete = sum(done for _parameters, _value, done in observations)
-        return {
-            "analysis_version": 4,
+        evidence_fingerprint = fingerprint or (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    {"candidates": bounded, "objective": dict(objective)},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode()
+            ).hexdigest()
+        )
+        scientific = ScientificQuestionAnalyzer.analyze(
+            bounded,
+            objective,
+            practical_margin=practical_margin,
+            fingerprint=evidence_fingerprint,
+            candidate_pool=candidate_pool,
+            final=final,
+        )
+        result = {
+            "analysis_version": 5,
             "analysis_kind": "marginal-and-pairwise-descriptive-diagnostics",
             "objective": {
                 "metric": metric,
@@ -180,6 +233,17 @@ class StudyInsightAnalyzer:
             ),
             "parameters": insights,
             "interaction_matrix": cls._interaction_matrix(relationship_names, relationships),
+            "scientific_understanding": scientific,
+            "parameter_questions": scientific["parameter_questions"],
+            "interaction_questions": scientific["interaction_questions"],
+            "practical_optimal_region": scientific["practical_optimal_region"],
+            "optimization_opportunity": scientific["optimization_opportunity"],
+            "scientific_uncertainty": scientific["scientific_uncertainty"],
+            "optimization_weight": scientific["optimization_weight"],
+            "information_weight": scientific["information_weight"],
+            "phase": scientific["phase"],
+            "seed_noise_model": scientific["seed_noise_model"],
+            "unresolved_questions": scientific["unresolved_questions"],
             "decision_model": (
                 "Controller proposals use a joint mixed-space GP (or multivariate k-NN "
                 "fallback). Per-parameter panels are marginal explanations only."
@@ -195,6 +259,12 @@ class StudyInsightAnalyzer:
                 "decision authority."
             ),
         }
+        with cls._cache_lock:
+            cls._cache[cache_key] = deepcopy(result)
+            cls._cache.move_to_end(cache_key)
+            while len(cls._cache) > cls._CACHE_LIMIT:
+                cls._cache.popitem(last=False)
+        return result
 
     @classmethod
     def _parameter(
@@ -798,7 +868,7 @@ class StudyInsightAnalyzer:
     @staticmethod
     def _empty(metric: str, mode: str, reason: str) -> dict[str, Any]:
         return {
-            "analysis_version": 4,
+            "analysis_version": 5,
             "objective": {"metric": metric, "mode": mode},
             "candidate_observations": 0,
             "terminal_candidate_observations": 0,
