@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future
@@ -14,6 +15,7 @@ from typing import Any
 import pytest
 
 from lambdaforge.execution.ResourceRequest import ResourceRequest
+from lambdaforge.hpo.AdaptiveResources import ResourcePrediction
 from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservation
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
@@ -716,7 +718,9 @@ def test_bayesian_provider_failure_is_audited_before_deterministic_fallback(
     assert result.status == "succeeded"
 
 
-def test_gpu_packing_is_explicit_and_requires_a_per_run_memory_bound(tmp_path: Path) -> None:
+def test_gpu_packing_can_learn_automatically_or_keep_an_explicit_safety_floor(
+    tmp_path: Path,
+) -> None:
     base = {
         "name": "gpu-study",
         "run": "tests.work_cases.AdaptiveScoreWork",
@@ -729,12 +733,11 @@ def test_gpu_packing_is_explicit_and_requires_a_per_run_memory_bound(tmp_path: P
         "objective": {"metric": "score", "mode": "max"},
         "resources": {"gpu": 2},
     }
-    try:
-        WorkConfig.from_mapping(base, source=tmp_path / "study.yaml")
-    except ValueError as error:
-        assert "resources.gpu_memory" in str(error)
-    else:
-        raise AssertionError("Unsafe GPU packing was accepted without gpu_memory.")
+    automatic = WorkConfig.from_mapping(base, source=tmp_path / "study.yaml")
+    automatic_policy = automatic.levels[0].runs[0].search_policy
+    assert automatic_policy is not None
+    assert automatic_policy.runs_per_gpu == 4
+    assert automatic.resources.gpu_memory_bytes == 0
 
     configured = {**base, "resources": {"gpu": 2, "gpu_memory": "16GiB"}}
     config = WorkConfig.from_mapping(configured, source=tmp_path / "study.yaml")
@@ -901,7 +904,7 @@ def test_cuda_oom_is_requeued_as_a_new_attempt_before_becoming_terminal(
     assert _retry_failed_result(retry, result, policy=policy, telemetry=None) is None
 
 
-def test_gpu_oom_retry_waits_for_learned_lower_concurrency(
+def test_gpu_cold_start_completes_sequential_learning_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -910,9 +913,6 @@ def test_gpu_oom_retry_waits_for_learned_lower_concurrency(
     attempts: dict[int, int] = {}
     events: list[str] = []
     submitted: list[Future[Any]] = []
-    oom_returned = False
-    first_returned = False
-    retry_returned = False
 
     def outcome(trial: int, *, oom: bool = False) -> WorkResult:
         return WorkResult(
@@ -965,47 +965,12 @@ def test_gpu_oom_retry_waits_for_learned_lower_concurrency(
         futures: Sequence[Future[Any]],
         **kwargs: Any,
     ) -> tuple[set[Future[Any]], set[Future[Any]]]:
-        nonlocal oom_returned, first_returned, retry_returned
         del kwargs
         current = set(futures)
-        if len(submitted) < 3:
-            return set(), current
-        if not oom_returned:
-            selected = next(
-                future
-                for future in current
-                if future.trial == 3 and future.attempt == 1  # type: ignore[attr-defined]
-            )
-            selected.set_result(outcome(3, oom=True))
-            oom_returned = True
-            events.append("oom-3-1")
-            return {selected}, current - {selected}
-        if not first_returned:
-            selected = next(
-                future
-                for future in current
-                if future.trial == 1  # type: ignore[attr-defined]
-            )
-            selected.set_result(outcome(1))
-            first_returned = True
-            events.append("finish-1-1")
-            return {selected}, current - {selected}
-        retry = next(
-            (
-                future
-                for future in current
-                if future.trial == 3 and future.attempt == 2  # type: ignore[attr-defined]
-            ),
-            None,
-        )
-        if retry is not None and not retry_returned:
-            retry.set_result(outcome(3))
-            retry_returned = True
-            events.append("finish-3-2")
-            return {retry}, current - {retry}
         selected = next(iter(current))
-        selected.set_result(outcome(2))
-        events.append("finish-2-1")
+        trial = int(selected.trial)  # type: ignore[attr-defined]
+        selected.set_result(outcome(trial))
+        events.append(f"finish-{trial}-1")
         return {selected}, current - {selected}
 
     monkeypatch.setattr(
@@ -1024,7 +989,7 @@ def test_gpu_oom_retry_waits_for_learned_lower_concurrency(
         policy=AdaptiveSearchPolicy(
             runs_per_gpu=3,
             early_stopping=False,
-            failure_retries=1,
+            failure_retries=0,
         ),
         parallelism=3,
         visible_gpus=("gpu-a",),
@@ -1035,13 +1000,12 @@ def test_gpu_oom_retry_waits_for_learned_lower_concurrency(
         executors=executors,
     )
 
-    assert attempts == {1: 1, 2: 1, 3: 2}
-    assert events.index("finish-1-1") < events.index("submit-3-2")
+    assert attempts == {1: 1, 2: 1, 3: 1}
+    assert events.index("finish-1-1") < events.index("submit-2-1")
     assert len(results) == 3
     assert all(result.ok for result in results)
     output = capsys.readouterr().out
-    assert "reducing the study packing ceiling for that device from 3 to 2" in output
-    assert "cautiously restoring it from 2 to 3" in output
+    assert "commitment=80.0GiB" in output
 
 
 def test_gpu_admission_rejects_only_a_bound_impossible_on_every_device() -> None:
@@ -1052,18 +1016,134 @@ def test_gpu_admission_rejects_only_a_bound_impossible_on_every_device() -> None
         _validate_gpu_memory_capacity(((5 * gib, 24 * gib), (10 * gib, 20 * gib)), 30 * gib)
 
 
-def test_gpu_round_dispatches_to_available_devices_and_retries_queued_runs(
+def test_gpu_dispatch_fails_explicitly_when_every_action_is_device_infeasible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deterministic impossibility terminates instead of polling forever."""
+    gib = 1024**3
+    monkeypatch.setattr(
+        "lambdaforge.work.runner._gpu_memory_inventory",
+        lambda count: ((80 * gib, 80 * gib),),
+    )
+    monkeypatch.setattr(
+        "lambdaforge.work.runner.ResourceDemandModel.predict",
+        lambda self, **kwargs: ResourcePrediction(
+            candidate_key=str(kwargs["candidate_key"]),
+            predicted_peak_bytes=81 * gib,
+            lower_bytes=81 * gib,
+            upper_bytes=81 * gib,
+            known_lower_bound_bytes=81 * gib,
+            predicted_time_to_envelope_seconds=None,
+            predicted_duration_seconds=None,
+            compatible_history_count=1,
+            exact_history_count=0,
+            support="censored-only",
+            calibration="poor",
+            backend="test",
+            samples=(81 * gib,),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="instead of waiting or retrying forever"):
+        _execute_gpu_admitted_runs(
+            [{"trial_index": 1, "seed": 4}],
+            resources=ResourceRequest(gpu_count=1),
+            policy=AdaptiveSearchPolicy(runs_per_gpu=10, early_stopping=False),
+            parallelism=10,
+            visible_gpus=("gpu-a",),
+            objective_metric="score",
+            objective_mode="max",
+            telemetry=None,
+            results=[],
+            executors=[],
+        )
+
+
+def test_gpu_dispatch_requests_a_bounded_alternative_when_frontier_is_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gib = 1024**3
-    observations = iter(
-        (
-            ((10 * gib, 80 * gib), (40 * gib, 80 * gib)),
-            ((10 * gib, 80 * gib), (40 * gib, 80 * gib)),
-            ((35 * gib, 80 * gib), (10 * gib, 80 * gib)),
-            ((35 * gib, 80 * gib), (35 * gib, 80 * gib)),
-        )
+    probes = itertools.chain(
+        (((40 * gib, 80 * gib),),) * 3,
+        itertools.repeat(((80 * gib, 80 * gib),)),
     )
+    submitted: list[int] = []
+    frontier_calls = 0
+
+    def predict(self: Any, **kwargs: Any) -> ResourcePrediction:
+        peak = int(kwargs["parameters"].get("memory_gib", 70)) * gib
+        return ResourcePrediction(
+            str(kwargs["candidate_key"]),
+            peak,
+            peak,
+            peak,
+            0,
+            None,
+            1.0,
+            4,
+            0,
+            "near-compatible",
+            "moderate",
+            "test",
+            (peak,),
+        )
+
+    class ImmediatePool:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def submit(self, function: Any, value: dict[str, Any]) -> Future[Any]:
+            del function
+            submitted.append(int(value["trial_index"]))
+            future: Future[Any] = Future()
+            future.set_result(SimpleNamespace(trial={"index": value["trial_index"]}))
+            return future
+
+        def shutdown(self, **kwargs: Any) -> None:
+            del kwargs
+
+    def expand(queued: Any, pending: Any) -> list[dict[str, Any]]:
+        nonlocal frontier_calls
+        del queued, pending
+        frontier_calls += 1
+        return [{"trial_index": 2, "seed": 2, "trial_parameters": {"memory_gib": 10}}]
+
+    monkeypatch.setattr("lambdaforge.work.runner._gpu_memory_inventory", lambda count: next(probes))
+    monkeypatch.setattr("lambdaforge.work.runner.ResourceDemandModel.predict", predict)
+    monkeypatch.setattr("lambdaforge.work.runner.ProcessPoolExecutor", ImmediatePool)
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_LAUNCH_STAGGER_SECONDS", 0.0)
+
+    results: list[Any] = []
+    _execute_gpu_admitted_runs(
+        [{"trial_index": 1, "seed": 1, "trial_parameters": {"memory_gib": 70}}],
+        resources=ResourceRequest(gpu_count=1),
+        policy=AdaptiveSearchPolicy(runs_per_gpu=2, early_stopping=False),
+        parallelism=2,
+        visible_gpus=("gpu-a",),
+        objective_metric="score",
+        objective_mode="max",
+        telemetry=None,
+        results=results,
+        executors=[],
+        on_resource_blocked=expand,
+    )
+
+    assert frontier_calls == 1
+    assert submitted == [2, 1]
+    assert len(results) == 2
+
+
+def test_gpu_round_uses_resource_planner_and_releases_every_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gib = 1024**3
+    samples = (
+        ((10 * gib, 80 * gib), (40 * gib, 80 * gib)),
+        ((10 * gib, 80 * gib), (40 * gib, 80 * gib)),
+        ((35 * gib, 80 * gib), (10 * gib, 80 * gib)),
+        ((35 * gib, 80 * gib), (35 * gib, 80 * gib)),
+    )
+    observations = itertools.chain(samples, itertools.repeat(samples[-1]))
     submitted: list[tuple[str, int]] = []
     shut_down: list[str] = []
 
@@ -1106,10 +1186,70 @@ def test_gpu_round_dispatches_to_available_devices_and_retries_queued_runs(
     )
 
     assert submitted[0] == ("gpu-b", 1)
-    assert ("gpu-a", 2) in submitted
+    assert submitted == [("gpu-b", 1), ("gpu-a", 2), ("gpu-a", 3)]
     assert len(submitted) == len(results) == 3
     assert shut_down == [slot for slot, _trial in submitted]
     assert executors == []
+
+
+def test_gpu_resource_trajectory_keeps_sampling_when_dispatch_queue_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fully occupied study must still observe peaks after its launch ramp."""
+    gib = 1024**3
+    future: Future[Any] = Future()
+    probes = 0
+    updates = 0
+
+    class DeferredPool:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def submit(self, function: Any, value: dict[str, Any]) -> Future[Any]:
+            del function, value
+            return future
+
+        def shutdown(self, **kwargs: Any) -> None:
+            del kwargs
+
+    def inventory(count: int) -> tuple[tuple[int, int], ...]:
+        nonlocal probes
+        assert count == 1
+        probes += 1
+        if probes == 3:
+            future.set_result(SimpleNamespace(trial={"index": 1}))
+        return ((60 * gib, 80 * gib),)
+
+    from lambdaforge.work import runner as runner_module
+
+    original_update = runner_module._update_active_resource_commitments
+
+    def update(*args: Any, **kwargs: Any) -> None:
+        nonlocal updates
+        updates += 1
+        original_update(*args, **kwargs)
+
+    monkeypatch.setattr("lambdaforge.work.runner._gpu_memory_inventory", inventory)
+    monkeypatch.setattr("lambdaforge.work.runner.ProcessPoolExecutor", DeferredPool)
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_LAUNCH_STAGGER_SECONDS", 0.0)
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_RESOURCE_SAMPLE_SECONDS", 0.0)
+    monkeypatch.setattr("lambdaforge.work.runner._update_active_resource_commitments", update)
+
+    _execute_gpu_admitted_runs(
+        [{"trial_index": 1, "seed": 1}],
+        resources=ResourceRequest(gpu_count=1),
+        policy=AdaptiveSearchPolicy(runs_per_gpu=1, early_stopping=False),
+        parallelism=1,
+        visible_gpus=("gpu-a",),
+        objective_metric="score",
+        objective_mode="max",
+        telemetry=None,
+        results=[],
+        executors=[],
+    )
+
+    assert probes >= 3
+    assert updates >= 1
 
 
 def test_gpu_run_failure_still_exits_its_cuda_worker(

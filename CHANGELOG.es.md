@@ -9,13 +9,41 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+### Añadido
+
+- Añadida inteligencia adaptativa de recursos por candidato HPO. Trayectorias físicas/allocator
+  acotadas durante toda la Run activa, picos exactos y censurados, duración/tiempo a envolvente, cotas OOM y firmas compatibles
+  de Work/código/entorno/hardware alimentan un modelo bootstrap mixed-space persistente reutilizable
+  entre Studies compatibles.
+- Añadida una capa de placement posterior al ranking científico: compromisos futuros conservadores,
+  rechazo duro de reintentos dominados, `RESOURCE_BLOCKED` separado de inviabilidad del dispositivo,
+  packing best-fit de varios candidatos, backfill por ventana predicha, reserva anti-starvation e
+  interferencia aprendida. Las predicciones se condicionan por dispositivo heterogéneo; una
+  frontera totalmente bloqueada obtiene una ampliación científica acotada y la inviabilidad dura
+  termina explícitamente en vez de sondear para siempre. Un benchmark CPU sintético compara utilización, trabajo útil/tiempo,
+  bloqueo, starvation, desperdicio OOM y errores de predicción frente a una Run fija por GPU.
+- Expuesto el modelo de lectura de recursos en Resources del Study: VRAM física libre/externa/LF,
+  compromisos actuales/futuros y headroom predicho, intervalo/soporte/calibración del candidato, P(fit), motivo de
+  admisión/bloqueo y elección de backfill. El análisis final registra muestreo condicionado por
+  recursos sin confundir escasez con evidencia científica negativa.
+
 ### Corregido
 
+- Eliminado un bloqueo de liveness del controlador de Studies causado por recalcular vecinos
+  contrafactuales sobre todo el pool HPO para cada parámetro, pareja y remuestreo. El análisis vivo
+  reutiliza geometría/distancias, evalúa un diseño de referencia determinista acotado y rota una
+  shortlist científica acotada sin reducir el pool completo elegible para el optimizador. Así se
+  recogen Runs acabados/OOM y se rellenan slots sin esperar al análisis descriptivo.
+- Hechos seguros los canvas de `textual-plot` bajo `NO_COLOR`; las gráficas nativas ya no cierran
+  Textual al aplicar el filtro monocromo a un segmento vacío sin estilo de la dependencia.
+- Añadida la acción siempre visible **Delete Study History…** en cada Study. Reutiliza el borrado
+  semántico exacto de Work, muestra progreso de preview/aplicación, exige confirmación y no puede
+  borrar Runs activos ni otra ejecución homónima.
 - Hecha equitativa y work-conserving la planificación GPU adaptativa: el startup Sobol automático
   llena el ancho paralelo seguro con candidatos distintos, los slots globales libres priorizan la
   GPU concedida menos cargada/más ociosa y una OOM reduce solo su dispositivo antes de recuperarse
-  gradualmente con evidencia. `gpu_memory` sigue siendo únicamente un umbral de VRAM libre viva por
-  lanzamiento nuevo, nunca una reserva multiplicada por Runs activos.
+  gradualmente con evidencia. `gpu_memory` sigue siendo un suelo de seguridad por lanzamiento
+  dentro de la envolvente aprendida, nunca una reserva multiplicada por Runs activos.
 - Ampliado el editor de clúster de la Consola desde seis campos básicos al perfil durable completo:
   referencias de autenticación, runtime/PyTorch, retención de almacenamiento/SSH, toda la política
   GPU y los mapas OpenSSH/SLURM avanzados validados se conservan sin pérdidas silenciosas. Las
@@ -50,7 +78,8 @@ metadata empaquetada.
   fase y no puede repetirse mientras está activo.
 - Eliminada la reserva VRAM oculta por oleada que contaba dos veces `gpu_memory` para Runs activos y
   podía limitar una GPU de 80 GiB a tres entrenos con umbral de 20 GiB aunque hubiese memoria libre.
-  La admisión sigue ahora el umbral de VRAM libre por lanzamiento y su escalonado documentado. Una
+  La admisión combina ahora el suelo por lanzamiento, la ocupación física y la envolvente futura
+  aprendida. Una
   OOM CUDA sigue aislada y reintentable, pero reduce el límite vivo de packing del Study por debajo
   de la concurrencia fallida antes de reencolar, sin alterar los demás Runs.
 - Desactivada por defecto la convergencia implícita por racha de récords. Los Studies adaptativos

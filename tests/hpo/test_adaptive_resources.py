@@ -1,0 +1,474 @@
+"""CPU-only decision tests for adaptive resource intelligence."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from lambdaforge.hpo.AdaptiveResources import (
+    ActiveResourceCommitment,
+    BoundedResourceTrajectory,
+    CandidateResourceAction,
+    GPUPlacementPlanner,
+    GPUResourceState,
+    ResourceDemandModel,
+    ResourceHistoryStore,
+    ResourcePrediction,
+    ResourceProfileObservation,
+    ResourceTrajectorySample,
+    oom_evidence,
+    resource_state,
+)
+
+GIB = 1024**3
+
+
+def observation(
+    key: str,
+    peak: int,
+    *,
+    compatibility: str = "compatible",
+    state: str = "completed",
+    exact: bool = True,
+    lower: int = 0,
+    parameters: dict[str, Any] | None = None,
+    co_runners: int = 0,
+    throughput: float | None = None,
+    hardware: str = "H100-80",
+) -> ResourceProfileObservation:
+    return ResourceProfileObservation(
+        candidate_key=key,
+        compatibility_key=compatibility,
+        work_class="project.Train",
+        parameters=parameters or {},
+        fixed_arguments={"batch_size": 32},
+        fidelity={"target": 100, "maximum": 100},
+        hardware=hardware,
+        total_bytes=80 * GIB,
+        state=state,  # type: ignore[arg-type]
+        observed_peak_bytes=peak,
+        peak_is_exact=exact,
+        duration_seconds=100.0,
+        time_to_peak_seconds=20.0,
+        lower_bound_bytes=lower,
+        co_runners=co_runners,
+        throughput=throughput,
+    )
+
+
+def prediction(
+    key: str,
+    peak: int,
+    *,
+    duration: float = 10.0,
+    lower_bound: int = 0,
+    history: int = 4,
+) -> ResourcePrediction:
+    return ResourcePrediction(
+        candidate_key=key,
+        predicted_peak_bytes=peak,
+        lower_bytes=max(lower_bound, peak),
+        upper_bytes=max(lower_bound, peak),
+        known_lower_bound_bytes=lower_bound,
+        predicted_time_to_envelope_seconds=2.0,
+        predicted_duration_seconds=duration,
+        compatible_history_count=history,
+        exact_history_count=history,
+        support="exact-candidate",
+        calibration="good",
+        backend="test",
+        samples=(peak, peak, peak),
+    )
+
+
+def action(key: str, peak: int, value: float, *, duration: float = 10.0) -> CandidateResourceAction:
+    return CandidateResourceAction(
+        key,
+        {"trial_index": int(key.removeprefix("c") or 0), "resource_compatibility_key": "c"},
+        value,
+        prediction(key, peak, duration=duration),
+    )
+
+
+def gpu(
+    index: int = 0,
+    *,
+    free: int = 80,
+    external: int = 0,
+    active: tuple[ActiveResourceCommitment, ...] = (),
+    cap: int = 10,
+) -> GPUResourceState:
+    return GPUResourceState(
+        index,
+        str(index),
+        "H100-80",
+        80 * GIB,
+        free * GIB,
+        external * GIB,
+        active,
+        cap,
+    )
+
+
+def test_candidate_specific_model_packs_small_and_separates_large_runs() -> None:
+    observations = [observation(f"c{index}", 10 * GIB) for index in range(1, 5)]
+    model = ResourceDemandModel(observations)
+    actions = [
+        CandidateResourceAction(
+            f"c{index}",
+            {"trial_index": index, "resource_compatibility_key": "compatible"},
+            1.0 - index / 100,
+            model.predict(
+                candidate_key=f"c{index}",
+                compatibility_key="compatible",
+                parameters={},
+                hardware="H100-80",
+                total_bytes=80 * GIB,
+            ),
+        )
+        for index in range(1, 5)
+    ]
+    admitted, blocked = GPUPlacementPlanner(model).place(actions, (gpu(cap=4),), max_launches=4)
+    assert len(admitted) == 4
+    assert not blocked
+
+    large = action("c1", 48 * GIB, 1.0)
+    small = action("c2", 10 * GIB, 0.9)
+    admitted, _ = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (large, small), (gpu(cap=2),), max_launches=2
+    )
+    assert len(admitted) == 2
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (large, action("c2", 48 * GIB, 0.9)), (gpu(cap=2),), max_launches=2
+    )
+    assert len(admitted) == 1
+    assert blocked[0].state == "RESOURCE_BLOCKED"
+
+
+def test_cold_start_is_one_run_per_gpu_until_evidence_exists() -> None:
+    model = ResourceDemandModel()
+    unknown = [
+        CandidateResourceAction(
+            f"unknown-{index}",
+            {"trial_index": index},
+            1.0,
+            model.predict(
+                candidate_key=f"unknown-{index}",
+                compatibility_key="new",
+                parameters={"width": index},
+                hardware="H100-80",
+                total_bytes=80 * GIB,
+            ),
+        )
+        for index in range(10)
+    ]
+    admitted, _ = GPUPlacementPlanner(model).place(unknown, (gpu(0), gpu(1)), max_launches=10)
+    assert len(admitted) == 2
+    assert {value.target_gpu for value in admitted} == {0, 1}
+
+
+def test_one_neighbour_does_not_collapse_between_candidate_uncertainty() -> None:
+    model = ResourceDemandModel(
+        [observation("known", 10 * GIB, parameters={"width": 64})]
+    )
+    unseen = model.predict(
+        candidate_key="unseen",
+        compatibility_key="compatible",
+        parameters={"width": 256},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+
+    assert unseen.predicted_peak_bytes == 10 * GIB
+    assert unseen.commitment_bytes == 80 * GIB
+    assert unseen.support == "sparse-near-compatible"
+
+
+def test_early_low_memory_uses_future_commitment_not_current_usage() -> None:
+    ramping = ActiveResourceCommitment("large", 45 * GIB, current_bytes=4 * GIB)
+    candidate = action("c2", 20 * GIB, 0.8)
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (candidate,), (gpu(free=60, external=16, active=(ramping,)),), max_launches=1
+    )
+    assert not admitted
+    assert blocked[0].reason == "predicted future GPU-memory envelope does not fit now"
+
+
+def test_new_external_pressure_cannot_be_hidden_by_future_attribution() -> None:
+    active = ActiveResourceCommitment(
+        "running",
+        40 * GIB,
+        current_bytes=10 * GIB,
+        remaining_seconds=20.0,
+    )
+    # The learned future ledger alone leaves 40 GiB, but physical free VRAM has fallen to 30 GiB
+    # since the prior baseline. Admission must honor the stricter live physical observation.
+    pressured = gpu(free=30, external=0, active=(active,))
+    candidate = action("c2", 35 * GIB, 0.8)
+
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (candidate,), (pressured,), max_launches=1
+    )
+
+    assert pressured.predicted_headroom_bytes == 40 * GIB
+    assert pressured.admission_headroom_bytes == 30 * GIB
+    assert not admitted
+    assert blocked[0].devices[0]["admission_headroom_bytes"] == 30 * GIB
+
+
+def test_oom_lower_bound_blocks_same_or_less_headroom_and_allows_more() -> None:
+    evidence = oom_evidence(
+        "CUDA out of memory. Tried to allocate 2 GiB",
+        candidate_key="heavy",
+        compatibility_key="compatible",
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+        headroom_bytes=26 * GIB,
+        resident_bytes=24 * GIB,
+        physical_free_bytes=2 * GIB,
+        external_bytes=0,
+        active_co_runs=1,
+    )
+    assert evidence.lower_bound_bytes == 26 * GIB
+    model = ResourceDemandModel(
+        [observation("heavy", 24 * GIB, state="oom", exact=False, lower=26 * GIB)]
+    )
+    predicted = model.predict(
+        candidate_key="heavy",
+        compatibility_key="compatible",
+        parameters={},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+    candidate = CandidateResourceAction("retry", {"trial_index": 1}, 1.0, predicted)
+    admitted, blocked = GPUPlacementPlanner(model).place(
+        (candidate,), (gpu(0, free=25, external=55), gpu(1, free=18, external=62)), max_launches=1
+    )
+    assert not admitted
+    assert all(
+        device["reason"] == "dominated-by-known-oom-lower-bound" for device in blocked[0].devices
+    )
+    admitted, _ = GPUPlacementPlanner(model).place(
+        (candidate,), (gpu(free=40, external=40),), max_launches=1
+    )
+    assert len(admitted) == 1
+
+
+def test_infeasible_device_type_is_not_a_scientific_failure() -> None:
+    candidate = CandidateResourceAction(
+        "huge",
+        {"trial_index": 7},
+        0.99,
+        prediction("huge", 83 * GIB, lower_bound=82 * GIB),
+    )
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (candidate,), (gpu(),), max_launches=1
+    )
+    assert not admitted
+    assert blocked[0].state == "RESOURCE_INFEASIBLE_ON_DEVICE_TYPE"
+    assert "objective" not in blocked[0].to_dict()
+
+
+def test_best_action_stays_blocked_while_next_feasible_action_backfills() -> None:
+    active = ActiveResourceCommitment("running", 50 * GIB, remaining_seconds=20.0)
+    heavy = action("c1", 42 * GIB, 0.91)
+    light = action("c2", 14 * GIB, 0.78, duration=5.0)
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (heavy, light), (gpu(free=30, active=(active,)),), max_launches=1
+    )
+    assert admitted[0].candidate_key == "c2"
+    assert admitted[0].backfill is True
+    assert blocked[0].candidate_key == "c1"
+    assert blocked[0].earliest_opportunity_seconds == 20.0
+
+
+def test_best_fit_preserves_large_gpu_for_heavy_action() -> None:
+    devices = (gpu(0, free=50, external=30), gpu(1, free=25, external=55))
+    small = action("c1", 20 * GIB, 1.0)
+    heavy = action("c2", 45 * GIB, 0.9)
+    admitted, _ = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (small, heavy), devices, max_launches=2
+    )
+    assert [(value.candidate_key, value.target_gpu) for value in admitted] == [
+        ("c1", 1),
+        ("c2", 0),
+    ]
+
+
+def test_heterogeneous_devices_use_their_own_conditioned_prediction() -> None:
+    smaller = GPUResourceState(0, "a100", "A100-40", 40 * GIB, 40 * GIB, 0, (), 2)
+    larger = GPUResourceState(1, "h100", "H100-80", 80 * GIB, 80 * GIB, 0, (), 2)
+    candidate = CandidateResourceAction(
+        "mixed",
+        {"trial_index": 1},
+        1.0,
+        prediction("mixed-h100", 30 * GIB),
+        {
+            0: prediction("mixed-a100", 45 * GIB, lower_bound=45 * GIB),
+            1: prediction("mixed-h100", 30 * GIB),
+        },
+    )
+
+    admitted, _ = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (candidate,), (smaller, larger), max_launches=1
+    )
+
+    assert admitted[0].target_gpu == 1
+    assert admitted[0].prediction["candidate_key"] == "mixed-h100"
+
+
+def test_backfill_reservation_rejects_a_run_that_would_starve_heavy_work() -> None:
+    active = ActiveResourceCommitment("active", 60 * GIB, remaining_seconds=10.0)
+    device = gpu(free=20, active=(active,))
+    heavy = action("c1", 70 * GIB, 1.0, duration=30.0)
+    short = action("c2", 10 * GIB, 0.8, duration=5.0)
+    long = action("c3", 10 * GIB, 0.7, duration=20.0)
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (heavy, short, long), (device,), max_launches=2
+    )
+    assert [value.candidate_key for value in admitted] == ["c2"]
+    assert {value.candidate_key for value in blocked} == {"c1", "c3"}
+
+
+def test_measured_interference_can_stop_unproductive_extra_packing() -> None:
+    history = [
+        observation("one", 10 * GIB, co_runners=0, throughput=100.0),
+        observation("two", 10 * GIB, co_runners=1, throughput=75.0),
+        observation("three", 10 * GIB, co_runners=2, throughput=50.0),
+    ]
+    model = ResourceDemandModel(history)
+    active = (
+        ActiveResourceCommitment("a", 10 * GIB),
+        ActiveResourceCommitment("b", 10 * GIB),
+    )
+    third = CandidateResourceAction(
+        "third",
+        {"trial_index": 3, "resource_compatibility_key": "compatible"},
+        0.8,
+        prediction("third", 10 * GIB),
+    )
+    admitted, blocked = GPUPlacementPlanner(model).place(
+        (third,), (gpu(free=60, active=active),), max_launches=1
+    )
+    assert not admitted
+    assert blocked[0].devices[0]["reason"] == "predicted-aggregate-throughput-would-not-improve"
+
+
+def test_duration_prediction_is_conditioned_on_observed_colocation() -> None:
+    solo = observation("solo", 10 * GIB, co_runners=0)
+    packed = ResourceProfileObservation(
+        **{
+            **observation("packed", 10 * GIB, co_runners=1).to_dict(),
+            "duration_seconds": 175.0,
+        }
+    )
+    model = ResourceDemandModel((solo, packed))
+
+    assert model.adjusted_duration("compatible", 20.0, 1) == 20.0
+    assert model.adjusted_duration("compatible", 20.0, 2) == 35.0
+    assert model.adjusted_duration("unknown", 20.0, 2) == 20.0
+
+
+def test_late_validation_peak_and_pruned_resource_evidence_remain_conservative() -> None:
+    history = [
+        ResourceProfileObservation(
+            **{
+                **observation("candidate", 28 * GIB).to_dict(),
+                "peak_phase": "validation",
+            }
+        ),
+        observation("pruned", 12 * GIB, state="pruned", exact=False, lower=12 * GIB),
+    ]
+    model = ResourceDemandModel(history)
+    live = model.predict(
+        candidate_key="candidate",
+        compatibility_key="compatible",
+        parameters={},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+        observed_prefix_peak_bytes=20 * GIB,
+        phase="training",
+    )
+    assert live.commitment_bytes >= 28 * GIB
+    censored = model.predict(
+        candidate_key="pruned",
+        compatibility_key="compatible",
+        parameters={},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+    assert censored.exact_history_count == 0
+    assert censored.commitment_bytes == 80 * GIB
+
+
+def test_resource_stability_depends_on_decision_uncertainty_not_a_timer() -> None:
+    stable = prediction("known", 10 * GIB, history=8)
+    uncertain = ResourcePrediction(
+        candidate_key="known",
+        predicted_peak_bytes=10 * GIB,
+        lower_bytes=8 * GIB,
+        upper_bytes=20 * GIB,
+        known_lower_bound_bytes=0,
+        predicted_time_to_envelope_seconds=2.0,
+        predicted_duration_seconds=10.0,
+        compatible_history_count=8,
+        exact_history_count=8,
+        support="exact-candidate",
+        calibration="good",
+        backend="test",
+        samples=(8 * GIB, 20 * GIB),
+    )
+    assert (
+        resource_state(stable, observed_peak_bytes=10 * GIB, phase="validation")
+        == "RESOURCE_STABLE"
+    )
+    assert resource_state(uncertain, observed_peak_bytes=8 * GIB, phase="training") == "RAMPING"
+
+
+def test_history_is_persistent_compatible_and_deterministic(tmp_path: Path) -> None:
+    study = tmp_path / "study"
+    shared = tmp_path / "shared"
+    store = ResourceHistoryStore(study, shared)
+    store.append(observation("candidate", 11 * GIB))
+    loaded = ResourceHistoryStore(tmp_path / "other", shared).load()
+    assert len(loaded) == 1
+    model = ResourceDemandModel(loaded)
+    first = model.predict(
+        candidate_key="candidate",
+        compatibility_key="compatible",
+        parameters={},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+    second = model.predict(
+        candidate_key="candidate",
+        compatibility_key="compatible",
+        parameters={},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+    assert first == second
+    incompatible = model.predict(
+        candidate_key="candidate",
+        compatibility_key="different-code",
+        parameters={},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+    assert incompatible.support == "cold-start"
+
+
+def test_bounded_trajectory_preserves_the_true_peak_and_transitions() -> None:
+    trajectory = BoundedResourceTrajectory()
+    for index in range(500):
+        trajectory.append(
+            ResourceTrajectorySample(
+                float(index),
+                (999 if index == 177 else index % 50) * GIB,
+                phase="validation" if 200 <= index < 220 else "training",
+                step=index // 5,
+            )
+        )
+    assert len(trajectory.values) <= 192
+    assert max(value.physical_bytes for value in trajectory.values) == 999 * GIB
+    assert {value.phase for value in trajectory.values} == {"training", "validation"}

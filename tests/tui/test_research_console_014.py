@@ -140,6 +140,14 @@ class FakeServices:
             "status": "cancelled",
         }
 
+    def delete_work(self, selector, *, apply=False):
+        self.calls.append(("delete_work", (selector, apply)))
+        return {
+            "work_id": selector,
+            "applied": apply,
+            "will_remove": ["terminal Attempt workspaces", "project history record"],
+        }
+
     def recent_work_configs(self, *, limit=12):
         self.calls.append(("recent_work_configs", limit))
         return self.recent[:limit]
@@ -202,7 +210,10 @@ class FakeServices:
     def study(self, job_id):
         for item in self.snapshot.get("work", {}).get("items", []):
             if item.get("primary_job_id") == job_id:
-                return item["study"]
+                value = item["study"]
+                if value is None:
+                    raise KeyError(f"{job_id} has no Study telemetry")
+                return value
         raise KeyError(job_id)
 
     def study_run(self, job_id, run_key, *, tail=2_000, curve_points=200):
@@ -564,6 +575,37 @@ def test_running_study_without_telemetry_can_cancel_its_semantic_work() -> None:
             assert ("cancel_work", "work-preparing-study") in services.calls
             status = str(app.screen.query_one("#study-action-status").render())
             assert "Cancellation complete" in status
+
+    asyncio.run(exercise())
+
+
+def test_terminal_study_delete_uses_exact_work_preview_and_confirmation() -> None:
+    work = {
+        "work_id": "work-terminal-study",
+        "name": "wisdom-v1",
+        "primary_job_id": "job-terminal-study",
+        "cluster": "gpu12",
+        "state": "failed",
+        "study_expected": True,
+        "study": None,
+    }
+    services = FakeServices({"work": {"items": [work]}, "clusters": []})
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(services)
+        async with app.run_test(size=(110, 34)) as pilot:
+            app.push_screen(StudyWorkspace(work, services))
+            await pilot.pause(0.1)
+            delete = app.screen.query_one("#study-delete")
+            assert delete.disabled is False
+            await pilot.click("#study-delete")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, ExactConfirmation)
+            assert ("delete_work", ("work-terminal-study", False)) in services.calls
+            await pilot.click("#exact-apply")
+            await pilot.pause(0.15)
+            assert ("delete_work", ("work-terminal-study", True)) in services.calls
+            assert not isinstance(app.screen, StudyWorkspace)
 
     asyncio.run(exercise())
 

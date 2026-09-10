@@ -6,8 +6,29 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from rich.segment import Segment
+from textual.app import ComposeResult
+from textual.containers import Grid
 from textual.events import Click
+from textual.strip import Strip
+from textual.widgets import Static
+from textual_hires_canvas import Canvas
 from textual_plot import PlotWidget
+
+
+class _NoColorSafeCanvas(Canvas):
+    """Normalize a dependency's unstyled empty segments before Textual filters see them."""
+
+    def render_line(self, y: int) -> Strip:
+        strip = super().render_line(y)
+        base = self.rich_style
+        return Strip(
+            [
+                Segment(segment.text, segment.style or base, segment.control)
+                for segment in strip
+            ],
+            strip.cell_length,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +62,15 @@ class InspectablePlotWidget(PlotWidget):
             allow_pan_and_zoom=allow_pan_and_zoom,
         )
         self._inspection_points: tuple[InspectionPoint, ...] = ()
+
+    def compose(self) -> ComposeResult:
+        """Use textual-plot's canvas contract with a NO_COLOR-safe compatibility subclass."""
+        with Grid():
+            yield _NoColorSafeCanvas(1, 1, id="margin-top")
+            yield _NoColorSafeCanvas(1, 1, id="margin-left")
+            yield _NoColorSafeCanvas(1, 1, id="plot")
+            yield _NoColorSafeCanvas(1, 1, id="margin-bottom")
+        yield Static(id="legend")
 
     def set_inspection_points(self, points: Sequence[InspectionPoint]) -> None:
         self._inspection_points = tuple(points)

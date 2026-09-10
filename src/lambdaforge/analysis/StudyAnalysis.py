@@ -164,6 +164,7 @@ class StudyAnalysis:
             "optimization_opportunity": scientific_understanding["optimization_opportunity"],
             "scientific_uncertainty": scientific_understanding["scientific_uncertainty"],
             "resources": resources,
+            "resource_conditioning": cls._resource_conditioning(source),
             "pareto": pareto,
             "constraints": constraint_summary,
             "findings": generated_findings,
@@ -180,8 +181,17 @@ class StudyAnalysis:
                     "intrinsic median per comparable full-fidelity Run is separate from "
                     "controller total spend"
                 ),
+                "resource_sampling_policy": (
+                    "candidate evidence is conditioned by recorded physical admission; resource "
+                    "blocking is operational and is never interpreted as poor objective evidence"
+                ),
             },
         }
+
+    @staticmethod
+    def _resource_conditioning(source: Mapping[str, Any]) -> dict[str, Any]:
+        value = source.get("resource_conditioning")
+        return dict(value) if isinstance(value, Mapping) else {"available": False}
 
     @classmethod
     def persist(

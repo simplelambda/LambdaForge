@@ -238,6 +238,22 @@ def test_persistence_is_idempotent_for_the_same_evidence(tmp_path: Path) -> None
     assert second["analysis_version"] == 3
 
 
+def test_analysis_preserves_resource_conditioning_without_biasing_objective() -> None:
+    source = _study([({"width": 64}, 0.8), ({"width": 256}, 0.7)])
+    source["resource_conditioning"] = {
+        "available": True,
+        "states": {"ADMITTED": 2, "RESOURCE_BLOCKED": 3},
+        "by_trial": {"2": {"RESOURCE_BLOCKED": 3}},
+        "interpretation": "Heavy region was temporarily resource-blocked.",
+    }
+
+    analysis = StudyAnalysis.compute(source)
+
+    assert analysis["resource_conditioning"]["states"]["RESOURCE_BLOCKED"] == 3
+    assert analysis["candidates"][0]["mean"] == pytest.approx(0.8)
+    assert analysis["candidates"][1]["mean"] == pytest.approx(0.7)
+
+
 def test_empirical_seed_stability_requires_repeated_leading_seeds() -> None:
     source = {
         "execution_id": "single-seed",

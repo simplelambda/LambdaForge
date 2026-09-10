@@ -518,7 +518,7 @@ search:
 objective: {metric: val_auprc, mode: max}
 resources:
   gpu: 2
-  gpu_memory: 16GiB  # bound for each independent Run
+  gpu_memory: 16GiB  # minimum currently-free VRAM required before starting a Run
   cpu: 16            # total reservation, divided among active Runs
   memory: 32GiB      # total reservation, divided among active Runs
 ```
@@ -526,7 +526,12 @@ resources:
 The deterministic `proposal_pool_size` is stored once; lightweight candidate/seed specifications
 refer only to their own values. Planning memory therefore grows linearly with the internal pool and
 Run identities. A large valid study should not need smaller YAML budgets merely to avoid framework
-memory amplification.
+memory amplification. Live scientific interpretation is also independent of that pool's raw size:
+LambdaForge caches its immutable matching geometry and distances, resamples at bounded live
+precision and rotates a bounded representative shortlist after each event. The optimization
+sampler still owns and may choose from the complete deterministic pool; this is a computational
+boundary for explanatory analysis, not a hidden reduction of the search space. Terminal analysis
+may use denser evidence because it can no longer delay collection or scheduling of Runs.
 
 `trials` is the candidate budget and LambdaForge consumes it by default. Low confidence or sparse
 coverage is never silently interpreted as convergence. `max_runs` and `max_time` are explicit
@@ -537,17 +542,47 @@ controller event records whether execution ended because of candidate, Run or ti
 exhausted proposal pool, or this explicit convergence policy. Pruning and seed racing still save
 compute without reducing the authored candidate budget.
 
-This permits at most eight simultaneous trainings, four on each of two GPUs. Six GPUs with
-`runs_per_gpu: 2` permit twelve; `runs_per_gpu: 1` gives one-Run-per-GPU isolation. Packing above
-one requires `gpu_memory`, which is the minimum free-VRAM admission threshold for each new Run,
-not a demand to start the maximum concurrency immediately. LambdaForge probes every allocated GPU,
-launches on whichever devices currently fit, and leaves the rest of the Runs queued. It polls again
-while VRAM is temporarily busy and staggers launches on the same device so the preceding process
-can materialize its allocation. The threshold is evaluated against current free VRAM for every
-launch; it is not multiplied by the number of active Runs or treated as a hidden reservation.
-When several GPUs can accept one globally available Run, the least-loaded/longest-idle device is
-selected rather than preferring GPU index zero. While eligible scientific actions and candidate/Run
-budget remain, every completed Run triggers immediate replanning to keep safe slots occupied.
+This permits **at most** eight simultaneous trainings, four on each of two GPUs. It does not ask
+LambdaForge to manufacture eight fixed slots. Each candidate receives a learned, conservative
+future-memory envelope from compatible completed/censored Runs. Admission uses physical device
+memory as authority and approximates future headroom as
+
+$$
+H_g(t)=C_g-E_g(t)-\sum_i M_{i,\mathrm{future}}(t).
+$$
+
+Here $C_g$ is usable GPU capacity, $E_g$ is occupancy not attributed to active LambdaForge Runs,
+and $M_{i,\mathrm{future}}$ is each active Run's possible maximum demand from now until completion.
+The planner chooses the least-slack safe device (best fit), so a large and a small Run can coexist
+without treating every hyperparameter configuration as the same size. With no compatible history,
+uncertainty deliberately cold-starts at one Run per GPU and packing rises only after evidence.
+
+`gpu_memory` is optional. When present it remains the user's minimum safety floor for each new Run;
+the effective commitment is the larger of that floor, the learned upper envelope and any known OOM
+lower bound. It is never multiplied by active Runs and is not a hard limiter inside consumer code.
+When omitted, automatic prediction is used. `runs_per_gpu` remains a hard per-device ceiling and
+`max_parallel` a hard global ceiling. A candidate that cannot fit now is `RESOURCE_BLOCKED`, not
+failed or pruned, and is reconsidered when memory changes. A lower-value candidate may safely
+backfill if it can finish before a high-value heavy candidate's expected window. Best-fit placement
+and a bounded ranked frontier avoid random retries and preserve room for heavy work. If the first
+frontier cannot run, the controller requests one bounded extension from the same scientific design
+policy and starts its highest-value feasible member; it never generates random candidates until
+one happens to fit.
+
+LambdaForge probes every granted GPU, reacts to external occupancy, staggers same-device launches
+and updates active future envelopes from bounded trajectories for the full Run, including periods
+where every dispatch slot is occupied and the temporary queue is empty. Physical peaks, allocator
+diagnostics, duration/time-to-peak, censored early termination and OOM lower bounds are persisted.
+Admission uses the stricter of live physical free VRAM and predicted future headroom, so new
+external pressure cannot be hidden by estimated per-Run attribution.
+If a candidate OOMs with effective headroom $H$, the compatible retry is logically forbidden at
+headroom $\le H$; it waits until conditions materially improve. OOM is resource evidence, never a
+bad scientific objective. Measured co-location throughput can also stop extra packing even when
+VRAM fits, because the goal is useful scientific work per wall-clock time rather than full memory.
+
+When several GPUs can accept one globally available Run, the resource planner uses the current
+ranked scientific frontier and device state instead of preferring GPU index zero. While eligible
+scientific actions and candidate/Run budget remain, every terminal event triggers replanning.
 Each packed Run owns a fresh spawned process which exits as
 soon as the Run finishes; LambdaForge does not reuse an idle CUDA worker because its surviving
 device context could retain VRAM and deadlock queued Runs. One full GPU therefore never fails the complete study, and a
@@ -555,13 +590,10 @@ GPU that fits two of four configured slots runs two. Only a threshold larger tha
 of every allocated GPU is rejected as impossible. CPU-only adaptive studies can bound concurrency
 with `max_parallel`. The memory observer runs in a short-lived child process, so it does not leave
 an idle CUDA context on each device and never consumes one of the `runs_per_gpu` scientific slots.
-If a child nevertheless raises CUDA OOM, only that Run becomes `retrying`: its failed Attempt is
-retained, the controller lowers only that device's effective packing ceiling below the concurrency
-that caused the OOM, and a checkpoint-compatible Attempt waits in the queue. Healthy Runs and other
-GPUs continue at their own limits. After one complete stable turnover at the reduced ceiling, the
-device cautiously tests one additional slot, still subject to live free VRAM. Retry recovery is
-bounded by `failure_retries`; an OOM that repeats even at safer packing becomes honest terminal
-evidence rather than an infinite retry loop.
+If a child nevertheless raises CUDA OOM, only that Run becomes `retrying`: its failed Attempt and
+censored resource evidence are retained. Healthy Runs and other GPUs continue. Retry recovery is
+bounded by `failure_retries`; an OOM that repeats under a genuinely improved placement becomes
+honest terminal evidence rather than an infinite retry loop.
 Repeated `self.metrics.log("val_auprc", value, step=epoch)` observations enable
 probability-based pruning. A local trend projects each active curve beyond the common observed step;
 a stop is requested only when practical competitiveness falls below the configured probability,
@@ -989,7 +1021,9 @@ opens as a Study and keeps its terminal logs; missing telemetry is shown as miss
 as a console crash. **Cancel Study** is available from that degraded view as soon as the semantic
 Work exists: it stops every active Attempt and descendant Run even before the worker publishes its
 first Study snapshot. Periodic provider failures stay in the view as stale/error status and never
-produce a repeating notification stream.
+produce a repeating notification stream. **Delete Study History…** previews and then removes the
+exact terminal Study/Attempt state using its `work_id`; active Studies must first be cancelled, and
+published datasets, shared environments and unrelated same-name executions remain untouched.
 
 Dataset Summary loads exact split and primary-target counts from the logical index without walking
 large asset trees. Opening Members automatically fetches one bounded page. Physical Stats and

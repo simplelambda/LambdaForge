@@ -485,6 +485,14 @@ an explicit active/inactive feature rather than a fake value. This pool is plann
 list of decided Trials. It is retained once and lightweight Run specifications reference only their
 own candidate and seed, so planning memory grows linearly rather than duplicating the pool per Run.
 Large valid values therefore do not require weakening the YAML to avoid planner memory blow-ups.
+They also do not multiply controller-critical scientific-analysis work. Live analysis builds one
+reusable immutable design basis, caches mixed-space distances, uses 32 deterministic
+evidence realizations and evaluates bounded representative counterfactual/factorial support.
+Scientific candidate scoring rotates that bounded set on every controller decision and always
+includes the optimization sampler's proposal. Consequently the full pool remains eligible over
+time without a full-pool scan per question/resample blocking completed-Run collection. The
+persisted evidence reports pool, reference and matching-support sizes; final post-hoc analysis may
+use a denser budget because it is outside the scheduling-critical path.
 If `startup_trials` is omitted, LambdaForge first proposes
 `min(trials, max(10, safe_parallelism))` distinct space-filling points. This preserves the
 historical statistical floor and fills the available first wave; it does not promise that temporary
@@ -721,48 +729,81 @@ resources:
 ```
 
 The maximum is \(2\times4=8\) concurrent trainings. Six GPUs with `runs_per_gpu: 2` gives 12;
-two GPUs with `runs_per_gpu: 1` gives 2. Packing above one requires `gpu_memory`, interpreted as a
-per-Run admission threshold. Before launching each individual child LambdaForge requires
+two GPUs with `runs_per_gpu: 1` gives 2. `runs_per_gpu` is a hard ceiling, not a request for fixed
+identical slots. `gpu_memory` is an optional user safety floor. When present, each launch requires
 
 $$
 \texttt{gpu\_memory}
 \leq \text{currently free device memory}.
 $$
 
-`runs_per_gpu` is only the per-device maximum. LambdaForge probes every allocated device and fills
-only the slots that pass this check; temporarily unavailable Runs remain queued and the controller
-polls again. Launches on one GPU are separated by five seconds so a new process can materialize its
-allocation before the next observation. Admission then uses the newly observed free VRAM directly;
-it does not multiply `gpu_memory` by the active-Run count or reserve that amount a second time.
+The resource model also predicts a candidate-specific peak distribution, conservative future
+envelope, time to that envelope and remaining duration from exact and censored compatible history.
+The effective commitment is `max(gpu_memory, learned upper envelope, known OOM lower bound)`; when
+`gpu_memory` is omitted, prediction operates automatically. Physical VRAM is the packing authority.
+Admissible headroom is the stricter of live physical free VRAM and predicted future headroom; an
+external process appearing after launch therefore blocks an unsafe new admission immediately.
+CUDA allocated/reserved values are diagnostics and model features, not a replacement for physical
+occupancy. Bounded trajectories preserve their true peak and transitions; no fixed wait-to-peak
+timeout exists.
+
+For GPU \(g\), placement reasons about \(C_g-E_g-\sum_i M_{i,future}\): usable capacity minus
+external occupancy and active future commitments. Cold start admits one Run per GPU until evidence
+narrows uncertainty. A known OOM lower bound is hard: a compatible candidate that failed with
+effective headroom \(H\) is never tried at headroom \(\le H\). `RESOURCE_BLOCKED` is a reversible
+operational wait; `RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` means the lower bound exceeds that device.
+
+The scientific controller supplies a bounded ranked frontier. The resource planner uses best fit,
+preserves larger devices for heavy work and may run a short feasible backfill while a high-value
+heavy action waits for its predicted window. Learned co-location throughput can stop extra packing
+when it would reduce useful scientific work per wall-clock time. Resource scarcity changes
+when/where an action runs, never its scientific objective. If that complete bounded frontier is
+blocked, one bounded extension is requested from the same scientific policy. This is the
+fit-constrained probe path: it remains optimization/information driven and cannot loop through
+random configurations.
+
+LambdaForge probes every allocated device throughout active Runs—even with no queued action—and
+fills only safe capacity; temporarily unavailable Runs remain queued. Same-device launches are
+staggered so allocation becomes observable. It does
+not multiply `gpu_memory` by active Runs or create a second hidden reservation.
 Eligible GPUs are ordered by current active-Run count and time since their last launch. Therefore,
 when only one global slot is free, GPU index zero cannot repeatedly win and starve another granted
 device. Within the remaining candidate/Run/time budgets, each terminal event replans immediately
 and supplies a replacement action; low post-hoc analysis confidence is not an early-stop signal.
 Every admitted Run has a fresh one-worker spawned process. It is shut down as soon
 as its result or error is received, releasing the whole CUDA context; a persistent idle pool could
-retain VRAM and deadlock the Runs waiting for admission. A full or smaller GPU is skipped while other usable GPUs continue. Only a
-threshold above the total VRAM of every allocated device is impossible and fails as configuration.
+retain VRAM and deadlock the Runs waiting for admission. A full or smaller GPU is skipped while
+other usable GPUs continue. A declared floor, or a persisted hard OOM lower bound, above every
+allocated compatible device is explicitly infeasible instead of waiting forever.
 The memory probe itself executes in a short-lived child and exits after returning JSON, so the HPO
 controller does not appear as one idle CUDA process per GPU and does not consume a
 `runs_per_gpu` slot. Wait/admission records are flushed to the Work log.
 
-This dynamic admission is not a promise against unrelated processes allocating memory afterward,
-nor a hard memory limiter inside consumer code. Declare a conservative peak requirement.
-`max_parallel` can lower the global GPU maximum and bounds CPU-only studies.
+This dynamic admission is not a hard memory limiter inside consumer code. An explicit
+`gpu_memory` floor is useful for a known non-negotiable minimum; automatic mode is appropriate when
+demand varies across a search. `max_parallel` remains the global hard ceiling and also bounds
+CPU-only studies.
 
 Failure isolation follows the Run boundary. CPU and GPU adaptive Runs both use fresh one-worker
 processes, so a killed worker cannot poison a shared pool or cancel unrelated candidates. A worker
 lost before returning a result and CUDA OOM/allocation failures are retried as a new Attempt up to
 `failure_retries` (default 1, allowed 0–3). Compatible checkpoints remain under the same Run and
-are discovered by the retry. A CUDA OOM lowers only the affected device's live packing ceiling
-below the concurrency observed at failure, so one constrained GPU cannot throttle its healthy
-siblings. After that GPU completes one full stable turnover at the reduced ceiling, the controller
-tests exactly one additional slot; normal live-free-VRAM admission still applies. Already-running
-children are never killed. A repeated resource failure at safer packing becomes
-terminal, and ordinary consumer
+are discovered by the retry. A CUDA OOM records attempted allocation (when reported), physical
+headroom, candidate residency, external occupancy and co-runners as censored lower-bound evidence,
+then updates pending predictions. Its retry cannot be admitted until headroom or another compatible
+condition materially improves. Already-running children are never killed. A repeated resource
+failure after a genuinely improved placement becomes terminal, and ordinary consumer
 exceptions are never retried blindly because invalid data/code will not improve with repetition.
 Other pending/active Runs continue. The enclosing Work is still reported failed when a Run exhausts
 recovery, preserving honest scientific evidence instead of hiding a missing candidate.
+
+Study resource evidence lives under `hpo-control/resources/`: bounded observations, OOM evidence,
+admission decisions and the current commitment ledger. Compatible Work/code/environment/hardware
+signatures warm-start later project Studies; incompatible records do not become exact priors. The
+Research Console Resources tab renders the same read model: physical free memory, external usage,
+current/future commitment, predicted headroom, P(fit), blocking reason and backfill explanation.
+Final Study Analysis records resource-conditioned sampling so an under-sampled heavy region is not
+described as scientifically poor.
 
 ### 7.3 Multi-fidelity continuation
 
@@ -941,8 +982,9 @@ allocation (`max_memory_allocated`); `gpu_reserved_mb` is the current PyTorch ca
 pool; `gpu_peak_reserved_mb` is that pool's epoch peak. Reserved memory contains live allocations
 plus reusable cached blocks, so it can legitimately be much larger without being a second
 scheduler reservation. Adaptive packing never derives concurrency from this diagnostic value: it
-uses explicit per-Run `resources.gpu_memory` as a live admission threshold plus current driver free
-memory, filling safe slots rather than requiring the maximum upfront. After each packed Run,
+uses physical driver memory plus the learned candidate envelope and any optional
+`resources.gpu_memory` safety floor, filling safe capacity rather than requiring the maximum
+upfront. After each packed Run,
 its dedicated process exits and releases the complete CUDA context before the slot is admitted again.
 
 There is no training-specific execution type. Local validation marks any ordinary Work declaring
@@ -1610,6 +1652,9 @@ Analysis. Analysis uses the persisted document and has
 Summary, Parameters, Interactions, Coverage, Seeds, Pareto and Findings views; it never fits a
 second controller model in a widget. Work owns Executions/Attempts/logs and links Studies. Cluster
 workspaces expose test/doctor/bootstrap, redacted credentials, GPU policy, resources and storage.
+The visible **Delete Study History…** control delegates to the same exact semantic Work deletion
+service as automation: it previews owned terminal state, confirms once, then removes it. Active
+Studies are refused until cancellation, and equal display names never broaden the target.
 Dataset Summary asynchronously reads exact split and per-split primary-target counts from the
 logical index. This does not recurse through large assets. Members automatically loads at most 200
 records when opened. Physical Stats and Integrity expose a centered explanation and explicit action

@@ -702,11 +702,9 @@ def _search_policy(
         raise ValueError(
             f"search.confirmation_seeds must be disjoint from search seeds: {sorted(overlap)}."
         )
-    if policy.runs_per_gpu > 1 and resources.gpu_memory_bytes <= 0:
-        raise ValueError(
-            "search.runs_per_gpu > 1 requires resources.gpu_memory so LambdaForge can "
-            "admit each Run only when that much device memory is currently free."
-        )
+    # gpu_memory remains an optional user safety floor.  When omitted, the adaptive resource
+    # planner starts conservatively and learns candidate-specific future envelopes; runs_per_gpu
+    # is only the hard cap and therefore no longer requires a homogeneous per-Run declaration.
     return policy
 
 

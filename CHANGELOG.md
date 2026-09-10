@@ -10,13 +10,42 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+### Added
+
+- Added candidate-specific adaptive resource intelligence for HPO. Bounded physical/allocator
+  trajectories spanning the complete active Run, exact and censored peaks, duration/time-to-envelope, OOM lower bounds and
+  Work/code/environment/hardware compatibility signatures now feed a persistent mixed-space
+  bootstrap demand model that can warm-start compatible Studies.
+- Added a resource placement layer after scientific ranking: conservative future commitments,
+  hard dominated-retry rejection, explicit `RESOURCE_BLOCKED` versus device infeasibility,
+  best-fit multi-candidate packing, predicted-window backfill, heavy-action reservation and learned
+  co-location throughput checks. Predictions are conditioned per heterogeneous device; an entirely
+  blocked frontier gets one bounded scientific extension, while hard device-type impossibility
+  terminates explicitly instead of polling forever. A CPU-only synthetic benchmark reports utilization, useful
+  actions/time, blocking, starvation, OOM waste and prediction error against fixed one-Run packing.
+- Exposed the backend resource read model in Study Resources: per-device physical free/external/LF
+  current/future commitments, predicted headroom, candidate peak interval/support/calibration, P(fit), admission or
+  blocking reason and safe-backfill choice. Final Study Analysis records resource-conditioned
+  sampling without treating resource scarcity as poor scientific evidence.
+
 ### Fixed
 
+- Removed a Study-controller liveness failure caused by recomputing nearest counterfactuals across
+  the complete HPO proposal pool for every parameter, pair and evidence resample. Live scientific
+  analysis now reuses immutable pool geometry and mixed-space distances, evaluates a deterministic
+  bounded reference design and rotates a bounded scientific shortlist while the optimizer's full
+  proposal pool remains eligible. Finished/OOM Runs can therefore be collected and slots refilled
+  instead of waiting behind descriptive analysis.
+- Made `textual-plot` canvases safe under `NO_COLOR`; native charts no longer crash Textual's
+  monochrome filter on an unstyled empty dependency segment.
+- Added an always-visible **Delete Study History…** action to Study workspaces. It reuses exact
+  semantic Work deletion, shows preview/apply progress, requires explicit confirmation and cannot
+  delete active Runs or another same-name execution.
 - Made adaptive GPU scheduling work-conserving and fair: automatic Sobol startup now fills the safe
   parallel width with distinct candidates, globally free slots prefer the least-loaded/longest-idle
   granted GPU, and an OOM backs off only its device before evidence-based gradual recovery.
-  `gpu_memory` remains solely a live free-VRAM threshold for each new launch, never a multiplied
-  per-active-Run reservation.
+  `gpu_memory` remains a per-launch safety floor inside the learned candidate envelope, never a
+  multiplied per-active-Run reservation.
 - Expanded the Research Console cluster editor from six basic fields to the complete durable
   profile: authentication references, runtime/PyTorch, storage/SSH retention, every GPU-access
   policy field and validated advanced OpenSSH/SLURM mappings now round-trip without silent loss.
@@ -51,8 +80,8 @@ metadata rather than invented release numbers.
   reports its phase and cannot be repeated while active.
 - Removed the hidden per-wave VRAM reservation that double-counted `gpu_memory` for active Runs and
   could cap an 80 GiB GPU at three 20 GiB-threshold trainings despite enough live free memory. GPU
-  admission now follows the documented per-launch free-VRAM threshold and launch stagger. A CUDA
-  OOM remains isolated and retryable, but now lowers the live Study packing ceiling below the
+  admission now combines the documented per-launch floor with physical occupancy and the learned
+  future envelope. A CUDA OOM remains isolated and retryable, but now lowers the live Study packing ceiling below the
   failing concurrency before requeueing, while unrelated Runs continue unchanged.
 - Disabled implicit record-streak convergence by default. Adaptive Studies now consume their
   authored candidate budget unless an explicit Run/time limit or opt-in positive

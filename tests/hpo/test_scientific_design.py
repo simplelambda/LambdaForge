@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -337,3 +338,73 @@ def test_controller_value_moves_between_interaction_probe_and_optimization() -> 
     assert evidence_first.target_questions
     assert optimization_first.purpose == "OPTIMIZE"
     assert optimization_first.optimization_value > 0
+
+
+def test_large_proposal_pool_keeps_live_scientific_analysis_bounded() -> None:
+    pool = {
+        trial: {
+            "width": (32, 64, 128, 256)[trial % 4],
+            "depth": 1 + trial % 5,
+            "dropout": (trial % 20) / 40,
+            "optimizer": ("adam", "lion")[trial % 2],
+            "residual": bool(trial % 2),
+            "heads": (2, 4, 8)[trial % 3],
+        }
+        for trial in range(1, 4097)
+    }
+    candidates = [
+        _candidate(trial, pool[trial], [0.4 + (trial % 11) / 100])
+        for trial in range(1, 23)
+    ]
+
+    started = time.perf_counter()
+    analysis = ScientificQuestionAnalyzer.analyze(
+        candidates,
+        {"metric": "score", "mode": "max"},
+        practical_margin=0.01,
+        fingerprint="sha256:large-live-pool",
+        candidate_pool=pool,
+        final=False,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 10.0
+    assert analysis["evidence"]["candidate_pool_size"] == 4096
+    assert analysis["evidence"]["reference_points"] <= 32
+    assert analysis["evidence"]["matching_support_points"] <= 4
+    assert analysis["evidence"]["live_cost_is_pool_bounded"] is True
+
+
+def test_scientific_shortlist_rotates_and_always_keeps_sampler_proposal() -> None:
+    pool = {trial: {"x": trial / 4096, "family": trial % 4} for trial in range(1, 4097)}
+    policy = ExperimentalDesignPolicy(pool, mode="max", practical_margin=0.01)
+    state = {
+        "optimization_opportunity": 0.5,
+        "scientific_uncertainty": 0.5,
+        "optimization_weight": 0.5,
+        "information_weight": 0.5,
+        "parameter_questions": [],
+        "interaction_questions": [],
+        "evidence": {"resamples": 32},
+    }
+    outcomes = {1: {1: 0.4}, 2: {1: 0.5}}
+
+    first = policy.rank(
+        outcomes,
+        selected=(1, 2),
+        scientific_state=state,
+        required_candidates=(4096,),
+        decision_key="decision-1",
+    )
+    second = policy.rank(
+        outcomes,
+        selected=(1, 2),
+        scientific_state=state,
+        required_candidates=(4096,),
+        decision_key="decision-2",
+    )
+
+    assert len(first) == 32
+    assert len(second) == 32
+    assert any(value.trial == 4096 for value in first)
+    assert {value.trial for value in first} != {value.trial for value in second}

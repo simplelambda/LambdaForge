@@ -133,15 +133,28 @@ válidos emparejados si reducen una comparación importante. Persiste propósito
 O/K, pesos automáticos, coste y alternativas. No añadas fases/pesos/umbrales de confianza a YAML,
 afirmes causalidad, inventes margen práctico, amplíes dominios declarados ni sustituyas confirmación
 con seeds frescas.
+El análisis científico dentro de la ruta crítica debe quedar acotado por la precisión viva, nunca
+por el `proposal_pool_size` bruto: reutiliza geometría/distancias, puntúa una shortlist
+representativa rotatoria e incluye siempre la propuesta del optimizador. Nunca escanees todo el
+pool por parámetro/pareja/remuestreo ni retrases la recogida de Futures, limpieza GPU o admisión por
+análisis explicativo. El pool determinista completo sigue siendo la autoridad de optimización.
 `objective.constraints.METRICA.min/max` declara guardas del mismo checkpoint. Entre seeds,
 `seed_aggregation` es `mean` legacy, `worst` o `lcb` con `confidence`; evidencia ausente o LCB
 insuficiente es no factible. Un componente de utilidad también puede ser constraint. Nunca infieras guardas o pesos
-multiobjetivo ocultos desde otras métricas. `runs_per_gpu` empaqueta Runs spawn independientes dentro de una
-reserva fija y valores >1 exigen `resources.gpu_memory` por Run. Es un umbral vivo de VRAM libre por
-nuevo Run y `runs_per_gpu` solo un máximo: GPU llenas esperan y se sondean, las demás continúan y
-los lanzamientos sobre una GPU se escalonan. No multipliques el umbral por los Runs activos ni
-mantengas una segunda reserva oculta. Solo se rechaza si ninguna GPU asignada tiene VRAM
-total suficiente. Cada Run GPU admitido usa un proceso spawn nuevo de un único worker y termina al
+multiobjetivo ocultos desde otras métricas. `runs_per_gpu` es solo el máximo duro por GPU dentro de
+la reserva fija y `max_parallel` el máximo global. `resources.gpu_memory` es opcional; si aparece es
+un suelo de seguridad del usuario por lanzamiento. La admisión efectiva usa el máximo entre ese
+suelo, una envolvente futura conservadora específica del candidato y cotas OOM conocidas. La VRAM
+física libre actual impone además el límite estricto. La VRAM física es la autoridad. Nunca
+multipliques el suelo por Runs activos ni mantengas otra reserva. Cold
+start admite una Run desconocida por GPU; historia compatible exacta/censurada permite después
+packing best-fit más denso. `RESOURCE_BLOCKED` es reversible y científicamente neutro;
+`RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` requiere una cota dura superior al dispositivo. Nunca
+reintentes una OOM compatible con headroom igual o menor. El planner consume una frontera científica
+acotada, permite backfill seguro, protege trabajo pesado con ventanas de finalización predichas y
+puede rechazar co-location aunque quepa si no mejora throughput agregado. Si toda la frontera queda
+bloqueada, pide como máximo una ampliación acotada a la misma política científica antes de dejar el
+recurso ocioso; nunca itera candidatos aleatorios por recursos. Cada Run GPU admitido usa un proceso spawn nuevo de un único worker y termina al
 recibir resultado/error; no restaures pools CUDA persistentes porque sus contextos ociosos retienen
 VRAM y pueden bloquear la cola. El probe de memoria GPU debe seguir siendo un hijo efímero: el
 controlador no debe retener un contexto CUDA por dispositivo ni consumir una plaza científica. Un
@@ -152,10 +165,9 @@ seguro al detectar `self.stop_requested`.
 
 Cada Run adaptativo CPU/GPU posee proceso nuevo de un worker. Un worker perdido/matado o una OOM
 CUDA puede reintentarse como Attempt compatible con checkpoints hasta `failure_retries` (1 por
-defecto, máximo 3); si se repite queda terminal. Una OOM CUDA reduce solo el límite de packing de
-esa GPU por debajo de la concurrencia observada antes de readmitir el reintento; tras una rotación
-estable completa puede probar un slot adicional, siempre tras admisión de VRAM viva. Prioriza GPU
-admisibles menos cargadas y más ociosas para no dejar sin trabajo índices altos. No mates Runs
+defecto, máximo 3); si se repite queda terminal. OOM es evidencia censurada de recursos, no un
+objective: persiste asignación intentada/headroom/residencia/origen y replantea todo lo pendiente
+antes de reintentar. Prioriza best fit preservando una ventana predicha para trabajo pesado todavía relevante. No mates Runs
 hermanos sanos ni reintentes sin límite. No reintentes excepciones consumidoras arbitrarias.
 Un Run agotado deja el Work honestamente fallido, pero no cancela Runs ajenos activos/en cola. La
 telemetría guarda índice GPU lógico y token heredado exacto; nunca infieras ni amplíes dispositivos
@@ -293,6 +305,8 @@ convertirlo directamente ni degradarlo a Work ordinario.
 Cancelar un Study es una operación sobre el Work semántico y sigue disponible antes de existir
 telemetría. Los fallos recurrentes de refresh/proveedor se muestran inline como estado
 obsoleto/error; nunca producen un aviso emergente en cada intervalo de sondeo.
+Borrar un Study reutiliza el borrado preview-first del Work semántico exacto, con progreso visible;
+rechaza Studies activos hasta cancelarlos y nunca selecciona el objetivo por su nombre visible.
 HPO consume ese mismo análisis: dominios declarados/observados/prometedores, fiabilidad, respuesta
 con incertidumbre/soporte, dispersión, interacciones e historial completo Acción/Trial/Motivo. No
 ajusta otro modelo ni afirma causalidad. Antes de existir un resultado de Execution usa

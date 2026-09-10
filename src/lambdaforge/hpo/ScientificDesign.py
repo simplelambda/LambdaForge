@@ -101,6 +101,131 @@ class CandidateDesignValue:
         }
 
 
+class _ScientificDesignBasis:
+    """Reusable bounded matching geometry for one immutable proposal pool.
+
+    Counterfactual matching depends on the authored pool, not on sampled objective values.  The
+    old implementation nevertheless repeated every nearest-neighbour scan for every Monte Carlo
+    realization.  This basis computes those matches once, retains exact matches when the finite
+    design contains them and otherwise uses a deterministic, evenly spread support coreset.
+    """
+
+    def __init__(
+        self,
+        pool: Mapping[int, Mapping[str, Any]],
+        *,
+        reference_budget: int,
+    ) -> None:
+        self.pool = tuple(
+            (int(trial), dict(parameters)) for trial, parameters in sorted(pool.items())
+        )
+        self.references = self._sample(
+            tuple(parameters for _trial, parameters in self.pool),
+            max(1, reference_budget),
+        )
+        # Match against sqrt(R) representatives for R Monte Carlo reference points.  Scientific
+        # live cost is therefore bounded by its inference precision rather than by proposal-pool
+        # cardinality; terminal analysis naturally uses a denser support.
+        # A realization ensemble supplies uncertainty; repeating many near-identical members in
+        # every factorial cell only multiplies latency. Live analysis uses at most four matched
+        # representatives and two per interaction cell; denser final analysis remains bounded.
+        root_budget = math.ceil(math.sqrt(max(1, reference_budget)))
+        self.support_budget = max(2, min(16, math.ceil(root_budget / 2)))
+        self.cell_budget = max(1, min(8, math.ceil(root_budget / 4)))
+        self._counterfactual_cache: dict[
+            tuple[str, str], tuple[tuple[str, dict[str, Any], int], ...]
+        ] = {}
+        self._factorial_cache: dict[
+            tuple[str, str, str, str], tuple[dict[str, Any], ...]
+        ] = {}
+        self._lock = Lock()
+
+    def counterfactual_matches(
+        self, name: str, level: Any
+    ) -> tuple[tuple[str, dict[str, Any], int], ...]:
+        """Return weighted matched authored points for one parameter level."""
+        cache_key = (name, _label(level))
+        with self._lock:
+            cached = self._counterfactual_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        members = tuple(
+            parameters
+            for _trial, parameters in self.pool
+            if parameters.get(name, _INACTIVE) == level
+        )
+        support = self._sample(members, self.support_budget)
+        if not support:
+            return ()
+        # Prefer a genuine authored counterfactual whenever the finite design contains one.  The
+        # smaller support sample is only the bounded fallback for references whose remaining
+        # coordinates have no exact counterpart at this level.
+        exact = {_projected_key(parameters, ignore=(name,)): parameters for parameters in members}
+        counts: dict[str, tuple[dict[str, Any], int]] = {}
+        for reference in self.references:
+            matched = exact.get(_projected_key(reference, ignore=(name,)))
+            if matched is None:
+                matched = min(
+                    support,
+                    key=lambda parameters: _mixed_distance(
+                        reference, parameters, ignore=(name,)
+                    ),
+                )
+            encoded = json.dumps(matched, sort_keys=True, separators=(",", ":"), default=str)
+            previous = counts.get(encoded)
+            counts[encoded] = (matched, 1 if previous is None else previous[1] + 1)
+        result = tuple((key, *counts[key]) for key in sorted(counts))
+        with self._lock:
+            return self._counterfactual_cache.setdefault(cache_key, result)
+
+    def factorial_members(
+        self,
+        left: str,
+        right: str,
+        left_value: Any,
+        right_value: Any,
+        left_levels: Sequence[Any],
+        right_levels: Sequence[Any],
+    ) -> tuple[dict[str, Any], ...]:
+        """Return bounded authored members of one valid endpoint factorial cell."""
+        cache_key = (left, right, _label(left_value), _label(right_value))
+        with self._lock:
+            cached = self._factorial_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        left_numeric = all(_finite(value) for value in left_levels)
+        right_numeric = all(_finite(value) for value in right_levels)
+        members = tuple(
+            parameters
+            for _trial, parameters in self.pool
+            if _endpoint_level(
+                parameters.get(left, _INACTIVE), left_levels, numeric=left_numeric
+            )
+            == left_value
+            and _endpoint_level(
+                parameters.get(right, _INACTIVE), right_levels, numeric=right_numeric
+            )
+            == right_value
+        )
+        result = self._sample(members, self.cell_budget)
+        with self._lock:
+            return self._factorial_cache.setdefault(cache_key, result)
+
+    @staticmethod
+    def _sample(
+        values: Sequence[dict[str, Any]], limit: int
+    ) -> tuple[dict[str, Any], ...]:
+        """Select deterministic evenly spaced entries without relying on pool size knobs."""
+        if len(values) <= limit:
+            return tuple(values)
+        if limit <= 1:
+            return (values[len(values) // 2],)
+        indexes = sorted(
+            {round(index * (len(values) - 1) / (limit - 1)) for index in range(limit)}
+        )
+        return tuple(values[index] for index in indexes)
+
+
 class SeedNoiseModel:
     """Fit ``y[c,s] = f(x_c) + b_s + epsilon[c,s]`` by pooled demeaning."""
 
@@ -153,12 +278,17 @@ class ScientificQuestionAnalyzer:
     plausible evidence realizations.  A flat conclusion can therefore be highly confident.
     """
 
-    LIVE_MAX_RESAMPLES = 256
-    FINAL_MAX_RESAMPLES = 1024
+    # Live controller inference must remain cheaper than one scheduling heartbeat.  Thirty-two
+    # deterministic realizations give 1/32 probability resolution; terminal analysis may spend a
+    # much larger budget without delaying collection of finished Run processes.
+    LIVE_MAX_RESAMPLES = 32
+    FINAL_MAX_RESAMPLES = 256
     MIN_RESAMPLES = 64
     RESAMPLE_BATCH = 32
     _CACHE_LIMIT = 8
+    _BASIS_CACHE_LIMIT = 4
     _cache: ClassVar[OrderedDict[str, dict[str, Any]]] = OrderedDict()
+    _basis_cache: ClassVar[OrderedDict[str, _ScientificDesignBasis]] = OrderedDict()
     _cache_lock: ClassVar[Lock] = Lock()
 
     @classmethod
@@ -216,11 +346,21 @@ class ScientificQuestionAnalyzer:
             pool.setdefault(trial, values)
         noise = SeedNoiseModel.fit(outcomes)
         natural_scale = cls._natural_scale(rows, objective)
-        model = _MixedKnnModel(parameters, rows, noise=noise, natural_scale=natural_scale)
         resamples = cls._resample_count(
             rows,
             len({name for value in pool.values() for name in value}),
             final=final,
+        )
+        basis = cls._design_basis(pool, reference_budget=resamples)
+        distance_cache: dict[str, dict[int, float]] = {}
+        distance_order_cache: dict[str, tuple[int, tuple[int, ...]]] = {}
+        model = _MixedKnnModel(
+            parameters,
+            rows,
+            noise=noise,
+            natural_scale=natural_scale,
+            distance_cache=distance_cache,
+            distance_order_cache=distance_order_cache,
         )
         rng = random.Random(cls._seed(fingerprint, "scientific-questions"))
         realizations = cls._realizations(
@@ -228,16 +368,39 @@ class ScientificQuestionAnalyzer:
             outcomes,
             rows,
             noise=noise,
-            natural_scale=natural_scale,
+            fallback_sigma=max(model.validation_error, natural_scale / math.sqrt(12.0)),
             count=resamples,
             rng=rng,
         )
+        # One predictive model belongs to one evidence realization.  Reusing it across every
+        # parameter and interaction is essential: constructing it inside each question repeated
+        # leave-one-out validation thousands of times and could starve the scheduler loop.
+        realization_models = tuple(
+            (
+                realization,
+                _MixedKnnModel(
+                    parameters,
+                    realization,
+                    noise=None,
+                    natural_scale=natural_scale,
+                    distance_cache=distance_cache,
+                    distance_order_cache=distance_order_cache,
+                    validation_error=model.validation_error,
+                ),
+            )
+            for realization in realizations
+        )
         names = sorted({str(name) for values in pool.values() for name in values})
+        levels_by_name = {
+            name: cls._levels([value[name] for value in pool.values() if name in value])
+            for name in names
+        }
         interactions = cls._interactions(
             names,
             parameters,
-            pool,
-            realizations,
+            realization_models,
+            basis=basis,
+            levels_by_name=levels_by_name,
             practical_margin=margin,
             natural_scale=natural_scale,
         )
@@ -252,10 +415,12 @@ class ScientificQuestionAnalyzer:
                 pool,
                 rows,
                 outcomes,
-                realizations,
+                realization_models,
+                basis=basis,
+                levels=levels_by_name[name][0],
+                numeric=levels_by_name[name][1],
                 interactions=interaction_by_parameter[name],
                 practical_margin=margin,
-                natural_scale=natural_scale,
                 pruned=pruned,
             )
             for name in names
@@ -272,8 +437,8 @@ class ScientificQuestionAnalyzer:
         )
         cls._attach_region_flexibility(parameter_questions, region, parameters)
         opportunity = cls._optimization_opportunity(
-            pool,
-            set(parameters),
+            basis.references,
+            parameters,
             model,
             rows,
             mode=mode,
@@ -322,6 +487,10 @@ class ScientificQuestionAnalyzer:
             "response_scale": "maximized-objective-utility",
             "seed_noise_model": noise.to_dict(),
             "optimization_opportunity": opportunity,
+            "optimization_opportunity_method": (
+                "expected improvement over a deterministic bounded reference design; "
+                "the optimization sampler still considers the complete proposal pool"
+            ),
             "scientific_uncertainty": uncertainty,
             "optimization_weight": optimization_weight,
             "information_weight": information_weight,
@@ -332,7 +501,11 @@ class ScientificQuestionAnalyzer:
             "practical_optimal_region": region,
             "evidence": {
                 "completed_candidates": len(rows),
+                "candidate_pool_size": len(pool),
                 "resamples": resamples,
+                "reference_points": len(basis.references),
+                "matching_support_points": basis.support_budget,
+                "live_cost_is_pool_bounded": not final,
                 "resampling": (
                     "deterministic candidate-level delete-d/shared-seed-aware evidence ensemble"
                 ),
@@ -348,6 +521,34 @@ class ScientificQuestionAnalyzer:
             while len(cls._cache) > cls._CACHE_LIMIT:
                 cls._cache.popitem(last=False)
         return result
+
+    @classmethod
+    def _design_basis(
+        cls,
+        pool: Mapping[int, Mapping[str, Any]],
+        *,
+        reference_budget: int,
+    ) -> _ScientificDesignBasis:
+        """Reuse immutable proposal-pool geometry across event-driven evidence updates."""
+        key = hashlib.sha256(
+            json.dumps(
+                {"pool": pool, "reference_budget": reference_budget},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        ).hexdigest()
+        with cls._cache_lock:
+            cached = cls._basis_cache.get(key)
+            if cached is not None:
+                cls._basis_cache.move_to_end(key)
+                return cached
+            basis = _ScientificDesignBasis(pool, reference_budget=reference_budget)
+            cls._basis_cache[key] = basis
+            cls._basis_cache.move_to_end(key)
+            while len(cls._basis_cache) > cls._BASIS_CACHE_LIMIT:
+                cls._basis_cache.popitem(last=False)
+            return basis
 
     @staticmethod
     def _evidence(
@@ -402,15 +603,13 @@ class ScientificQuestionAnalyzer:
         rows: Mapping[int, float],
         *,
         noise: SeedNoiseEstimate,
-        natural_scale: float,
+        fallback_sigma: float,
         count: int,
         rng: random.Random,
     ) -> list[dict[int, float]]:
         seed_labels = sorted(
             {seed for values in outcomes.values() for seed in values if seed is not None}
         )
-        model = _MixedKnnModel(parameters, rows, noise=noise, natural_scale=natural_scale)
-        fallback_sigma = max(model.validation_error, natural_scale / math.sqrt(12.0))
         realizations: list[dict[int, float]] = []
         trials = tuple(sorted(outcomes))
         for _ in range(count):
@@ -448,11 +647,13 @@ class ScientificQuestionAnalyzer:
         pool: Mapping[int, Mapping[str, Any]],
         rows: Mapping[int, float],
         outcomes: Mapping[int, Mapping[int | None, float]],
-        realizations: Sequence[Mapping[int, float]],
+        realization_models: Sequence[tuple[Mapping[int, float], _MixedKnnModel]],
         *,
+        basis: _ScientificDesignBasis,
+        levels: Sequence[Any],
+        numeric: bool,
         interactions: Sequence[Mapping[str, Any]],
         practical_margin: float | None,
-        natural_scale: float,
         pruned: set[int],
     ) -> dict[str, Any]:
         observed = {
@@ -460,7 +661,6 @@ class ScientificQuestionAnalyzer:
             for trial, values in parameters.items()
             if name in values and trial in rows
         }
-        authored = [values[name] for values in pool.values() if name in values]
         pruned_parameter_count = sum(
             trial in pruned for trial, values in parameters.items() if name in values
         )
@@ -468,7 +668,6 @@ class ScientificQuestionAnalyzer:
             trial in rows and name not in values for trial, values in parameters.items()
         )
         authored_inactive = sum(name not in values for values in pool.values())
-        levels, numeric = cls._levels(authored)
         if len(levels) < 2 or len(set(map(_label, observed.values()))) < 2:
             probabilities = cls._unresolved_distribution(_PARAMETER_STATES)
             return cls._parameter_result(
@@ -498,9 +697,8 @@ class ScientificQuestionAnalyzer:
             ),
             default=0.0,
         )
-        for realization in realizations:
-            model = _MixedKnnModel(parameters, realization, noise=None, natural_scale=natural_scale)
-            response = cls._counterfactual_response(name, levels, pool, model)
+        for realization, model in realization_models:
+            response = cls._counterfactual_response(name, levels, basis, model)
             if len(response) < 2:
                 kinds.append("UNRESOLVED")
                 conclusion_tokens.append("UNRESOLVED")
@@ -727,28 +925,25 @@ class ScientificQuestionAnalyzer:
         cls,
         names: Sequence[str],
         parameters: Mapping[int, Mapping[str, Any]],
-        pool: Mapping[int, Mapping[str, Any]],
-        realizations: Sequence[Mapping[int, float]],
+        realization_models: Sequence[tuple[Mapping[int, float], _MixedKnnModel]],
         *,
+        basis: _ScientificDesignBasis,
+        levels_by_name: Mapping[str, tuple[list[Any], bool]],
         practical_margin: float | None,
         natural_scale: float,
     ) -> list[dict[str, Any]]:
         output: list[dict[str, Any]] = []
         for left_index, left in enumerate(names):
             for right in names[left_index + 1 :]:
-                left_levels, left_numeric = cls._levels(
-                    [value[left] for value in pool.values() if left in value]
-                )
-                right_levels, right_numeric = cls._levels(
-                    [value[right] for value in pool.values() if right in value]
-                )
+                left_levels, left_numeric = levels_by_name[left]
+                right_levels, right_numeric = levels_by_name[right]
                 if len(left_levels) < 2 or len(right_levels) < 2:
                     continue
                 states: list[str] = []
                 magnitudes: list[float] = []
                 reversals = 0
                 supported = 0
-                for realization in realizations:
+                for realization, model in realization_models:
                     observed_cells = set()
                     for trial in realization:
                         if (
@@ -768,11 +963,8 @@ class ScientificQuestionAnalyzer:
                     if len(observed_cells) < 4:
                         states.append("UNRESOLVED")
                         continue
-                    model = _MixedKnnModel(
-                        parameters, realization, noise=None, natural_scale=natural_scale
-                    )
                     cells = cls._factorial_cells(
-                        left, right, left_levels, right_levels, pool, model
+                        left, right, left_levels, right_levels, basis, model
                     )
                     if len(cells) < 4:
                         states.append("UNRESOLVED")
@@ -834,7 +1026,9 @@ class ScientificQuestionAnalyzer:
                         if supported
                         else None,
                         "support": {
-                            "completed_candidates": len(realizations[0]) if realizations else 0,
+                            "completed_candidates": (
+                                len(realization_models[0][0]) if realization_models else 0
+                            ),
                             "factorial_realizations": supported,
                         },
                         "missing_evidence": (
@@ -953,8 +1147,8 @@ class ScientificQuestionAnalyzer:
     @classmethod
     def _optimization_opportunity(
         cls,
-        pool: Mapping[int, Mapping[str, Any]],
-        observed: set[int],
+        candidate_points: Sequence[Mapping[str, Any]],
+        observed: Mapping[int, Mapping[str, Any]],
         model: _MixedKnnModel,
         rows: Mapping[int, float],
         *,
@@ -962,13 +1156,23 @@ class ScientificQuestionAnalyzer:
         practical_margin: float | None,
         natural_scale: float,
     ) -> float:
-        if not rows or not (set(pool) - observed):
+        observed_keys = {
+            json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+            for value in observed.values()
+        }
+        unobserved = [
+            value
+            for value in candidate_points
+            if json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+            not in observed_keys
+        ]
+        if not rows or not unobserved:
             return 0.0
         del mode  # rows and model predictions are maximized objective utilities
         incumbent = max(rows.values())
         best_ei = 0.0
-        for trial in set(pool) - observed:
-            mean, deviation = model.predict(pool[trial])
+        for parameters in unobserved:
+            mean, deviation = model.predict(parameters)
             improvement_threshold = incumbent + (practical_margin or 0.0)
             best_ei = max(
                 best_ei,
@@ -984,33 +1188,28 @@ class ScientificQuestionAnalyzer:
         cls,
         name: str,
         levels: Sequence[Any],
-        pool: Mapping[int, Mapping[str, Any]],
+        basis: _ScientificDesignBasis,
         model: _MixedKnnModel,
     ) -> list[tuple[Any, float]]:
         values: list[tuple[Any, float]] = []
         for level in levels:
-            members = [
-                parameters
-                for parameters in pool.values()
-                if parameters.get(name, _INACTIVE) == level
-            ]
             # Average matched counterfactuals over one common reference distribution.  A raw
             # group mean would confound this parameter with whichever settings happened to occur
             # beside each level.  Conditional spaces remain valid because only authored pool
-            # members are scored; the nearest valid member supplies each reference counterpart.
-            predictions = []
-            for reference in pool.values():
-                if not members:
-                    continue
-                matched = min(
-                    members,
-                    key=lambda parameters: _mixed_distance(
-                        reference, parameters, ignore=(name,)
-                    ),
+            # members are scored; the reusable basis supplies each reference counterpart once.
+            matches = basis.counterfactual_matches(name, level)
+            total = sum(weight for _key, _parameters, weight in matches)
+            if total:
+                values.append(
+                    (
+                        level,
+                        sum(
+                            model.predict_keyed(key, parameters)[0] * weight
+                            for key, parameters, weight in matches
+                        )
+                        / total,
+                    )
                 )
-                predictions.append(model.predict(matched)[0])
-            if predictions:
-                values.append((level, statistics.fmean(predictions)))
         return values
 
     @classmethod
@@ -1020,28 +1219,20 @@ class ScientificQuestionAnalyzer:
         right: str,
         left_levels: Sequence[Any],
         right_levels: Sequence[Any],
-        pool: Mapping[int, Mapping[str, Any]],
+        basis: _ScientificDesignBasis,
         model: _MixedKnnModel,
     ) -> dict[tuple[str, str], float]:
         cells: dict[tuple[str, str], float] = {}
         for left_value in (left_levels[0], left_levels[-1]):
             for right_value in (right_levels[0], right_levels[-1]):
-                members = [
-                    parameters
-                    for parameters in pool.values()
-                    if _endpoint_level(
-                        parameters.get(left, _INACTIVE),
-                        left_levels,
-                        numeric=all(_finite(value) for value in left_levels),
-                    )
-                    == left_value
-                    and _endpoint_level(
-                        parameters.get(right, _INACTIVE),
-                        right_levels,
-                        numeric=all(_finite(value) for value in right_levels),
-                    )
-                    == right_value
-                ]
+                members = basis.factorial_members(
+                    left,
+                    right,
+                    left_value,
+                    right_value,
+                    left_levels,
+                    right_levels,
+                )
                 if members:
                     cells[(_label(left_value), _label(right_value))] = statistics.fmean(
                         model.predict(parameters)[0] for parameters in members
@@ -1106,7 +1297,9 @@ class ScientificQuestionAnalyzer:
 
     @classmethod
     def _resample_count(cls, rows: Mapping[int, float], questions: int, *, final: bool) -> int:
-        maximum = cls.FINAL_MAX_RESAMPLES if final else cls.LIVE_MAX_RESAMPLES
+        if not final:
+            return cls.LIVE_MAX_RESAMPLES
+        maximum = cls.FINAL_MAX_RESAMPLES
         # Computational precision, not a scientific threshold: more evidence/questions make a
         # close action ordering worth resolving, while the hard bound protects live refresh.
         target = cls.MIN_RESAMPLES + cls.RESAMPLE_BATCH * math.ceil(
@@ -1161,6 +1354,8 @@ class ExperimentalDesignPolicy:
         selected: Sequence[int],
         scientific_state: Mapping[str, Any],
         costs: Mapping[int, float] | None = None,
+        required_candidates: Sequence[int] = (),
+        decision_key: str = "",
     ) -> tuple[CandidateDesignValue, ...]:
         rows = {
             trial: statistics.fmean(values.values()) for trial, values in outcomes.items() if values
@@ -1187,8 +1382,14 @@ class ExperimentalDesignPolicy:
         incumbent = (max if self.mode == "max" else min)(rows.values())
         sign = 1.0 if self.mode == "max" else -1.0
         selected_set = set(selected)
+        candidates_to_score = self._decision_shortlist(
+            selected_set,
+            scientific_state=scientific_state,
+            required_candidates=required_candidates,
+            decision_key=decision_key,
+        )
         output: list[CandidateDesignValue] = []
-        for trial in sorted(set(self.candidates) - selected_set):
+        for trial in candidates_to_score:
             parameters = self.candidates[trial]
             prediction, deviation = model.predict(parameters)
             improvement = _normal_expected_improvement(
@@ -1275,6 +1476,60 @@ class ExperimentalDesignPolicy:
             )
         return tuple(sorted(output, key=lambda value: (-value.score, value.trial)))
 
+    def _decision_shortlist(
+        self,
+        selected: set[int],
+        *,
+        scientific_state: Mapping[str, Any],
+        required_candidates: Sequence[int],
+        decision_key: str,
+    ) -> tuple[int, ...]:
+        """Bound per-event scientific scoring while keeping the full pool eligible over time.
+
+        The analysis resampling budget already expresses the affordable live precision.  Reusing
+        it as the shortlist size avoids a new user-facing knob.  A deterministic decision-keyed
+        rotation exposes different pool regions after every event, and the sampler's optimization
+        proposal is always retained even when it falls outside this event's scientific sample.
+        """
+        available = tuple(sorted(set(self.candidates) - selected))
+        if not available:
+            return ()
+        evidence = scientific_state.get("evidence", {})
+        raw_budget = evidence.get("resamples") if isinstance(evidence, Mapping) else None
+        budget = (
+            int(raw_budget)
+            if isinstance(raw_budget, int)
+            and not isinstance(raw_budget, bool)
+            and raw_budget > 0
+            else max(1, math.ceil(math.sqrt(len(available))))
+        )
+        required = tuple(
+            dict.fromkeys(
+                int(trial)
+                for trial in required_candidates
+                if int(trial) in self.candidates and int(trial) not in selected
+            )
+        )
+        budget = min(len(available), max(len(required), budget))
+        if len(available) <= budget:
+            return available
+        required_set = set(required)
+        rotating = sorted(
+            (trial for trial in available if trial not in required_set),
+            key=lambda trial: hashlib.sha256(
+                (
+                    f"{decision_key}:{trial}:"
+                    + json.dumps(
+                        self.candidates[trial],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                ).encode()
+            ).digest(),
+        )
+        return tuple((*required, *rotating[: budget - len(required)]))
+
     def _relevance(
         self, parameters: Mapping[str, Any], question: Mapping[str, Any], selected: set[int]
     ) -> float:
@@ -1335,6 +1590,9 @@ class _MixedKnnModel:
         *,
         noise: SeedNoiseEstimate | None,
         natural_scale: float,
+        distance_cache: dict[str, dict[int, float]] | None = None,
+        distance_order_cache: dict[str, tuple[int, tuple[int, ...]]] | None = None,
+        validation_error: float | None = None,
     ) -> None:
         self.parameters = {
             trial: dict(values) for trial, values in parameters.items() if trial in rows
@@ -1342,25 +1600,45 @@ class _MixedKnnModel:
         self.rows = {trial: float(rows[trial]) for trial in self.parameters}
         self.noise = noise
         self.natural_scale = max(float(natural_scale), 1e-12)
-        self.validation_error = self._validation_error()
+        # Objective realizations change their values and included candidates, but the mixed-space
+        # geometry does not.  Sharing this cache prevents every resample from recalculating the
+        # same query-to-observation distances.
+        self._distance_cache = distance_cache if distance_cache is not None else {}
+        self._distance_order_cache = (
+            distance_order_cache if distance_order_cache is not None else {}
+        )
+        # Evidence realizations share the same observed design and use the base model's measured
+        # leave-one-candidate-out scale. Recomputing it for every resample is both statistically
+        # redundant for this approximation and quadratic in accumulated candidate evidence.
+        self.validation_error = (
+            float(validation_error)
+            if validation_error is not None
+            else self._validation_error()
+        )
         self._prediction_cache: dict[str, tuple[float, float]] = {}
 
     def predict(self, parameters: Mapping[str, Any]) -> tuple[float, float]:
         key = json.dumps(parameters, sort_keys=True, separators=(",", ":"), default=str)
+        return self.predict_keyed(key, parameters)
+
+    def predict_keyed(
+        self, key: str, parameters: Mapping[str, Any]
+    ) -> tuple[float, float]:
+        """Predict using a caller-owned stable parameter key to avoid repeated serialization."""
         cached = self._prediction_cache.get(key)
         if cached is not None:
             return cached
         if not self.rows:
             return 0.0, self.natural_scale
-        neighbours = sorted(
-            (
-                (_mixed_distance(parameters, self.parameters[trial]), value)
-                for trial, value in self.rows.items()
-            ),
-            key=lambda item: item[0],
-        )
-        count = max(1, math.ceil(math.sqrt(len(neighbours))))
-        selected = neighbours[:count]
+        distances = self._distances(parameters, key=key)
+        ordered_trials = self._ordered_trials(key, distances)
+        count = max(1, math.ceil(math.sqrt(len(self.rows))))
+        selected: list[tuple[float, float]] = []
+        for trial in ordered_trials:
+            if trial in self.rows:
+                selected.append((distances[trial], self.rows[trial]))
+                if len(selected) >= count:
+                    break
         weights = [1.0 / max(distance, 1e-6) for distance, _value in selected]
         mean = sum(
             weight * value for weight, (_distance, value) in zip(weights, selected, strict=True)
@@ -1398,16 +1676,16 @@ class _MixedKnnModel:
             return self.natural_scale
         errors: list[float] = []
         for trial, value in self.rows.items():
-            neighbours = sorted(
-                (
-                    (_mixed_distance(self.parameters[trial], self.parameters[other]), observed)
-                    for other, observed in self.rows.items()
-                    if other != trial
-                ),
-                key=lambda item: item[0],
-            )
-            count = max(1, math.ceil(math.sqrt(len(neighbours))))
-            selected = neighbours[:count]
+            parameters = self.parameters[trial]
+            key = json.dumps(parameters, sort_keys=True, separators=(",", ":"), default=str)
+            distances = self._distances(parameters, key=key)
+            count = max(1, math.ceil(math.sqrt(len(self.rows) - 1)))
+            selected = []
+            for other in self._ordered_trials(key, distances):
+                if other in self.rows and other != trial:
+                    selected.append((distances[other], self.rows[other]))
+                    if len(selected) >= count:
+                        break
             weights = [1.0 / max(distance, 1e-6) for distance, _value in selected]
             prediction = sum(
                 weight * observed
@@ -1419,6 +1697,26 @@ class _MixedKnnModel:
             if errors
             else self.natural_scale
         )
+
+    def _distances(
+        self, parameters: Mapping[str, Any], *, key: str | None = None
+    ) -> dict[int, float]:
+        key = key or json.dumps(
+            parameters, sort_keys=True, separators=(",", ":"), default=str
+        )
+        distances = self._distance_cache.setdefault(key, {})
+        for trial, observed in self.parameters.items():
+            if trial not in distances:
+                distances[trial] = _mixed_distance(parameters, observed)
+        return distances
+
+    def _ordered_trials(self, key: str, distances: Mapping[int, float]) -> tuple[int, ...]:
+        cached = self._distance_order_cache.get(key)
+        if cached is not None and cached[0] == len(distances):
+            return cached[1]
+        ordered = tuple(sorted(distances, key=distances.__getitem__))
+        self._distance_order_cache[key] = (len(distances), ordered)
+        return ordered
 
 
 def _expected_categorical_entropy_reduction(raw: Any, support: float) -> float:
@@ -1478,6 +1776,17 @@ def _mixed_distance(
         else:
             values.append(0.0 if first == second else 1.0)
     return math.sqrt(statistics.fmean(value * value for value in values))
+
+
+def _projected_key(parameters: Mapping[str, Any], *, ignore: Sequence[str]) -> str:
+    """Encode one mixed-space point after removing the experimentally varied fields."""
+    ignored = set(ignore)
+    return json.dumps(
+        {key: parameters[key] for key in sorted(parameters) if key not in ignored},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _normalized_entropy(probabilities: Mapping[str, float]) -> float:

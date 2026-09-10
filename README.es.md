@@ -442,7 +442,7 @@ search:
 objective: {metric: val_auprc, mode: max}
 resources:
   gpu: 2
-  gpu_memory: 16GiB  # límite por Run independiente
+  gpu_memory: 16GiB  # VRAM libre mínima exigida antes de iniciar cada Run
   cpu: 16            # reserva total repartida entre Runs activos
   memory: 32GiB      # reserva total repartida entre Runs activos
 ```
@@ -450,7 +450,12 @@ resources:
 El `proposal_pool_size` determinista se almacena una sola vez; cada especificación ligera de
 candidato/seed referencia solo sus propios valores. La memoria de planificación crece así de forma
 lineal y un estudio grande válido no necesita reducir su presupuesto YAML para evitar amplificación
-de memoria del framework.
+de memoria del framework. La interpretación científica viva tampoco depende del tamaño bruto de
+ese pool: LambdaForge reutiliza su geometría y distancias inmutables, remuestrea con precisión viva
+acotada y rota una shortlist representativa tras cada evento. El sampler de optimización conserva
+el pool determinista completo y puede elegir cualquier miembro; es un límite computacional del
+análisis explicativo, no una reducción oculta del espacio de búsqueda. El análisis terminal puede
+usar evidencia más densa porque ya no retrasa la recogida ni planificación de Runs.
 
 `trials` es el presupuesto de candidatos y LambdaForge lo consume completo por defecto. Una
 confianza baja o cobertura escasa nunca se interpreta silenciosamente como convergencia.
@@ -461,17 +466,45 @@ prueba de cobertura multidimensional. El evento final indica si se agotó el pre
 candidatos, Runs o tiempo, el pool de propuestas, o esta convergencia explícita. Pruning y carrera
 de seeds siguen ahorrando cómputo sin recortar el presupuesto de candidatos declarado.
 
-El ejemplo permite ocho entrenos simultáneos: cuatro en cada una de dos GPUs. Seis GPUs con
-`runs_per_gpu: 2` permiten doce, y `runs_per_gpu: 1` da aislamiento uno-a-uno. Empaquetar más de uno
-exige `gpu_memory`, que es el umbral mínimo de VRAM libre para admitir cada Run nuevo, no una
-obligación de iniciar inmediatamente la concurrencia máxima. LambdaForge sondea todas las GPU
-asignadas, lanza donde quepa y mantiene el resto en cola. Si la VRAM está ocupada vuelve a sondear y
-separa temporalmente lanzamientos sobre el mismo dispositivo para dejar materializar la asignación
-anterior. El umbral se compara con la VRAM libre actual en cada lanzamiento: no se multiplica por
-el número de Runs activos ni actúa como una reserva oculta. Si varias GPU admiten el único Run global disponible,
-se elige la menos cargada y que más tiempo lleva sin recibir uno, no siempre el índice cero. Mientras
-queden acciones científicas elegibles y presupuesto de candidatos/Runs, cada finalización provoca
-una replanificación inmediata para ocupar los slots seguros. Cada Run empaquetado posee un proceso
+El ejemplo permite **como máximo** ocho entrenos simultáneos, cuatro en cada GPU; no pide crear ocho
+slots idénticos. Cada candidato recibe una envolvente conservadora de memoria futura aprendida de
+Runs compatibles, completas o censuradas. La memoria física es la autoridad y el headroom futuro se
+aproxima mediante
+
+$$
+H_g(t)=C_g-E_g(t)-\sum_i M_{i,\mathrm{future}}(t),
+$$
+
+donde $C_g$ es la capacidad utilizable, $E_g$ el uso no atribuido a Runs de LambdaForge y
+$M_{i,\mathrm{future}}$ la demanda máxima todavía posible de cada Run activa. El planner elige la
+GPU segura con menor holgura (best fit), por lo que puede juntar una configuración grande y otra
+pequeña. Sin historial compatible comienza deliberadamente con una Run por GPU y aumenta el packing
+solo cuando la evidencia reduce la incertidumbre.
+
+`gpu_memory` es opcional. Si se declara conserva su semántica de suelo de seguridad mínimo para
+cada lanzamiento; el compromiso efectivo es el máximo entre ese suelo, la envolvente superior
+aprendida y cualquier cota inferior OOM conocida. Nunca se multiplica por Runs activos ni limita el
+proceso consumidor. Si se omite se usa predicción automática. `runs_per_gpu` sigue siendo un máximo
+duro por dispositivo y `max_parallel` un máximo global. Un candidato que no cabe ahora queda
+`RESOURCE_BLOCKED`, no fallido ni pruned, y se reconsidera cuando cambia la memoria. Un candidato
+menos prioritario puede hacer backfill seguro si termina antes de la ventana esperada del candidato
+pesado. El best fit y la frontera científica acotada evitan reintentos aleatorios y starvation. Si
+la primera frontera no puede ejecutarse, el controlador pide una única ampliación acotada a la
+misma política científica y lanza su miembro factible más valioso; nunca genera candidatos al azar
+hasta que alguno quepa.
+
+LambdaForge sondea solo las GPU concedidas, reacciona al uso externo, escalona lanzamientos y
+actualiza las envolventes con trayectorias acotadas durante toda la Run, incluso cuando todos los
+slots están ocupados y la cola temporal está vacía. Persiste picos físicos, diagnósticos del
+allocator, duración/tiempo al pico, terminaciones censuradas y cotas inferiores OOM. La admisión
+usa el mínimo entre la VRAM física libre y el headroom futuro predicho, de modo que una nueva
+presión externa no pueda quedar oculta por una atribución estimada entre Runs. Si un candidato
+agota memoria con headroom efectivo $H$, queda lógicamente prohibido reintentarlo con headroom
+$\le H$; espera un cambio material. Una OOM aporta evidencia de recursos, nunca un objective malo.
+La interferencia medida entre co-runners también puede impedir añadir otro proceso aunque quepa en
+VRAM: se maximiza trabajo científico útil por tiempo, no memoria ocupada.
+
+Cada evento terminal replanifica la frontera científica contra el estado físico actual. Cada Run empaquetado posee un proceso
 spawn nuevo que termina al acabar el Run; no se reutiliza un worker CUDA ocioso cuyo contexto
 podría retener VRAM y bloquear para siempre la cola.
 Una GPU llena no falla todo el estudio; si otra admite dos de cuatro slots, ejecuta
@@ -479,13 +512,10 @@ dos. Solo se rechaza como imposible un umbral mayor que la memoria total de toda
 En CPU puede limitarse la concurrencia con `max_parallel`. El observador de memoria usa un proceso
 hijo efímero, así que no deja un contexto CUDA ocioso en cada dispositivo ni consume una plaza
 científica de `runs_per_gpu`.
-Si aun así un hijo sufre CUDA OOM, solo ese Run pasa a `retrying`: se conserva el Attempt fallido,
-el controlador reduce solo el límite efectivo del dispositivo que sufrió la OOM por debajo de la
-concurrencia observada y encola un Attempt compatible con checkpoints. Los Runs sanos y las demás
-GPU continúan con sus propios límites. Tras completar una rotación estable en el límite reducido,
-ese dispositivo prueba cautelosamente un slot adicional, siempre sujeto a la VRAM libre viva. La recuperación está
-acotada por `failure_retries`; un OOM repetido incluso con packing más seguro queda como evidencia
-terminal honesta en vez de crear un bucle infinito.
+Si aun así un hijo sufre CUDA OOM, solo ese Run pasa a `retrying`: se conservan el Attempt y la
+evidencia censurada. Los Runs sanos y las demás GPU continúan. La recuperación está acotada por
+`failure_retries`; una OOM repetida tras una mejora real del placement queda como evidencia terminal
+honesta en vez de crear un bucle infinito.
 `self.metrics.log("val_auprc", valor, step=epoch)` permite pruning basado en probabilidad. Una
 tendencia local proyecta cada curva más allá del step común y solo solicita parada cuando la
 competitividad práctica cae bajo el umbral, protegiendo mejor arranques lentos que eliminar una
@@ -893,7 +923,10 @@ logs; la ausencia se muestra como evidencia no disponible, nunca cerrando la con
 Study** está disponible en esa vista degradada desde que existe el Work semántico: detiene todos
 sus Attempts activos y Runs descendientes aunque el worker aún no haya publicado el primer
 snapshot. Los fallos de proveedor durante el sondeo quedan como estado obsoleto/error inline y
-nunca generan notificaciones emergentes repetitivas.
+nunca generan notificaciones emergentes repetitivas. **Delete Study History…** previsualiza y
+elimina después el estado terminal exacto del Study/Attempt mediante su `work_id`; un Study activo
+debe cancelarse primero, y no toca datasets publicados, entornos compartidos ni ejecuciones
+homónimas ajenas.
 
 Summary de Dataset carga conteos exactos de splits y del target principal desde el índice lógico,
 sin recorrer árboles pesados de assets. Members carga automáticamente una página acotada. Stats

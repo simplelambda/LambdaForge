@@ -215,6 +215,7 @@ class StudyWorkspace(ResearchWorkspace):
         self._analysis_loading = False
         self._analysis_loaded_at = 0.0
         self._cancel_running = False
+        self._delete_running = False
         self._last_refresh_error: str | None = None
         super().__init__(f"Studies / {work.get('name', 'Study')}")
 
@@ -226,6 +227,7 @@ class StudyWorkspace(ResearchWorkspace):
         yield Static(id="study-header", classes="workspace-header")
         with Horizontal(id="study-control-bar"):
             yield Button("Cancel Study", id="study-cancel", variant="warning")
+            yield Button("Delete Study History…", id="study-delete", variant="error")
             yield Static("", id="study-action-status", classes="freshness-line")
         with Vertical(id="study-loading", classes="workspace-loading"):
             yield LoadingIndicator()
@@ -377,6 +379,7 @@ class StudyWorkspace(ResearchWorkspace):
             "timeout",
         }
         self.query_one("#study-cancel", Button).disabled = terminal or not bool(self._selector)
+        self.query_one("#study-delete", Button).disabled = not bool(self._selector)
         self.query_one("#study-loading").display = not bool(self.study)
         self.query_one("#study-tabs").display = bool(self.study)
         self.query_one("#hpo-parameter-table").display = False
@@ -611,9 +614,7 @@ class StudyWorkspace(ResearchWorkspace):
         stop_summary = self._controller_stop_summary(controller)
         controller_status = stop_summary or f"Last: {latest.get('action', 'No decision yet')}"
         self.query_one("#hpo-strategy-card", Static).update(
-            "[b]STRATEGY[/b]\n"
-            f"{self.study.get('strategy', 'adaptive')}\n"
-            f"{controller_status}"
+            f"[b]STRATEGY[/b]\n{self.study.get('strategy', 'adaptive')}\n{controller_status}"
         )
         self.query_one("#hpo-objective-card", Static).update(
             "[b]OBJECTIVE[/b]\n"
@@ -657,11 +658,7 @@ class StudyWorkspace(ResearchWorkspace):
         candidates = [last] if isinstance(last, Mapping) else []
         candidates.extend(reversed(recent))
         terminal = next(
-            (
-                value
-                for value in candidates
-                if value.get("action") in {"FINISH", "STOP_PROPOSING"}
-            ),
+            (value for value in candidates if value.get("action") in {"FINISH", "STOP_PROPOSING"}),
             None,
         )
         if terminal is None:
@@ -674,7 +671,9 @@ class StudyWorkspace(ResearchWorkspace):
         recent = (
             self._persisted_hpo_actions
             if self._persisted_hpo_actions is not None
-            else controller.get("recent", ()) if isinstance(controller, Mapping) else ()
+            else controller.get("recent", ())
+            if isinstance(controller, Mapping)
+            else ()
         )
         self._hpo_actions = [value for value in recent if isinstance(value, Mapping)]
         table = self.query_one("#hpo-action-table", DataTable)
@@ -682,7 +681,9 @@ class StudyWorkspace(ResearchWorkspace):
         table.add_columns("Action", "Trial", "Reason")
         for index, action in enumerate(self._hpo_actions):
             table.add_row(
-                str(action.get("action", action.get("decision", "unavailable"))).replace("_", " ").title(),
+                str(action.get("action", action.get("decision", "unavailable")))
+                .replace("_", " ")
+                .title(),
                 str(action.get("trial", action.get("candidate", "—"))),
                 str(action.get("reason", action.get("why", "No reason persisted."))),
                 key=str(index),
@@ -766,7 +767,9 @@ class StudyWorkspace(ResearchWorkspace):
                         if isinstance(live_detail.get("practical_region"), Mapping)
                         else {}
                     ).get("classification", "unresolved")
-                ).replace("-", " ").title(),
+                )
+                .replace("-", " ")
+                .title(),
                 key=name,
             )
         loading = self.query_one("#hpo-analysis-loading")
@@ -810,14 +813,19 @@ class StudyWorkspace(ResearchWorkspace):
         response = response if isinstance(response, Mapping) else {}
         region = response.get("best_supported_region")
         if isinstance(region, Mapping):
-            lower, upper = region.get("low", region.get("lower")), region.get("high", region.get("upper"))
+            lower, upper = (
+                region.get("low", region.get("lower")),
+                region.get("high", region.get("upper")),
+            )
             if lower is not None or upper is not None:
                 return f"{format_value(lower)} … {format_value(upper)}"
         point = response.get("best_supported_point")
         if isinstance(point, Mapping):
             return format_value(point.get("x", point.get("category")))
         points = [value for value in response.get("points", ()) if isinstance(value, Mapping)]
-        comparable = [value for value in points if isinstance(value.get("predicted_objective"), int | float)]
+        comparable = [
+            value for value in points if isinstance(value.get("predicted_objective"), int | float)
+        ]
         if comparable:
             chosen = (max if objective.get("mode", "max") == "max" else min)(
                 comparable, key=lambda value: float(value["predicted_objective"])
@@ -845,8 +853,94 @@ class StudyWorkspace(ResearchWorkspace):
     def _resource_text(self) -> str:
         admission = self.study.get("admission", {})
         current = admission.get("current", {}) if isinstance(admission, Mapping) else {}
+        if current.get("admission_version") == 2:
+            devices = [value for value in current.get("devices", ()) if isinstance(value, Mapping)]
+            admitted = [
+                value for value in current.get("admitted", ()) if isinstance(value, Mapping)
+            ]
+            blocked = [
+                value for value in current.get("resource_blocked", ()) if isinstance(value, Mapping)
+            ]
+            lines = [
+                "[b]RESOURCE-AWARE ADMISSION[/b]",
+                f"State             {current.get('summary', 'unavailable')}",
+                f"Waiting           {current.get('pending_runs', 0)} Run(s)",
+                f"Global hard cap   {current.get('max_parallel', 'automatic')}",
+                f"Per-GPU hard cap  {current.get('runs_per_gpu', 1)}",
+                f"gpu_memory        {self._resource_bytes(current.get('user_minimum_bytes'))} "
+                "declared safety floor",
+                "",
+                "[b]GPU COMMITMENT LEDGER[/b]",
+            ]
+            for device in devices:
+                active_runs = [
+                    value for value in device.get("active", ()) if isinstance(value, Mapping)
+                ]
+                lines.extend(
+                    (
+                        f"GPU {device.get('gpu', '?')} · {device.get('hardware', 'unknown')}",
+                        "  physical free     "
+                        f"{self._resource_bytes(device.get('physical_free_bytes'))}",
+                        f"  external/base     {self._resource_bytes(device.get('external_bytes'))}",
+                        "  future committed  "
+                        f"{self._resource_bytes(device.get('future_committed_bytes'))}",
+                        "  predicted headroom "
+                        f"{self._resource_bytes(device.get('predicted_headroom_bytes'))}",
+                        "  safe admission     "
+                        f"{self._resource_bytes(device.get('admission_headroom_bytes'))}",
+                        f"  active Runs       {device.get('active_runs', 0)} / "
+                        f"{device.get('runs_per_gpu', '?')}",
+                        "",
+                    )
+                )
+                for active in active_runs[:8]:
+                    identity = (
+                        f"Trial {active.get('trial')} · seed {active.get('seed')}"
+                        if active.get("trial") is not None
+                        else str(active.get("candidate", "Run"))[:24]
+                    )
+                    lines.append(
+                        f"    {identity} · current "
+                        f"{self._resource_bytes(active.get('current_bytes'))} · future "
+                        f"{self._resource_bytes(active.get('future_commitment_bytes'))} · "
+                        f"{active.get('resource_state', 'unknown')}"
+                    )
+                if active_runs:
+                    lines.append("")
+            if admitted:
+                lines.append("[b]NEXT SAFE PLACEMENT[/b]")
+                for value in admitted[:6]:
+                    prediction = value.get("prediction", {})
+                    prediction = prediction if isinstance(prediction, Mapping) else {}
+                    lines.append(
+                        f"Trial {value.get('trial', '?')} → GPU {value.get('target_gpu', '?')} · "
+                        f"peak {self._resource_bytes(prediction.get('predicted_peak_bytes'))} · "
+                        f"commit {self._resource_bytes(prediction.get('commitment_bytes'))} · "
+                        f"P(fit) {format_value(value.get('fit_probability'))} · "
+                        f"{value.get('reason', 'fits')}"
+                    )
+            if blocked:
+                lines.extend(("", "[b]RESOURCE-BLOCKED FRONTIER[/b]"))
+                for value in blocked[:8]:
+                    prediction = value.get("prediction", {})
+                    prediction = prediction if isinstance(prediction, Mapping) else {}
+                    lines.append(
+                        f"Trial {value.get('trial', '?')} · {value.get('state')} · "
+                        f"commit {self._resource_bytes(prediction.get('commitment_bytes'))} · "
+                        f"lower bound "
+                        f"{self._resource_bytes(prediction.get('known_lower_bound_bytes'))} · "
+                        f"{value.get('reason', 'waiting')}"
+                    )
+            lines.extend(
+                (
+                    "",
+                    "RESOURCE_BLOCKED is an operational wait, not FAILED or PRUNED. "
+                    "Scientific priority is preserved and reconsidered after resource changes.",
+                )
+            )
+            return "\n".join(lines)
         requested = current.get("requested", {}) if isinstance(current, Mapping) else {}
-        devices = current.get("devices", ()) if isinstance(current, Mapping) else ()
+        legacy_devices = current.get("devices", ()) if isinstance(current, Mapping) else ()
         lines = [
             "REQUESTED",
             f"GPUs                  {requested.get('gpus', current.get('gpu_count', 'unavailable'))}",
@@ -859,7 +953,7 @@ class StudyWorkspace(ResearchWorkspace):
             f"limiting resource     {current.get('limiting_resource', 'unavailable')}",
             f"reason                {current.get('reason', 'No admission evidence persisted.')}",
         ]
-        for device in devices:
+        for device in legacy_devices:
             if isinstance(device, Mapping):
                 lines.extend(
                     (
@@ -873,6 +967,17 @@ class StudyWorkspace(ResearchWorkspace):
                     )
                 )
         return "\n".join(lines)
+
+    @staticmethod
+    def _resource_bytes(value: Any) -> str:
+        if not isinstance(value, int | float) or isinstance(value, bool):
+            return "unavailable"
+        amount = float(value)
+        for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+            if amount < 1024 or unit == "TiB":
+                return f"{amount:.1f} {unit}"
+            amount /= 1024
+        return f"{value} B"
 
     def _load_analysis(self, *, force: bool = False) -> None:
         if self._analysis_loading or (
@@ -937,9 +1042,7 @@ class StudyWorkspace(ResearchWorkspace):
         self.analysis = dict(value)
         current_controller = self.study.get("controller", {})
         current_tail = (
-            current_controller.get("recent", ())
-            if isinstance(current_controller, Mapping)
-            else ()
+            current_controller.get("recent", ()) if isinstance(current_controller, Mapping) else ()
         )
         if actions is not None and (actions or not current_tail):
             self._persisted_hpo_actions = [dict(action) for action in actions]
@@ -1071,9 +1174,7 @@ class StudyWorkspace(ResearchWorkspace):
         )
         model = seeds.get("model_based", {})
         model_status = (
-            model.get("status", "not persisted")
-            if isinstance(model, Mapping)
-            else "not persisted"
+            model.get("status", "not persisted") if isinstance(model, Mapping) else "not persisted"
         )
         self.query_one("#analysis-seed-content", Static).update(
             f"{seeds.get('interpretation', 'More repeated seeds are required for empirical stability.')}\n"
@@ -1088,8 +1189,7 @@ class StudyWorkspace(ResearchWorkspace):
     ) -> None:
         candidate_values = (
             [value for value in raw_candidates if isinstance(value, Mapping)]
-            if isinstance(raw_candidates, Sequence)
-            and not isinstance(raw_candidates, str | bytes)
+            if isinstance(raw_candidates, Sequence) and not isinstance(raw_candidates, str | bytes)
             else []
         )
         candidates = {str(value.get("trial")): value for value in candidate_values}
@@ -1385,6 +1485,8 @@ class StudyWorkspace(ResearchWorkspace):
                 "will_preserve": "logs, partial results, checkpoints and published datasets",
             }
             self.app.push_screen(ExactConfirmation("Cancel Study", preview), self._apply_cancel)
+        elif event.button.id == "study-delete":
+            self._preview_delete()
         elif event.button.id in {
             "study-overview-export",
             "study-hpo-export",
@@ -1467,9 +1569,83 @@ class StudyWorkspace(ResearchWorkspace):
         )
         self._render_workspace()
 
+    def _preview_delete(self) -> None:
+        """Resolve the exact owned state before asking for destructive confirmation."""
+        if self._delete_running:
+            return
+        self._delete_running = True
+        self.query_one("#study-delete", Button).disabled = True
+        self.query_one("#study-action-status", Static).update(
+            "Preparing exact Study deletion preview…"
+        )
+
+        def preview() -> None:
+            try:
+                result = self.services.delete_work(self._selector, apply=False)
+            except Exception as error:
+                self.app.call_from_thread(self._delete_failed, error)
+            else:
+                self.app.call_from_thread(self._confirm_delete, result)
+
+        Thread(target=preview, daemon=True, name="lambdaforge-tui-study-delete-preview").start()
+
+    def _confirm_delete(self, preview: Mapping[str, Any]) -> None:
+        self._delete_running = False
+        self.query_one("#study-delete", Button).disabled = False
+        self.query_one("#study-action-status", Static).update(
+            "Deletion preview ready · confirmation required"
+        )
+        self.app.push_screen(
+            ExactConfirmation("Delete Study history and owned Attempt state", preview),
+            self._apply_delete,
+        )
+
+    def _apply_delete(self, confirmed: bool | None) -> None:
+        if not confirmed:
+            self.query_one("#study-action-status", Static).update(
+                "Deletion cancelled · no changes made"
+            )
+            return
+        if self._delete_running:
+            return
+        self._delete_running = True
+        self.query_one("#study-delete", Button).disabled = True
+        self.query_one("#study-action-status", Static).update(
+            "Deleting Study history and owned terminal Attempt state…"
+        )
+
+        def apply() -> None:
+            try:
+                result = self.services.delete_work(self._selector, apply=True)
+            except Exception as error:
+                self.app.call_from_thread(self._delete_failed, error)
+            else:
+                self.app.call_from_thread(self._delete_complete, result)
+
+        Thread(target=apply, daemon=True, name="lambdaforge-tui-study-delete-apply").start()
+
+    def _delete_failed(self, error: Exception) -> None:
+        self._delete_running = False
+        self.query_one("#study-delete", Button).disabled = False
+        self.query_one("#study-action-status", Static).update(
+            f"Deletion failed · {type(error).__name__}: {error}"
+        )
+        self.notify(f"{type(error).__name__}: {error}", title="Delete failed", severity="error")
+
+    def _delete_complete(self, _result: Mapping[str, Any]) -> None:
+        self._delete_running = False
+        self.query_one("#study-action-status", Static).update(
+            "Deleted · Study history and owned terminal state removed"
+        )
+        self.notify(f"{self.work.get('name', 'Study')} was deleted from its project history.")
+        self.app.pop_screen()
+
     def _export_analysis(self, suffix: str) -> None:
         if self.analysis is None:
-            self.notify("Analysis is still loading; try again when the tables are visible.", severity="warning")
+            self.notify(
+                "Analysis is still loading; try again when the tables are visible.",
+                severity="warning",
+            )
             return
         analysis = dict(self.analysis)
         path = self._report_path(str(self.work.get("name", "study")), suffix)
@@ -1651,9 +1827,7 @@ class HpoParameterWorkspace(ResearchWorkspace):
         if not direct:
             scientific = self.analysis.get("scientific_understanding", {})
             direct = (
-                scientific.get("parameter_questions", ())
-                if isinstance(scientific, Mapping)
-                else ()
+                scientific.get("parameter_questions", ()) if isinstance(scientific, Mapping) else ()
             )
         live = self.analysis.get("live_hpo", {})
         parameters = direct or (
@@ -1810,7 +1984,9 @@ class HpoActionWorkspace(ResearchWorkspace):
     def compose_workspace(self) -> ComposeResult:
         action = self.action.get("action", self.action.get("decision", "Decision"))
         trial = self.action.get("trial", self.action.get("candidate", "—"))
-        yield Static(f"{str(action).replace('_', ' ').title()} · Trial {trial}", classes="workspace-header")
+        yield Static(
+            f"{str(action).replace('_', ' ').title()} · Trial {trial}", classes="workspace-header"
+        )
         yield VerticalScroll(
             Static(
                 _structured_text(self.action, heading="PERSISTED CONTROLLER EVIDENCE", limit=240),
@@ -2956,6 +3132,7 @@ class ClusterWorkspace(ResearchWorkspace):
 
         def run() -> None:
             try:
+
                 def progress(message: Any) -> None:
                     self.app.call_from_thread(self._operation_progress, str(message))
 
@@ -3139,9 +3316,7 @@ class WorkWorkspace(ResearchWorkspace):
 
     def _apply_delete(self, confirmed: bool | None) -> None:
         if confirmed:
-            self._operation(
-                "Delete", lambda: self.services.delete_work(self._selector, apply=True)
-            )
+            self._operation("Delete", lambda: self.services.delete_work(self._selector, apply=True))
 
     @property
     def _selector(self) -> str:
@@ -3226,7 +3401,9 @@ class DatasetWorkspace(ResearchWorkspace):
                     "Open a tab for bounded evidence; member and integrity reads never mutate the dataset.",
                     classes="workspace-panel",
                 )
-                yield Static("SPLITS AND PRIMARY TARGET", classes="section-title dataset-split-title")
+                yield Static(
+                    "SPLITS AND PRIMARY TARGET", classes="section-title dataset-split-title"
+                )
                 yield DataTable(id="dataset-split-table", zebra_stripes=True)
                 yield Static(
                     "Loading exact per-split target counts from the logical member index…",
@@ -3270,7 +3447,9 @@ class DatasetWorkspace(ResearchWorkspace):
                     yield Static(
                         "Physical statistics walk the selected managed placement and may be slow for large datasets."
                     )
-                    yield Button("Compute physical statistics", id="dataset-show-stats", variant="primary")
+                    yield Button(
+                        "Compute physical statistics", id="dataset-show-stats", variant="primary"
+                    )
                 yield VerticalScroll(Static(id="dataset-stat-content"))
             with TabPane("Integrity", id="dataset-integrity"):
                 with Vertical(classes="dataset-action-state", id="dataset-verify-action"):
@@ -3378,8 +3557,16 @@ class DatasetWorkspace(ResearchWorkspace):
                 self._distribution_text(other),
             )
         if not splits:
-            table.add_row("No split partition", str(value.get("member_count", self.dataset.get("sample_count", 0))), "—", "—", "—")
-        target_text = metric_display_name(primary_target) if primary_target else "no binary target recorded"
+            table.add_row(
+                "No split partition",
+                str(value.get("member_count", self.dataset.get("sample_count", 0))),
+                "—",
+                "—",
+                "—",
+            )
+        target_text = (
+            metric_display_name(primary_target) if primary_target else "no binary target recorded"
+        )
         self.query_one("#dataset-split-note", Static).update(
             f"{'Exact logical-index counts' if exact else 'Cached manifest counts'} · primary target: {target_text}. "
             "Dash means the dataset does not declare that binary class; it is not interpreted as zero."
@@ -3388,10 +3575,7 @@ class DatasetWorkspace(ResearchWorkspace):
     @classmethod
     def _primary_target(cls, cross: Mapping[str, Any]) -> str | None:
         names = {
-            str(name)
-            for split in cross.values()
-            if isinstance(split, Mapping)
-            for name in split
+            str(name) for split in cross.values() if isinstance(split, Mapping) for name in split
         }
         return next((name for name in ("label", "target", "class") if name in names), None) or (
             sorted(names)[0] if names else None
@@ -3406,7 +3590,9 @@ class DatasetWorkspace(ResearchWorkspace):
         )
 
     @staticmethod
-    def _binary_counts(distribution: Mapping[str, Any]) -> tuple[int | None, int | None, dict[str, int]]:
+    def _binary_counts(
+        distribution: Mapping[str, Any],
+    ) -> tuple[int | None, int | None, dict[str, int]]:
         if not distribution:
             return None, None, {}
         positive = 0
@@ -3509,7 +3695,11 @@ class DatasetWorkspace(ResearchWorkspace):
 
     def _dataset_operation_failed(self, target: str, message: str) -> None:
         self.query_one(target, Static).update(message)
-        action = "#dataset-stats-action" if target == "#dataset-stat-content" else "#dataset-verify-action"
+        action = (
+            "#dataset-stats-action"
+            if target == "#dataset-stat-content"
+            else "#dataset-verify-action"
+        )
         self.query_one(action).display = True
 
     def _preview_delete(self) -> None:

@@ -399,7 +399,14 @@ seeds nuevas. `proposal_pool_size` acota el pool Sobol interno (por defecto hast
 `trials`, máximo 4096), mientras `trials` solo limita candidatos realmente ejecutables. Solo los Trials
 propuestos aparecen en la Consola de investigación. El pool se conserva una sola vez y cada
 especificación ligera referencia únicamente su candidato y seed, por lo que la memoria de
-planificación crece linealmente y no obliga a debilitar un YAML válido. Si se omite
+planificación crece linealmente y no obliga a debilitar un YAML válido. El tamaño del pool tampoco
+multiplica el análisis científico en la ruta crítica: el análisis vivo construye una base inmutable
+reutilizable, cachea distancias, usa 32 realizaciones deterministas y soporte
+representativo acotado para contrafactuales/interacciones. La shortlist científica rota en cada
+decisión e incluye siempre la propuesta del sampler de optimización; todo el pool continúa
+elegible sin escanearlo por pregunta/remuestreo ni bloquear la recogida de Runs. La evidencia
+persiste los tamaños de pool, referencia y soporte, mientras el análisis final puede usar un
+presupuesto más denso fuera del scheduler. Si se omite
 `startup_trials`, LambdaForge propone primero `min(trials, max(10, paralelismo_seguro))` candidatos
 distintos que cubren el espacio. Así conserva el mínimo estadístico histórico y llena la primera
 oleada disponible; la presión temporal de VRAM aún puede impedir admitirlos todos de inmediato. Un
@@ -613,46 +620,75 @@ resources:
 ```
 
 El máximo es \(2\times4=8\) entrenos concurrentes. Seis GPUs con `runs_per_gpu: 2` dan 12; dos con
-`runs_per_gpu: 1` dan 2. Un packing mayor que uno exige `gpu_memory`, interpretado como umbral de
-admisión por Run. Antes de lanzar cada hijo individual se comprueba
+`runs_per_gpu: 1` dan 2. `runs_per_gpu` es un máximo duro, no una petición de slots idénticos.
+`gpu_memory` es un suelo de seguridad opcional. Si se declara, cada lanzamiento comprueba
 
 $$
 \texttt{gpu\_memory}
 \leq \text{memoria de dispositivo libre en ese momento}.
 $$
 
-`runs_per_gpu` solo es el máximo por dispositivo. LambdaForge sondea todas las GPU asignadas y
-ocupa únicamente slots que cumplen la condición; los Runs sin hueco permanecen en cola y se vuelve
-a sondear. Los lanzamientos en una misma GPU se separan cinco segundos para que el nuevo proceso
-materialice su asignación antes de observar otra vez. Después se usa directamente la nueva VRAM
-libre observada: `gpu_memory` no se multiplica por la cantidad de Runs activos ni se reserva por
-segunda vez. Las GPU elegibles se ordenan por Runs activos y tiempo desde su último lanzamiento.
+El modelo predice además para cada candidato una distribución de pico, envolvente futura, tiempo
+hasta ella y duración restante a partir de historia compatible exacta o censurada. El compromiso
+efectivo es `max(gpu_memory, envolvente superior aprendida, cota inferior OOM conocida)`; si se
+omite `gpu_memory`, la predicción funciona automáticamente. La VRAM física es la autoridad.
+El headroom admisible es el mínimo entre VRAM física libre y headroom futuro predicho; un proceso
+externo que aparezca tras el lanzamiento bloquea inmediatamente una nueva admisión insegura.
+Allocated/reserved de CUDA son diagnósticos y features, no sustitutos de la ocupación física. Las
+trayectorias acotadas preservan el pico real y las transiciones; no hay un timeout fijo al pico.
+
+Para la GPU \(g\), el planner razona con \(C_g-E_g-\sum_i M_{i,future}\): capacidad utilizable
+menos uso externo y compromisos futuros activos. Sin historia compatible admite una Run por GPU
+hasta reducir incertidumbre. Una cota OOM es dura: si un candidato compatible falló con headroom
+\(H\), jamás se prueba con \(\le H\). `RESOURCE_BLOCKED` es una espera reversible;
+`RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` indica que la cota supera ese dispositivo.
+
+El controlador científico entrega una frontera ordenada y acotada. El planner usa best fit,
+preserva GPU grandes para trabajo pesado y puede ejecutar backfill corto hasta la ventana predicha
+de un candidato prioritario. La interferencia histórica puede frenar packing adicional cuando
+reduce trabajo científico útil por tiempo. La escasez cambia cuándo/dónde se ejecuta, nunca el
+objective científico. Si toda esa frontera acotada está bloqueada, se pide una única ampliación
+acotada a la misma política científica. Esta es la ruta de probe restringido por fit: continúa
+guiada por optimización/información y no puede recorrer configuraciones aleatorias en bucle.
+
+LambdaForge sondea las GPU concedidas durante toda Run activa, aunque no haya una acción en cola, y
+ocupa solo capacidad segura; el resto espera. Los lanzamientos se escalonan para observar la
+asignación anterior. `gpu_memory` no se multiplica por
+Runs activos ni crea otra reserva oculta. Las GPU elegibles se ordenan por Runs activos y tiempo desde su último lanzamiento.
 Así, cuando solo queda un slot global, el índice cero no gana siempre ni deja sin trabajo otro
 dispositivo concedido. Mientras queden presupuestos de candidatos/Runs/tiempo, cada evento terminal
 replantea inmediatamente y aporta una acción de reemplazo; la confianza baja del análisis posterior
 no es una condición implícita de parada. Cada Run admitido tiene un proceso spawn nuevo con un único worker, que se
 cierra al recibir resultado o error y libera el contexto CUDA completo. Un pool ocioso persistente
-retendría VRAM y podría bloquear la cola. Una GPU llena o pequeña se omite mientras las demás continúan. Solo un umbral
-mayor que la VRAM total de todas las GPU asignadas es imposible y falla como configuración. Las
+retendría VRAM y podría bloquear la cola. Una GPU llena o pequeña se omite mientras las demás
+continúan. Un suelo declarado, o una cota inferior OOM dura persistida, superior a todo dispositivo
+compatible asignado se marca explícitamente inviable en vez de esperar para siempre. Las
 consultas de memoria se ejecutan en un hijo efímero que termina tras devolver JSON, por lo que el
 controlador HPO no aparece como un proceso CUDA ocioso por GPU ni consume un slot de
 `runs_per_gpu`. Las esperas/admisiones se escriben inmediatamente en el log del Work.
 
-Es admisión preventiva, no una promesa frente a procesos externos que reserven después ni un límite
-duro dentro del código consumidor: debe declararse un pico conservador. `max_parallel` reduce el
-máximo GPU global y limita estudios solo CPU.
+Es admisión preventiva, no un límite duro dentro del código consumidor. Un `gpu_memory` explícito
+sirve si se conoce un mínimo no negociable; el modo automático es apropiado cuando el search cambia
+mucho la demanda. `max_parallel` conserva el máximo global duro y limita estudios solo CPU.
 
 El aislamiento sigue el límite de Run. Tanto en CPU como GPU cada Run adaptativo usa un proceso
 nuevo de un worker: matar uno no rompe un pool compartido ni cancela candidatos ajenos. Un worker
 perdido antes de devolver resultado y una OOM/asignación CUDA se reintentan como Attempt nuevo hasta
 `failure_retries` (1 por defecto, rango 0–3), conservando checkpoints compatibles bajo el mismo
-Run. Una OOM CUDA reduce solo el límite vivo del dispositivo afectado por debajo de la concurrencia
-observada al fallar, evitando que una GPU limitada frene a sus hermanas sanas. Cuando esa GPU
-completa una rotación estable entera en el límite reducido, el controlador prueba exactamente un
-slot adicional, todavía sujeto a la admisión por VRAM libre viva. Nunca se matan hijos sanos. Si el impedimento se repite con packing más
+Run. Una OOM CUDA registra asignación intentada (si aparece), headroom físico, residencia del
+candidato, uso externo y co-runners como cota inferior censurada, y actualiza las predicciones
+pendientes. El reintento no se admite hasta que mejore materialmente el headroom u otra condición
+compatible. Nunca se matan hijos sanos. Si el impedimento se repite con packing más
 seguro queda terminal; las excepciones normales de datos o código no se repiten a ciegas. Los demás
 Runs activos o pendientes continúan. El Work exterior sigue quedando
 fallido si un Run agota recuperación, para no ocultar evidencia científica incompleta.
+
+La evidencia queda bajo `hpo-control/resources/`: observaciones acotadas, evidencia OOM, decisiones
+de admisión y ledger actual. Una firma Work/código/entorno/hardware permite warm-start entre Studies
+compatibles; lo incompatible no se convierte en prior exacto. Resources en la Consola muestra el
+mismo modelo de lectura: memoria física libre, uso externo, compromiso actual/futuro, headroom,
+P(fit), bloqueo y backfill. El análisis final registra muestreo condicionado por recursos para no
+describir como mala una región pesada simplemente infra-muestreada.
 
 ### 7.3 Continuación multi-fidelidad
 
@@ -822,9 +858,9 @@ entreno. Los nombres CUDA son precisos: `gpu_mem_mb` es el pico de tensores vivo
 (`max_memory_allocated`); `gpu_reserved_mb` es el pool actual de caché del allocator PyTorch;
 `gpu_peak_reserved_mb` es su pico en la época. La memoria reservada incluye asignaciones vivas y
 bloques cacheados reutilizables, por lo que puede ser mucho mayor sin ser otra reserva del scheduler.
-El packing adaptativo nunca deduce concurrencia de ese dato: usa `resources.gpu_memory` por Run como
-umbral vivo de admisión y la memoria libre actual del driver, llenando slots seguros sin exigir el
-máximo de antemano. Tras cada Run empaquetado, termina su proceso dedicado y libera el contexto
+El packing adaptativo nunca deduce concurrencia de ese dato: usa memoria física del driver, la
+envolvente aprendida por candidato y el suelo opcional `resources.gpu_memory`, llenando capacidad
+segura sin exigir el máximo de antemano. Tras cada Run empaquetado, termina su proceso dedicado y libera el contexto
 CUDA completo antes de readmitir el slot.
 
 No existe un tipo de ejecución específico para entreno. La validación local marca como estudio de
@@ -1083,6 +1119,10 @@ asignarlo ni sustituirlo. En SLURM se usa el comando configurado, cuya política
 asignación completa y sus steps. La cancelación es idempotente para Jobs directos ya registrados
 como cancelados: repetir `lf cancel WORK` vuelve a verificar ownership y corrige fugas huérfanas de
 versiones anteriores.
+
+El workspace de Study ofrece **Delete Study History…**: obtiene primero un preview del `work_id`
+exacto, confirma una vez y elimina solo su estado terminal. Un Study activo debe cancelarse antes;
+ni datasets publicados, ni entornos compartidos, ni ejecuciones homónimas quedan incluidas.
 
 Cada Job Work publica además un resultado estructurado acotado en la raíz exacta del Job.
 `lf logs WORK` y `lf jobs logs JOB` añaden `Scientific failure` después del stream recortado si los

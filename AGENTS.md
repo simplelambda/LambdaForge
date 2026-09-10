@@ -218,15 +218,29 @@ counterfactual probes when they reduce an important comparison. Persist purpose,
 O/K, automatic weights, cost and alternatives. Do not add phase/confidence weights or thresholds to
 YAML, claim causality, invent a practical margin, expand authored domains, or replace fresh-seed
 confirmation.
+Controller-critical scientific analysis must stay bounded by live inference precision, never by
+raw `proposal_pool_size`: reuse immutable matching geometry and mixed-space distances, score a
+rotating representative shortlist, and always retain the optimizer proposal. Never scan the full
+pool once per parameter/pair/resample or let explanatory analysis delay Future collection, GPU
+cleanup or admission. The full deterministic pool remains authoritative for optimization.
 `objective.constraints.METRIC.min/max` are explicit same-checkpoint guardrails. Across seeds,
 `seed_aggregation` is legacy `mean`, `worst` or `lcb` with optional `confidence`; missing/insufficient
 LCB evidence is infeasible. A utility component may also be constrained. Never
-infer guardrails or hidden multi-objective weights from other metrics. `runs_per_gpu` packs independent spawned Runs inside the fixed outer
-reservation; values >1 require per-Run `resources.gpu_memory`. This is a live free-VRAM threshold
-per new Run, while `runs_per_gpu` is only a maximum: temporarily full GPUs wait and are polled,
-other devices continue, and same-device launches are staggered. Do not multiply the threshold by
-the active-Run count or maintain a second hidden reservation. Reject only when no allocated GPU
-has enough total VRAM. Every admitted GPU Run uses a fresh one-worker spawned process that exits on
+infer guardrails or hidden multi-objective weights from other metrics. `runs_per_gpu` is only a hard
+per-device maximum inside the fixed outer reservation; `max_parallel` remains the global maximum.
+`resources.gpu_memory` is optional and, when present, is a user safety floor per new Run. Effective
+admission uses the maximum of that floor, a candidate-specific conservative future envelope and
+known OOM lower bounds, bounded again by live physical free VRAM. Physical VRAM is authoritative.
+Never multiply the floor by active Runs or
+maintain a second reservation. Cold start admits one unknown Run per GPU; compatible exact/censored
+history then enables denser best-fit packing. `RESOURCE_BLOCKED` is reversible and scientifically
+neutral; `RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` requires a hard lower bound above device capacity.
+Never retry a compatible OOM candidate at the same or lower effective headroom. The resource
+planner consumes a bounded ranked scientific frontier, may safely backfill, protects heavy work
+from starvation using predicted completion windows, and may stop memory-feasible co-location when
+measured aggregate throughput would not improve. If that frontier is entirely blocked, request at
+most one bounded extension from the same scientific policy before intentionally idling; never loop
+through random resource candidates. Every admitted GPU Run uses a fresh one-worker spawned process that exits on
 result/error; never restore a persistent CUDA pool because idle contexts retain VRAM and can
 deadlock queued Runs. GPU memory probing must remain a short-lived child process: the controller
 must not retain one CUDA context per device or consume a scientific slot. Repeated objective observations need
@@ -235,10 +249,9 @@ safe boundary when `self.stop_requested` is true.
 
 Every adaptive CPU/GPU Run owns a fresh one-worker process. A lost/killed worker and CUDA OOM may
 retry as a new checkpoint-compatible Attempt up to `failure_retries` (default 1, max 3); a repeat is
-terminal. A CUDA OOM lowers only that GPU's in-memory packing ceiling below the observed failing
-concurrency before the retry is readmitted; after one full stable turnover it may test one extra
-slot, still behind live-VRAM admission. Prefer least-loaded/longest-idle admissible GPUs so a free
-global slot cannot starve higher indices. Do not kill healthy siblings or retry forever. Never
+terminal. OOM is censored resource evidence, not an objective value; persist its attempted
+allocation/headroom/residency/source and recompute every pending placement before retry. Prefer
+best-fit admissible GPUs while preserving a predicted window for still-relevant heavy work. Do not kill healthy siblings or retry forever. Never
 retry arbitrary consumer exceptions. One exhausted Run makes the enclosing Work
 honestly failed but must not cancel unrelated active/queued Runs. Telemetry records logical GPU
 index and exact inherited token; never infer or broaden physical devices from that display field.
@@ -362,6 +375,8 @@ transient failure. Destructive actions retain exact-target confirmation and prev
 Treat `study: null` as unavailable evidence: open the Study/log workspace and attempt a bounded
 service reload instead of converting it blindly or demoting it to ordinary Work.
 Study cancellation is a semantic Work operation and must remain available before telemetry exists.
+Study deletion is the same preview-first exact semantic Work deletion exposed with visible
+progress; active Studies are refused until cancelled and display names never select the target.
 Recurring refresh/provider failures render inline stale/error state; they must not emit a toast on
 every polling interval.
 `lf top`, `lf clusters setup` and `lf clusters modify` are retired public routes; do not restore a

@@ -458,7 +458,7 @@ class StudyTelemetry:
                             )
                     observed_runs.append(merged)
                     selected = str(merged.get("state", "scheduled"))
-                    completed += selected in {"succeeded", "failed", "pruned", "cancelled"}
+                    completed += selected in {"succeeded", "failed", "pruned"}
                     active += selected in {"running", "retrying"}
                     queued += selected == "scheduled"
                     paused += selected == "paused"
@@ -554,7 +554,11 @@ class StudyTelemetry:
                 "counts": {
                     "candidates": len(index.get("candidates", ())),
                     "scheduled_runs": sum(
-                        len(value.get("runs", ()))
+                        sum(
+                            str(run.get("state", "scheduled")) != "cancelled"
+                            for run in value.get("runs", ())
+                            if isinstance(run, Mapping)
+                        )
                         for value in index.get("candidates", ())
                         if isinstance(value, Mapping)
                     ),

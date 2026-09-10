@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import tomli
@@ -34,6 +34,20 @@ from lambdaforge.data.DatasetRegistry import DatasetRegistry
 from lambdaforge.data.DatasetResolver import DatasetResolver
 from lambdaforge.EnvironmentManifest import EnvironmentManifest
 from lambdaforge.execution.ResourceRequest import ResourceRequest
+from lambdaforge.hpo.AdaptiveResources import (
+    ActiveResourceCommitment,
+    BoundedResourceTrajectory,
+    CandidateResourceAction,
+    GPUPlacementPlanner,
+    GPUResourceState,
+    ResourceDemandModel,
+    ResourceHistoryStore,
+    ResourceProfileObservation,
+    ResourceTrajectorySample,
+    oom_evidence,
+    resource_identity,
+    resource_state,
+)
 from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservation
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
@@ -77,6 +91,7 @@ from lambdaforge.work.study import StudyTelemetry
 
 _GPU_ADMISSION_POLL_SECONDS = 1.0
 _GPU_LAUNCH_STAGGER_SECONDS = 5.0
+_GPU_RESOURCE_SAMPLE_SECONDS = 5.0
 _GPU_WAIT_LOG_SECONDS = 30.0
 _GPU_PROBE_FAILURE_LIMIT = 12
 _PRUNER_AUDIT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -375,8 +390,12 @@ class WorkRunner:
             try:
                 from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
 
+                analysis_source = execution_result.to_dict()
+                analysis_source["resource_conditioning"] = _resource_conditioning_summary(
+                    execution_dir / "hpo-control" / "resources"
+                )
                 StudyAnalysis.persist(
-                    execution_result.to_dict(),
+                    analysis_source,
                     execution_dir / "analysis.json",
                     objective=study_definitions[0].objective,
                     authored_space=StudyAnalysis.authored_space(config.raw),
@@ -1141,6 +1160,7 @@ def _execute_adaptive_group(
     """Interleave new candidates and probability-driven shared-seed evidence."""
     if not specifications:
         return ()
+    study_execution_id = str(specifications[0]["execution_id"])
     definition = specifications[0]["definition"]
     resources = ResourceRequest.from_mapping(definition["resources"])
     objective = definition.get("objective") or {}
@@ -1830,8 +1850,14 @@ def _execute_adaptive_group(
                 selected=proposed,
                 scientific_state=scientific,
                 costs=costs_by_trial,
+                required_candidates=proposal,
+                decision_key=f"{study_execution_id}:{decision_number}",
             )
-            candidates_to_value = list(designed[:1])
+            # Scientific design exposes a bounded ranked frontier.  Placement, not this layer,
+            # decides which member fits now; selecting one candidate here would hide useful
+            # backfill work whenever the nominal winner is resource-blocked.
+            frontier_width = min(8, max(4, capacity), candidate_budget - len(proposed))
+            candidates_to_value = list(designed[:frontier_width])
             if proposal:
                 optimization_candidate = next(
                     (value for value in designed if value.trial == proposal[0]), None
@@ -1841,7 +1867,12 @@ def _execute_adaptive_group(
                 ):
                     candidates_to_value.append(optimization_candidate)
             for design in candidates_to_value:
-                specification = initial_specifications(design.trial)[0]
+                # Keep frontier alternatives private until they are actually selected.  Calling
+                # ``initial_specifications`` here would allocate public Trial IDs and consume the
+                # candidate budget for actions that placement may never dispatch.
+                specification = dict(by_trial[design.trial][0])
+                specification["candidate_pool_index"] = design.trial
+                specification["trial_index"] = design.trial
                 specification["hpo_probe_purpose"] = design.purpose
                 specification["hpo_target_questions"] = list(design.target_questions)
                 evidence = design.to_dict()
@@ -1857,7 +1888,9 @@ def _execute_adaptive_group(
                 )
         elif proposal:
             # No comparable outcome exists yet; preserve deterministic space-filling startup.
-            specification = initial_specifications(proposal[0])[0]
+            specification = dict(by_trial[proposal[0]][0])
+            specification["candidate_pool_index"] = proposal[0]
+            specification["trial_index"] = proposal[0]
             options.append(
                 (
                     1.0,
@@ -1879,19 +1912,63 @@ def _execute_adaptive_group(
         options = [value for value in options if value[0] > 1e-12]
         if not options:
             return "WAIT", [], {"reason": "no-scientifically-useful-action"}
-        score, _tie, action, specification, evidence = max(
-            options, key=lambda value: (value[0], -value[1], -int(value[3]["trial_index"]))
+        ranked_options = sorted(
+            options,
+            key=lambda value: (value[0], -value[1], -int(value[3]["trial_index"])),
+            reverse=True,
         )
-        if action in {"START_NEW", "DESIGNED_PROBE"}:
-            pool_trial = int(evidence["pool_trial"])
-            proposed.append(pool_trial)
-            specifications = initial_specifications(pool_trial)[:capacity]
-            if action == "DESIGNED_PROBE":
-                for value in specifications:
-                    value["hpo_probe_purpose"] = evidence.get("purpose")
-                    value["hpo_target_questions"] = list(evidence.get("target_questions", ()))
-        else:
-            specifications = [specification]
+        score, _tie, action, _specification, evidence = ranked_options[0]
+        specifications: list[dict[str, Any]] = []
+        frontier_records: list[dict[str, Any]] = []
+        seen: set[tuple[int, int | None, str, int]] = set()
+        selected_new_trials: set[int] = set()
+        for (
+            option_score,
+            _option_tie,
+            option_action,
+            option_specification,
+            option_evidence,
+        ) in ranked_options:
+            if len(specifications) >= min(8, max(1, capacity)):
+                break
+            selected = dict(option_specification)
+            if option_action in {"START_NEW", "DESIGNED_PROBE"}:
+                pool_trial = int(option_evidence["pool_trial"])
+                if pool_trial not in proposed:
+                    if len(proposed) + len(selected_new_trials) >= candidate_budget:
+                        continue
+                selected = initial_specifications(pool_trial)[0]
+                if option_action == "DESIGNED_PROBE":
+                    selected["hpo_probe_purpose"] = option_evidence.get("purpose")
+                    selected["hpo_target_questions"] = list(
+                        option_evidence.get("target_questions", ())
+                    )
+            selected_key = scheduling_key(selected)
+            if selected_key in seen or selected_key in scheduled_run_keys:
+                continue
+            seen.add(selected_key)
+            selected["hpo_scheduler_action"] = option_action
+            selected["hpo_scheduler_priority"] = float(option_score)
+            selected["hpo_scientific_value"] = {
+                "score": float(option_score),
+                "optimization_value": option_evidence.get("optimization_value"),
+                "information_value": option_evidence.get("information_value"),
+                "expected_cost_seconds": option_evidence.get("expected_cost_seconds"),
+                "purpose": option_evidence.get("purpose", option_action),
+            }
+            specifications.append(selected)
+            pool_trial = int(selected.get("candidate_pool_index", selected["trial_index"]))
+            if pool_trial not in proposed:
+                selected_new_trials.add(pool_trial)
+            frontier_records.append(
+                {
+                    "action": option_action,
+                    "trial": int(selected["trial_index"]),
+                    "score": option_score,
+                    "purpose": option_evidence.get("purpose"),
+                }
+            )
+        proposed.extend(sorted(selected_new_trials))
         alternatives = [
             {
                 "action": value[2],
@@ -1911,6 +1988,7 @@ def _execute_adaptive_group(
                 **evidence,
                 "score": score,
                 "alternatives": alternatives,
+                "scientific_frontier": frontier_records,
                 "optimization_opportunity": scientific["optimization_opportunity"],
                 "scientific_uncertainty": scientific["scientific_uncertainty"],
                 "optimization_weight": optimization_weight,
@@ -2085,7 +2163,14 @@ def _execute_adaptive_group(
                     deferred_keys.add(key)
             if not within_time():
                 return ()
-            remaining_capacity = allowance() - pending_runs
+            # Start with the scientifically best action for each genuinely free slot.  When that
+            # narrow frontier is resource-blocked, the dispatcher asks once for bounded additional
+            # alternatives below.  This avoids materialising candidates that were never needed.
+            free_slots = parallelism - pending_runs
+            remaining_capacity = min(
+                allowance() - pending_runs,
+                free_slots,
+            )
             if remaining_capacity <= 0:
                 return ()
             # Startup is space-filling evidence, not a barrier. Alternate deferred startup work
@@ -2142,9 +2227,11 @@ def _execute_adaptive_group(
             deferred_queue.extend(retained_deferred)
             action_priority = evidence.get("score")
             for specification in specifications:
-                specification["hpo_scheduler_action"] = action
-                if isinstance(action_priority, int | float) and not isinstance(
-                    action_priority, bool
+                specification.setdefault("hpo_scheduler_action", action)
+                if (
+                    "hpo_scheduler_priority" not in specification
+                    and isinstance(action_priority, int | float)
+                    and not isinstance(action_priority, bool)
                 ):
                     specification["hpo_scheduler_priority"] = float(action_priority)
             for stale in stale_queue:
@@ -2222,6 +2309,41 @@ def _execute_adaptive_group(
             register(specifications)
             return specifications
 
+        def resource_frontier(
+            queued_specifications: Sequence[Mapping[str, Any]],
+            pending_specifications: Sequence[Mapping[str, Any]],
+        ) -> Sequence[dict[str, Any]]:
+            """Ask once for more scientific alternatives when the current frontier cannot fit."""
+            capacity = min(
+                8,
+                allowance() - len(queued_specifications) - len(pending_specifications),
+            )
+            if capacity <= 0 or not within_time():
+                return ()
+            action, specifications, evidence = next_event_action(capacity)
+            specifications = [
+                value for value in specifications if scheduling_key(value) not in scheduled_run_keys
+            ][:capacity]
+            if not specifications:
+                return ()
+            for specification in specifications:
+                specification.setdefault("hpo_scheduler_action", action)
+                specification["hpo_resource_frontier_extension"] = True
+            register(specifications)
+            record_decision(
+                "EXPAND_RESOURCE_FRONTIER",
+                reason=(
+                    "the currently ranked frontier was resource-blocked; requesting bounded "
+                    "additional scientific alternatives"
+                ),
+                underlying_action=action,
+                trials=[int(value["trial_index"]) for value in specifications],
+                scientific_reason=evidence.get("reason"),
+                queued_runs=len(queued_specifications),
+                running_runs=len(pending_specifications),
+            )
+            return specifications
+
         _execute_adaptive_dispatch(
             limited,
             resources=resources,
@@ -2233,6 +2355,7 @@ def _execute_adaptive_group(
             parallelism=parallelism,
             telemetry=telemetry,
             on_result=observed,
+            on_resource_blocked=resource_frontier,
             on_queued_cancel=lambda value: record_decision(
                 "CANCEL_QUEUED_ACTION",
                 reason="candidate-level-performance-prune",
@@ -2385,6 +2508,11 @@ def _execute_adaptive_dispatch(
         Sequence[dict[str, Any]],
     ]
     | None = None,
+    on_resource_blocked: Callable[
+        [Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+        Sequence[dict[str, Any]],
+    ]
+    | None = None,
     on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[WorkResult, ...]:
     if not specifications:
@@ -2450,6 +2578,14 @@ def _execute_adaptive_dispatch(
             return ()
         return tuple(prepare_specification(value) for value in on_result(result, queued, pending))
 
+    def dispatch_resource_frontier(
+        queued: Sequence[Mapping[str, Any]],
+        pending: Sequence[Mapping[str, Any]],
+    ) -> Sequence[dict[str, Any]]:
+        if on_resource_blocked is None:
+            return ()
+        return tuple(prepare_specification(value) for value in on_resource_blocked(queued, pending))
+
     results: list[WorkResult] = []
     executors: list[ProcessPoolExecutor] = []
     try:
@@ -2468,6 +2604,9 @@ def _execute_adaptive_dispatch(
                 results=results,
                 executors=executors,
                 on_result=dispatch_refill if on_result is not None else None,
+                on_resource_blocked=(
+                    dispatch_resource_frontier if on_resource_blocked is not None else None
+                ),
                 on_queued_cancel=on_queued_cancel,
             )
         else:
@@ -2831,17 +2970,20 @@ def _execute_gpu_admitted_runs(
         Sequence[dict[str, Any]],
     ]
     | None = None,
+    on_resource_blocked: Callable[
+        [Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+        Sequence[dict[str, Any]],
+    ]
+    | None = None,
     on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
     """Launch only Runs that currently fit, waiting through temporary VRAM pressure."""
     required = resources.gpu_memory_bytes
-    memory = (
-        _initial_gpu_memory_inventory(resources.gpu_count)
-        if required > 0
-        else tuple((0, 0) for _ in range(resources.gpu_count))
-    )
+    # Dynamic packing always needs a physical baseline, including the automatic mode where no
+    # legacy gpu_memory floor was authored.
+    memory = _initial_gpu_memory_inventory(resources.gpu_count)
     _validate_gpu_memory_capacity(memory, required)
-    usable = tuple(index for index, (_, total) in enumerate(memory) if required <= total)
+    hardware_labels = _gpu_hardware_labels(resources.gpu_count, memory)
     queued = deque(dict(value) for value in prepared)
     pending: dict[Any, tuple[dict[str, Any], int, ProcessPoolExecutor]] = {}
     active = [0] * resources.gpu_count
@@ -2850,13 +2992,32 @@ def _execute_gpu_admitted_runs(
     # unusually constrained GPU must not throttle healthy siblings for the remainder of a Study.
     effective_runs_per_gpu = [policy.runs_per_gpu] * resources.gpu_count
     stable_runs_after_backoff = [0] * resources.gpu_count
+    initial_external = [max(0, total - free) for free, total in memory]
+    raw_execution_dir = prepared[0].get("execution_dir")
+    control_root = (
+        Path(str(raw_execution_dir)) / "hpo-control" if raw_execution_dir is not None else None
+    )
+    resource_root = control_root / "resources" if control_root is not None else None
+    raw_cache_root = os.environ.get("LAMBDAFORGE_CACHE_ROOT")
+    shared_resource_root = (
+        Path(raw_cache_root) / "resource-intelligence" if raw_cache_root else None
+    )
+    resource_store = ResourceHistoryStore(resource_root, shared_resource_root)
+    resource_model = ResourceDemandModel(resource_store.load())
+    active_commitments: dict[Any, ActiveResourceCommitment] = {}
+    resource_trajectories: dict[Any, BoundedResourceTrajectory] = {}
+    resource_metadata: dict[Any, dict[str, Any]] = {}
+    code_fingerprint, environment_fingerprint = _resource_runtime_fingerprints(control_root)
     next_wait_log = 0.0
     consecutive_probe_failures = 0
+    frontier_expanded_without_terminal_event = False
+    next_resource_sample = 0.0
     while queued or pending:
         done: set[Any] = set()
         if pending:
             done, _ = wait(tuple(pending), timeout=0.5, return_when=FIRST_COMPLETED)
         for future in done:
+            frontier_expanded_without_terminal_event = False
             value, slot, pool = pending.pop(future)
             try:
                 result = future.result()
@@ -2872,6 +3033,14 @@ def _execute_gpu_admitted_runs(
                     queued.append(retry)
                 else:
                     failure = _controller_failure_result(value, error)
+                    observation = _resource_observation_for_result(
+                        value,
+                        failure,
+                        metadata=resource_metadata.get(future, {}),
+                        memory_failure=False,
+                    )
+                    resource_store.append(observation)
+                    resource_model = ResourceDemandModel(resource_store.load())
                     results.append(failure)
                     if telemetry is not None:
                         telemetry.run_finished(value, failure)
@@ -2885,6 +3054,15 @@ def _execute_gpu_admitted_runs(
                         queued.extend(replacement)
             else:
                 memory_failure = _is_gpu_memory_failure(result)
+                if isinstance(result, WorkResult):
+                    observation = _resource_observation_for_result(
+                        value,
+                        result,
+                        metadata=resource_metadata.get(future, {}),
+                        memory_failure=memory_failure,
+                    )
+                    resource_store.append(observation)
+                    resource_model = ResourceDemandModel(resource_store.load())
                 retry = _retry_failed_result(
                     value,
                     result,
@@ -2951,6 +3129,9 @@ def _execute_gpu_admitted_runs(
                 pool.shutdown(wait=True, cancel_futures=True)
                 executors.remove(pool)
                 active[slot] -= 1
+                active_commitments.pop(future, None)
+                resource_trajectories.pop(future, None)
+                resource_metadata.pop(future, None)
 
         if policy.early_stopping and pending:
             _request_early_stops(
@@ -2973,86 +3154,188 @@ def _execute_gpu_admitted_runs(
         if telemetry is not None:
             telemetry.refresh()
 
-        if not queued:
-            continue
-
         now = time.monotonic()
-        if required > 0:
-            try:
-                memory = _gpu_memory_inventory(resources.gpu_count)
-            except RuntimeError as error:
-                # Observation is not execution.  A transient NVML/driver/CUDA probe
-                # failure must never tear down healthy Runs that are already using the
-                # allocation.  Fail closed for admission, preserve those children and
-                # retry.  Once no child remains, a bounded failure makes a persistent
-                # loss of the GPU grant visible instead of waiting forever.
-                consecutive_probe_failures += 1
-                if now >= next_wait_log:
-                    print(
-                        "[hpo] GPU admission probe unavailable; no new Run will start "
-                        f"until observation recovers ({consecutive_probe_failures}/"
-                        f"{_GPU_PROBE_FAILURE_LIMIT}): {error}",
-                        flush=True,
-                    )
-                    next_wait_log = now + _GPU_WAIT_LOG_SECONDS
-                if telemetry is not None:
-                    telemetry.admission_state(
-                        {
-                            "status": "probe-unavailable",
-                            "safe_to_launch": False,
-                            "consecutive_failures": consecutive_probe_failures,
-                            "reason": str(error),
-                            "active_runs": len(pending),
-                            "queued_runs": len(queued),
-                        }
-                    )
-                if not pending and consecutive_probe_failures >= _GPU_PROBE_FAILURE_LIMIT:
-                    raise RuntimeError(
-                        "CUDA GPU admission remained unavailable for "
-                        f"{consecutive_probe_failures} consecutive probes while Runs were "
-                        f"waiting. Last cause: {error}"
-                    ) from error
-                time.sleep(_GPU_ADMISSION_POLL_SECONDS)
-                continue
-            else:
-                if consecutive_probe_failures:
-                    print(
-                        "[hpo] GPU admission probe recovered; queued Runs may start again.",
-                        flush=True,
-                    )
-                consecutive_probe_failures = 0
+        if not queued and (not pending or now < next_resource_sample):
+            continue
+        try:
+            memory = _gpu_memory_inventory(resources.gpu_count)
+        except RuntimeError as error:
+            # Observation is not execution.  A transient NVML/driver/CUDA probe failure must
+            # never tear down healthy Runs that are already using the allocation.
+            consecutive_probe_failures += 1
+            next_resource_sample = now + _GPU_RESOURCE_SAMPLE_SECONDS
+            if now >= next_wait_log:
+                print(
+                    "[hpo] GPU admission probe unavailable; no new Run will start "
+                    f"until observation recovers ({consecutive_probe_failures}/"
+                    f"{_GPU_PROBE_FAILURE_LIMIT}): {error}",
+                    flush=True,
+                )
+                next_wait_log = now + _GPU_WAIT_LOG_SECONDS
+            if telemetry is not None:
+                telemetry.admission_state(
+                    {
+                        "status": "probe-unavailable",
+                        "safe_to_launch": False,
+                        "consecutive_failures": consecutive_probe_failures,
+                        "reason": str(error),
+                        "active_runs": len(pending),
+                        "queued_runs": len(queued),
+                    }
+                )
+            if not pending and consecutive_probe_failures >= _GPU_PROBE_FAILURE_LIMIT:
+                raise RuntimeError(
+                    "CUDA GPU admission remained unavailable for "
+                    f"{consecutive_probe_failures} consecutive probes while Runs were waiting. "
+                    f"Last cause: {error}"
+                ) from error
+            time.sleep(_GPU_ADMISSION_POLL_SECONDS)
+            continue
         else:
-            memory = tuple((0, 0) for _ in range(resources.gpu_count))
-        slots = _admissible_gpu_slots(
+            next_resource_sample = now + _GPU_RESOURCE_SAMPLE_SECONDS
+            if consecutive_probe_failures:
+                print(
+                    "[hpo] GPU admission probe recovered; queued Runs may start again.",
+                    flush=True,
+                )
+            consecutive_probe_failures = 0
+
+        _update_active_resource_commitments(
             memory,
-            active=active,
-            last_launch=last_launch,
-            required_bytes=required,
-            runs_per_gpu=effective_runs_per_gpu,
+            pending=pending,
+            commitments=active_commitments,
+            trajectories=resource_trajectories,
+            metadata=resource_metadata,
+            model=resource_model,
+            initial_external=initial_external,
             now=now,
-            launch_stagger_seconds=_GPU_LAUNCH_STAGGER_SECONDS,
-            usable=usable,
+        )
+
+        devices = _resource_device_states(
+            memory,
+            active_commitments=active_commitments,
+            pending=pending,
+            visible_gpus=visible_gpus,
+            run_limits=effective_runs_per_gpu,
+            hardware_labels=hardware_labels,
+        )
+        if not queued:
+            resource_store.persist_ledger(devices)
+            if telemetry is not None:
+                telemetry.admission_state(
+                    _resource_admission_diagnostics(
+                        devices,
+                        admitted=(),
+                        blocked=(),
+                        pending=0,
+                        max_parallel=policy.max_parallel,
+                        configured_runs_per_gpu=policy.runs_per_gpu,
+                        user_minimum_bytes=required,
+                    )
+                )
+            continue
+        actions = _resource_actions(
+            tuple(queued),
+            model=resource_model,
+            devices=devices,
+            user_minimum_bytes=required,
+            code_fingerprint=code_fingerprint,
+            environment_fingerprint=environment_fingerprint,
+        )
+        planner = GPUPlacementPlanner(resource_model)
+        admitted, blocked = planner.place(
+            actions,
+            devices,
+            max_launches=max(0, parallelism - len(pending)),
+        )
+        if (
+            not admitted
+            and queued
+            and on_resource_blocked is not None
+            and not frontier_expanded_without_terminal_event
+        ):
+            alternatives = tuple(
+                on_resource_blocked(
+                    tuple(queued),
+                    tuple(item for item, _slot, _pool in pending.values()),
+                )
+            )
+            known = {
+                (
+                    value.get("candidate_pool_index", value.get("trial_index")),
+                    value.get("seed"),
+                    value.get("hpo_phase", "search"),
+                    int((value.get("hpo_fidelity") or {}).get("target", 0)),
+                )
+                for value in queued
+            }
+            added = 0
+            for alternative in alternatives:
+                key = (
+                    alternative.get("candidate_pool_index", alternative.get("trial_index")),
+                    alternative.get("seed"),
+                    alternative.get("hpo_phase", "search"),
+                    int((alternative.get("hpo_fidelity") or {}).get("target", 0)),
+                )
+                if key in known:
+                    continue
+                alternative["hpo_resource_frontier_extension"] = True
+                queued.append(alternative)
+                known.add(key)
+                added += 1
+            frontier_expanded_without_terminal_event = True
+            if added:
+                print(
+                    f"[hpo] expanded the scientific frontier with {added} additional "
+                    "resource alternatives; placement will choose the highest-value safe action",
+                    flush=True,
+                )
+                continue
+        resource_store.record_decisions((*admitted, *blocked))
+        resource_store.persist_ledger(devices)
+        by_candidate = {action.key: action for action in actions}
+        slots = tuple(
+            int(decision.target_gpu)
+            for decision in admitted
+            if decision.target_gpu is not None
+            and now - last_launch[int(decision.target_gpu)] >= _GPU_LAUNCH_STAGGER_SECONDS
         )
         if telemetry is not None:
             telemetry.admission_state(
-                _gpu_admission_diagnostics(
-                    memory,
-                    active=active,
-                    required_bytes=required,
-                    runs_per_gpu=effective_runs_per_gpu,
-                    configured_runs_per_gpu=policy.runs_per_gpu,
-                    max_parallel=policy.max_parallel,
+                _resource_admission_diagnostics(
+                    devices,
+                    admitted=admitted,
+                    blocked=blocked,
                     pending=len(queued),
-                    visible_gpus=visible_gpus,
-                    usable=usable,
-                    admissible=slots,
+                    max_parallel=policy.max_parallel,
+                    configured_runs_per_gpu=policy.runs_per_gpu,
+                    user_minimum_bytes=required,
                 )
             )
         launched = False
         for slot in slots:
             if not queued or len(pending) >= parallelism:
                 break
-            value = queued.popleft()
+            if now - last_launch[slot] < _GPU_LAUNCH_STAGGER_SECONDS:
+                continue
+            decision = next(
+                (
+                    value
+                    for value in admitted
+                    if value.target_gpu == slot
+                    and any(
+                        action.key == value.candidate_key
+                        for action in actions
+                        if any(action.specification is item for item in queued)
+                    )
+                ),
+                None,
+            )
+            if decision is None:
+                continue
+            action = by_candidate[decision.candidate_key]
+            value = next(item for item in queued if item is action.specification)
+            queued.remove(value)
             value["hpo_dispatched_monotonic"] = time.monotonic()
             value["gpu_slot"] = visible_gpus[slot]
             value["gpu_index"] = slot
@@ -3070,16 +3353,51 @@ def _execute_gpu_admitted_runs(
                 executors.remove(pool)
                 raise
             pending[future] = (value, slot, pool)
+            selected_device = devices[slot]
+            prediction = action.prediction_for(selected_device)
+            identities = value.get("resource_device_identities", {})
+            selected_identity = identities.get(slot) if isinstance(identities, Mapping) else None
+            if isinstance(selected_identity, Sequence) and len(selected_identity) == 2:
+                value["resource_candidate_key"] = str(selected_identity[0])
+                value["resource_compatibility_key"] = str(selected_identity[1])
+            effective_duration = resource_model.adjusted_duration(
+                str(value.get("resource_compatibility_key", "")),
+                prediction.predicted_duration_seconds,
+                len(selected_device.active) + 1,
+            )
+            active_commitments[future] = ActiveResourceCommitment(
+                action.key,
+                prediction.commitment_bytes,
+                remaining_seconds=effective_duration,
+                trial=_optional_int(value.get("trial_index")),
+                seed=_optional_int(value.get("seed")),
+            )
+            resource_metadata[future] = {
+                "candidate_key": value["resource_candidate_key"],
+                "compatibility_key": value["resource_compatibility_key"],
+                "hardware": devices[slot].hardware,
+                "total_bytes": devices[slot].total_bytes,
+                "headroom_bytes": devices[slot].predicted_headroom_bytes,
+                "physical_free_bytes": devices[slot].free_bytes,
+                "external_bytes": devices[slot].external_bytes,
+                "co_runners": len(devices[slot].active),
+                "max_co_runners": len(devices[slot].active),
+                "prediction": prediction.to_dict(),
+                "predicted_effective_duration_seconds": effective_duration,
+                "code_fingerprint": code_fingerprint,
+                "environment_fingerprint": environment_fingerprint,
+                "trajectory": resource_trajectories.setdefault(future, BoundedResourceTrajectory()),
+            }
             active[slot] += 1
             last_launch[slot] = now
             free, _total = memory[slot]
             memory_state = (
-                f"free={_memory_text(free)} threshold={_memory_text(required)} " if required else ""
+                f"free={_memory_text(free)} commitment={_memory_text(prediction.commitment_bytes)} "
             )
             print(
                 f"[hpo] admitted trial={value['trial_index']} seed={value.get('seed')} "
                 f"on GPU {visible_gpus[slot]}: {memory_state}"
-                f"active={active[slot]}/"
+                f"P(fit)={decision.fit_probability:.2f} active={active[slot]}/"
                 f"{effective_runs_per_gpu[slot]}",
                 flush=True,
             )
@@ -3087,20 +3405,65 @@ def _execute_gpu_admitted_runs(
 
         if queued and not launched and now >= next_wait_log:
             states = ", ".join(
-                f"GPU {visible_gpus[index]} "
-                f"{'free=' + _memory_text(memory[index][0]) + ' ' if required else ''}"
-                f"active={active[index]}/{effective_runs_per_gpu[index]}"
-                for index in usable
+                f"GPU {device.token} headroom={_memory_text(device.predicted_headroom_bytes)} "
+                f"active={len(device.active)}/{device.run_cap}"
+                for device in devices
             )
+            leading = blocked[0] if blocked else None
+            cause = f"; leading blocked trial={leading.trial}: {leading.reason}" if leading else ""
             print(
-                f"[hpo] waiting for safe GPU admission: {len(queued)} Run(s) pending; "
-                f"{'need ' + _memory_text(required) + ' free per new Run; ' if required else ''}"
-                f"{states}",
+                f"[hpo] waiting for resource-aware admission: {len(queued)} Run(s) pending; "
+                f"{states}{cause}",
                 flush=True,
             )
             next_wait_log = now + _GPU_WAIT_LOG_SECONDS
+        if (
+            queued
+            and not pending
+            and not launched
+            and actions
+            and all(_resource_action_is_device_infeasible(action, devices) for action in actions)
+        ):
+            details = "; ".join(
+                f"trial={action.specification.get('trial_index')} "
+                f"lower_bound={_memory_text(action.prediction.known_lower_bound_bytes)}"
+                for action in actions[:8]
+            )
+            totals = ", ".join(
+                f"GPU {device.token}={_memory_text(device.total_bytes)}" for device in devices
+            )
+            raise RuntimeError(
+                "RESOURCE_INFEASIBLE_ON_DEVICE_TYPE: every pending scientific action has a "
+                "known resource lower bound above every allocated GPU's physical capacity. "
+                "LambdaForge stopped instead of waiting or retrying forever. "
+                f"Allocated devices: {totals}. Pending evidence: {details}."
+            )
         if queued and not pending and not launched:
             time.sleep(_GPU_ADMISSION_POLL_SECONDS)
+
+    # A terminal controller owns no live commitments.  Persist that fact explicitly so a later
+    # inspection/resume cannot mistake the last pre-completion snapshot for active work.  Durable
+    # observations and OOM lower bounds remain in their append-only history.
+    terminal_devices = _resource_device_states(
+        memory,
+        active_commitments={},
+        pending={},
+        visible_gpus=visible_gpus,
+        run_limits=effective_runs_per_gpu,
+        hardware_labels=hardware_labels,
+    )
+    resource_store.persist_ledger(terminal_devices)
+
+
+def _resource_action_is_device_infeasible(
+    action: CandidateResourceAction,
+    devices: Sequence[GPUResourceState],
+) -> bool:
+    """Return true only for a deterministic device-type impossibility, never pressure."""
+    return bool(devices) and all(
+        action.prediction_for(device).known_lower_bound_bytes > device.total_bytes
+        for device in devices
+    )
 
 
 def _gpu_memory_inventory(gpu_count: int) -> tuple[tuple[int, int], ...]:
@@ -3147,6 +3510,40 @@ def _gpu_memory_inventory(gpu_count: int) -> tuple[tuple[int, int], ...]:
         raise RuntimeError(
             f"CUDA GPU admission could not read current device memory safely.{detail}"
         ) from error
+
+
+def _gpu_hardware_labels(
+    gpu_count: int,
+    memory: Sequence[tuple[int, int]],
+) -> tuple[str, ...]:
+    """Read stable model labels once, retaining capacity-only compatibility as a safe fallback."""
+    fallback = tuple(f"unknown-vram-{total}" for _free, total in memory)
+    script = (
+        "import json, torch; "
+        f"expected={gpu_count}; "
+        "assert torch.cuda.device_count() >= expected; "
+        "print(json.dumps([str(torch.cuda.get_device_properties(i).name) "
+        "for i in range(expected)]))"
+    )
+    try:
+        completed = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        decoded = json.loads(completed.stdout)
+        if not isinstance(decoded, list) or len(decoded) != gpu_count:
+            return fallback
+        return tuple(
+            f"{str(name).strip() or 'unknown'}|vram-{memory[index][1]}"
+            for index, name in enumerate(decoded)
+        )
+    except Exception:
+        # Model names improve transfer precision but are not admission authority.  The already
+        # verified physical capacity remains a conservative compatibility class.
+        return fallback
 
 
 def _initial_gpu_memory_inventory(gpu_count: int) -> tuple[tuple[int, int], ...]:
@@ -3269,6 +3666,583 @@ def _gpu_admission_diagnostics(
         "devices": devices,
         "summary": ("admissible" if ready else "waiting_for_resources" if pending else "idle"),
     }
+
+
+def _resource_runtime_fingerprints(control_root: Path | None) -> tuple[str, str]:
+    """Build portable code/runtime identities once for compatible resource history."""
+    execution: Mapping[str, Any] = {}
+    path = control_root.parent / "execution.json" if control_root is not None else None
+    if path is not None and path.is_file() and not path.is_symlink():
+        try:
+            decoded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(decoded, Mapping):
+                execution = decoded
+        except (OSError, json.JSONDecodeError):
+            pass
+    code = execution.get("code_identity", {})
+    code_fingerprint = _stable_resource_digest(code if isinstance(code, Mapping) else {})
+    try:
+        torch_version = metadata.version("torch")
+    except metadata.PackageNotFoundError:
+        torch_version = None
+    runtime_packages: dict[str, str] = {}
+    for distribution in metadata.distributions():
+        name = str(distribution.metadata["Name"] or "").lower().replace("_", "-")
+        if name in {"torch", "triton"} or name.startswith(("nvidia-", "cuda-")):
+            runtime_packages[name] = str(distribution.version)
+    environment_fingerprint = _stable_resource_digest(
+        {
+            "python": (
+                f"{sys.implementation.name}-"
+                f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+            ),
+            "torch": torch_version,
+            "lambdaforge": VERSION,
+            "accelerator_runtime_packages": runtime_packages,
+        }
+    )
+    return code_fingerprint, environment_fingerprint
+
+
+def _resource_device_states(
+    memory: Sequence[tuple[int, int]],
+    *,
+    active_commitments: Mapping[Any, ActiveResourceCommitment],
+    pending: Mapping[Any, tuple[dict[str, Any], int, ProcessPoolExecutor]],
+    visible_gpus: Sequence[str],
+    run_limits: Sequence[int],
+    hardware_labels: Sequence[str],
+) -> tuple[GPUResourceState, ...]:
+    """Reconcile physical free VRAM with controller-owned future commitments."""
+    values: list[GPUResourceState] = []
+    for index, (free, total) in enumerate(memory):
+        commitments = tuple(
+            active_commitments[future]
+            for future, (_value, slot, _pool) in pending.items()
+            if slot == index and future in active_commitments
+        )
+        # Physical occupancy is authoritative. Current per-Run attribution is bounded by each
+        # learned envelope; every remaining physical byte is external rather than silently
+        # assigned to LambdaForge.
+        physical_used = max(0, total - free)
+        external = max(0, physical_used - sum(value.current_bytes for value in commitments))
+        values.append(
+            GPUResourceState(
+                index=index,
+                token=visible_gpus[index],
+                hardware=(
+                    hardware_labels[index]
+                    if index < len(hardware_labels)
+                    else f"unknown-vram-{total}"
+                ),
+                total_bytes=total,
+                free_bytes=free,
+                external_bytes=max(0, external),
+                active=commitments,
+                run_cap=int(run_limits[index]),
+            )
+        )
+    return tuple(values)
+
+
+def _update_active_resource_commitments(
+    memory: Sequence[tuple[int, int]],
+    *,
+    pending: Mapping[Any, tuple[dict[str, Any], int, ProcessPoolExecutor]],
+    commitments: dict[Any, ActiveResourceCommitment],
+    trajectories: dict[Any, BoundedResourceTrajectory],
+    metadata: Mapping[Any, dict[str, Any]],
+    model: ResourceDemandModel,
+    initial_external: Sequence[int],
+    now: float,
+) -> None:
+    """Incrementally update active future envelopes from bounded physical observations."""
+    for slot, (free, total) in enumerate(memory):
+        futures = [
+            future
+            for future, (_value, selected, _pool) in pending.items()
+            if selected == slot and future in commitments
+        ]
+        if not futures:
+            continue
+        base_external = int(initial_external[slot]) if slot < len(initial_external) else 0
+        physical_owned = max(0, total - free - base_external)
+        commitment_total = sum(commitments[future].commitment_bytes for future in futures)
+        for future in futures:
+            current = (
+                min(
+                    commitments[future].commitment_bytes,
+                    int(
+                        physical_owned
+                        * commitments[future].commitment_bytes
+                        / max(1, commitment_total)
+                    ),
+                )
+                if commitment_total
+                else 0
+            )
+            specification = pending[future][0]
+            details = metadata.get(future, {})
+            prediction = model.predict(
+                candidate_key=str(details.get("candidate_key", "")),
+                compatibility_key=str(details.get("compatibility_key", "")),
+                parameters=dict(specification.get("trial_parameters", {})),
+                hardware=str(details.get("hardware", f"cuda-vram-{total}")),
+                total_bytes=total,
+                user_minimum_bytes=int(
+                    specification.get("definition", {})
+                    .get("resources", {})
+                    .get("gpu_memory_bytes", 0)
+                    or 0
+                ),
+                observed_prefix_peak_bytes=max(
+                    current,
+                    max(
+                        (
+                            sample.physical_bytes
+                            for sample in trajectories.get(
+                                future, BoundedResourceTrajectory()
+                            ).values
+                        ),
+                        default=0,
+                    ),
+                ),
+            )
+            state = resource_state(
+                prediction,
+                observed_peak_bytes=current,
+                phase=None,
+            )
+            remaining = commitments[future].remaining_seconds
+            dispatched = specification.get("hpo_dispatched_monotonic")
+            elapsed = (
+                max(0.0, now - float(dispatched))
+                if isinstance(dispatched, int | float) and not isinstance(dispatched, bool)
+                else 0.0
+            )
+            raw_prediction = details.get("prediction")
+            predicted_duration = details.get("predicted_effective_duration_seconds")
+            if predicted_duration is None and isinstance(raw_prediction, Mapping):
+                predicted_duration = raw_prediction.get("predicted_duration_seconds")
+            if isinstance(predicted_duration, int | float) and not isinstance(
+                predicted_duration, bool
+            ):
+                remaining = max(0.0, float(predicted_duration) - elapsed)
+            commitments[future] = ActiveResourceCommitment(
+                commitments[future].candidate_key,
+                max(current, prediction.commitment_bytes),
+                current_bytes=current,
+                remaining_seconds=remaining,
+                resource_state=state,
+                trial=commitments[future].trial,
+                seed=commitments[future].seed,
+            )
+            details["resource_state"] = state
+            details["physical_free_bytes"] = free
+            details["external_bytes"] = max(0, total - free - physical_owned)
+            details["headroom_bytes"] = current + free
+            details["max_co_runners"] = max(
+                int(details.get("max_co_runners", details.get("co_runners", 0)) or 0),
+                len(futures) - 1,
+            )
+            if state == "RESOURCE_STABLE":
+                details.setdefault("time_to_stable_seconds", elapsed)
+            trajectory = trajectories.setdefault(future, BoundedResourceTrajectory())
+            trajectory.append(
+                ResourceTrajectorySample(
+                    elapsed_seconds=elapsed,
+                    physical_bytes=current,
+                    device_free_bytes=free,
+                    external_bytes=max(0, total - free - physical_owned),
+                    phase=None,
+                )
+            )
+
+
+def _resource_actions(
+    queued: Sequence[dict[str, Any]],
+    *,
+    model: ResourceDemandModel,
+    devices: Sequence[GPUResourceState],
+    user_minimum_bytes: int,
+    code_fingerprint: str,
+    environment_fingerprint: str,
+) -> tuple[CandidateResourceAction, ...]:
+    """Attach one auditable demand prediction to each scientifically ranked action."""
+    if not devices:
+        return ()
+    # The current adaptive runtime allocates one logical device per child Run.  Condition every
+    # prediction and compatibility identity on the actual device class; choosing from one shared
+    # absolute-memory estimate would be unsafe on heterogeneous grants.
+    reference = max(devices, key=lambda value: (value.total_bytes, -value.index))
+    output: list[CandidateResourceAction] = []
+    for position, specification in enumerate(queued):
+        identities = {
+            device.index: resource_identity(
+                specification,
+                code_fingerprint=code_fingerprint,
+                environment_fingerprint=environment_fingerprint,
+                hardware=device.hardware,
+            )
+            for device in devices
+        }
+        candidate, compatibility = identities[reference.index]
+        specification["resource_candidate_key"] = candidate
+        specification["resource_compatibility_key"] = compatibility
+        specification["resource_device_identities"] = identities
+        device_predictions = {
+            device.index: model.predict(
+                candidate_key=identities[device.index][0],
+                compatibility_key=identities[device.index][1],
+                parameters=dict(specification.get("trial_parameters", {})),
+                hardware=device.hardware,
+                total_bytes=device.total_bytes,
+                user_minimum_bytes=user_minimum_bytes,
+            )
+            for device in devices
+        }
+        prediction = device_predictions[reference.index]
+        priority = specification.get("hpo_scheduler_priority")
+        scientific_value = (
+            float(priority)
+            if isinstance(priority, int | float) and not isinstance(priority, bool)
+            else max(1e-9, 1.0 - position / max(1, len(queued)))
+        )
+        unique = (
+            f"{candidate}:trial={specification.get('trial_index')}:"
+            f"seed={specification.get('seed')}:retry={specification.get('controller_retry', 0)}"
+        )
+        output.append(
+            CandidateResourceAction(
+                unique,
+                specification,
+                scientific_value,
+                prediction,
+                device_predictions,
+            )
+        )
+    return tuple(output)
+
+
+def _resource_observation_for_result(
+    specification: Mapping[str, Any],
+    result: WorkResult,
+    *,
+    metadata: Mapping[str, Any],
+    memory_failure: bool,
+) -> ResourceProfileObservation:
+    """Convert one terminal Run into exact or explicitly censored resource evidence."""
+    peaks = _resource_metric_evidence(result.run_dir / "training-metrics.jsonl")
+    allocated = peaks.get("allocated_peak_bytes")
+    reserved = peaks.get("reserved_peak_bytes")
+    raw_trajectory = metadata.get("trajectory")
+    trajectory = (
+        raw_trajectory.values if isinstance(raw_trajectory, BoundedResourceTrajectory) else ()
+    )
+    physical_peak = max((sample.physical_bytes for sample in trajectory), default=0)
+    # Physical device delta is the packing target. Allocator peaks remain separate features: in
+    # particular, reserved bytes are not relabelled as scientific working-set or a request.
+    observed = physical_peak
+    if peaks:
+        terminal_trajectory = BoundedResourceTrajectory(trajectory)
+        terminal_trajectory.append(
+            ResourceTrajectorySample(
+                elapsed_seconds=max(0.0, result.duration_seconds),
+                physical_bytes=physical_peak,
+                cuda_allocated_bytes=(int(allocated) if isinstance(allocated, int) else None),
+                cuda_reserved_bytes=(int(reserved) if isinstance(reserved, int) else None),
+                cuda_max_allocated_bytes=(int(allocated) if isinstance(allocated, int) else None),
+                throughput=(
+                    float(peaks["throughput"])
+                    if isinstance(peaks.get("throughput"), int | float)
+                    else None
+                ),
+                step=_optional_int(peaks.get("peak_step")),
+                phase="oom" if memory_failure else str(peaks.get("peak_phase") or "terminal"),
+            )
+        )
+        trajectory = terminal_trajectory.values
+    candidate = str(
+        metadata.get("candidate_key") or specification.get("resource_candidate_key") or ""
+    )
+    compatibility = str(
+        metadata.get("compatibility_key") or specification.get("resource_compatibility_key") or ""
+    )
+    definition = specification.get("definition", {})
+    definition = definition if isinstance(definition, Mapping) else {}
+    parameters = dict(specification.get("parameters", {}))
+    varied = dict(specification.get("trial_parameters", {}))
+    fixed = {key: value for key, value in parameters.items() if key not in varied}
+    lower_bound = observed
+    lower_source: str | None = "observed-process-peak" if observed else None
+    if memory_failure:
+        failure = result.failure if isinstance(result.failure, Mapping) else {}
+        evidence = oom_evidence(
+            str(failure.get("message", "")),
+            candidate_key=candidate,
+            compatibility_key=compatibility,
+            hardware=str(metadata.get("hardware", "unknown")),
+            total_bytes=int(metadata.get("total_bytes", 0) or 0),
+            headroom_bytes=int(metadata.get("headroom_bytes", 0) or 0),
+            resident_bytes=(
+                observed or (int(allocated) if isinstance(allocated, int) else 0) or None
+            ),
+            physical_free_bytes=_optional_int(metadata.get("physical_free_bytes")),
+            external_bytes=_optional_int(metadata.get("external_bytes")),
+            active_co_runs=int(metadata.get("max_co_runners", metadata.get("co_runners", 0)) or 0),
+            phase=str(peaks.get("peak_phase")) if peaks.get("peak_phase") else None,
+            step=_optional_int(peaks.get("peak_step")),
+        )
+        lower_bound = evidence.lower_bound_bytes
+        lower_source = evidence.lower_bound_source
+        raw_execution = specification.get("execution_dir")
+        if raw_execution is not None:
+            resource_root = Path(str(raw_execution)) / "hpo-control" / "resources"
+            ResourceHistoryStore._append_mapping(  # noqa: SLF001 - same persistence boundary
+                resource_root / "oom-evidence.jsonl", evidence.to_dict()
+            )
+    state: Literal["completed", "oom", "pruned", "failed"] = (
+        "oom"
+        if memory_failure
+        else "completed"
+        if result.ok and not result.pruned
+        else "pruned"
+        if result.pruned
+        else "failed"
+    )
+    # Aggregate physical occupancy is exact only when no sibling shared the device.  With
+    # co-runners the conservative proportional attribution remains useful censored evidence, but
+    # must not masquerade as an exact per-Run target.
+    co_runners = int(metadata.get("max_co_runners", metadata.get("co_runners", 0)) or 0)
+    exact = state == "completed" and observed > 0 and co_runners == 0
+    return ResourceProfileObservation(
+        candidate_key=candidate,
+        compatibility_key=compatibility,
+        work_class=str(definition.get("work_class", result.work_class)),
+        parameters=varied,
+        fixed_arguments=fixed,
+        fidelity=dict(result.fidelity or {}),
+        hardware=str(metadata.get("hardware", "unknown")),
+        total_bytes=int(metadata.get("total_bytes", 0) or 0),
+        state=state,
+        observed_peak_bytes=observed,
+        peak_is_exact=exact,
+        duration_seconds=result.duration_seconds,
+        trial=(
+            int(result.trial["index"])
+            if isinstance(result.trial, Mapping) and isinstance(result.trial.get("index"), int)
+            else None
+        ),
+        seed=result.seed,
+        run_id=result.run_id,
+        started_at_utc=result.started_at_utc,
+        finished_at_utc=result.finished_at_utc,
+        time_to_peak_seconds=_resource_time_to_peak(trajectory, peaks),
+        time_to_stable_seconds=(
+            float(metadata["time_to_stable_seconds"])
+            if isinstance(metadata.get("time_to_stable_seconds"), int | float)
+            else None
+        ),
+        peak_phase=str(peaks.get("peak_phase")) if peaks.get("peak_phase") else None,
+        peak_step=_optional_int(peaks.get("peak_step")),
+        allocated_peak_bytes=allocated if isinstance(allocated, int) else None,
+        reserved_peak_bytes=reserved if isinstance(reserved, int) else None,
+        lower_bound_bytes=lower_bound,
+        lower_bound_source=lower_source,
+        batch_size=parameters.get("batch_size"),
+        precision=parameters.get("precision"),
+        dataset_signature=_stable_resource_digest(
+            {
+                key: value
+                for key, value in fixed.items()
+                if "dataset" in str(key).lower() or "input" in str(key).lower()
+            }
+        ),
+        code_fingerprint=str(metadata.get("code_fingerprint", "")),
+        environment_fingerprint=str(metadata.get("environment_fingerprint", "")),
+        co_runners=co_runners,
+        throughput=(
+            float(peaks["throughput"]) if isinstance(peaks.get("throughput"), int | float) else None
+        ),
+        trajectory=tuple(sample.to_dict() for sample in trajectory),
+    )
+
+
+def _resource_time_to_peak(
+    trajectory: Sequence[ResourceTrajectorySample],
+    metric_evidence: Mapping[str, Any],
+) -> float | None:
+    """Prefer the timestamp of the physical peak, falling back to scalar epoch evidence."""
+    if trajectory:
+        peak = max(trajectory, key=lambda sample: sample.physical_bytes)
+        if peak.physical_bytes > 0:
+            return peak.elapsed_seconds
+    value = metric_evidence.get("time_to_peak_seconds")
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _resource_metric_evidence(path: Path) -> dict[str, Any]:
+    """Stream scalar telemetry once and preserve its true resource extrema."""
+    evidence: dict[str, Any] = {}
+    if not path.is_file() or path.is_symlink():
+        return evidence
+    elapsed_by_step: dict[int, float] = {}
+    peak = 0
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                value = json.loads(line)
+                if not isinstance(value, Mapping):
+                    continue
+                name = str(value.get("name", ""))
+                numeric = value.get("value")
+                if not isinstance(numeric, int | float) or isinstance(numeric, bool):
+                    continue
+                step = value.get("step")
+                if name == "epoch_time_s" and isinstance(step, int):
+                    elapsed_by_step[step] = float(numeric)
+                amount: int | None = None
+                if name == "gpu_mem_mb":
+                    amount = int(float(numeric) * 1024**2)
+                    evidence["allocated_peak_bytes"] = max(
+                        amount, int(evidence.get("allocated_peak_bytes", 0))
+                    )
+                elif name in {"gpu_reserved_mb", "gpu_peak_reserved_mb"}:
+                    amount = int(float(numeric) * 1024**2)
+                    evidence["reserved_peak_bytes"] = max(
+                        amount, int(evidence.get("reserved_peak_bytes", 0))
+                    )
+                elif name in {"items_per_second", "items_per_sec", "throughput"}:
+                    evidence["throughput"] = float(numeric)
+                else:
+                    continue
+                if amount is not None and amount > peak:
+                    peak = amount
+                    evidence["peak_step"] = step if isinstance(step, int) else None
+                    evidence["peak_phase"] = "training"
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return evidence
+    peak_step = evidence.get("peak_step")
+    if isinstance(peak_step, int):
+        evidence["time_to_peak_seconds"] = sum(
+            duration for step, duration in elapsed_by_step.items() if step <= peak_step
+        )
+    return evidence
+
+
+def _resource_admission_diagnostics(
+    devices: Sequence[GPUResourceState],
+    *,
+    admitted: Sequence[Any],
+    blocked: Sequence[Any],
+    pending: int,
+    max_parallel: int | None,
+    configured_runs_per_gpu: int,
+    user_minimum_bytes: int,
+) -> dict[str, Any]:
+    """Expose the exact backend placement read model without frontend inference."""
+    return {
+        "admission_version": 2,
+        "summary": "admissible" if admitted else "waiting_for_resources" if pending else "idle",
+        "pending_runs": pending,
+        "max_parallel": max_parallel,
+        "runs_per_gpu": configured_runs_per_gpu,
+        "gpu_memory_semantics": (
+            "user-safety-floor-and-learned-candidate-specific-future-envelope"
+            if user_minimum_bytes
+            else "automatic-learned-candidate-specific-future-envelope"
+        ),
+        "user_minimum_bytes": user_minimum_bytes,
+        "devices": [
+            {
+                "gpu": value.index,
+                "token": value.token,
+                "hardware": value.hardware,
+                "total_bytes": value.total_bytes,
+                "physical_free_bytes": value.free_bytes,
+                "external_bytes": value.external_bytes,
+                "lf_current_resident_bytes": sum(item.current_bytes for item in value.active),
+                "future_committed_bytes": value.future_committed_bytes,
+                "predicted_headroom_bytes": value.predicted_headroom_bytes,
+                "admission_headroom_bytes": value.admission_headroom_bytes,
+                "active_runs": len(value.active),
+                "runs_per_gpu": value.run_cap,
+                "active": [
+                    {
+                        "candidate": item.candidate_key,
+                        "trial": item.trial,
+                        "seed": item.seed,
+                        "current_bytes": item.current_bytes,
+                        "future_commitment_bytes": item.commitment_bytes,
+                        "remaining_seconds": item.remaining_seconds,
+                        "resource_state": item.resource_state,
+                    }
+                    for item in value.active
+                ],
+            }
+            for value in devices
+        ],
+        "admitted": [value.to_dict() for value in admitted],
+        "resource_blocked": [value.to_dict() for value in blocked],
+    }
+
+
+def _resource_conditioning_summary(resource_root: Path) -> dict[str, Any]:
+    """Summarize the final resource-selection condition without refitting scientific evidence."""
+    path = resource_root / "admission-decisions.jsonl"
+    if not path.is_file() or path.is_symlink():
+        return {
+            "available": False,
+            "reason": "no-resource-admission-history",
+            "interpretation": (
+                "Scientific evidence was not stratified by resource admission because no "
+                "resource-aware placement record was persisted."
+            ),
+        }
+    latest: dict[str, Mapping[str, Any]] = {}
+    try:
+        with path.open(encoding="utf-8") as stream:
+            lines = deque(stream, maxlen=2048)
+        for line in lines:
+            value = json.loads(line)
+            if isinstance(value, Mapping) and value.get("candidate_key"):
+                latest[str(value["candidate_key"])] = value
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        return {
+            "available": False,
+            "reason": f"unreadable-resource-admission-history: {type(error).__name__}",
+        }
+    counts: dict[str, int] = {}
+    by_trial: dict[str, dict[str, int]] = {}
+    backfills = 0
+    for value in latest.values():
+        state = str(value.get("state", "unknown"))
+        counts[state] = counts.get(state, 0) + 1
+        trial = value.get("trial")
+        if isinstance(trial, int):
+            trial_counts = by_trial.setdefault(str(trial), {})
+            trial_counts[state] = trial_counts.get(state, 0) + 1
+        backfills += int(bool(value.get("backfill")))
+    return {
+        "available": True,
+        "latest_action_count": len(latest),
+        "states": counts,
+        "safe_backfill_admissions": backfills,
+        "by_trial": by_trial,
+        "interpretation": (
+            "Observed candidates reflect both scientific ranking and physical feasibility. "
+            "RESOURCE_BLOCKED entries are waiting conditions, not negative scientific evidence."
+        ),
+    }
+
+
+def _optional_int(value: Any) -> int | None:
+    return int(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _stable_resource_digest(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _gpu_run_limit(value: int | Sequence[int], index: int) -> int:
