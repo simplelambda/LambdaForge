@@ -7,11 +7,13 @@ import math
 import os
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.integrations.Lightning import CallbackBase
+from lambdaforge.work.atomic import atomic_write_json
 
 
 class AdaptiveHpoCallback(CallbackBase):
@@ -44,6 +46,7 @@ class AdaptiveHpoCallback(CallbackBase):
         self._last_training_step: int | None = None
         self._written: set[tuple[int, str]] = set()
         self._chart_filter_written = False
+        self._resource_signals: set[str] = set()
 
     @classmethod
     def from_environment(
@@ -78,11 +81,20 @@ class AdaptiveHpoCallback(CallbackBase):
 
     def on_train_epoch_start(self, trainer: Any, *_: Any) -> None:
         self._epoch_started = time.perf_counter()
+        self._resource_signal("training", trainer)
 
     def on_train_batch_start(self, trainer: Any, *_: Any) -> None:
+        self._resource_signal("train-forward", trainer)
         self._stop(trainer)
 
+    def on_after_backward(self, trainer: Any, *_: Any) -> None:
+        self._resource_signal("backward", trainer)
+
+    def on_before_optimizer_step(self, trainer: Any, *_: Any) -> None:
+        self._resource_signal("optimizer-step", trainer)
+
     def on_validation_batch_start(self, trainer: Any, *_: Any) -> None:
+        self._resource_signal("validation", trainer)
         self._stop(trainer)
 
     def on_train_epoch_end(self, trainer: Any, *_: Any) -> None:
@@ -93,6 +105,7 @@ class AdaptiveHpoCallback(CallbackBase):
             scalars["epoch_time_s"] = time.perf_counter() - self._epoch_started
         if bool(getattr(trainer, "is_global_zero", True)):
             self._write_training(scalars, step)
+        self._resource_signal("epoch-complete", trainer)
         self._stop(trainer)
 
     def on_validation_epoch_start(self, trainer: Any, *_: Any) -> None:
@@ -123,6 +136,54 @@ class AdaptiveHpoCallback(CallbackBase):
         step = int(getattr(trainer, "current_epoch", 0)) + 1
         if step != self._last_training_step:
             self._write_training(self._scalars(getattr(trainer, "callback_metrics", {})), step)
+        self._resource_signal("terminal", trainer)
+
+    def on_save_checkpoint(self, trainer: Any, *_: Any) -> None:
+        self._resource_signal("checkpoint", trainer, checkpoint=True)
+
+    def _resource_signal(self, phase: str, trainer: Any, *, checkpoint: bool = False) -> None:
+        """Publish cheap allocator/phase telemetry from the CUDA-owning worker."""
+        configured = os.environ.get("LAMBDAFORGE_RESOURCE_HEARTBEAT_PATH")
+        if not configured or not bool(getattr(trainer, "is_global_zero", True)):
+            return
+        step = int(getattr(trainer, "current_epoch", 0)) + 1
+        once = phase in {"train-forward", "backward", "optimizer-step", "terminal"}
+        signal_key = phase if once else f"{phase}:{step}"
+        if signal_key in self._resource_signals:
+            return
+        self._resource_signals.add(signal_key)
+        payload: dict[str, Any] = {
+            "pid": os.getpid(),
+            "phase": phase,
+            "step": step,
+            "checkpoint_committed": checkpoint,
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        callback_metrics = self._scalars(getattr(trainer, "callback_metrics", {}))
+        for name in ("items_per_second", "items_per_sec", "throughput"):
+            if name in callback_metrics:
+                payload["throughput"] = callback_metrics[name]
+                break
+        try:
+            import torch
+
+            if torch.cuda.is_initialized():
+                payload.update(
+                    {
+                        "cuda_allocated_bytes": int(torch.cuda.memory_allocated()),
+                        "cuda_reserved_bytes": int(torch.cuda.memory_reserved()),
+                        "cuda_max_allocated_bytes": int(torch.cuda.max_memory_allocated()),
+                        "cuda_max_reserved_bytes": int(torch.cuda.max_memory_reserved()),
+                    }
+                )
+        except Exception:
+            # Phase evidence remains useful when allocator telemetry is unavailable.
+            pass
+        try:
+            atomic_write_json(Path(configured), payload)
+        except OSError:
+            # Observability must never replace a scientific outcome.
+            pass
 
     def _stop(self, trainer: Any) -> None:
         if self.stop_path is not None and self.stop_path.is_file():

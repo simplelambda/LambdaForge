@@ -40,9 +40,7 @@ class StudyOverviewDashboard(Vertical):
                 yield Static("No Runs observed yet.", classes="study-state-counts")
 
     def show_study(self, study: Mapping[str, Any]) -> None:
-        candidates = [
-            value for value in study.get("candidates", ()) if isinstance(value, Mapping)
-        ]
+        candidates = [value for value in study.get("candidates", ()) if isinstance(value, Mapping)]
         states = Counter(
             str(run.get("state", "unknown"))
             for candidate in candidates
@@ -119,5 +117,6 @@ class StudyOverviewDashboard(Vertical):
             "  ·  ".join(f"{label.replace('_', ' ').title()} {states[label]}" for label in states)
             or "No Runs observed yet."
         )
+
 
 __all__ = ["StudyOverviewDashboard"]

@@ -33,7 +33,6 @@ from lambdaforge.work.runner import (
     _objective_observation,
     _request_early_stops,
     _retry_failed_result,
-    _safer_gpu_concurrency,
     _validate_gpu_memory_capacity,
 )
 
@@ -851,8 +850,6 @@ def test_gpu_admission_does_not_double_count_active_run_thresholds() -> None:
     )
 
     assert slots == (0,)
-    assert _safer_gpu_concurrency(5, 4) == 3
-    assert _safer_gpu_concurrency(3, 1) == 1
 
 
 def test_cuda_oom_is_requeued_as_a_new_attempt_before_becoming_terminal(

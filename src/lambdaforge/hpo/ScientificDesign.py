@@ -135,9 +135,7 @@ class _ScientificDesignBasis:
         self._counterfactual_cache: dict[
             tuple[str, str], tuple[tuple[str, dict[str, Any], int], ...]
         ] = {}
-        self._factorial_cache: dict[
-            tuple[str, str, str, str], tuple[dict[str, Any], ...]
-        ] = {}
+        self._factorial_cache: dict[tuple[str, str, str, str], tuple[dict[str, Any], ...]] = {}
         self._lock = Lock()
 
     def counterfactual_matches(
@@ -167,9 +165,7 @@ class _ScientificDesignBasis:
             if matched is None:
                 matched = min(
                     support,
-                    key=lambda parameters: _mixed_distance(
-                        reference, parameters, ignore=(name,)
-                    ),
+                    key=lambda parameters: _mixed_distance(reference, parameters, ignore=(name,)),
                 )
             encoded = json.dumps(matched, sort_keys=True, separators=(",", ":"), default=str)
             previous = counts.get(encoded)
@@ -198,9 +194,7 @@ class _ScientificDesignBasis:
         members = tuple(
             parameters
             for _trial, parameters in self.pool
-            if _endpoint_level(
-                parameters.get(left, _INACTIVE), left_levels, numeric=left_numeric
-            )
+            if _endpoint_level(parameters.get(left, _INACTIVE), left_levels, numeric=left_numeric)
             == left_value
             and _endpoint_level(
                 parameters.get(right, _INACTIVE), right_levels, numeric=right_numeric
@@ -212,17 +206,13 @@ class _ScientificDesignBasis:
             return self._factorial_cache.setdefault(cache_key, result)
 
     @staticmethod
-    def _sample(
-        values: Sequence[dict[str, Any]], limit: int
-    ) -> tuple[dict[str, Any], ...]:
+    def _sample(values: Sequence[dict[str, Any]], limit: int) -> tuple[dict[str, Any], ...]:
         """Select deterministic evenly spaced entries without relying on pool size knobs."""
         if len(values) <= limit:
             return tuple(values)
         if limit <= 1:
             return (values[len(values) // 2],)
-        indexes = sorted(
-            {round(index * (len(values) - 1) / (limit - 1)) for index in range(limit)}
-        )
+        indexes = sorted({round(index * (len(values) - 1) / (limit - 1)) for index in range(limit)})
         return tuple(values[index] for index in indexes)
 
 
@@ -745,17 +735,12 @@ class ScientificQuestionAnalyzer:
         practical_equivalent = probabilities.get("PRACTICALLY_EQUIVALENT", 0.0)
         best_distribution = Counter(best_labels)
         response_summary = cls._summarize_responses(response_realizations, levels)
-        response_means = sorted(
-            (float(value["mean"]) for value in response_summary), reverse=True
-        )
-        nonzero_preference = (
-            len(response_means) >= 2
-            and not math.isclose(
-                response_means[0],
-                response_means[1],
-                rel_tol=1e-12,
-                abs_tol=1e-12,
-            )
+        response_means = sorted((float(value["mean"]) for value in response_summary), reverse=True)
+        nonzero_preference = len(response_means) >= 2 and not math.isclose(
+            response_means[0],
+            response_means[1],
+            rel_tol=1e-12,
+            abs_tol=1e-12,
         )
         if dominant == "PRACTICALLY_EQUIVALENT" and best_distribution and nonzero_preference:
             total = sum(best_distribution.values())
@@ -1431,9 +1416,7 @@ class ExperimentalDesignPolicy:
                 cost_ratio, 1e-12
             )
             top_value, top_kind, top_target, match_quality, _target_eig = (
-                targeted[0]
-                if targeted
-                else (0.0, "coverage", "search space", 0.0, 0.0)
+                targeted[0] if targeted else (0.0, "coverage", "search space", 0.0, 0.0)
             )
             targets: tuple[str, ...]
             if w_info * information_value > w_opt * optimization_value and top_value > 0:
@@ -1498,9 +1481,7 @@ class ExperimentalDesignPolicy:
         raw_budget = evidence.get("resamples") if isinstance(evidence, Mapping) else None
         budget = (
             int(raw_budget)
-            if isinstance(raw_budget, int)
-            and not isinstance(raw_budget, bool)
-            and raw_budget > 0
+            if isinstance(raw_budget, int) and not isinstance(raw_budget, bool) and raw_budget > 0
             else max(1, math.ceil(math.sqrt(len(available))))
         )
         required = tuple(
@@ -1611,9 +1592,7 @@ class _MixedKnnModel:
         # leave-one-candidate-out scale. Recomputing it for every resample is both statistically
         # redundant for this approximation and quadratic in accumulated candidate evidence.
         self.validation_error = (
-            float(validation_error)
-            if validation_error is not None
-            else self._validation_error()
+            float(validation_error) if validation_error is not None else self._validation_error()
         )
         self._prediction_cache: dict[str, tuple[float, float]] = {}
 
@@ -1621,9 +1600,7 @@ class _MixedKnnModel:
         key = json.dumps(parameters, sort_keys=True, separators=(",", ":"), default=str)
         return self.predict_keyed(key, parameters)
 
-    def predict_keyed(
-        self, key: str, parameters: Mapping[str, Any]
-    ) -> tuple[float, float]:
+    def predict_keyed(self, key: str, parameters: Mapping[str, Any]) -> tuple[float, float]:
         """Predict using a caller-owned stable parameter key to avoid repeated serialization."""
         cached = self._prediction_cache.get(key)
         if cached is not None:
@@ -1662,10 +1639,7 @@ class _MixedKnnModel:
         distance = statistics.fmean(value[0] for value in selected)
         epistemic = self.validation_error / math.sqrt(max(1, len(self.rows)))
         deviation = math.sqrt(
-            local * local
-            + epistemic**2
-            + seed * seed
-            + (distance * self.natural_scale) ** 2
+            local * local + epistemic**2 + seed * seed + (distance * self.natural_scale) ** 2
         )
         result = (mean, max(deviation, 1e-12))
         self._prediction_cache[key] = result
@@ -1701,9 +1675,7 @@ class _MixedKnnModel:
     def _distances(
         self, parameters: Mapping[str, Any], *, key: str | None = None
     ) -> dict[int, float]:
-        key = key or json.dumps(
-            parameters, sort_keys=True, separators=(",", ":"), default=str
-        )
+        key = key or json.dumps(parameters, sort_keys=True, separators=(",", ":"), default=str)
         distances = self._distance_cache.setdefault(key, {})
         for trial, observed in self.parameters.items():
             if trial not in distances:

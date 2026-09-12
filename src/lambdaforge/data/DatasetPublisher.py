@@ -91,16 +91,47 @@ class DatasetPublisher:
                 raise InvalidDatasetPublicationError(
                     "Staged dataset failed verification: " + "; ".join(verification["errors"])
                 )
-            os.replace(staging, destination)
-            return self.registry.register_artifact(
-                destination / "dataset-artifact.json",
-                cluster=cluster,
-                root=destination,
-                producer=build_provenance,
+            self._require_compatible_registration(
+                artifact.name,
+                artifact.version,
+                artifact.dataset_id,
             )
+            os.replace(staging, destination)
+            try:
+                return self.registry.register_artifact(
+                    destination / "dataset-artifact.json",
+                    cluster=cluster,
+                    root=destination,
+                    producer=build_provenance,
+                )
+            except Exception:
+                # Registration is the last publication step. A concurrent
+                # conflict or index-write failure must not leave untracked bytes.
+                if destination.is_dir() and not destination.is_symlink():
+                    shutil.rmtree(destination)
+                raise
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+
+    def _require_compatible_registration(
+        self,
+        name: str,
+        version: str,
+        dataset_id: str,
+    ) -> None:
+        """Reject a known immutable-version conflict before committing staged bytes."""
+        key = f"{name}@{version}"
+        try:
+            existing = self.registry.get(key)
+        except KeyError:
+            return
+        if existing.dataset_id != dataset_id:
+            raise InvalidDatasetPublicationError(
+                f"Dataset {key} already has a different immutable identity. "
+                f"Existing content: {existing.dataset_id}. New content: {dataset_id}. "
+                "Publish changed bytes under a new dataset version."
+            )
 
     @classmethod
     def _materialize_members(

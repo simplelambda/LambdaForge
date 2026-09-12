@@ -11,6 +11,24 @@ metadata empaquetada.
 
 ### Añadido
 
+- Sustituido el cold start GPU dependiente de Runs terminales por Adaptive Resource Intelligence
+  v2. Memoria PID/NVML, picos del allocator, trayectorias de fase/progreso y checkpoints activos
+  alimentan un modelo de residual futuro compartido entre GPU compatibles. El planner existente
+  distingue admisión segura y exploratoria por valor esperado, avanza 1→2→3 de uno en uno, conserva
+  un carril protegido y persiste transiciones de recursos sin spam. Reservas grandes pueden probar
+  preguntas de recursos distintas y no redundantes en paralelo; el throughput vivo detiene una
+  escalera cuyo rendimiento agregado ya haya empeorado.
+- Añadida evidencia OOM específica del packing y `RESOURCE_RECOVERY` consciente de checkpoints. Una
+  OOM sin atribución ya no inventa una cota intrínseca; no se repiten packings dominados, pero un
+  fallo heavy+heavy no prohíbe globalmente heavy+small. La distancia respeta dominios lineales,
+  logarítmicos, categóricos y condicionales, ampliando incertidumbre fuera del soporte observado.
+  La calibración usa underprediction leave-one-out consciente de parámetros, las cotas censuradas
+  cercanas ensanchan la cola y snapshots activos atómicos sobreviven solo como conocimiento
+  provisional, nunca falsamente vivo o exacto.
+- Expuestos los artefactos gestionados ya finalizados de cada Run de Study mediante
+  `lf show WORK --run CLAVE` y la pestaña **Artifacts** de la seed. El modelo de lectura compartido
+  muestra ruta utilizable preferida, ubicaciones gestionada/publicada, rol, tipo MIME, bytes,
+  SHA-256, retención y metadatos sin copiar ni abrir contenido remoto.
 - Añadida inteligencia adaptativa de recursos por candidato HPO. Trayectorias físicas/allocator
   acotadas durante toda la Run activa, picos exactos y censurados, duración/tiempo a envolvente, cotas OOM y firmas compatibles
   de Work/código/entorno/hardware alimentan un modelo bootstrap mixed-space persistente reutilizable
@@ -29,6 +47,13 @@ metadata empaquetada.
 
 ### Corregido
 
+- Hecha transaccional la publicación de datasets gestionados entre sistema de ficheros y registro:
+  un conflicto conocido de versión inmutable se rechaza antes del commit, un fallo tardío de
+  registro elimina solo el directorio creado por ese intento y un registro remoto conflictivo y
+  obsoleto solo se puede reconciliar tras demostrar que su ruta registrada no existe. Los
+  diagnósticos de réplica usan ahora las opciones reales `--source`/`--destination`, comprueban
+  antes los conflictos de destino y explican por qué se rechaza un relay remoto-remoto no
+  configurado sin modificar ninguno de los dos lados.
 - Eliminado un bloqueo de liveness del controlador de Studies causado por recalcular vecinos
   contrafactuales sobre todo el pool HPO para cada parámetro, pareja y remuestreo. El análisis vivo
   reutiliza geometría/distancias, evalúa un diseño de referencia determinista acotado y rota una

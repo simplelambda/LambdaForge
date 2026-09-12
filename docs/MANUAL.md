@@ -728,6 +728,11 @@ resources:
   time: 24h
 ```
 
+That CPU/RAM/storage share is based on the hard global concurrency ceiling, not the momentary
+number of active GPU Runs. This avoids promising excess host resources to an early Run that cannot
+later be resized. The outer reservation remains non-oversubscribed and `self.resources` stays a
+stable contract throughout dynamic GPU admission.
+
 The maximum is \(2\times4=8\) concurrent trainings. Six GPUs with `runs_per_gpu: 2` gives 12;
 two GPUs with `runs_per_gpu: 1` gives 2. `runs_per_gpu` is a hard ceiling, not a request for fixed
 identical slots. `gpu_memory` is an optional user safety floor. When present, each launch requires
@@ -748,10 +753,14 @@ occupancy. Bounded trajectories preserve their true peak and transitions; no fix
 timeout exists.
 
 For GPU \(g\), placement reasons about \(C_g-E_g-\sum_i M_{i,future}\): usable capacity minus
-external occupancy and active future commitments. Cold start admits one Run per GPU until evidence
-narrows uncertainty. A known OOM lower bound is hard: a compatible candidate that failed with
-effective headroom \(H\) is never tried at headroom \(\le H\). `RESOURCE_BLOCKED` is a reversible
-operational wait; `RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` means the lower bound exceeds that device.
+dynamic external occupancy and active future distributions. Here
+\(M_{i,future}(t)=m_i(t)+R_i(t)\), where the residual \(R_i\) remains non-negative and uncertain.
+Cold start first creates progress, then uses live phase/step trajectories and checkpoints for
+incremental 1→2→3 experiments without waiting for terminal peaks. `SAFE_ADMISSION` uses supported
+future envelopes; `EXPLORATORY_ADMISSION` is chosen only when expected progress plus resource
+information exceeds rollback/interference cost. Equivalent GPUs keep a protected progress lane and
+never duplicate the same unvalidated escalation. `RESOURCE_BLOCKED` is reversible;
+`RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` requires an intrinsic hard lower bound above the device.
 
 The scientific controller supplies a bounded ranked frontier. The resource planner uses best fit,
 preserves larger devices for heavy work and may run a short feasible backfill while a high-value
@@ -784,10 +793,20 @@ This dynamic admission is not a hard memory limiter inside consumer code. An exp
 demand varies across a search. `max_parallel` remains the global hard ceiling and also bounds
 CPU-only studies.
 
+Worker PID/process-tree VRAM is attributed through NVML when available and reconciled against
+physical used memory on every sample. Allocator heartbeats add phase, checkpoint and short-spike
+evidence; aggregate fallback remains explicitly censored. OOM evidence separates intrinsic
+resident-plus-requested bytes from a failed placement signature. Consequently a failed
+`heavy+heavy` packing cannot reduce a global GPU concurrency ceiling or prohibit `heavy+small`.
+An atomic bounded active-evidence snapshot survives controller interruption as stale provisional
+knowledge. It can warm uncertainty after restart, but is never restored as a live process or exact
+peak; terminal evidence supersedes it and normal completion clears it.
+
 Failure isolation follows the Run boundary. CPU and GPU adaptive Runs both use fresh one-worker
 processes, so a killed worker cannot poison a shared pool or cancel unrelated candidates. A worker
 lost before returning a result and CUDA OOM/allocation failures are retried as a new Attempt up to
-`failure_retries` (default 1, allowed 0–3). Compatible checkpoints remain under the same Run and
+`failure_retries` (default 1, allowed 0–3). An exploratory resource OOM instead enters bounded
+`RESOURCE_RECOVERY`; compatible checkpoints remain under the same Run and
 are discovered by the retry. A CUDA OOM records attempted allocation (when reported), physical
 headroom, candidate residency, external occupancy and co-runners as censored lower-bound evidence,
 then updates pending predictions. Its retry cannot be admitted until headroom or another compatible
@@ -1027,7 +1046,12 @@ lf logs WORK --run trial-00017-seed-4 --tail 300
 ```
 
 `work.items[].study` contains the compact catalogue and exact Run keys. `show --run` returns
-structured parameters, latest values, down-sampled curves, bounded log, failure and evidence paths;
+structured parameters, latest values, down-sampled curves, bounded log, failure, evidence paths and
+the finalized managed-artifact inventory. Human output highlights each preferred usable artifact
+path; `--json` preserves its checksum, size, role, MIME type, managed/published locations, retention
+and metadata. The Research Console exposes the same inventory in the selected seed's **Artifacts**
+tab. This is metadata-only inspection: it neither copies nor opens remote files. Artifacts do not
+appear before successful output finalization;
 `--curve-points N` selects 10–500 points. `logs --run` emits only that Run's log. Poll JSON for a
 headless UI; `--follow` is intentionally reserved for outer logs because the Research Console already provides
 safe live per-Run refresh.
@@ -1755,6 +1779,21 @@ For default remote storage, new work uses
 same ownership boundary by adding `projects/<project-id>`. These are operational paths; scientific
 identity and result reuse do not include the project ID. The shared lease root deliberately remains
 outside the project namespace.
+
+This applies to `storage.dataset_root` too: an authored `/persistent/datasets` becomes
+`/persistent/datasets/projects/<project-id>` for new publications. An older DatasetVersion can
+still resolve from an unscoped absolute root when that exact placement was already registered and
+its manifest/content identity verifies. LambdaForge preserves that durable legacy placement; it
+does not infer that every project may use arbitrary bytes below the old root. The hexadecimal
+directory below `NAME/VERSION/` is the content ID prefix, not a project or random run ID. Publishing
+different bytes under the same `NAME@VERSION` is refused; increment the version instead.
+
+`lf datasets reconcile NAME@VERSION --on CLUSTER` previews index-only repairs. A conflicting remote
+record is removable through `--apply` only when its registered directory is proven absent; valid or
+unreachable bytes remain a hard conflict. Publication failures roll back newly committed bytes, so
+an immutable-version rejection cannot leave a new unregistered managed directory. Remote-to-remote
+replication never falls back to relaying arbitrary dataset size through controller disk: use a
+configured site transfer facility, then reconcile the exact verified destination placement.
 
 The user catalog at `~/.config/lambdaforge/clusters.yaml` remains the common source for host,
 authentication and site policies. A project's `lambdaforge.clusters.yaml` is a recursive overlay,

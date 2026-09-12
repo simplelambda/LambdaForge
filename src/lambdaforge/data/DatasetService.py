@@ -209,12 +209,41 @@ class DatasetService:
         record = controller_record or target_record
         assert record is not None
         if target_record is not None and target_record.dataset_id != record.dataset_id:
+            target_placement = self._placement_for(target_record, cluster)
+            if target_placement is not None:
+                try:
+                    target_observation = self._operation(cluster, "inspect", target_placement.root)
+                except Exception as error:
+                    return DatasetPlacementResolution(
+                        record,
+                        cluster,
+                        DatasetPlacementState.UNREACHABLE,
+                        controller_placement=self._placement_for(controller_record, cluster),
+                        target_placement=target_placement,
+                        reason=f"Conflicting target state could not be observed: {error}",
+                    )
+                if not target_observation.get("exists"):
+                    return DatasetPlacementResolution(
+                        record,
+                        cluster,
+                        DatasetPlacementState.CONFLICT,
+                        controller_placement=self._placement_for(controller_record, cluster),
+                        target_placement=target_placement,
+                        physical=target_observation,
+                        reason=(
+                            "The target registry assigns a different immutable identity to "
+                            f"{record.key}, but its registered directory no longer exists. "
+                            "The stale target registration can be removed without deleting "
+                            "dataset bytes."
+                        ),
+                        repair="remove_stale_conflicting_registration",
+                    )
             return DatasetPlacementResolution(
                 record,
                 cluster,
                 DatasetPlacementState.CONFLICT,
                 controller_placement=self._placement_for(controller_record, cluster),
-                target_placement=self._placement_for(target_record, cluster),
+                target_placement=target_placement,
                 reason=(
                     "Controller and target registries assign different immutable identities "
                     f"to {record.key}: {record.dataset_id} != {target_record.dataset_id}."
@@ -673,6 +702,11 @@ class DatasetService:
             action = "REGISTER_EXACT_PLACEMENT"
         elif state is DatasetPlacementState.REGISTERED_BUT_MISSING:
             action = "REMOVE_STALE_REGISTRATION"
+        elif (
+            state is DatasetPlacementState.CONFLICT
+            and resolution.repair == "remove_stale_conflicting_registration"
+        ):
+            action = "REMOVE_STALE_CONFLICTING_REGISTRATION"
         elif state in {DatasetPlacementState.CONFLICT, DatasetPlacementState.UNREACHABLE}:
             action = "REFUSE"
             safe = False
@@ -697,6 +731,14 @@ class DatasetService:
                 self._remove_remote(resolution.record.key, cluster)
             self.registry.discard(resolution.record.key, cluster=cluster)
             applied = True
+        elif apply and action == "REMOVE_STALE_CONFLICTING_REGISTRATION":
+            if cluster == "local":
+                raise UnsafeDatasetOperationError(
+                    "A conflicting local registration cannot be repaired as remote stale state."
+                )
+            self._forget_remote(resolution.record.key, cluster)
+            self.registry.discard(resolution.record.key, cluster=cluster)
+            applied = True
         return {
             "dataset": resolution.record.key,
             "dataset_id": resolution.record.dataset_id,
@@ -705,13 +747,26 @@ class DatasetService:
             "safe": safe,
             "reason": resolution.reason,
             "action": action,
-            "root": resolution.placement.root if resolution.placement is not None else None,
+            "root": (
+                resolution.placement.root
+                if resolution.placement is not None
+                else resolution.target_placement.root
+                if resolution.target_placement is not None
+                else None
+            ),
             "applied": applied,
             "why_safe": (
                 "The controller, target and physical manifest use the same immutable dataset_id."
-                if safe and action not in {"NOOP", "REMOVE_STALE_REGISTRATION"}
+                if safe
+                and action
+                not in {
+                    "NOOP",
+                    "REMOVE_STALE_REGISTRATION",
+                    "REMOVE_STALE_CONFLICTING_REGISTRATION",
+                }
                 else "Only stale index metadata is removed; dataset bytes are not touched."
-                if safe and action == "REMOVE_STALE_REGISTRATION"
+                if safe
+                and action in {"REMOVE_STALE_REGISTRATION", "REMOVE_STALE_CONFLICTING_REGISTRATION"}
                 else None
             ),
         }
@@ -747,9 +802,16 @@ class DatasetService:
         if resolution.state is DatasetPlacementState.UNREACHABLE:
             raise OfflineClusterError(cluster, resolution.reason)
         if resolution.state is DatasetPlacementState.CONFLICT:
+            next_step = (
+                f" Run 'lf datasets reconcile {resolution.record.key} --on {cluster} --apply' "
+                "first."
+                if resolution.repair == "remove_stale_conflicting_registration"
+                else ""
+            )
             raise UnsafeDatasetOperationError(
                 "Dataset materialization refused because target state conflicts: "
                 + resolution.reason
+                + next_step
             )
         if resolution.state is DatasetPlacementState.AVAILABLE:
             return DatasetMaterializationPlan(
@@ -812,6 +874,29 @@ class DatasetService:
             )
         record = resolution.record
         placement = resolution.placement
+        target_resolution = self.resolve_placement(record.key, destination)
+        if target_resolution.state is DatasetPlacementState.UNREACHABLE:
+            raise OfflineClusterError(destination, target_resolution.reason)
+        if target_resolution.state is DatasetPlacementState.CONFLICT:
+            next_step = (
+                f" Run 'lf datasets reconcile {record.key} --on {destination} --apply' first."
+                if target_resolution.repair == "remove_stale_conflicting_registration"
+                else ""
+            )
+            raise UnsafeDatasetOperationError(
+                "Dataset replication refused because target state conflicts: "
+                + target_resolution.reason
+                + next_step
+            )
+        if target_resolution.state is DatasetPlacementState.AVAILABLE:
+            return DatasetMaterializationPlan(
+                record.key,
+                destination,
+                "NOOP",
+                source,
+                estimated_bytes=placement.size_bytes,
+                reason="The destination already has the exact immutable DatasetArtifact.",
+            )
         plan = DatasetMaterializationPlan(
             record.key,
             destination,
@@ -898,9 +983,9 @@ class DatasetService:
                                     "datasets",
                                     "replicate",
                                     record.key,
-                                    "--from",
+                                    "--source",
                                     source.cluster,
-                                    "--to",
+                                    "--destination",
                                     destination,
                                     "--apply",
                                 )
@@ -923,9 +1008,44 @@ class DatasetService:
             / record.dataset_id.removeprefix("sha256:")[:16]
         )
         if source.cluster != "local":
-            raise RuntimeError(
-                "The built-in safe transfer provider currently needs a local source. "
-                "Use a shared filesystem/provider or stage an explicit durable transfer job."
+            raise LambdaForgeError(
+                diagnostic(
+                    ErrorCategory.OPERATION_REFUSED,
+                    f"Cannot relay {record.key!r} directly between two remote clusters.",
+                    "LambdaForge has no configured durable data-transfer provider for this route.",
+                    reason=(
+                        "SSH control transports intentionally stage only small control data. "
+                        "Relaying a potentially multi-terabyte dataset through the controller "
+                        "would consume local disk/bandwidth and is not a safe implicit fallback."
+                    ),
+                    impact=("No bytes or registry entries were changed on either cluster.",),
+                    fixes=(
+                        "Use the site's durable transfer service to copy the exact manifest-backed "
+                        "directory, then run dataset reconciliation on the destination.",
+                        "Alternatively publish newly generated content under a new dataset "
+                        "version.",
+                    ),
+                    commands=(
+                        (
+                            "Inspect the source placement",
+                            f"lf datasets show {shlex.quote(record.key)} --on "
+                            f"{shlex.quote(source.cluster)}",
+                        ),
+                        (
+                            "Reconcile after an external exact transfer",
+                            f"lf datasets reconcile {shlex.quote(record.key)} --on "
+                            f"{shlex.quote(destination)}",
+                        ),
+                    ),
+                    context={
+                        "dataset": record.key,
+                        "source_cluster": source.cluster,
+                        "source_root": source.root,
+                        "target_cluster": destination,
+                        "target_root": target_root,
+                    },
+                    operation="dataset replication preflight",
+                )
             )
         if target.transport == "local":
             destination_path = Path(target_root)

@@ -256,7 +256,11 @@ class CommandLineInterface:
                             tail=arguments.tail,
                             curve_points=arguments.curve_points,
                         )
-                        print(json.dumps(payload, indent=2))
+                        print(
+                            json.dumps(payload, indent=2)
+                            if arguments.json
+                            else CommandLineInterface._render_study_run(payload)
+                        )
                         return 0
                     scientific = jobs.scientific_result(remote_work.primary_job_id)
                     payload = {
@@ -362,6 +366,50 @@ class CommandLineInterface:
             payload = works.cancel(arguments.selector)
         print(json.dumps(payload, indent=2) if arguments.json else json.dumps(payload, indent=2))
         return 0
+
+    @staticmethod
+    def _render_study_run(detail: Mapping[str, Any]) -> str:
+        """Render one Run summary with its durable artifact locations."""
+        lines = [
+            f"LambdaForge Run {detail.get('key', 'unknown')}",
+            f"State: {detail.get('state', 'unknown')}",
+            f"Trial: {detail.get('trial', '-')}  Seed: {detail.get('seed', 'none')}  "
+            f"GPU: {detail.get('gpu_index', '-')}",
+        ]
+        parameters = detail.get("parameters")
+        if isinstance(parameters, Mapping) and parameters:
+            lines.extend(("", "PARAMETERS"))
+            lines.extend(f"  {name}: {value}" for name, value in sorted(parameters.items()))
+        lines.extend(("", "ARTIFACTS"))
+        artifacts = detail.get("artifacts", ())
+        if isinstance(artifacts, Sequence) and not isinstance(artifacts, str | bytes):
+            visible = [value for value in artifacts if isinstance(value, Mapping)]
+        else:
+            visible = []
+        if not visible:
+            lines.append("  No finalized managed artifacts are recorded for this Run.")
+        for artifact in visible:
+            size = artifact.get("size_bytes")
+            size_text = f"{size} bytes" if isinstance(size, int) else "size unavailable"
+            media_type = artifact.get("media_type") or "unspecified media type"
+            lines.extend(
+                (
+                    f"  {artifact.get('name', 'artifact')} "
+                    f"[{artifact.get('role', 'artifact')}; {media_type}; {size_text}]",
+                    f"    Path: {artifact.get('path', 'unavailable')}",
+                )
+            )
+            published = artifact.get("published_path")
+            managed = artifact.get("managed_path")
+            if published and managed and published != managed:
+                lines.append(f"    Managed source: {managed}")
+        paths = detail.get("paths")
+        if isinstance(paths, Mapping):
+            lines.extend(("", "EVIDENCE"))
+            lines.append(f"  Result: {paths.get('result') or 'unavailable'}")
+            lines.append(f"  Log: {paths.get('log') or 'unavailable'}")
+        lines.extend(("", "Use --json for curves, metrics, checksums and complete metadata."))
+        return "\n".join(lines)
 
     @staticmethod
     def _results(arguments: Any) -> int:

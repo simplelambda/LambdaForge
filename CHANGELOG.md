@@ -12,6 +12,24 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Replaced terminal-only GPU cold start with Adaptive Resource Intelligence v2. Active Run PID/NVML
+  memory, allocator peaks, phase/progress trajectories and durable checkpoints now feed a
+  future-residual model across compatible GPUs. The existing planner distinguishes safe and
+  expected-value exploratory admission, advances one unvalidated 1→2→3 step at a time, preserves a
+  protected progress lane and persists concise resource transition events. Larger grants may run
+  distinct non-redundant resource experiments concurrently; live throughput stops a ladder whose
+  aggregate work rate has already regressed.
+- Added packing-specific OOM evidence and checkpoint-aware `RESOURCE_RECOVERY`. Unattributed OOMs
+  no longer fabricate intrinsic candidate bounds; dominated resident-set experiments are not
+  repeated, while a failed heavy+heavy placement does not globally forbid heavy+small packing.
+  Resource-space distance now respects authored linear/log/categorical/conditional dimensions and
+  widens predictions outside empirical support. Calibration uses parameter-aware leave-one-out
+  underprediction, nearby censored bounds widen predictive tails, and atomic active snapshots
+  survive interruption only as provisional—not falsely live or exact—knowledge.
+- Exposed each Study Run's finalized managed artifacts through `lf show WORK --run KEY` and the
+  seed **Artifacts** tab. The shared bounded read model reports the preferred usable path,
+  managed/published locations, role, MIME type, byte size, SHA-256, retention and metadata without
+  copying or opening remote content.
 - Added candidate-specific adaptive resource intelligence for HPO. Bounded physical/allocator
   trajectories spanning the complete active Run, exact and censored peaks, duration/time-to-envelope, OOM lower bounds and
   Work/code/environment/hardware compatibility signatures now feed a persistent mixed-space
@@ -30,6 +48,12 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Made managed dataset publication transactional across the filesystem/registry boundary: a known
+  immutable-version conflict is rejected before commit, a late registration failure removes only
+  the directory created by that attempt, and stale conflicting remote records become explicitly
+  reconcilable only after their registered path is proven absent. Replication diagnostics now use
+  the real `--source`/`--destination` CLI options, preflight destination conflicts and explain why
+  an unconfigured remote-to-remote relay is refused without changing either side.
 - Removed a Study-controller liveness failure caused by recomputing nearest counterfactuals across
   the complete HPO proposal pool for every parameter, pair and evidence resample. Live scientific
   analysis now reuses immutable pool geometry and mixed-space distances, evaluates a deterministic

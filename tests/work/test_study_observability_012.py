@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from lambdaforge.cli.CommandLineInterface import CommandLineInterface
 from lambdaforge.cli.LiveJobMonitor import (
     StudyEpochRenderer,
     StudyInsightRenderer,
@@ -791,6 +792,29 @@ def test_job_service_returns_downsampled_curves_and_only_the_selected_run_log(
             {
                 "result_version": 1,
                 "status": "failed",
+                "artifacts": [
+                    {
+                        "name": "protein-view",
+                        "path": "artifacts/protein-view/1abc.html",
+                        "role": "visualization",
+                        "sha256": "a" * 64,
+                        "size_bytes": 4096,
+                        "media_type": "text/html",
+                        "metadata": {},
+                    },
+                    {
+                        "name": "predictions",
+                        "path": "artifacts/predictions/predictions.npz",
+                        "role": "predictions",
+                        "sha256": "b" * 64,
+                        "size_bytes": 8192,
+                        "media_type": "application/octet-stream",
+                        "metadata": {
+                            "published_to": "/research/wisdom/predictions.npz",
+                            "retention": "published-only",
+                        },
+                    },
+                ],
                 "failure": {
                     "type": "RuntimeError",
                     "message": "training exploded",
@@ -906,8 +930,72 @@ def test_job_service_returns_downsampled_curves_and_only_the_selected_run_log(
     assert detail["failure"]["phase"] == "Training.run"
     assert "Traceback" in detail["failure"]["traceback"]
     assert detail["paths"]["result"].endswith("/result.json")
+    assert detail["artifacts"] == [
+        {
+            "name": "protein-view",
+            "role": "visualization",
+            "media_type": "text/html",
+            "size_bytes": 4096,
+            "sha256": "a" * 64,
+            "path": str(run_dir / "artifacts/protein-view/1abc.html"),
+            "managed_path": str(run_dir / "artifacts/protein-view/1abc.html"),
+            "published_path": None,
+            "retention": "managed-internal",
+            "metadata": {},
+        },
+        {
+            "name": "predictions",
+            "role": "predictions",
+            "media_type": "application/octet-stream",
+            "size_bytes": 8192,
+            "sha256": "b" * 64,
+            "path": "/research/wisdom/predictions.npz",
+            "managed_path": None,
+            "published_path": "/research/wisdom/predictions.npz",
+            "retention": "published-only",
+            "metadata": {
+                "published_to": "/research/wisdom/predictions.npz",
+                "retention": "published-only",
+            },
+        },
+    ]
     with pytest.raises(ValueError, match="Invalid study Run key"):
         service.study_run("job-1", "../../escape")
+
+
+def test_study_artifact_paths_fail_closed_on_persisted_traversal() -> None:
+    with pytest.raises(RuntimeError, match="unsafe managed artifact path"):
+        JobService._study_artifacts(
+            {"artifacts": [{"name": "escape", "path": "../outside.html"}]},
+            Path("/owned/run"),
+        )
+
+
+def test_human_run_summary_exposes_preferred_artifact_path() -> None:
+    rendered = CommandLineInterface._render_study_run(
+        {
+            "key": "trial-00001-seed-4",
+            "state": "succeeded",
+            "trial": 1,
+            "seed": 4,
+            "artifacts": [
+                {
+                    "name": "protein-view",
+                    "role": "visualization",
+                    "media_type": "text/html",
+                    "size_bytes": 4096,
+                    "path": "/remote/run/artifacts/protein-view/1abc.html",
+                    "managed_path": "/remote/run/artifacts/protein-view/1abc.html",
+                }
+            ],
+            "paths": {"result": "/remote/run/result.json", "log": "/remote/run/work.log"},
+        }
+    )
+
+    assert "ARTIFACTS" in rendered
+    assert "protein-view [visualization; text/html; 4096 bytes]" in rendered
+    assert "Path: /remote/run/artifacts/protein-view/1abc.html" in rendered
+    assert "Result: /remote/run/result.json" in rendered
 
 
 def test_failed_study_run_has_an_expandable_persisted_failure_view() -> None:

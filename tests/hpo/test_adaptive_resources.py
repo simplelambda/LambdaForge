@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
 from lambdaforge.hpo.AdaptiveResources import (
     ActiveResourceCommitment,
+    ActiveResourceEvidence,
     BoundedResourceTrajectory,
     CandidateResourceAction,
     GPUPlacementPlanner,
     GPUResourceState,
+    PlacementOOMEvidence,
     ResourceDemandModel,
     ResourceHistoryStore,
     ResourcePrediction,
@@ -168,9 +171,7 @@ def test_cold_start_is_one_run_per_gpu_until_evidence_exists() -> None:
 
 
 def test_one_neighbour_does_not_collapse_between_candidate_uncertainty() -> None:
-    model = ResourceDemandModel(
-        [observation("known", 10 * GIB, parameters={"width": 64})]
-    )
+    model = ResourceDemandModel([observation("known", 10 * GIB, parameters={"width": 64})])
     unseen = model.predict(
         candidate_key="unseen",
         compatibility_key="compatible",
@@ -458,6 +459,41 @@ def test_history_is_persistent_compatible_and_deterministic(tmp_path: Path) -> N
     assert incompatible.support == "cold-start"
 
 
+def test_active_snapshot_survives_restart_only_as_provisional_evidence(tmp_path: Path) -> None:
+    store = ResourceHistoryStore(tmp_path / "study")
+    live = ActiveResourceEvidence(
+        "candidate",
+        "compatible",
+        {"width": 64},
+        "H100-80",
+        80 * GIB,
+        11 * GIB,
+        12 * GIB,
+        (12 * GIB, 16 * GIB, 80 * GIB),
+        "PLATEAU_UNCONFIRMED",
+        30.0,
+        phase="training",
+        step=3,
+        trajectory=(ResourceTrajectorySample(30.0, 12 * GIB, step=3, phase="training"),),
+    )
+    store.persist_active((live,))
+
+    restored = ResourceHistoryStore(tmp_path / "study").load_active()
+    assert restored == (live,)
+    predicted = ResourceDemandModel(active_evidence=restored).predict(
+        candidate_key="candidate",
+        compatibility_key="compatible",
+        parameters={"width": 64},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+    assert predicted.is_provisional is True
+    assert predicted.exact_history_count == 0
+
+    store.persist_active(())
+    assert ResourceHistoryStore(tmp_path / "study").load_active() == ()
+
+
 def test_bounded_trajectory_preserves_the_true_peak_and_transitions() -> None:
     trajectory = BoundedResourceTrajectory()
     for index in range(500):
@@ -472,3 +508,443 @@ def test_bounded_trajectory_preserves_the_true_peak_and_transitions() -> None:
     assert len(trajectory.values) <= 192
     assert max(value.physical_bytes for value in trajectory.values) == 999 * GIB
     assert {value.phase for value in trajectory.values} == {"training", "validation"}
+
+
+def test_live_plateau_enables_one_protected_checkpoint_aware_cold_start_probe() -> None:
+    live = ActiveResourceEvidence(
+        candidate_key="resident-a",
+        compatibility_key="compatible",
+        parameters={"width": 64},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+        current_bytes=12 * GIB,
+        running_peak_bytes=12 * GIB,
+        future_peak_samples=(12 * GIB, 15 * GIB, 80 * GIB),
+        resource_state="PROVISIONALLY_STABLE",
+        elapsed_seconds=120.0,
+        step=6,
+        checkpoint_step=6,
+        checkpoint_elapsed_seconds=115.0,
+        checkpoint_resumable=True,
+    )
+    model = ResourceDemandModel(active_evidence=(live,))
+    queued = model.predict(
+        candidate_key="queued-c",
+        compatibility_key="compatible",
+        parameters={"width": 64},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+        user_minimum_bytes=20 * GIB,
+    )
+    action_c = CandidateResourceAction(
+        "c",
+        {"trial_index": 3, "resource_compatibility_key": "compatible"},
+        1.0,
+        queued,
+    )
+    resident_a = ActiveResourceCommitment(
+        "resident-a",
+        80 * GIB,
+        current_bytes=12 * GIB,
+        running_peak_bytes=12 * GIB,
+        future_peak_samples=(12 * GIB, 15 * GIB, 80 * GIB),
+        remaining_seconds=500.0,
+        resource_state="PROVISIONALLY_STABLE",
+        checkpoint_step=6,
+        checkpoint_elapsed_seconds=115.0,
+        checkpoint_resumable=True,
+        elapsed_seconds=120.0,
+    )
+    resident_b = ActiveResourceCommitment(
+        "resident-b",
+        80 * GIB,
+        current_bytes=40 * GIB,
+        running_peak_bytes=40 * GIB,
+        future_peak_samples=(40 * GIB, 80 * GIB),
+        resource_state="RAMPING",
+        elapsed_seconds=120.0,
+    )
+
+    admitted, _ = GPUPlacementPlanner(model).place(
+        (action_c,),
+        (
+            gpu(0, free=68, active=(resident_a,), cap=5),
+            gpu(1, free=40, active=(resident_b,), cap=5),
+        ),
+        max_launches=1,
+    )
+
+    assert len(admitted) == 1
+    assert admitted[0].target_gpu == 0
+    assert admitted[0].admission_mode == "EXPLORATORY_ADMISSION"
+    assert admitted[0].rollback_cost_seconds == 5.0
+
+
+def test_concurrency_ladder_allows_only_one_uncharacterized_increment() -> None:
+    stable = ActiveResourceCommitment(
+        "a",
+        80 * GIB,
+        current_bytes=10 * GIB,
+        running_peak_bytes=10 * GIB,
+        future_peak_samples=(10 * GIB, 12 * GIB, 80 * GIB),
+        resource_state="PROVISIONALLY_STABLE",
+        checkpoint_resumable=True,
+    )
+    probe = ActiveResourceCommitment(
+        "b",
+        80 * GIB,
+        current_bytes=10 * GIB,
+        running_peak_bytes=10 * GIB,
+        future_peak_samples=(10 * GIB, 15 * GIB, 80 * GIB),
+        resource_state="PLATEAU_UNCONFIRMED",
+        admission_mode="EXPLORATORY_ADMISSION",
+    )
+    candidate = CandidateResourceAction(
+        "c",
+        {"trial_index": 3, "resource_compatibility_key": "compatible"},
+        1.0,
+        ResourcePrediction(
+            "c",
+            10 * GIB,
+            10 * GIB,
+            80 * GIB,
+            10 * GIB,
+            None,
+            100.0,
+            0,
+            0,
+            "cold-start",
+            "poor",
+            "test",
+            (10 * GIB, 20 * GIB, 80 * GIB),
+        ),
+    )
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (candidate,), (gpu(free=60, active=(stable, probe), cap=5),), max_launches=1
+    )
+    assert not admitted
+    assert blocked
+
+
+def test_live_evidence_transfers_across_seed_without_becoming_exact() -> None:
+    live = ActiveResourceEvidence(
+        "same-candidate",
+        "compatible",
+        {"width": 64},
+        "H100-80",
+        80 * GIB,
+        11 * GIB,
+        12 * GIB,
+        (12 * GIB, 14 * GIB, 80 * GIB),
+        "PLATEAU_UNCONFIRMED",
+        50.0,
+    )
+    predicted = ResourceDemandModel(active_evidence=(live,)).predict(
+        candidate_key="same-candidate",
+        compatibility_key="compatible",
+        parameters={"width": 64},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+    assert predicted.support == "active-same-candidate"
+    assert predicted.is_provisional is True
+    assert predicted.exact_history_count == 0
+    assert predicted.provisional_lower_bound_bytes == 12 * GIB
+
+
+def test_placement_oom_does_not_create_intrinsic_bound_or_global_backoff() -> None:
+    extracted = oom_evidence(
+        "CUDA out of memory. Tried to allocate 2 GiB",
+        candidate_key="heavy",
+        compatibility_key="compatible",
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+        headroom_bytes=30 * GIB,
+        resident_bytes=None,
+        physical_free_bytes=1 * GIB,
+        external_bytes=0,
+        active_co_runs=1,
+    )
+    assert extracted.lower_bound_bytes == 0
+    failed = PlacementOOMEvidence(
+        "heavy",
+        "compatible",
+        "H100-80",
+        ("heavy-resident",),
+        30 * GIB,
+        1 * GIB,
+        79 * GIB,
+        2 * GIB,
+        None,
+        "lower-bound-only",
+        "failed-heavy-heavy",
+    )
+    model = ResourceDemandModel(placement_failures=(failed,))
+    light = ActiveResourceCommitment(
+        "light-resident",
+        10 * GIB,
+        current_bytes=10 * GIB,
+        running_peak_bytes=10 * GIB,
+        future_peak_samples=(10 * GIB,),
+        resource_state="RESOURCE_STABLE",
+        checkpoint_resumable=True,
+    )
+    candidate = CandidateResourceAction(
+        "heavy-action",
+        {"trial_index": 2, "resource_compatibility_key": "compatible"},
+        1.0,
+        prediction("heavy", 48 * GIB),
+    )
+    admitted, _ = GPUPlacementPlanner(model).place(
+        (candidate,), (gpu(free=70, active=(light,), cap=5),), max_launches=1
+    )
+    assert admitted
+
+
+def test_schema_aware_distance_handles_log_scale_and_inactive_conditionals() -> None:
+    from lambdaforge.hpo.AdaptiveResources import _mixed_distance
+
+    schema = {
+        "learning_rate": {"range": [1e-5, 1e-3], "scale": "log"},
+        "depth": {"values": [1, 2], "when": {"enabled": True}},
+        "enabled": {"values": [True, False]},
+    }
+    first = _mixed_distance(
+        {"learning_rate": 1e-5, "enabled": False},
+        {"learning_rate": 1e-4, "enabled": False},
+        schema,
+    )
+    second = _mixed_distance(
+        {"learning_rate": 1e-4, "enabled": False},
+        {"learning_rate": 1e-3, "enabled": False},
+        schema,
+    )
+    assert math.isclose(first, second)
+    assert (
+        _mixed_distance(
+            {"learning_rate": 1e-4, "enabled": False, "depth": 1},
+            {"learning_rate": 1e-4, "enabled": False, "depth": 2},
+            schema,
+        )
+        == 0.0
+    )
+
+
+def test_live_update_prefers_per_process_vram_over_predicted_proportions(
+    monkeypatch: Any,
+) -> None:
+    from lambdaforge.work.runner import _update_active_resource_commitments
+
+    first, second = object(), object()
+    specification = {
+        "trial_parameters": {},
+        "definition": {"resources": {"gpu_memory_bytes": 0}},
+        "hpo_dispatched_monotonic": 0.0,
+    }
+    pending = {
+        first: (dict(specification), 0, object()),
+        second: (dict(specification), 0, object()),
+    }
+    commitments = {
+        first: ActiveResourceCommitment("a", 25 * GIB),
+        second: ActiveResourceCommitment("b", 15 * GIB),
+    }
+    metadata = {
+        first: {"candidate_key": "a", "compatibility_key": "c", "hardware": "H100-80"},
+        second: {"candidate_key": "b", "compatibility_key": "c", "hardware": "H100-80"},
+    }
+    monkeypatch.setattr(
+        "lambdaforge.work.runner._read_live_resource_snapshot",
+        lambda _: {"phase": "training", "step": 2},
+    )
+    monkeypatch.setattr(
+        "lambdaforge.work.runner._gpu_process_memory",
+        lambda *_: ({first: 10 * GIB, second: 30 * GIB}, "nvml-process-exact"),
+    )
+
+    evidence = _update_active_resource_commitments(
+        ((40 * GIB, 80 * GIB),),
+        pending=pending,  # type: ignore[arg-type]
+        commitments=commitments,
+        trajectories={},
+        metadata=metadata,
+        model=ResourceDemandModel(),
+        now=10.0,
+    )
+
+    assert commitments[first].current_bytes == 10 * GIB
+    assert commitments[second].current_bytes == 30 * GIB
+    assert {value.measurement_provenance for value in evidence} == {"nvml-process-exact"}
+
+
+def test_known_failed_placement_blocks_only_the_dominated_resident_set() -> None:
+    resident = ActiveResourceCommitment(
+        "resident",
+        20 * GIB,
+        current_bytes=20 * GIB,
+        running_peak_bytes=20 * GIB,
+        future_peak_samples=(20 * GIB,),
+        resource_state="RESOURCE_STABLE",
+    )
+    failed = PlacementOOMEvidence(
+        "candidate",
+        "compatible",
+        "H100-80",
+        ("resident",),
+        60 * GIB,
+        1 * GIB,
+        79 * GIB,
+        2 * GIB,
+        58 * GIB,
+        "sampled-physical",
+        "known-failure",
+    )
+    candidate = CandidateResourceAction(
+        "candidate-action",
+        {"trial_index": 2, "resource_compatibility_key": "compatible"},
+        1.0,
+        prediction("candidate", 50 * GIB),
+    )
+
+    admitted, blocked = GPUPlacementPlanner(
+        ResourceDemandModel(placement_failures=(failed,))
+    ).place((candidate,), (gpu(free=60, active=(resident,), cap=5),), max_launches=1)
+
+    assert not admitted
+    assert blocked[0].devices[0]["reason"] == "known-failed-placement-dominates-current-condition"
+
+
+def test_distinct_experiments_may_use_large_gpu_group_but_preserve_one_lane() -> None:
+    existing_probe = ActiveResourceCommitment(
+        "probe-a",
+        20 * GIB,
+        current_bytes=10 * GIB,
+        running_peak_bytes=10 * GIB,
+        future_peak_samples=(10 * GIB, 20 * GIB, 80 * GIB),
+        resource_state="PLATEAU_UNCONFIRMED",
+        admission_mode="EXPLORATORY_ADMISSION",
+        exploration_signature="different-question",
+    )
+    stable = ActiveResourceCommitment(
+        "resident",
+        80 * GIB,
+        current_bytes=10 * GIB,
+        running_peak_bytes=10 * GIB,
+        future_peak_samples=(10 * GIB, 20 * GIB, 80 * GIB),
+        resource_state="PROVISIONALLY_STABLE",
+        checkpoint_resumable=True,
+    )
+    candidate = CandidateResourceAction(
+        "candidate-action",
+        {"trial_index": 2, "resource_compatibility_key": "compatible"},
+        1.0,
+        ResourcePrediction(
+            "candidate",
+            10 * GIB,
+            10 * GIB,
+            80 * GIB,
+            10 * GIB,
+            None,
+            100.0,
+            0,
+            0,
+            "active-near-compatible",
+            "poor",
+            "test",
+            (10 * GIB, 20 * GIB, 80 * GIB),
+            is_provisional=True,
+        ),
+    )
+    devices = (
+        gpu(0, free=60, active=(stable, existing_probe), cap=5),
+        gpu(1, free=70, active=(stable,), cap=5),
+        gpu(2, free=70, active=(stable,), cap=5),
+        gpu(3, free=70, active=(stable,), cap=5),
+    )
+
+    admitted, _ = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (candidate,), devices, max_launches=1
+    )
+
+    assert admitted
+    assert admitted[0].target_gpu in {1, 2, 3}
+    assert admitted[0].admission_mode == "EXPLORATORY_ADMISSION"
+
+
+def test_nearby_censored_oom_widens_prediction_without_becoming_exact() -> None:
+    exact = (
+        observation("small-a", 10 * GIB, parameters={"width": 64}),
+        observation("small-b", 12 * GIB, parameters={"width": 96}),
+        observation(
+            "oom-near",
+            44 * GIB,
+            state="oom",
+            exact=False,
+            lower=44 * GIB,
+            parameters={"width": 128},
+        ),
+    )
+    predicted = ResourceDemandModel(
+        exact,
+        parameter_schema={"width": {"range": [64, 256]}},
+    ).predict(
+        candidate_key="query",
+        compatibility_key="compatible",
+        parameters={"width": 144},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+
+    assert predicted.upper_bytes > 30 * GIB
+    assert predicted.known_lower_bound_bytes == 0
+    assert predicted.exact_history_count == 0
+
+
+def test_live_throughput_can_stop_a_counterproductive_ladder_increment() -> None:
+    live = (
+        ActiveResourceEvidence(
+            "solo",
+            "compatible",
+            {},
+            "H100-80",
+            80 * GIB,
+            10 * GIB,
+            10 * GIB,
+            (10 * GIB,),
+            "RESOURCE_STABLE",
+            10.0,
+            throughput=100.0,
+            co_runners=0,
+        ),
+        ActiveResourceEvidence(
+            "packed-a",
+            "compatible",
+            {},
+            "H100-80",
+            80 * GIB,
+            10 * GIB,
+            10 * GIB,
+            (10 * GIB,),
+            "RESOURCE_STABLE",
+            10.0,
+            throughput=45.0,
+            co_runners=1,
+        ),
+    )
+    residents = (
+        ActiveResourceCommitment("a", 10 * GIB, current_bytes=10 * GIB),
+        ActiveResourceCommitment("b", 10 * GIB, current_bytes=10 * GIB),
+    )
+    candidate = CandidateResourceAction(
+        "candidate-action",
+        {"trial_index": 3, "resource_compatibility_key": "compatible"},
+        1.0,
+        prediction("candidate", 10 * GIB),
+    )
+
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel(active_evidence=live)).place(
+        (candidate,), (gpu(free=60, active=residents, cap=5),), max_launches=1
+    )
+
+    assert not admitted
+    assert blocked[0].devices[0]["reason"] == "predicted-aggregate-throughput-would-not-improve"

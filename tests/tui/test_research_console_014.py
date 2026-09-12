@@ -244,6 +244,32 @@ class FakeServices:
             "curves": curves,
             "chart_filter": {},
             "resources": {"usage": {"gpu_mem_mb": 1024, "ram_mb": 2048}},
+            "artifacts": [
+                {
+                    "name": "protein-view",
+                    "role": "visualization",
+                    "media_type": "text/html",
+                    "size_bytes": 4096,
+                    "sha256": "a" * 64,
+                    "path": "/remote/run/artifacts/protein-view/1abc.html",
+                    "managed_path": "/remote/run/artifacts/protein-view/1abc.html",
+                    "published_path": None,
+                    "retention": "managed-internal",
+                    "metadata": {"protein": "1ABC"},
+                },
+                {
+                    "name": "predictions",
+                    "role": "predictions",
+                    "media_type": "application/octet-stream",
+                    "size_bytes": 8192,
+                    "sha256": "b" * 64,
+                    "path": "/project/data/predictions.npz",
+                    "managed_path": None,
+                    "published_path": "/project/data/predictions.npz",
+                    "retention": "published-only",
+                    "metadata": {},
+                },
+            ],
             "log": "epoch 100 complete",
             "paths": {},
         }
@@ -1242,6 +1268,10 @@ def test_study_trial_seed_epoch_navigation_uses_persisted_telemetry() -> None:
             await pilot.click("#curve-next")
             assert "CURVES 2/2" in str(app.screen.query_one("#curve-content").render())
             assert "Train loss" in str(app.screen.query_one("#curve-content").render())
+
+            artifacts = app.screen.query_one("#seed-artifact-table")
+            assert artifacts.row_count == 2
+            assert "1abc.html" in str(app.screen.query_one("#seed-artifact-detail").render())
 
             epochs = app.screen.query_one("#epoch-table")
             assert epochs.row_count == 100

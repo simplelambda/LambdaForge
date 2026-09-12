@@ -1,11 +1,13 @@
 """Search helpers used by Work study expansion."""
 
 from lambdaforge.hpo.AdaptiveResources import (
+    ActiveResourceEvidence,
     AdmissionDecision,
     GPUPlacementPlanner,
     ResourceDemandModel,
     ResourcePrediction,
     ResourceProfileObservation,
+    ResourceTrajectoryAnalyzer,
 )
 from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservation
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer, CandidateEstimate
@@ -18,6 +20,7 @@ from lambdaforge.hpo.Trial import Trial
 __all__ = [
     "AdaptiveSampler",
     "AdaptiveSeedRacer",
+    "ActiveResourceEvidence",
     "AdmissionDecision",
     "BayesianSampler",
     "CandidateEstimate",
@@ -27,6 +30,7 @@ __all__ = [
     "ResourceDemandModel",
     "ResourcePrediction",
     "ResourceProfileObservation",
+    "ResourceTrajectoryAnalyzer",
     "SobolSearch",
     "StudyInsightAnalyzer",
     "Trial",

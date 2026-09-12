@@ -519,8 +519,8 @@ objective: {metric: val_auprc, mode: max}
 resources:
   gpu: 2
   gpu_memory: 16GiB  # minimum currently-free VRAM required before starting a Run
-  cpu: 16            # total reservation, divided among active Runs
-  memory: 32GiB      # total reservation, divided among active Runs
+  cpu: 16            # total reservation; stable share per possible concurrent Run
+  memory: 32GiB      # total reservation; Run shares never exceed this outer limit
 ```
 
 The deterministic `proposal_pool_size` is stored once; lightweight candidate/seed specifications
@@ -543,8 +543,8 @@ exhausted proposal pool, or this explicit convergence policy. Pruning and seed r
 compute without reducing the authored candidate budget.
 
 This permits **at most** eight simultaneous trainings, four on each of two GPUs. It does not ask
-LambdaForge to manufacture eight fixed slots. Each candidate receives a learned, conservative
-future-memory envelope from compatible completed/censored Runs. Admission uses physical device
+LambdaForge to manufacture eight fixed slots. Each candidate receives a learned future-memory
+distribution from compatible terminal and live right-censored Runs. Admission uses physical device
 memory as authority and approximates future headroom as
 
 $$
@@ -552,10 +552,20 @@ H_g(t)=C_g-E_g(t)-\sum_i M_{i,\mathrm{future}}(t).
 $$
 
 Here $C_g$ is usable GPU capacity, $E_g$ is occupancy not attributed to active LambdaForge Runs,
-and $M_{i,\mathrm{future}}$ is each active Run's possible maximum demand from now until completion.
-The planner chooses the least-slack safe device (best fit), so a large and a small Run can coexist
-without treating every hyperparameter configuration as the same size. With no compatible history,
-uncertainty deliberately cold-starts at one Run per GPU and packing rises only after evidence.
+and $M_{i,\mathrm{future}}=m_i(t)+R_i(t)$ combines the running maximum with the distribution of
+memory that may still appear. The planner chooses the least-slack safe device (best fit), so a
+large and a small Run can coexist without treating every hyperparameter configuration as the same
+size. LambdaForge begins conservatively but does not wait for complete Runs: phase, progress,
+change points, allocator peaks and durable checkpoints make active trajectories provisional
+evidence that compatible GPUs can use immediately.
+
+`SAFE_ADMISSION` fits after uncertainty and known OOM bounds are considered.
+`EXPLORATORY_ADMISSION` is a checkpoint-aware 1→2→3 packing step whose expected scientific progress
+and resource information exceed rollback and interference cost. With at least two interchangeable
+GPUs, one remains a protected progress lane while an equivalent unvalidated experiment runs on at
+most one sibling. A provisional success promotes the packing frontier before terminal epochs; a
+later OOM invalidates it. Thus a long cold start cannot remain at one Run per GPU merely because no
+training has finished.
 
 `gpu_memory` is optional. When present it remains the user's minimum safety floor for each new Run;
 the effective commitment is the larger of that floor, the learned upper envelope and any known OOM
@@ -569,15 +579,27 @@ frontier cannot run, the controller requests one bounded extension from the same
 policy and starts its highest-value feasible member; it never generates random candidates until
 one happens to fit.
 
+CPU, RAM and storage retain a conservative stable per-Run share derived from the hard global
+concurrency ceiling. They are not temporarily over-promised to the first cold-start Runs, because
+those Runs cannot later be resized safely as packing grows. Unused host capacity remains available
+to the operating system, while `self.resources` consistently reports the share a Run may rely on.
+
 LambdaForge probes every granted GPU, reacts to external occupancy, staggers same-device launches
 and updates active future envelopes from bounded trajectories for the full Run, including periods
 where every dispatch slot is occupied and the temporary queue is empty. Physical peaks, allocator
 diagnostics, duration/time-to-peak, censored early termination and OOM lower bounds are persisted.
 Admission uses the stricter of live physical free VRAM and predicted future headroom, so new
-external pressure cannot be hidden by estimated per-Run attribution.
-If a candidate OOMs with effective headroom $H$, the compatible retry is logically forbidden at
-headroom $\le H$; it waits until conditions materially improve. OOM is resource evidence, never a
-bad scientific objective. Measured co-location throughput can also stop extra packing even when
+external pressure cannot be hidden. Worker PIDs and CUDA descendants are matched to NVML process
+memory when available; child allocator heartbeats add phase, step and short-peak evidence. Fallback
+attribution is labelled inferred and never becomes exact evidence.
+The bounded active-evidence snapshot is atomic: after a controller restart it may inform
+uncertainty as stale provisional evidence, but LambdaForge never pretends its old PIDs are alive.
+Terminal observations supersede it and successful shutdown clears it.
+An OOM without reliable candidate attribution constrains the failed resident-set placement rather
+than inventing a candidate size. The same or a dominated experiment is not repeated, but
+`heavy+heavy` never globally forbids `heavy+small`. An exploratory OOM becomes resource recovery: a
+new Attempt of the same logical Run resumes a valid checkpoint. It is never a bad scientific
+objective or a new Trial. Measured co-location throughput can also stop extra packing even when
 VRAM fits, because the goal is useful scientific work per wall-clock time rather than full memory.
 
 When several GPUs can accept one globally available Run, the resource planner uses the current
@@ -752,7 +774,10 @@ facts through `lf overview --json`, `lf show WORK --json`,
 `lf show WORK --run trial-00001-seed-4 --json` and
 `lf logs WORK --run trial-00001-seed-4 --tail 300`. The live index stores only compact state and
 scalar JSONL; it references existing Run logs/results and down-samples curves when reading them, so
-it does not duplicate checkpoints, models or large outputs.
+it does not duplicate checkpoints, models or large outputs. Open a seed's **Artifacts** tab, or run
+`lf show WORK --run KEY`, to list each finalized managed artifact with its preferred usable path,
+role, media type and size. The JSON form also includes SHA-256, managed/published paths, retention
+and metadata. Published-only outputs point to `publish_to`; otherwise the path is inside the Run.
 
 GPU admission belongs to the cluster profile, not scientific YAML. `gpu_access.mode=auto` uses
 SLURM allocation on SLURM clusters and conservative exclusive LambdaForge leases on direct hosts.
@@ -1033,6 +1058,17 @@ previews every registered placement and requires confirmation before deleting a 
 DatasetVersion. Repeated activation is blocked while an operation is active. A manually removed placement converges as stale registry cleanup; it does not make
 the action fail or leave an empty logical version in the browser. Pruned Runs use “not final ·
 pruned” or “not observed” for expected missing evidence instead of the misleading “unavailable”.
+
+New remote dataset publications use the current project's effective root, including
+`<configured-dataset-root>/projects/<project-id>`. A verified older placement may remain usable at
+its explicitly registered unscoped path; it is durable evidence, not an implicit global lookup.
+The final hash directory is the content identity. If preprocessing changes any asset bytes, publish
+a new dataset version rather than reusing `NAME@VERSION`. Use `lf datasets reconcile NAME@VERSION
+--on CLUSTER` to preview index-only repair and `--apply` only after review; an existing or
+unreachable conflicting placement is never removed automatically. LambdaForge does not silently
+relay a large remote dataset through the controller: remote-to-remote placement uses the site's
+durable transfer facility, followed by `reconcile` after the exact manifest-backed directory is in
+place.
 
 Work names are display labels, not identities. The same authored Work may run locally and on one or
 more clusters at the same time; tables and destructive actions use the exact `work_id`, so equal

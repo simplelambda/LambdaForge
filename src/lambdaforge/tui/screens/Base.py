@@ -114,11 +114,7 @@ class DataScreen(Vertical):
     def _failed(self, error: Exception) -> None:
         self.query_one("#screen-loading", LoadingIndicator).display = False
         self._last_refresh_error = f"{type(error).__name__}: {error}"
-        suffix = (
-            " · showing the last successful snapshot"
-            if self.last_success is not None
-            else ""
-        )
+        suffix = " · showing the last successful snapshot" if self.last_success is not None else ""
         self.query_one("#screen-status", Static).update(
             f"Temporarily unavailable · {self._last_refresh_error}{suffix}"
         )

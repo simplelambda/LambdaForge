@@ -61,6 +61,19 @@ def _structured_text(value: Any, *, heading: str | None = None, limit: int = 160
     return structured_text(value, heading=heading, limit=limit)
 
 
+def _artifact_size(value: Any) -> str:
+    """Render persisted artifact bytes compactly without hiding the exact byte count."""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return "unavailable"
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            compact = f"{amount:.0f}" if unit in {"B", "KiB"} else f"{amount:.1f}"
+            return f"{compact} {unit} ({value} bytes)"
+        amount /= 1024
+    return f"{value} bytes"
+
+
 class ResearchWorkspace(Screen[None]):
     """Base screen with real stack navigation and human-readable breadcrumbs."""
 
@@ -2226,6 +2239,10 @@ class SeedWorkspace(ResearchWorkspace):
                 yield DataTable(id="metric-table", cursor_type="row", zebra_stripes=True)
             with TabPane("Resources", id="seed-resources"):
                 yield Static(id="seed-resource-content", classes="workspace-panel")
+            with TabPane("Artifacts", id="seed-artifacts"):
+                with Vertical(id="seed-artifact-content"):
+                    yield DataTable(id="seed-artifact-table", cursor_type="row", zebra_stripes=True)
+                    yield Static(id="seed-artifact-detail", classes="detail-panel")
             with TabPane("Logs", id="seed-logs"):
                 yield RichLog(id="seed-log-content", wrap=False, auto_scroll=True, highlight=False)
             with TabPane("Metadata", id="seed-metadata"):
@@ -2307,6 +2324,7 @@ class SeedWorkspace(ResearchWorkspace):
             f"Elapsed                {format_duration(detail.get('duration_seconds'))}\n\n"
             "Reserved GPU memory is allocator cache, not live scientific tensor allocation."
         )
+        self._populate_artifacts(detail.get("artifacts", ()))
         log = self.query_one("#seed-log-content", RichLog)
         at_end = log.is_vertical_scroll_end
         previous_y = log.scroll_y
@@ -2342,6 +2360,58 @@ class SeedWorkspace(ResearchWorkspace):
                 default=str,
             )
         )
+
+    def _populate_artifacts(self, raw_artifacts: Any) -> None:
+        artifacts = (
+            [dict(value) for value in raw_artifacts if isinstance(value, Mapping)]
+            if isinstance(raw_artifacts, Sequence) and not isinstance(raw_artifacts, str | bytes)
+            else []
+        )
+        table = self.query_one("#seed-artifact-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("Name", "Role", "Media type", "Size", "Location")
+        for index, artifact in enumerate(artifacts):
+            table.add_row(
+                str(artifact.get("name", "artifact")),
+                str(artifact.get("role", "artifact")),
+                str(artifact.get("media_type") or "unspecified"),
+                _artifact_size(artifact.get("size_bytes")).split(" (", 1)[0],
+                str(artifact.get("path", "unavailable")),
+                key=f"artifact-{index}",
+            )
+        detail = self.query_one("#seed-artifact-detail", Static)
+        if artifacts:
+            table.move_cursor(row=0)
+            self._render_artifact_detail(artifacts[0])
+        else:
+            detail.update(
+                "No finalized managed artifacts are recorded for this Run yet.\n"
+                "Artifacts appear after the Work registers and successfully finalizes them."
+            )
+
+    def _render_artifact_detail(self, artifact: Mapping[str, Any]) -> None:
+        published = artifact.get("published_path")
+        managed = artifact.get("managed_path")
+        lines = [
+            f"{artifact.get('name', 'Artifact')} · {artifact.get('role', 'artifact')}",
+            f"Preferred path   {artifact.get('path', 'unavailable')}",
+            f"Managed path     {managed or 'not retained'}",
+            f"Published path   {published or 'not published separately'}",
+            f"Retention        {artifact.get('retention', 'managed-internal')}",
+            f"Media type       {artifact.get('media_type') or 'unspecified'}",
+            f"Size             {_artifact_size(artifact.get('size_bytes'))}",
+            f"SHA-256          {artifact.get('sha256') or 'unavailable'}",
+        ]
+        metadata = artifact.get("metadata")
+        if isinstance(metadata, Mapping):
+            custom = {
+                str(key): value
+                for key, value in metadata.items()
+                if key not in {"published_to", "retention"}
+            }
+            if custom:
+                lines.extend(("", _structured_text(custom, heading="METADATA", limit=40)))
+        self.query_one("#seed-artifact-detail", Static).update("\n".join(lines))
 
     def _render_curves(self, curves: Mapping[str, Any], detail: Mapping[str, Any]) -> None:
         chart_filter = detail.get("chart_filter", {})
@@ -2494,7 +2564,19 @@ class SeedWorkspace(ResearchWorkspace):
                     break
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        if event.data_table.id != "epoch-table" or self.detail is None:
+        if self.detail is None:
+            return
+        if event.data_table.id == "seed-artifact-table":
+            artifacts = self.detail.get("artifacts", ())
+            if (
+                isinstance(artifacts, Sequence)
+                and not isinstance(artifacts, str | bytes)
+                and 0 <= event.cursor_row < len(artifacts)
+                and isinstance(artifacts[event.cursor_row], Mapping)
+            ):
+                self._render_artifact_detail(artifacts[event.cursor_row])
+            return
+        if event.data_table.id != "epoch-table":
             return
         rows = epoch_rows(self.detail.get("curves", {}))
         if 0 <= event.cursor_row < len(rows):

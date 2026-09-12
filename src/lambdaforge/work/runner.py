@@ -36,13 +36,17 @@ from lambdaforge.EnvironmentManifest import EnvironmentManifest
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveResources import (
     ActiveResourceCommitment,
+    ActiveResourceEvidence,
     BoundedResourceTrajectory,
     CandidateResourceAction,
     GPUPlacementPlanner,
     GPUResourceState,
+    PlacementOOMEvidence,
     ResourceDemandModel,
+    ResourceEvidenceQuality,
     ResourceHistoryStore,
     ResourceProfileObservation,
+    ResourceTrajectoryAnalyzer,
     ResourceTrajectorySample,
     oom_evidence,
     resource_identity,
@@ -931,11 +935,32 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
     temp_dir = run_dir / "tmp"
     temp_dir.mkdir()
     checkpoints = CheckpointCollection(checkpoint_root)
+    resource_heartbeat_path = run_dir / "resource-heartbeat.json"
+    atomic_json(
+        resource_heartbeat_path,
+        {
+            "pid": os.getpid(),
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "phase": "startup",
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        },
+    )
     raw_checkpoint_manifest = specification.get("hpo_checkpoint_manifest_path")
     if raw_checkpoint_manifest is not None:
         atomic_json(
             Path(str(raw_checkpoint_manifest)),
-            {"checkpoint_root": str(checkpoint_root.resolve()), "run_id": run_id},
+            {
+                "checkpoint_root": str(checkpoint_root.resolve()),
+                "run_id": run_id,
+                "attempt_id": attempt_id,
+                "run_dir": str(run_dir.resolve()),
+                "resource_heartbeat": str(resource_heartbeat_path.resolve()),
+                "pid": os.getpid(),
+                "controller_pid": specification.get("resource_controller_pid"),
+                "gpu_token": specification.get("gpu_slot"),
+                "gpu_index": specification.get("gpu_index"),
+            },
         )
     resuming = any(path.is_file() for path in checkpoint_root.rglob("*"))
     resources = _work_resources(definition.resources.to_dict())
@@ -1004,6 +1029,7 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         run_environment = {
             "LAMBDAFORGE_TRAINING_METRICS_PATH": str(training_metrics_path),
             "LAMBDAFORGE_PROGRESS_PATH": str(run_dir / "progress.json"),
+            "LAMBDAFORGE_RESOURCE_HEARTBEAT_PATH": str(resource_heartbeat_path),
         }
         if fidelity is not None:
             run_environment.update(
@@ -1091,6 +1117,13 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         ),
         target_step=fidelity.target if fidelity is not None else None,
     )
+    if specification.get("resumed_after_resource_failure"):
+        termination = {
+            **dict(termination),
+            "resumed_after_resource_failure": True,
+            "checkpoint_used": resuming,
+            "resource_recovery_attempt": int(specification.get("resource_recovery", 1)),
+        }
     result = WorkResult(
         definition.name,
         definition.work_class,
@@ -2806,6 +2839,28 @@ def _retry_failed_result(
     if not _is_gpu_memory_failure(result):
         return None
     kind = str(result.failure.get("type", ""))
+    if (
+        specification.get("resource_admission_mode") == "EXPLORATORY_ADMISSION"
+        or specification.get("resumed_after_resource_failure")
+    ):
+        retry = dict(specification)
+        retry.pop("gpu_index", None)
+        retry["gpu_slot"] = None
+        retry["resumed_after_resource_failure"] = True
+        retry["resource_recovery"] = int(specification.get("resource_recovery", 0)) + 1
+        if telemetry is not None:
+            telemetry.run_retrying(
+                specification,
+                reason=f"resource exploration OOM: {result.failure.get('message', '')}",
+                retry=int(retry["resource_recovery"]),
+            )
+        print(
+            f"[hpo] RESOURCE_RECOVERY trial={specification['trial_index']} "
+            f"seed={specification.get('seed')}: same logical Run will resume under a "
+            "different non-dominated placement",
+            flush=True,
+        )
+        return retry
     return _new_retry(
         specification,
         reason=f"{kind or 'resource failure'}: {result.failure.get('message', '')}",
@@ -2830,11 +2885,6 @@ def _is_gpu_memory_failure(result: WorkResult) -> bool:
             "hip out of memory",
         )
     )
-
-
-def _safer_gpu_concurrency(current_limit: int, failed_active_runs: int) -> int:
-    """Learn a lower packing ceiling after an OOM at the observed concurrency."""
-    return min(current_limit, max(1, failed_active_runs - 1))
 
 
 def _new_retry(
@@ -2988,11 +3038,9 @@ def _execute_gpu_admitted_runs(
     pending: dict[Any, tuple[dict[str, Any], int, ProcessPoolExecutor]] = {}
     active = [0] * resources.gpu_count
     last_launch = [float("-inf")] * resources.gpu_count
-    # OOM evidence belongs to the device on which it was observed.  A single externally loaded or
-    # unusually constrained GPU must not throttle healthy siblings for the remainder of a Study.
-    effective_runs_per_gpu = [policy.runs_per_gpu] * resources.gpu_count
-    stable_runs_after_backoff = [0] * resources.gpu_count
-    initial_external = [max(0, total - free) for free, total in memory]
+    # Numeric runs_per_gpu is a policy ceiling. Resource failures constrain exact packings, never
+    # a permanent device-wide concurrency cap.
+    run_limits = [policy.runs_per_gpu] * resources.gpu_count
     raw_execution_dir = prepared[0].get("execution_dir")
     control_root = (
         Path(str(raw_execution_dir)) / "hpo-control" if raw_execution_dir is not None else None
@@ -3003,7 +3051,12 @@ def _execute_gpu_admitted_runs(
         Path(raw_cache_root) / "resource-intelligence" if raw_cache_root else None
     )
     resource_store = ResourceHistoryStore(resource_root, shared_resource_root)
-    resource_model = ResourceDemandModel(resource_store.load())
+    resource_model = ResourceDemandModel(
+        resource_store.load(),
+        active_evidence=resource_store.load_active(),
+        placement_failures=resource_store.load_placement_failures(),
+        parameter_schema=policy.parameter_space,
+    )
     active_commitments: dict[Any, ActiveResourceCommitment] = {}
     resource_trajectories: dict[Any, BoundedResourceTrajectory] = {}
     resource_metadata: dict[Any, dict[str, Any]] = {}
@@ -3018,6 +3071,7 @@ def _execute_gpu_admitted_runs(
             done, _ = wait(tuple(pending), timeout=0.5, return_when=FIRST_COMPLETED)
         for future in done:
             frontier_expanded_without_terminal_event = False
+            next_resource_sample = 0.0
             value, slot, pool = pending.pop(future)
             try:
                 result = future.result()
@@ -3040,7 +3094,11 @@ def _execute_gpu_admitted_runs(
                         memory_failure=False,
                     )
                     resource_store.append(observation)
-                    resource_model = ResourceDemandModel(resource_store.load())
+                    resource_model = ResourceDemandModel(
+                        resource_store.load(),
+                        placement_failures=resource_store.load_placement_failures(),
+                        parameter_schema=policy.parameter_space,
+                    )
                     results.append(failure)
                     if telemetry is not None:
                         telemetry.run_finished(value, failure)
@@ -3062,46 +3120,97 @@ def _execute_gpu_admitted_runs(
                         memory_failure=memory_failure,
                     )
                     resource_store.append(observation)
-                    resource_model = ResourceDemandModel(resource_store.load())
-                retry = _retry_failed_result(
-                    value,
-                    result,
-                    policy=policy,
-                    telemetry=telemetry,
-                )
-                if memory_failure:
-                    previous_limit = effective_runs_per_gpu[slot]
-                    effective_runs_per_gpu[slot] = _safer_gpu_concurrency(
-                        effective_runs_per_gpu[slot],
-                        active[slot],
+                    resource_store.record_event(
+                        "RESOURCE_KNOWLEDGE_UPDATED",
+                        {
+                            "candidate": observation.candidate_key,
+                            "state": observation.state,
+                            "observed_peak_bytes": observation.observed_peak_bytes,
+                            "measurement_quality": observation.measurement_quality,
+                        },
                     )
-                    stable_runs_after_backoff[slot] = 0
-                    if effective_runs_per_gpu[slot] < previous_limit:
-                        print(
-                            f"[hpo] CUDA OOM observed with {active[slot]} active Run(s) on "
-                            f"GPU {visible_gpus[slot]}; reducing the study packing ceiling "
-                            f"for that device from {previous_limit} to "
-                            f"{effective_runs_per_gpu[slot]} Run(s)",
-                            flush=True,
+                    if (
+                        resource_metadata.get(future, {}).get("admission_mode")
+                        == "EXPLORATORY_ADMISSION"
+                        and not memory_failure
+                        and (result.ok or result.pruned)
+                    ):
+                        resource_store.record_event(
+                            "RESOURCE_PROBE_SUCCEEDED",
+                            {
+                                "candidate": observation.candidate_key,
+                                "gpu": slot,
+                                "observed_peak_bytes": observation.observed_peak_bytes,
+                            },
                         )
-                elif (
-                    isinstance(result, WorkResult)
-                    and (result.ok or result.pruned)
-                    and (effective_runs_per_gpu[slot] < policy.runs_per_gpu)
-                ):
-                    # One full turnover at the learned lower ceiling is direct evidence that the
-                    # device is stable there. Probe exactly one additional slot next; live free
-                    # VRAM still has to satisfy the normal per-launch threshold.
-                    stable_runs_after_backoff[slot] += 1
-                    if stable_runs_after_backoff[slot] >= effective_runs_per_gpu[slot]:
-                        previous_limit = effective_runs_per_gpu[slot]
-                        effective_runs_per_gpu[slot] += 1
-                        stable_runs_after_backoff[slot] = 0
-                        print(
-                            f"[hpo] GPU {visible_gpus[slot]} completed one stable turnover at "
-                            f"the reduced packing ceiling; cautiously restoring it from "
-                            f"{previous_limit} to {effective_runs_per_gpu[slot]} Run(s)",
-                            flush=True,
+                    resource_model = ResourceDemandModel(
+                        resource_store.load(),
+                        placement_failures=resource_store.load_placement_failures(),
+                        parameter_schema=policy.parameter_space,
+                    )
+                exhausted_recovery = bool(
+                    memory_failure
+                    and value.get("resumed_after_resource_failure")
+                    and not resource_metadata.get(future, {}).get("resident_candidates")
+                    and all(
+                        label == resource_metadata.get(future, {}).get("hardware")
+                        for label in hardware_labels
+                    )
+                )
+                retry = (
+                    None
+                    if exhausted_recovery
+                    else _retry_failed_result(
+                        value,
+                        result,
+                        policy=policy,
+                        telemetry=telemetry,
+                    )
+                )
+                if retry is not None and retry.get("resumed_after_resource_failure"):
+                    resource_store.record_event(
+                        "RESOURCE_RECOVERY",
+                        {
+                            "trial": value.get("trial_index"),
+                            "seed": value.get("seed"),
+                            "same_logical_run": True,
+                            "checkpoint_available": _active_checkpoint_available(value),
+                        },
+                    )
+                if memory_failure:
+                    placement = _placement_oom_evidence(
+                        value,
+                        result,
+                        slot=slot,
+                        metadata=resource_metadata.get(future, {}),
+                        active_commitments=active_commitments,
+                    )
+                    resource_store.append_placement_failure(placement)
+                    resource_store.record_event("RESOURCE_PROBE_OOM", placement.to_dict())
+                    if (
+                        resource_metadata.get(future, {}).get("admission_mode")
+                        == "EXPLORATORY_ADMISSION"
+                    ):
+                        resource_store.record_event(
+                            "RESOURCE_PACKING_INVALIDATED", placement.to_dict()
+                        )
+                    resource_model = ResourceDemandModel(
+                        resource_store.load(),
+                        placement_failures=resource_store.load_placement_failures(),
+                        parameter_schema=policy.parameter_space,
+                    )
+                    # A recovery Attempt that OOMs while alone has already tested the safest
+                    # packing available for this hardware class.  Repeating it cannot add
+                    # information and would otherwise create an unbounded recovery loop.  Other
+                    # device classes remain eligible because their capacity/allocator behaviour
+                    # may differ.
+                    if exhausted_recovery:
+                        resource_store.record_event(
+                            "RESOURCE_RECOVERY_EXHAUSTED",
+                            {
+                                **placement.to_dict(),
+                                "reason": "same logical Run also OOMed without co-runners",
+                            },
                         )
                 if retry is not None:
                     queued.append(retry)
@@ -3155,7 +3264,11 @@ def _execute_gpu_admitted_runs(
             telemetry.refresh()
 
         now = time.monotonic()
-        if not queued and (not pending or now < next_resource_sample):
+        if not queued and not pending:
+            continue
+        if now < next_resource_sample:
+            if queued and not pending:
+                time.sleep(min(_GPU_ADMISSION_POLL_SECONDS, next_resource_sample - now))
             continue
         try:
             memory = _gpu_memory_inventory(resources.gpu_count)
@@ -3200,23 +3313,64 @@ def _execute_gpu_admitted_runs(
                 )
             consecutive_probe_failures = 0
 
-        _update_active_resource_commitments(
-            memory,
-            pending=pending,
-            commitments=active_commitments,
-            trajectories=resource_trajectories,
-            metadata=resource_metadata,
-            model=resource_model,
-            initial_external=initial_external,
-            now=now,
+        live_evidence = (
+            _update_active_resource_commitments(
+                memory,
+                pending=pending,
+                commitments=active_commitments,
+                trajectories=resource_trajectories,
+                metadata=resource_metadata,
+                model=resource_model,
+                now=now,
+            )
+            or ()
         )
+        resource_store.persist_active(live_evidence)
+        active_sampling = any(
+            value.resource_state in {"STARTING", "RAMPING"}
+            or any(
+                item.admission_mode == "EXPLORATORY_ADMISSION"
+                and item.candidate_key == value.candidate_key
+                for item in active_commitments.values()
+            )
+            for value in live_evidence
+        )
+        next_resource_sample = now + _GPU_RESOURCE_SAMPLE_SECONDS * (
+            1.0 if active_sampling else 4.0
+        )
+        resource_model = ResourceDemandModel(
+            resource_store.load(),
+            active_evidence=live_evidence,
+            placement_failures=resource_store.load_placement_failures(),
+            parameter_schema=policy.parameter_space,
+        )
+        for resource_details in resource_metadata.values():
+            if resource_details.pop("resource_plateau_event", False):
+                resource_store.record_event(
+                    "RESOURCE_PLATEAU",
+                    {
+                        "candidate": resource_details.get("candidate_key"),
+                        "hardware": resource_details.get("hardware"),
+                        "resource_state": resource_details.get("resource_state"),
+                    },
+                )
+            if resource_details.pop("resource_packing_promoted", False):
+                resource_store.record_event(
+                    "RESOURCE_PACKING_PROMOTED",
+                    {
+                        "candidate": resource_details.get("candidate_key"),
+                        "hardware": resource_details.get("hardware"),
+                        "resource_state": resource_details.get("resource_state"),
+                        "measurement_provenance": resource_details.get("measurement_provenance"),
+                    },
+                )
 
         devices = _resource_device_states(
             memory,
             active_commitments=active_commitments,
             pending=pending,
             visible_gpus=visible_gpus,
-            run_limits=effective_runs_per_gpu,
+            run_limits=run_limits,
             hardware_labels=hardware_labels,
         )
         if not queued:
@@ -3318,7 +3472,7 @@ def _execute_gpu_admitted_runs(
                 break
             if now - last_launch[slot] < _GPU_LAUNCH_STAGGER_SECONDS:
                 continue
-            decision = next(
+            selected_decision = next(
                 (
                     value
                     for value in admitted
@@ -3331,14 +3485,17 @@ def _execute_gpu_admitted_runs(
                 ),
                 None,
             )
-            if decision is None:
+            if selected_decision is None:
                 continue
-            action = by_candidate[decision.candidate_key]
+            action = by_candidate[selected_decision.candidate_key]
             value = next(item for item in queued if item is action.specification)
             queued.remove(value)
             value["hpo_dispatched_monotonic"] = time.monotonic()
             value["gpu_slot"] = visible_gpus[slot]
             value["gpu_index"] = slot
+            value["resource_controller_pid"] = os.getpid()
+            value["resource_admission_mode"] = selected_decision.admission_mode
+            value["resource_experiment_signature"] = selected_decision.exploration_signature
             pool = ProcessPoolExecutor(
                 max_workers=1,
                 mp_context=multiprocessing.get_context("spawn"),
@@ -3368,7 +3525,10 @@ def _execute_gpu_admitted_runs(
             active_commitments[future] = ActiveResourceCommitment(
                 action.key,
                 prediction.commitment_bytes,
+                future_peak_samples=prediction.samples,
                 remaining_seconds=effective_duration,
+                admission_mode=selected_decision.admission_mode,
+                exploration_signature=selected_decision.exploration_signature,
                 trial=_optional_int(value.get("trial_index")),
                 seed=_optional_int(value.get("seed")),
             )
@@ -3387,7 +3547,23 @@ def _execute_gpu_admitted_runs(
                 "code_fingerprint": code_fingerprint,
                 "environment_fingerprint": environment_fingerprint,
                 "trajectory": resource_trajectories.setdefault(future, BoundedResourceTrajectory()),
+                "admission_mode": selected_decision.admission_mode,
+                "exploration_signature": selected_decision.exploration_signature,
+                "resident_candidates": tuple(
+                    sorted(item.candidate_key for item in selected_device.active)
+                ),
             }
+            if selected_decision.admission_mode == "EXPLORATORY_ADMISSION":
+                resource_store.record_event("RESOURCE_EXPLORE", selected_decision.to_dict())
+                print(
+                    f"[hpo] RESOURCE_EXPLORE trial={value['trial_index']} "
+                    f"seed={value.get('seed')} GPU={visible_gpus[slot]} "
+                    f"P(fit)={selected_decision.fit_probability:.2f} "
+                    f"rollback={selected_decision.rollback_cost_seconds:.1f}s "
+                    f"resource_voi={selected_decision.resource_information_value:.3f}; "
+                    f"reason={selected_decision.reason}",
+                    flush=True,
+                )
             active[slot] += 1
             last_launch[slot] = now
             free, _total = memory[slot]
@@ -3397,16 +3573,22 @@ def _execute_gpu_admitted_runs(
             print(
                 f"[hpo] admitted trial={value['trial_index']} seed={value.get('seed')} "
                 f"on GPU {visible_gpus[slot]}: {memory_state}"
-                f"P(fit)={decision.fit_probability:.2f} active={active[slot]}/"
-                f"{effective_runs_per_gpu[slot]}",
+                f"P(fit)={selected_decision.fit_probability:.2f} "
+                f"mode={selected_decision.admission_mode} "
+                f"active={active[slot]}/{run_limits[slot]}",
                 flush=True,
             )
             launched = True
 
         if queued and not launched and now >= next_wait_log:
             states = ", ".join(
-                f"GPU {device.token} headroom={_memory_text(device.predicted_headroom_bytes)} "
-                f"active={len(device.active)}/{device.run_cap}"
+                f"GPU {device.token} physical_free={_memory_text(device.free_bytes)} "
+                f"LF_current={_memory_text(sum(item.current_bytes for item in device.active))} "
+                f"safe_headroom={_memory_text(device.predicted_headroom_bytes)} "
+                f"provisional_headroom={_memory_text(device.provisional_headroom_bytes)} "
+                f"active={len(device.active)}/{device.run_cap} "
+                "states="
+                f"{'+'.join(item.resource_state.lower() for item in device.active) or 'idle'}"
                 for device in devices
             )
             leading = blocked[0] if blocked else None
@@ -3449,10 +3631,11 @@ def _execute_gpu_admitted_runs(
         active_commitments={},
         pending={},
         visible_gpus=visible_gpus,
-        run_limits=effective_runs_per_gpu,
+        run_limits=run_limits,
         hardware_labels=hardware_labels,
     )
     resource_store.persist_ledger(terminal_devices)
+    resource_store.persist_active(())
 
 
 def _resource_action_is_device_infeasible(
@@ -3745,6 +3928,121 @@ def _resource_device_states(
     return tuple(values)
 
 
+def _read_live_resource_snapshot(specification: Mapping[str, Any]) -> dict[str, Any]:
+    """Read bounded worker-owned phase, allocator, progress and checkpoint evidence."""
+    raw_manifest = specification.get("hpo_checkpoint_manifest_path")
+    if raw_manifest is None:
+        return {}
+    manifest = Path(str(raw_manifest))
+    if not manifest.is_file() or manifest.is_symlink():
+        return {}
+    try:
+        declared = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(declared, Mapping):
+        return {}
+    snapshot = dict(declared)
+    heartbeat_path = declared.get("resource_heartbeat")
+    if isinstance(heartbeat_path, str):
+        heartbeat = Path(heartbeat_path)
+        try:
+            value = json.loads(heartbeat.read_text(encoding="utf-8"))
+            if isinstance(value, Mapping):
+                snapshot.update(value)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    run_dir = declared.get("run_dir")
+    if isinstance(run_dir, str):
+        progress = Path(run_dir) / "progress.json"
+        try:
+            value = json.loads(progress.read_text(encoding="utf-8"))
+            if isinstance(value, Mapping):
+                completed = value.get("completed")
+                if isinstance(completed, int) and not isinstance(completed, bool):
+                    snapshot.setdefault("step", completed)
+                if snapshot.get("phase") in {None, "startup"} and value.get("message"):
+                    snapshot["phase"] = value.get("message")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    checkpoint_root = declared.get("checkpoint_root")
+    if isinstance(checkpoint_root, str):
+        root = Path(checkpoint_root)
+        try:
+            files = [path for path in root.rglob("*") if path.is_file() and not path.is_symlink()]
+        except OSError:
+            files = []
+        if files:
+            try:
+                latest = max(files, key=lambda path: path.stat().st_mtime)
+                snapshot["checkpoint_resumable"] = True
+                snapshot["checkpoint_mtime"] = latest.stat().st_mtime
+                snapshot.setdefault("checkpoint_step", snapshot.get("step"))
+            except OSError:
+                pass
+    return snapshot
+
+
+def _descendant_pids(pid: int) -> set[int]:
+    """Resolve a Linux process tree without adding a process-monitor dependency."""
+    found = {pid}
+    pending = [pid]
+    while pending:
+        parent = pending.pop()
+        children_path = Path(f"/proc/{parent}/task/{parent}/children")
+        try:
+            children = [int(value) for value in children_path.read_text().split()]
+        except (OSError, ValueError):
+            continue
+        for child in children:
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+def _gpu_process_memory(
+    visible_gpus: Sequence[str],
+    snapshots: Mapping[Any, Mapping[str, Any]],
+) -> tuple[dict[Any, int], ResourceEvidenceQuality]:
+    """Attribute NVML physical VRAM to registered worker process trees when available."""
+    pid_owner: dict[int, Any] = {}
+    for future, snapshot in snapshots.items():
+        pid = snapshot.get("pid")
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            for child in _descendant_pids(pid):
+                pid_owner[child] = future
+    if not pid_owner:
+        return {}, "unavailable"
+    try:
+        completed = subprocess.run(  # noqa: S603
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}, "unavailable"
+    usage: dict[Any, int] = {}
+    for line in completed.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            pid, mib = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        owner = pid_owner.get(pid)
+        if owner is not None:
+            usage[owner] = usage.get(owner, 0) + mib * 1024**2
+    return usage, "nvml-process-exact" if usage else "unavailable"
+
+
 def _update_active_resource_commitments(
     memory: Sequence[tuple[int, int]],
     *,
@@ -3753,10 +4051,14 @@ def _update_active_resource_commitments(
     trajectories: dict[Any, BoundedResourceTrajectory],
     metadata: Mapping[Any, dict[str, Any]],
     model: ResourceDemandModel,
-    initial_external: Sequence[int],
     now: float,
-) -> None:
+) -> tuple[ActiveResourceEvidence, ...]:
     """Incrementally update active future envelopes from bounded physical observations."""
+    snapshots = {
+        future: _read_live_resource_snapshot(value) for future, (value, _, _) in pending.items()
+    }
+    process_memory, _ = _gpu_process_memory((), snapshots)
+    evidence: list[ActiveResourceEvidence] = []
     for slot, (free, total) in enumerate(memory):
         futures = [
             future
@@ -3765,24 +4067,78 @@ def _update_active_resource_commitments(
         ]
         if not futures:
             continue
-        base_external = int(initial_external[slot]) if slot < len(initial_external) else 0
-        physical_owned = max(0, total - free - base_external)
+        physical_used = max(0, total - free)
+        exact_owned = sum(process_memory.get(future, 0) for future in futures)
+        allocator_owned = sum(
+            int(snapshots[future].get("cuda_reserved_bytes", 0) or 0)
+            for future in futures
+            if future not in process_memory
+        )
+        physical_owned = min(physical_used, exact_owned + allocator_owned)
+        if physical_owned <= 0:
+            physical_owned = physical_used
         commitment_total = sum(commitments[future].commitment_bytes for future in futures)
         for future in futures:
-            current = (
-                min(
-                    commitments[future].commitment_bytes,
-                    int(
-                        physical_owned
-                        * commitments[future].commitment_bytes
-                        / max(1, commitment_total)
-                    ),
+            snapshot = snapshots[future]
+            provenance: ResourceEvidenceQuality
+            if future in process_memory:
+                current = process_memory[future]
+                provenance = "nvml-process-exact"
+            elif isinstance(snapshot.get("cuda_reserved_bytes"), int):
+                current = int(snapshot["cuda_reserved_bytes"])
+                provenance = "allocator-process"
+            else:
+                current = (
+                    min(
+                        commitments[future].commitment_bytes,
+                        int(
+                            physical_owned
+                            * commitments[future].commitment_bytes
+                            / max(1, commitment_total)
+                        ),
+                    )
+                    if commitment_total
+                    else 0
                 )
-                if commitment_total
-                else 0
-            )
+                provenance = "aggregate-inferred"
             specification = pending[future][0]
             details = metadata.get(future, {})
+            trajectory = trajectories.setdefault(future, BoundedResourceTrajectory())
+            phase = str(snapshot.get("phase")) if snapshot.get("phase") else None
+            step = _optional_int(snapshot.get("step"))
+            dispatched = specification.get("hpo_dispatched_monotonic")
+            elapsed = (
+                max(0.0, now - float(dispatched))
+                if isinstance(dispatched, int | float) and not isinstance(dispatched, bool)
+                else 0.0
+            )
+            checkpoint_elapsed: float | None = None
+            checkpoint_mtime = snapshot.get("checkpoint_mtime")
+            if isinstance(checkpoint_mtime, int | float) and not isinstance(checkpoint_mtime, bool):
+                checkpoint_elapsed = max(
+                    0.0, elapsed - max(0.0, time.time() - float(checkpoint_mtime))
+                )
+            trajectory.append(
+                ResourceTrajectorySample(
+                    elapsed_seconds=elapsed,
+                    physical_bytes=current,
+                    device_free_bytes=free,
+                    external_bytes=max(0, physical_used - exact_owned - allocator_owned),
+                    cuda_allocated_bytes=_optional_int(snapshot.get("cuda_allocated_bytes")),
+                    cuda_reserved_bytes=_optional_int(snapshot.get("cuda_reserved_bytes")),
+                    cuda_max_allocated_bytes=_optional_int(
+                        snapshot.get("cuda_max_allocated_bytes")
+                    ),
+                    throughput=(
+                        float(snapshot["throughput"])
+                        if isinstance(snapshot.get("throughput"), int | float)
+                        else None
+                    ),
+                    step=step,
+                    phase=phase,
+                    checkpoint_step=_optional_int(snapshot.get("checkpoint_step")),
+                )
+            )
             prediction = model.predict(
                 candidate_key=str(details.get("candidate_key", "")),
                 compatibility_key=str(details.get("compatibility_key", "")),
@@ -3807,19 +4163,25 @@ def _update_active_resource_commitments(
                         default=0,
                     ),
                 ),
+                phase=phase,
+            )
+            analysis = ResourceTrajectoryAnalyzer.analyze(
+                trajectory.values,
+                historical_residuals=prediction.future_residual_samples,
+                total_bytes=total,
+            )
+            future_samples = tuple(
+                max(analysis.running_peak_bytes, analysis.running_peak_bytes + residual)
+                for residual in analysis.residual_samples
             )
             state = resource_state(
                 prediction,
                 observed_peak_bytes=current,
-                phase=None,
+                phase=phase,
+                trajectory=trajectory.values,
             )
+            previous_state = details.get("resource_state")
             remaining = commitments[future].remaining_seconds
-            dispatched = specification.get("hpo_dispatched_monotonic")
-            elapsed = (
-                max(0.0, now - float(dispatched))
-                if isinstance(dispatched, int | float) and not isinstance(dispatched, bool)
-                else 0.0
-            )
             raw_prediction = details.get("prediction")
             predicted_duration = details.get("predicted_effective_duration_seconds")
             if predicted_duration is None and isinstance(raw_prediction, Mapping):
@@ -3828,18 +4190,46 @@ def _update_active_resource_commitments(
                 predicted_duration, bool
             ):
                 remaining = max(0.0, float(predicted_duration) - elapsed)
+            prior_mode = commitments[future].admission_mode
+            promoted = (
+                prior_mode == "EXPLORATORY_ADMISSION"
+                and state
+                in {
+                    "PROVISIONALLY_STABLE",
+                    "RESOURCE_STABLE",
+                }
+                and all(
+                    commitments[other].resource_state
+                    in {"PLATEAU_UNCONFIRMED", "PROVISIONALLY_STABLE", "RESOURCE_STABLE"}
+                    for other in futures
+                    if other != future
+                )
+            )
             commitments[future] = ActiveResourceCommitment(
                 commitments[future].candidate_key,
-                max(current, prediction.commitment_bytes),
+                max(current, max(future_samples, default=prediction.commitment_bytes)),
                 current_bytes=current,
+                running_peak_bytes=analysis.running_peak_bytes,
+                future_peak_samples=future_samples,
                 remaining_seconds=remaining,
                 resource_state=state,
+                phase=phase,
+                step=step,
+                checkpoint_step=_optional_int(snapshot.get("checkpoint_step")),
+                checkpoint_elapsed_seconds=checkpoint_elapsed,
+                checkpoint_resumable=bool(snapshot.get("checkpoint_resumable")),
+                elapsed_seconds=elapsed,
+                measurement_provenance=provenance,
+                admission_mode="SAFE_ADMISSION" if promoted else prior_mode,
+                exploration_signature=commitments[future].exploration_signature,
                 trial=commitments[future].trial,
                 seed=commitments[future].seed,
             )
             details["resource_state"] = state
+            if state in {"PLATEAU_UNCONFIRMED", "PROVISIONALLY_STABLE"} and state != previous_state:
+                details["resource_plateau_event"] = True
             details["physical_free_bytes"] = free
-            details["external_bytes"] = max(0, total - free - physical_owned)
+            details["external_bytes"] = max(0, physical_used - exact_owned - allocator_owned)
             details["headroom_bytes"] = current + free
             details["max_co_runners"] = max(
                 int(details.get("max_co_runners", details.get("co_runners", 0)) or 0),
@@ -3847,16 +4237,37 @@ def _update_active_resource_commitments(
             )
             if state == "RESOURCE_STABLE":
                 details.setdefault("time_to_stable_seconds", elapsed)
-            trajectory = trajectories.setdefault(future, BoundedResourceTrajectory())
-            trajectory.append(
-                ResourceTrajectorySample(
+            details["measurement_provenance"] = provenance
+            if promoted:
+                details["resource_packing_promoted"] = True
+            evidence.append(
+                ActiveResourceEvidence(
+                    candidate_key=str(details.get("candidate_key", "")),
+                    compatibility_key=str(details.get("compatibility_key", "")),
+                    parameters=dict(specification.get("trial_parameters", {})),
+                    hardware=str(details.get("hardware", f"cuda-vram-{total}")),
+                    total_bytes=total,
+                    current_bytes=current,
+                    running_peak_bytes=analysis.running_peak_bytes,
+                    future_peak_samples=future_samples,
+                    resource_state=state,
                     elapsed_seconds=elapsed,
-                    physical_bytes=current,
-                    device_free_bytes=free,
-                    external_bytes=max(0, total - free - physical_owned),
-                    phase=None,
+                    phase=phase,
+                    step=step,
+                    checkpoint_step=_optional_int(snapshot.get("checkpoint_step")),
+                    checkpoint_elapsed_seconds=checkpoint_elapsed,
+                    checkpoint_resumable=bool(snapshot.get("checkpoint_resumable")),
+                    throughput=(
+                        float(snapshot["throughput"])
+                        if isinstance(snapshot.get("throughput"), int | float)
+                        else None
+                    ),
+                    co_runners=len(futures) - 1,
+                    measurement_provenance=provenance,
+                    trajectory=trajectory.values,
                 )
             )
+    return tuple(evidence)
 
 
 def _resource_actions(
@@ -3942,7 +4353,10 @@ def _resource_observation_for_result(
     physical_peak = max((sample.physical_bytes for sample in trajectory), default=0)
     # Physical device delta is the packing target. Allocator peaks remain separate features: in
     # particular, reserved bytes are not relabelled as scientific working-set or a request.
-    observed = physical_peak
+    observed = max(
+        physical_peak,
+        int(allocated) if isinstance(allocated, int) else 0,
+    )
     if peaks:
         terminal_trajectory = BoundedResourceTrajectory(trajectory)
         terminal_trajectory.append(
@@ -4014,7 +4428,13 @@ def _resource_observation_for_result(
     # co-runners the conservative proportional attribution remains useful censored evidence, but
     # must not masquerade as an exact per-Run target.
     co_runners = int(metadata.get("max_co_runners", metadata.get("co_runners", 0)) or 0)
-    exact = state == "completed" and observed > 0 and co_runners == 0
+    exact = (
+        state == "completed"
+        and observed > 0
+        and co_runners == 0
+        and metadata.get("measurement_provenance") == "nvml-process-exact"
+        and allocated is not None
+    )
     return ResourceProfileObservation(
         candidate_key=candidate,
         compatibility_key=compatibility,
@@ -4065,6 +4485,78 @@ def _resource_observation_for_result(
             float(peaks["throughput"]) if isinstance(peaks.get("throughput"), int | float) else None
         ),
         trajectory=tuple(sample.to_dict() for sample in trajectory),
+        measurement_quality=(
+            "terminal-high-quality"
+            if exact and metadata.get("measurement_provenance") == "nvml-process-exact"
+            else "allocator-peak-supported"
+            if allocated is not None
+            else "sampled-physical"
+            if observed
+            else "lower-bound-only"
+        ),
+    )
+
+
+def _placement_oom_evidence(
+    specification: Mapping[str, Any],
+    result: WorkResult,
+    *,
+    slot: int,
+    metadata: Mapping[str, Any],
+    active_commitments: Mapping[Any, ActiveResourceCommitment],
+) -> PlacementOOMEvidence:
+    """Persist what co-location failed without inventing an intrinsic candidate peak."""
+    trajectory = metadata.get("trajectory")
+    values = trajectory.values if isinstance(trajectory, BoundedResourceTrajectory) else ()
+    candidate_resident = max((item.physical_bytes for item in values), default=0) or None
+    failure = result.failure if isinstance(result.failure, Mapping) else {}
+    extracted = oom_evidence(
+        str(failure.get("message", "")),
+        candidate_key=str(metadata.get("candidate_key", "")),
+        compatibility_key=str(metadata.get("compatibility_key", "")),
+        hardware=str(metadata.get("hardware", "unknown")),
+        total_bytes=int(metadata.get("total_bytes", 0) or 0),
+        headroom_bytes=int(metadata.get("headroom_bytes", 0) or 0),
+        resident_bytes=(
+            candidate_resident
+            if metadata.get("measurement_provenance") in {"nvml-process-exact", "allocator-process"}
+            else None
+        ),
+        physical_free_bytes=_optional_int(metadata.get("physical_free_bytes")),
+        external_bytes=_optional_int(metadata.get("external_bytes")),
+        active_co_runs=max(0, len(active_commitments) - 1),
+        phase=str(metadata.get("phase")) if metadata.get("phase") else None,
+        step=_optional_int(metadata.get("step")),
+    )
+    residents = tuple(str(value) for value in metadata.get("resident_candidates", ()))
+    signature = str(metadata.get("exploration_signature") or "")
+    if not signature:
+        signature = _stable_resource_digest(
+            {
+                "hardware": metadata.get("hardware"),
+                "candidate": metadata.get("candidate_key"),
+                "residents": residents,
+                "headroom": metadata.get("headroom_bytes"),
+            }
+        )
+    total = int(metadata.get("total_bytes", 0) or 0)
+    physical_free = _optional_int(metadata.get("physical_free_bytes"))
+    return PlacementOOMEvidence(
+        candidate_key=str(metadata.get("candidate_key", "")),
+        compatibility_key=str(metadata.get("compatibility_key", "")),
+        hardware=str(metadata.get("hardware", "unknown")),
+        resident_candidates=residents,
+        headroom_bytes=int(metadata.get("headroom_bytes", 0) or 0),
+        physical_free_bytes=physical_free,
+        aggregate_used_bytes=(max(0, total - physical_free) if physical_free is not None else None),
+        attempted_allocation_bytes=extracted.attempted_allocation_bytes,
+        candidate_resident_bytes=candidate_resident,
+        evidence_quality=(
+            "sampled-physical"
+            if metadata.get("measurement_provenance") == "nvml-process-exact"
+            else "lower-bound-only"
+        ),
+        experiment_signature=signature,
     )
 
 
@@ -4163,19 +4655,35 @@ def _resource_admission_diagnostics(
                 "external_bytes": value.external_bytes,
                 "lf_current_resident_bytes": sum(item.current_bytes for item in value.active),
                 "future_committed_bytes": value.future_committed_bytes,
+                "provisional_committed_bytes": value.provisional_committed_bytes,
                 "predicted_headroom_bytes": value.predicted_headroom_bytes,
+                "provisional_headroom_bytes": value.provisional_headroom_bytes,
                 "admission_headroom_bytes": value.admission_headroom_bytes,
                 "active_runs": len(value.active),
                 "runs_per_gpu": value.run_cap,
+                "role": (
+                    "exploration"
+                    if any(item.admission_mode == "EXPLORATORY_ADMISSION" for item in value.active)
+                    else "protected-progress"
+                ),
                 "active": [
                     {
                         "candidate": item.candidate_key,
                         "trial": item.trial,
                         "seed": item.seed,
                         "current_bytes": item.current_bytes,
+                        "running_peak_bytes": item.running_peak_bytes,
                         "future_commitment_bytes": item.commitment_bytes,
+                        "future_peak_samples": list(item.future_peak_samples),
                         "remaining_seconds": item.remaining_seconds,
                         "resource_state": item.resource_state,
+                        "phase": item.phase,
+                        "step": item.step,
+                        "checkpoint_step": item.checkpoint_step,
+                        "checkpoint_elapsed_seconds": item.checkpoint_elapsed_seconds,
+                        "checkpoint_resumable": item.checkpoint_resumable,
+                        "measurement_provenance": item.measurement_provenance,
+                        "admission_mode": item.admission_mode,
                     }
                     for item in value.active
                 ],

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from lambdaforge.execution.ResourceRequest import ResourceRequest
@@ -103,6 +103,8 @@ class AdaptiveSearchPolicy:
     min_improvement: float = 0.0
     sampler: str = "auto"
     fidelity: FidelityPolicy | None = None
+    # Normalized authored dimensions carried internally for resource-space distance.
+    parameter_space: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in (
@@ -288,6 +290,21 @@ class AdaptiveSearchPolicy:
                 if isinstance(raw_fidelity, Mapping)
                 else None
             ),
+            parameter_space={
+                str(name): (
+                    dict(descriptor)
+                    if isinstance(descriptor, Mapping)
+                    else {"values": list(descriptor)}
+                    if isinstance(descriptor, (list, tuple))
+                    else {"values": [descriptor]}
+                )
+                for name, descriptor in (
+                    value.get("parameter_space", value).items()
+                    if isinstance(value.get("parameter_space", value), Mapping)
+                    else ()
+                )
+                if str(name) not in SEARCH_POLICY_FIELDS and str(name) != "trials"
+            },
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -320,6 +337,11 @@ class AdaptiveSearchPolicy:
             "min_improvement": self.min_improvement,
             "sampler": self.sampler,
             "fidelity": self.fidelity.to_dict() if self.fidelity is not None else None,
+            "parameter_space": {
+                str(name): dict(descriptor)
+                for name, descriptor in self.parameter_space.items()
+                if isinstance(descriptor, Mapping)
+            },
         }
 
     @property
@@ -351,6 +373,7 @@ SEARCH_POLICY_FIELDS = frozenset(
         "min_improvement",
         "sampler",
         "fidelity",
+        "parameter_space",
     }
 )
 

@@ -443,8 +443,8 @@ objective: {metric: val_auprc, mode: max}
 resources:
   gpu: 2
   gpu_memory: 16GiB  # VRAM libre mínima exigida antes de iniciar cada Run
-  cpu: 16            # reserva total repartida entre Runs activos
-  memory: 32GiB      # reserva total repartida entre Runs activos
+  cpu: 16            # reserva total; parte estable por cada posible Run concurrente
+  memory: 32GiB      # reserva total; las partes nunca exceden este límite exterior
 ```
 
 El `proposal_pool_size` determinista se almacena una sola vez; cada especificación ligera de
@@ -467,8 +467,8 @@ candidatos, Runs o tiempo, el pool de propuestas, o esta convergencia explícita
 de seeds siguen ahorrando cómputo sin recortar el presupuesto de candidatos declarado.
 
 El ejemplo permite **como máximo** ocho entrenos simultáneos, cuatro en cada GPU; no pide crear ocho
-slots idénticos. Cada candidato recibe una envolvente conservadora de memoria futura aprendida de
-Runs compatibles, completas o censuradas. La memoria física es la autoridad y el headroom futuro se
+slots idénticos. Cada candidato recibe una distribución de memoria futura aprendida de Runs
+terminales y activas censuradas compatibles. La memoria física es la autoridad y el headroom futuro se
 aproxima mediante
 
 $$
@@ -476,10 +476,18 @@ H_g(t)=C_g-E_g(t)-\sum_i M_{i,\mathrm{future}}(t),
 $$
 
 donde $C_g$ es la capacidad utilizable, $E_g$ el uso no atribuido a Runs de LambdaForge y
-$M_{i,\mathrm{future}}$ la demanda máxima todavía posible de cada Run activa. El planner elige la
+$M_{i,\mathrm{future}}=m_i(t)+R_i(t)$ combina el máximo observado y la distribución de memoria que
+todavía puede aparecer. El planner elige la
 GPU segura con menor holgura (best fit), por lo que puede juntar una configuración grande y otra
-pequeña. Sin historial compatible comienza deliberadamente con una Run por GPU y aumenta el packing
-solo cuando la evidencia reduce la incertidumbre.
+pequeña. Empieza conservador, pero fase, progreso, cambios de trayectoria, allocator y checkpoints
+convierten Runs activas en evidencia provisional compartida antes de que terminen.
+
+`SAFE_ADMISSION` cabe considerando incertidumbre y cotas OOM. `EXPLORATORY_ADMISSION` es un paso
+1→2→3 consciente de checkpoints cuyo progreso e información esperados superan el coste de rollback
+e interferencia. Con dos o más GPU intercambiables queda un carril de progreso protegido y solo una
+hermana prueba el mismo escalón incierto. Un éxito provisional promueve el packing antes del último
+epoch; una OOM posterior lo invalida. Por ello un cold start largo no queda bloqueado con una Run
+por GPU solo porque ningún entreno haya terminado.
 
 `gpu_memory` es opcional. Si se declara conserva su semántica de suelo de seguridad mínimo para
 cada lanzamiento; el compromiso efectivo es el máximo entre ese suelo, la envolvente superior
@@ -493,14 +501,26 @@ la primera frontera no puede ejecutarse, el controlador pide una única ampliaci
 misma política científica y lanza su miembro factible más valioso; nunca genera candidatos al azar
 hasta que alguno quepa.
 
+CPU, RAM y almacenamiento conservan una parte estable y prudente por Run, derivada del máximo
+global de concurrencia. No se prometen temporalmente todos los recursos host a las primeras Runs
+del cold start, porque no podrían redimensionarse con seguridad al crecer el packing. La capacidad
+no usada sigue disponible para el sistema operativo y `self.resources` comunica siempre la parte
+con la que una Run puede contar.
+
 LambdaForge sondea solo las GPU concedidas, reacciona al uso externo, escalona lanzamientos y
 actualiza las envolventes con trayectorias acotadas durante toda la Run, incluso cuando todos los
 slots están ocupados y la cola temporal está vacía. Persiste picos físicos, diagnósticos del
 allocator, duración/tiempo al pico, terminaciones censuradas y cotas inferiores OOM. La admisión
 usa el mínimo entre la VRAM física libre y el headroom futuro predicho, de modo que una nueva
-presión externa no pueda quedar oculta por una atribución estimada entre Runs. Si un candidato
-agota memoria con headroom efectivo $H$, queda lógicamente prohibido reintentarlo con headroom
-$\le H$; espera un cambio material. Una OOM aporta evidencia de recursos, nunca un objective malo.
+presión externa no pueda quedar oculta. Los PID del worker y descendientes CUDA se cruzan con NVML;
+los heartbeats del allocator añaden fase, step y picos breves. El fallback se etiqueta como inferido.
+El snapshot acotado de evidencia activa se escribe atómicamente: tras reiniciar el controlador
+puede informar la incertidumbre como evidencia provisional anterior, pero LambdaForge nunca supone
+que sus PID sigan vivos. La evidencia terminal lo sustituye y un cierre correcto vacía el snapshot.
+Una OOM sin atribución fiable restringe el packing concreto, no inventa el tamaño del candidato.
+No se repite el mismo experimento o uno dominado, pero `heavy+heavy` no prohíbe globalmente
+`heavy+small`. Una OOM exploratoria crea un Attempt del mismo Run y reanuda su checkpoint; nunca es
+un objective malo ni otro Trial.
 La interferencia medida entre co-runners también puede impedir añadir otro proceso aunque quepa en
 VRAM: se maximiza trabajo científico útil por tiempo, no memoria ocupada.
 
@@ -671,7 +691,10 @@ para automatización mediante `lf overview --json`, `lf show WORK --json`,
 `lf show WORK --run trial-00001-seed-4 --json` y
 `lf logs WORK --run trial-00001-seed-4 --tail 300`. El índice vivo conserva solo estado compacto y
 JSONL escalar; referencia los logs/resultados existentes y reduce las curvas al leerlas, sin
-duplicar checkpoints, modelos ni outputs pesados.
+duplicar checkpoints, modelos ni outputs pesados. La pestaña **Artifacts** de una seed y
+`lf show WORK --run CLAVE` enumeran cada artefacto gestionado ya finalizado con su ruta utilizable
+preferida, rol, tipo MIME y tamaño. El JSON añade SHA-256, rutas gestionada/publicada, retención y
+metadatos. Un output `published-only` apunta a `publish_to`; los demás permanecen dentro del Run.
 
 El acceso físico a GPU pertenece al perfil del clúster. `gpu_access.mode=auto` usa SLURM en un
 clúster SLURM y leases exclusivos conservadores en hosts directos. Para un host deliberadamente
@@ -936,6 +959,18 @@ progreso de preview/aplicación, previsualiza todas las ubicaciones y exige conf
 borrar la DatasetVersion completa. Mientras está activa bloquea nuevas pulsaciones. Si una carpeta fue borrada manualmente, limpia el registro obsoleto sin
 fallar ni dejar una versión lógica vacía. Las Runs podadas muestran «not final · pruned» o «not
 observed» para ausencias esperadas, no el ambiguo «unavailable».
+
+Las publicaciones remotas nuevas usan la raíz efectiva del proyecto actual, incluido
+`<raíz-datasets-configurada>/projects/<project-id>`. Una colocación antigua verificada puede seguir
+funcionando en su ruta sin scope registrada explícitamente: es evidencia durable, no una búsqueda
+global implícita. La última carpeta hash representa la identidad del contenido. Si el preprocesado
+cambia cualquier byte de los assets, debe publicarse una versión nueva en vez de reutilizar
+`NOMBRE@VERSION`. `lf datasets reconcile NOMBRE@VERSION --on CLUSTER` previsualiza una reparación
+solo de índices; añade `--apply` tras revisarla. Una colocación conflictiva existente o inaccesible
+nunca se elimina automáticamente. LambdaForge no retransmite silenciosamente un dataset remoto
+grande a través del controlador: la colocación entre dos remotos usa el servicio durable de
+transferencia del centro y después `reconcile`, cuando ya existe allí el directorio exacto con su
+manifiesto.
 
 El nombre de un Work es una etiqueta, no su identidad. El mismo YAML puede ejecutarse a la vez en
 local y en uno o más clústeres; las tablas y acciones destructivas usan el `work_id` exacto, por lo

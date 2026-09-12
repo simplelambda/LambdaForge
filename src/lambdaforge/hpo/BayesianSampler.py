@@ -45,11 +45,16 @@ class BayesianSampler:
 
     @staticmethod
     def available() -> bool:
-        """Return whether the optional provider imports cleanly."""
+        """Return whether the optional provider and its Torch/NumPy bridge are usable."""
         try:
             importlib.import_module("botorch")
             importlib.import_module("gpytorch")
-        except ImportError:
+            # BoTorch's SciPy optimizer converts tensors through NumPy. Some otherwise
+            # importable combinations (notably an older Torch wheel beside NumPy 2) fail only
+            # during the first fit; report that provider as unavailable so the deterministic
+            # mixed-kNN fallback remains operational.
+            torch.zeros(1).numpy()
+        except (ImportError, RuntimeError):
             return False
         return True
 

@@ -645,16 +645,25 @@ class JobService:
         log_text, log_truncated = self._read_study_log(transport, log_path, tail=tail)
         failure = selected.get("failure")
         failure = dict(failure) if isinstance(failure, Mapping) else None
-        if result_path is not None and failure is not None:
+        persisted: Mapping[str, Any] | None = None
+        result_ready = str(selected.get("state", "")) in {
+            "succeeded",
+            "failed",
+            "pruned",
+            "cancelled",
+        }
+        if result_path is not None and (result_ready or failure is not None):
             result_text, _result_truncated = self._read_bounded_file(
                 transport, result_path, limit=8 * 1024 * 1024
             )
             if result_text:
                 try:
-                    persisted = json.loads(result_text)
+                    loaded_result = json.loads(result_text)
                 except (json.JSONDecodeError, TypeError):
-                    persisted = None
-                if isinstance(persisted, Mapping) and isinstance(persisted.get("failure"), Mapping):
+                    loaded_result = None
+                if isinstance(loaded_result, Mapping):
+                    persisted = loaded_result
+                if persisted is not None and isinstance(persisted.get("failure"), Mapping):
                     failure = dict(persisted["failure"])
         if failure is not None:
             diagnostic = failure.get("diagnostic")
@@ -762,6 +771,7 @@ class JobService:
             "log": log_text,
             "log_truncated": log_truncated,
             "metrics_truncated": metrics_truncated,
+            "artifacts": self._study_artifacts(persisted, run_dir),
             "paths": {
                 "run_dir": selected.get("run_dir"),
                 "log": str(log_path) if log_path is not None else None,
@@ -769,6 +779,61 @@ class JobService:
                 "result": str(result_path) if result_path is not None else None,
             },
         }
+
+    @staticmethod
+    def _study_artifacts(
+        result: Mapping[str, Any] | None,
+        run_dir: PurePosixPath | None,
+    ) -> Sequence[dict[str, Any]]:
+        """Build safe, useful artifact locations from one persisted Run result."""
+        if result is None or run_dir is None:
+            return []
+        raw_artifacts = result.get("artifacts", ())
+        if not isinstance(raw_artifacts, Sequence) or isinstance(raw_artifacts, str | bytes):
+            return []
+        artifacts: list[dict[str, Any]] = []
+        for raw in raw_artifacts:
+            if not isinstance(raw, Mapping):
+                continue
+            relative_value = raw.get("path")
+            if not isinstance(relative_value, str) or not relative_value:
+                continue
+            relative = PurePosixPath(relative_value)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RuntimeError("Persisted Run contains an unsafe managed artifact path.")
+            managed_path = run_dir / relative
+            try:
+                managed_path.relative_to(run_dir)
+            except ValueError as error:
+                raise RuntimeError(
+                    "Persisted Run contains an artifact outside its owned directory."
+                ) from error
+            metadata = raw.get("metadata", {})
+            metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+            published = metadata.get("published_to")
+            published_path = str(published) if isinstance(published, str) and published else None
+            retention = str(metadata.get("retention", "managed-internal"))
+            retained_managed_path = None if retention == "published-only" else str(managed_path)
+            available_path = (
+                published_path
+                if retention == "published-only" and published_path is not None
+                else str(managed_path)
+            )
+            artifacts.append(
+                {
+                    "name": str(raw.get("name", relative.name)),
+                    "role": str(raw.get("role", "artifact")),
+                    "media_type": raw.get("media_type"),
+                    "size_bytes": raw.get("size_bytes"),
+                    "sha256": raw.get("sha256"),
+                    "path": available_path,
+                    "managed_path": retained_managed_path,
+                    "published_path": published_path,
+                    "retention": retention,
+                    "metadata": metadata,
+                }
+            )
+        return artifacts
 
     @staticmethod
     def _load_study_summary(record: JobRecord, transport: Any) -> dict[str, Any] | None:

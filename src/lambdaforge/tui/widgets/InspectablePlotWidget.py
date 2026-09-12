@@ -23,10 +23,7 @@ class _NoColorSafeCanvas(Canvas):
         strip = super().render_line(y)
         base = self.rich_style
         return Strip(
-            [
-                Segment(segment.text, segment.style or base, segment.control)
-                for segment in strip
-            ],
+            [Segment(segment.text, segment.style or base, segment.control) for segment in strip],
             strip.cell_length,
         )
 

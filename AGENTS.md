@@ -232,8 +232,18 @@ per-device maximum inside the fixed outer reservation; `max_parallel` remains th
 admission uses the maximum of that floor, a candidate-specific conservative future envelope and
 known OOM lower bounds, bounded again by live physical free VRAM. Physical VRAM is authoritative.
 Never multiply the floor by active Runs or
-maintain a second reservation. Cold start admits one unknown Run per GPU; compatible exact/censored
-history then enables denser best-fit packing. `RESOURCE_BLOCKED` is reversible and scientifically
+maintain a second reservation. Cold start creates one progress lane per GPU, then uses live
+right-censored PID/allocator trajectories, phase/progress and durable checkpoints to evaluate
+incremental `SAFE_ADMISSION` or `EXPLORATORY_ADMISSION` steps before terminal Runs exist. Keep one
+protected compatible-GPU lane, one uncharacterized ladder step per evidence class, and share
+provisional knowledge across sibling GPUs. Larger groups may explore distinct resource questions
+concurrently, but never duplicate an equivalent experiment or consume the final protected lane.
+CPU/RAM/storage shares remain based on the hard global concurrency ceiling so dynamic GPU packing
+cannot over-promise host resources. Exact NVML process attribution is preferred; aggregate
+fallback remains censored. OOM constraints belong to the exact packing unless reliable candidate
+resident-plus-allocation evidence establishes an intrinsic bound; never restore global concurrency
+backoff. Compatible exact/censored
+history enables denser best-fit packing. `RESOURCE_BLOCKED` is reversible and scientifically
 neutral; `RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` requires a hard lower bound above device capacity.
 Never retry a compatible OOM candidate at the same or lower effective headroom. The resource
 planner consumes a bounded ranked scientific frontier, may safely backfill, protects heavy work
@@ -247,7 +257,10 @@ must not retain one CUDA context per device or consume a scientific slot. Repeat
 `step=` for early stopping. `LightningRunner` bridges them automatically; custom loops return at a
 safe boundary when `self.stop_requested` is true.
 
-Every adaptive CPU/GPU Run owns a fresh one-worker process. A lost/killed worker and CUDA OOM may
+Every adaptive CPU/GPU Run owns a fresh one-worker process. An exploratory CUDA OOM enters
+`RESOURCE_RECOVERY` as a new checkpoint-compatible Attempt of the same logical Run and is bounded
+by persisted failed-placement dominance rather than generic retry count. A lost/killed worker and
+non-exploratory CUDA OOM may
 retry as a new checkpoint-compatible Attempt up to `failure_retries` (default 1, max 3); a repeat is
 terminal. OOM is censored resource evidence, not an objective value; persist its attempted
 allocation/headroom/residency/source and recompute every pending placement before retry. Prefer
@@ -259,7 +272,9 @@ index and exact inherited token; never infer or broaden physical devices from th
 Study telemetry is a bounded read model, not another result store. It references per-Run logs and
 scalar JSONL, never copies checkpoints/outputs, and exposes exact keys under
 `overview --json` → `work.items[].study`. `lf show WORK --run KEY --json` returns parameters,
-down-sampled curves, current/best objective and epoch, timing/failure/log; `lf logs WORK --run KEY`
+down-sampled curves, current/best objective and epoch, timing/failure/log plus finalized artifact
+paths/checksums/retention; the seed Artifacts tab consumes the same metadata without copying or
+opening remote content. `lf logs WORK --run KEY`
 isolates output. Completed HPO uses the mean of each seed's best observed checkpoint; current
 same-step curves drive pruning, and pruned Runs are terminal censored evidence—not failures—and
 excluded as exact values from completed-objective fitting/statistics. Their parameter-region
@@ -412,6 +427,13 @@ Normal execution reuses verified success. Retry means same Run/new Attempt; resu
 checkpoints; rerun means a deliberate new Execution. Published datasets are durable independent
 objects. Results/checkpoints are scientific state. Bundle/environment/cache bytes are
 reconstructible. Deletion and cleanup must be exact-root, symlink-safe, idempotent and preview-first.
+
+Project-scoped dataset roots affect new publications only. Preserve a verified legacy absolute
+placement already recorded for the current project. Content-hash subdirectories are immutable
+identity, never random paths: changed bytes require a new logical version. Publication must check
+registry compatibility before commit and roll back a newly committed directory if final
+registration fails. A conflicting remote registration is safely reconcilable only when its exact
+registered directory is proven absent; unreachable or existing bytes remain a hard conflict.
 
 Dataset creation occurs only from `self.outputs.dataset(...)`; it streams members into the existing
 DatasetArtifact v2/index/registry format. There is no dataset-build execution protocol. Preserve v1

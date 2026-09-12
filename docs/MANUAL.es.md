@@ -619,6 +619,11 @@ resources:
   time: 24h
 ```
 
+La parte de CPU/RAM/almacenamiento se calcula con el máximo global duro de concurrencia, no con el
+número momentáneo de Runs GPU activas. Así no se prometen recursos host sobrantes a una Run inicial
+que después no podría redimensionarse. La reserva exterior nunca se sobreasigna y el contrato de
+`self.resources` permanece estable durante toda la admisión GPU dinámica.
+
 El máximo es \(2\times4=8\) entrenos concurrentes. Seis GPUs con `runs_per_gpu: 2` dan 12; dos con
 `runs_per_gpu: 1` dan 2. `runs_per_gpu` es un máximo duro, no una petición de slots idénticos.
 `gpu_memory` es un suelo de seguridad opcional. Si se declara, cada lanzamiento comprueba
@@ -638,10 +643,14 @@ Allocated/reserved de CUDA son diagnósticos y features, no sustitutos de la ocu
 trayectorias acotadas preservan el pico real y las transiciones; no hay un timeout fijo al pico.
 
 Para la GPU \(g\), el planner razona con \(C_g-E_g-\sum_i M_{i,future}\): capacidad utilizable
-menos uso externo y compromisos futuros activos. Sin historia compatible admite una Run por GPU
-hasta reducir incertidumbre. Una cota OOM es dura: si un candidato compatible falló con headroom
-\(H\), jamás se prueba con \(\le H\). `RESOURCE_BLOCKED` es una espera reversible;
-`RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` indica que la cota supera ese dispositivo.
+menos uso externo dinámico y distribuciones futuras activas. Aquí
+\(M_{i,future}(t)=m_i(t)+R_i(t)\), con residual no negativo e incierto. Cold start crea primero
+progreso y después usa trayectorias vivas de fase/step y checkpoints para experimentar 1→2→3 sin
+esperar picos terminales. `SAFE_ADMISSION` usa envolventes respaldadas;
+`EXPLORATORY_ADMISSION` exige que progreso e información esperados superen rollback e interferencia.
+GPU equivalentes mantienen un carril protegido y no duplican el mismo escalón sin validar.
+`RESOURCE_BLOCKED` es reversible; `RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` exige una cota intrínseca
+dura superior al dispositivo.
 
 El controlador científico entrega una frontera ordenada y acotada. El planner usa best fit,
 preserva GPU grandes para trabajo pesado y puede ejecutar backfill corto hasta la ventana predicha
@@ -671,10 +680,19 @@ Es admisión preventiva, no un límite duro dentro del código consumidor. Un `g
 sirve si se conoce un mínimo no negociable; el modo automático es apropiado cuando el search cambia
 mucho la demanda. `max_parallel` conserva el máximo global duro y limita estudios solo CPU.
 
+LambdaForge atribuye VRAM por PID/árbol de procesos mediante NVML y reconcilia uso externo en cada
+muestra. Heartbeats del allocator añaden fase, checkpoint y picos breves; el fallback agregado queda
+censurado. La evidencia OOM separa memoria intrínseca de la firma del packing fallido: por ello
+`heavy+heavy` no reduce un techo global ni prohíbe `heavy+small`.
+Un snapshot activo acotado y atómico sobrevive a una interrupción del controlador como conocimiento
+provisional anterior. Puede informar la incertidumbre tras reiniciar, pero nunca se restaura como
+proceso vivo o pico exacto; la evidencia terminal lo sustituye y el cierre normal lo vacía.
+
 El aislamiento sigue el límite de Run. Tanto en CPU como GPU cada Run adaptativo usa un proceso
 nuevo de un worker: matar uno no rompe un pool compartido ni cancela candidatos ajenos. Un worker
 perdido antes de devolver resultado y una OOM/asignación CUDA se reintentan como Attempt nuevo hasta
-`failure_retries` (1 por defecto, rango 0–3), conservando checkpoints compatibles bajo el mismo
+`failure_retries` (1 por defecto, rango 0–3). Una OOM exploratoria entra en `RESOURCE_RECOVERY`,
+conservando checkpoints compatibles bajo el mismo
 Run. Una OOM CUDA registra asignación intentada (si aparece), headroom físico, residencia del
 candidato, uso externo y co-runners como cota inferior censurada, y actualiza las predicciones
 pendientes. El reintento no se admite hasta que mejore materialmente el headroom u otra condición
@@ -905,7 +923,12 @@ lf logs WORK --run trial-00017-seed-4 --tail 300
 ```
 
 `work.items[].study` contiene catálogo compacto y claves exactas. `show --run` devuelve parámetros,
-últimos valores, curvas reducidas, log acotado, fallo y rutas de evidencia; `--curve-points N` elige
+últimos valores, curvas reducidas, log acotado, fallo, rutas de evidencia y el inventario de
+artefactos gestionados ya finalizados. La salida humana destaca la ruta utilizable preferida; el
+JSON conserva checksum, tamaño, rol, tipo MIME, ubicaciones gestionada/publicada, retención y
+metadatos. La Consola de investigación muestra el mismo inventario en **Artifacts** de la seed. La
+inspección solo lee metadatos: no copia ni abre ficheros remotos. Los artefactos no aparecen antes
+de finalizar correctamente los outputs; `--curve-points N` elige
 10–500 puntos. `logs --run` emite solo ese log. Una interfaz headless debe consultar el JSON;
 `--follow` queda para logs externos porque la Consola de investigación ya refresca cada Run de forma segura.
 
@@ -1500,6 +1523,23 @@ Con almacenamiento remoto por defecto, el trabajo nuevo usa
 `<workspace>/.lambdaforge/projects/<project-id>/{state,cache,jobs}`. Una raíz personalizada mantiene
 la frontera añadiendo `projects/<project-id>`. Son rutas operativas: el ID de proyecto no entra en la
 identidad científica. La raíz compartida de leases queda intencionadamente fuera.
+
+Esto también se aplica a `storage.dataset_root`: una raíz declarada como `/datos/datasets` se
+convierte en `/datos/datasets/projects/<project-id>` para publicaciones nuevas. Una DatasetVersion
+antigua puede seguir resolviéndose desde una ruta absoluta sin scope si esa colocación exacta ya
+estaba registrada y su manifiesto e identidad de contenido verifican. LambdaForge conserva esa
+colocación durable heredada; no deduce que cualquier proyecto pueda usar bytes arbitrarios de la
+raíz antigua. El directorio hexadecimal bajo `NOMBRE/VERSION/` es el prefijo del ID de contenido,
+no un proyecto ni un Run aleatorio. Publicar bytes distintos con el mismo `NOMBRE@VERSION` se
+rechaza; debe incrementarse la versión.
+
+`lf datasets reconcile NOMBRE@VERSION --on CLUSTER` previsualiza reparaciones solo de índices. Un
+registro remoto conflictivo solo se puede eliminar con `--apply` si se demuestra que su directorio
+registrado ya no existe; bytes válidos o inaccesibles conservan el conflicto duro. Los fallos de
+publicación revierten los bytes recién comprometidos, por lo que rechazar una versión inmutable no
+deja un nuevo directorio gestionado sin registrar. La réplica entre dos remotos nunca cae en
+retransmitir un tamaño arbitrario por el disco del controlador: se usa el servicio de transferencia
+del centro y después se reconcilia la colocación exacta verificada en destino.
 
 El catálogo de usuario `~/.config/lambdaforge/clusters.yaml` sigue siendo la fuente común para host,
 autenticación y políticas del centro. El `lambdaforge.clusters.yaml` del proyecto es un overlay

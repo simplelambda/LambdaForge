@@ -334,9 +334,7 @@ def write_metric_html(
     return _write_small_report(output, "LambdaForge learning curves", body)
 
 
-def write_parameter_html(
-    analysis: Mapping[str, Any], parameter: str, output: str | Path
-) -> Path:
+def write_parameter_html(analysis: Mapping[str, Any], parameter: str, output: str | Path) -> Path:
     """Write one parameter response plus its persisted pairwise surfaces."""
     try:
         import plotly.graph_objects as go
@@ -365,15 +363,19 @@ def write_parameter_html(
             {},
         )
         live_response = detail.get("response", {}) if isinstance(detail, Mapping) else {}
-        points = [
-            {
-                "x": value.get("parameter", value.get("label")),
-                "predicted_objective": value.get("objective"),
-                "support_count": value.get("samples", 0),
-            }
-            for value in live_response.get("points", ())
-            if isinstance(value, Mapping)
-        ] if isinstance(live_response, Mapping) else []
+        points = (
+            [
+                {
+                    "x": value.get("parameter", value.get("label")),
+                    "predicted_objective": value.get("objective"),
+                    "support_count": value.get("samples", 0),
+                }
+                for value in live_response.get("points", ())
+                if isinstance(value, Mapping)
+            ]
+            if isinstance(live_response, Mapping)
+            else []
+        )
 
     x = [value.get("x", value.get("category")) for value in points]
     y = [
@@ -392,12 +394,10 @@ def write_parameter_html(
             float(value) for value in uncertainty if isinstance(value, int | float)
         ]
         upper = [
-            value + spread
-            for value, spread in zip(numeric_y, numeric_uncertainty, strict=True)
+            value + spread for value, spread in zip(numeric_y, numeric_uncertainty, strict=True)
         ]
         lower = [
-            value - spread
-            for value, spread in zip(numeric_y, numeric_uncertainty, strict=True)
+            value - spread for value, spread in zip(numeric_y, numeric_uncertainty, strict=True)
         ]
         response_figure.add_trace(
             go.Scatter(
@@ -428,8 +428,7 @@ def write_parameter_html(
             mode=(
                 "lines+markers"
                 if all(
-                    isinstance(value, int | float) and not isinstance(value, bool)
-                    for value in x
+                    isinstance(value, int | float) and not isinstance(value, bool) for value in x
                 )
                 else "markers"
             ),
@@ -487,9 +486,7 @@ def write_parameter_html(
     )
 
 
-def write_resource_html(
-    cluster: str, series: Mapping[str, Any], output: str | Path
-) -> Path:
+def write_resource_html(cluster: str, series: Mapping[str, Any], output: str | Path) -> Path:
     """Write hoverable CPU/RAM/GPU histories from the console's bounded samples."""
     try:
         import plotly.graph_objects as go

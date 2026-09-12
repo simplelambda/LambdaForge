@@ -146,8 +146,17 @@ la reserva fija y `max_parallel` el máximo global. `resources.gpu_memory` es op
 un suelo de seguridad del usuario por lanzamiento. La admisión efectiva usa el máximo entre ese
 suelo, una envolvente futura conservadora específica del candidato y cotas OOM conocidas. La VRAM
 física libre actual impone además el límite estricto. La VRAM física es la autoridad. Nunca
-multipliques el suelo por Runs activos ni mantengas otra reserva. Cold
-start admite una Run desconocida por GPU; historia compatible exacta/censurada permite después
+multipliques el suelo por Runs activos ni mantengas otra reserva. Cold start crea progreso y después
+usa trayectorias PID/allocator activas censuradas, fase/progreso y checkpoints para pasos
+incrementales `SAFE_ADMISSION` o `EXPLORATORY_ADMISSION` antes de que haya Runs terminales. Conserva
+un carril protegido, un escalón sin caracterizar por clase y comparte evidencia provisional entre
+GPU hermanas. En grupos grandes permite preguntas de recursos distintas en paralelo, pero nunca
+duplica un experimento equivalente ni ocupa el último carril protegido. Las partes de
+CPU/RAM/almacenamiento se basan en el máximo global duro para no sobreprometer recursos host.
+Prefiere atribución NVML por proceso; el fallback agregado queda censurado. Una OOM
+restringe el packing exacto salvo que residencia propia más asignación solicitada demuestre cota
+intrínseca; nunca restaures backoff global de concurrencia. La historia compatible exacta o
+censurada permite después
 packing best-fit más denso. `RESOURCE_BLOCKED` es reversible y científicamente neutro;
 `RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` requiere una cota dura superior al dispositivo. Nunca
 reintentes una OOM compatible con headroom igual o menor. El planner consume una frontera científica
@@ -163,7 +172,9 @@ Study ni admitir desde memoria obsoleta. Para early stopping registra la
 métrica repetida con `step=`; `LightningRunner` lo enlaza, y un loop propio retorna en un límite
 seguro al detectar `self.stop_requested`.
 
-Cada Run adaptativo CPU/GPU posee proceso nuevo de un worker. Un worker perdido/matado o una OOM
+Cada Run adaptativo CPU/GPU posee proceso nuevo de un worker. Una OOM exploratoria entra en
+`RESOURCE_RECOVERY` como Attempt nuevo del mismo Run y queda acotada por dominancia persistida del
+packing fallido, no por reintentos genéricos. Un worker perdido/matado o una OOM no exploratoria
 CUDA puede reintentarse como Attempt compatible con checkpoints hasta `failure_retries` (1 por
 defecto, máximo 3); si se repite queda terminal. OOM es evidencia censurada de recursos, no un
 objective: persiste asignación intentada/headroom/residencia/origen y replantea todo lo pendiente
@@ -180,7 +191,9 @@ snapshot `.surrogate_belief` emitido por el sampler real.
 La telemetría de estudio es un modelo de lectura acotado, no otro almacén de resultados. Referencia
 logs y JSONL escalares por Run, nunca copia checkpoints/outputs, y expone claves exactas en
 `overview --json` → `work.items[].study`. `lf show WORK --run CLAVE --json` devuelve parámetros,
-curvas reducidas, objective y época actual/óptima, tiempos/fallo/log; `lf logs WORK --run CLAVE`
+curvas reducidas, objective y época actual/óptima, tiempos/fallo/log y rutas/checksums/retención de
+artefactos finalizados; la pestaña Artifacts de la seed consume esos mismos metadatos sin copiar ni
+abrir contenido remoto. `lf logs WORK --run CLAVE`
 aísla la salida. HPO terminado usa la media del mejor checkpoint de cada seed; las curvas actuales
 al mismo step deciden pruning y un Run podado es evidencia terminal censurada, no fallo, y se
 excluye como valor exacto del ajuste/estadística de objetivos completos. Sus tasas de poda por
@@ -351,6 +364,14 @@ Los datasets publicados son objetos durables independientes. Los resultados y ch
 estado científico; bundles, entornos compartidos y caché son reconstruibles. Todo borrado debe ser
 exacto, seguro frente a symlinks, idempotente y con vista previa. Nunca contactes un clúster real ni
 modifiques datos científicos reales al probar el repositorio.
+
+Las raíces de dataset con scope de proyecto solo afectan a publicaciones nuevas. Conserva una
+colocación absoluta heredada ya registrada para el proyecto si verifica exactamente. Las
+subcarpetas hash son identidad inmutable, no rutas aleatorias: cambiar bytes exige una versión
+lógica nueva. La publicación debe comprobar compatibilidad antes del commit y revertir un
+directorio recién comprometido si falla el registro final. Un registro remoto conflictivo solo es
+reconciliable si se demuestra que su directorio exacto ya no existe; bytes existentes o
+inaccesibles mantienen el conflicto duro.
 
 Antes de finalizar: actualiza ambos manuales, READMEs y AGENTS, esquema/ejemplos si aplica y
 changelog; ejecuta pruebas

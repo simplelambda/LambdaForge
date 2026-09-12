@@ -38,9 +38,7 @@ class HpoParameterDashboard(Vertical):
                 )
 
     def show_parameter(self, name: str, response: Mapping[str, Any]) -> None:
-        points = [
-            value for value in response.get("points", ()) if isinstance(value, Mapping)
-        ]
+        points = [value for value in response.get("points", ()) if isinstance(value, Mapping)]
         live_observed = response.get("source") == "live-observed"
         response_plot: Any = self.query_one(".hpo-response-plot")
         coverage_plot: Any = self.query_one(".hpo-coverage-plot")
@@ -58,9 +56,7 @@ class HpoParameterDashboard(Vertical):
             for point in points
         )
         coordinates = [
-            point.get("x")
-            if numeric
-            else str(point.get("category", point.get("x", "?")))
+            point.get("x") if numeric else str(point.get("category", point.get("x", "?")))
             for point in points
         ]
         predicted = [self._number(point.get("predicted_objective")) for point in points]
@@ -91,8 +87,7 @@ class HpoParameterDashboard(Vertical):
         response_plot.set_ylabel("mean objective" if live_observed else "predicted objective")
 
         support = [
-            int(point.get("support_count", point.get("support", 0)) or 0)
-            for point in points
+            int(point.get("support_count", point.get("support", 0)) or 0) for point in points
         ]
         if coordinates:
             if numeric:

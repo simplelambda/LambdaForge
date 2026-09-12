@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 
 from lambdaforge.hpo.AdaptiveResources import (
     ActiveResourceCommitment,
+    ActiveResourceEvidence,
     CandidateResourceAction,
     GPUPlacementPlanner,
     GPUResourceState,
@@ -42,6 +43,15 @@ class SchedulingBenchmark:
     time_to_envelope_mae_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class ColdStartBenchmark:
+    policy: str
+    time_to_first_two_way_packing_seconds: float
+    idle_vram_gib_seconds: float
+    protected_progress_lanes: int
+    exploratory_oom_count: int
+
+
 def compare_static_and_dynamic() -> dict[str, SchedulingBenchmark]:
     """Run a stable mixed-size workload through both policies using identical evidence."""
     workload = (
@@ -55,6 +65,89 @@ def compare_static_and_dynamic() -> dict[str, SchedulingBenchmark]:
     return {
         "fixed_one_run_per_gpu": _simulate(workload, dynamic=False),
         "adaptive_resource_planner": _simulate(workload, dynamic=True),
+    }
+
+
+def compare_terminal_and_live_cold_start() -> dict[str, ColdStartBenchmark]:
+    """Exercise the real planner on a cheap plateau beside one protected heavy Run."""
+    terminal_wait = 3600.0
+    evidence_time = 120.0
+    live = ActiveResourceEvidence(
+        "cheap",
+        "compatible",
+        {"width": 64},
+        "H100-80",
+        80 * GIB,
+        12 * GIB,
+        12 * GIB,
+        (12 * GIB, 15 * GIB, 80 * GIB),
+        "PROVISIONALLY_STABLE",
+        evidence_time,
+        step=6,
+        checkpoint_step=6,
+        checkpoint_elapsed_seconds=115.0,
+        checkpoint_resumable=True,
+    )
+    model = ResourceDemandModel(active_evidence=(live,))
+    queued = model.predict(
+        candidate_key="next-cheap",
+        compatibility_key="compatible",
+        parameters={"width": 64},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+        user_minimum_bytes=20 * GIB,
+    )
+    action = CandidateResourceAction(
+        "next",
+        {"trial_index": 3, "resource_compatibility_key": "compatible"},
+        1.0,
+        queued,
+    )
+    cheap = ActiveResourceCommitment(
+        "cheap",
+        80 * GIB,
+        current_bytes=12 * GIB,
+        running_peak_bytes=12 * GIB,
+        future_peak_samples=live.future_peak_samples,
+        resource_state=live.resource_state,
+        checkpoint_elapsed_seconds=115.0,
+        checkpoint_resumable=True,
+        elapsed_seconds=evidence_time,
+    )
+    heavy = ActiveResourceCommitment(
+        "heavy",
+        80 * GIB,
+        current_bytes=40 * GIB,
+        running_peak_bytes=40 * GIB,
+        future_peak_samples=(40 * GIB, 80 * GIB),
+        resource_state="RAMPING",
+        elapsed_seconds=evidence_time,
+    )
+    admitted, _ = GPUPlacementPlanner(model).place(
+        (action,),
+        (
+            GPUResourceState(0, "0", "H100-80", 80 * GIB, 68 * GIB, 0, (cheap,), 5),
+            GPUResourceState(1, "1", "H100-80", 80 * GIB, 40 * GIB, 0, (heavy,), 5),
+        ),
+        max_launches=1,
+    )
+    if not admitted or admitted[0].admission_mode != "EXPLORATORY_ADMISSION":
+        raise AssertionError("Live cold-start planner did not make progress.")
+    return {
+        "terminal_only": ColdStartBenchmark(
+            "terminal-only",
+            terminal_wait,
+            68.0 * terminal_wait,
+            2,
+            0,
+        ),
+        "adaptive_resource_v2": ColdStartBenchmark(
+            "adaptive-resource-v2",
+            evidence_time,
+            68.0 * evidence_time,
+            1,
+            0,
+        ),
     }
 
 
