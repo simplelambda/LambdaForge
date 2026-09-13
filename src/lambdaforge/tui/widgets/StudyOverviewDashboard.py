@@ -32,6 +32,10 @@ class StudyOverviewDashboard(Vertical):
                 yield InspectablePlotWidget(
                     classes="study-plot study-objective-plot", allow_pan_and_zoom=True
                 )
+                yield Static(
+                    "● final seed mean  ·  × pruned best observed (censored)",
+                    classes="study-objective-key",
+                )
             with Vertical(classes="study-plot-card"):
                 yield Label("Run states", classes="study-plot-title")
                 yield InspectablePlotWidget(
@@ -53,11 +57,14 @@ class StudyOverviewDashboard(Vertical):
         )
         objective_plot: Any = self.query_one(".study-objective-plot")
         objective_plot.clear()
+        objective_plot.set_xlimits(None, None)
+        objective_plot.set_ylimits(None, None)
         points = [
             (int(item.get("trial", index)), float(item["selection_objective"]))
             for index, item in enumerate(candidates)
             if isinstance(item.get("selection_objective"), int | float)
         ]
+        inspection: list[InspectionPoint] = []
         if points:
             points.sort()
             objective_plot.plot(
@@ -72,18 +79,42 @@ class StudyOverviewDashboard(Vertical):
                 marker="●",
                 marker_style="bright_cyan",
             )
-            objective_plot.set_inspection_points(
-                tuple(
-                    InspectionPoint(
-                        float(trial),
-                        objective_value,
-                        f"trial={trial}",
-                        f"objective={objective_value:.6g}",
-                        "candidate",
-                    )
-                    for trial, objective_value in points
+            inspection.extend(
+                InspectionPoint(
+                    float(trial),
+                    objective_value,
+                    f"trial={trial}",
+                    f"final selection={objective_value:.6g}",
+                    "candidate",
                 )
+                for trial, objective_value in points
             )
+        censored_points = [
+            (int(item.get("trial", index)), float(item["best_objective"]))
+            for index, item in enumerate(candidates)
+            if (item.get("partially_censored") or item.get("state") == "pruned")
+            and isinstance(item.get("best_objective"), int | float)
+            and not isinstance(item.get("best_objective"), bool)
+        ]
+        if censored_points:
+            censored_points.sort()
+            objective_plot.scatter(
+                [point[0] for point in censored_points],
+                [point[1] for point in censored_points],
+                marker="×",
+                marker_style="bold bright_yellow",
+            )
+            inspection.extend(
+                InspectionPoint(
+                    float(trial),
+                    objective_value,
+                    f"trial={trial}",
+                    f"best observed={objective_value:.6g} (pruned; censored)",
+                    "pruned candidate",
+                )
+                for trial, objective_value in censored_points
+            )
+        objective_plot.set_inspection_points(tuple(inspection))
         objective_plot.set_xlabel("trial")
         objective_plot.set_ylabel("selection")
 

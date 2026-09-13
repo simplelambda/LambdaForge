@@ -12,6 +12,13 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Evolved the existing scheduler to Adaptive Resource Intelligence v3. Live trajectories now learn
+  material-growth noise, update a weighted phase-aware peak-survival posterior and contract rare
+  capacity tails without erasing them. A dimensionally coherent WAIT/EXPLORE comparison normalizes
+  scientific ordering, integrates idle-capacity WaitRegret, preserves protected concurrency
+  ladders and can request a cooperative Lightning checkpoint before a valuable probe. Persisted
+  ExplorationEvaluations expose P(fit), hazard, rollback, information value, wait regret and exact
+  rejection reasons without polling spam. Phase-complete pruned Runs remain valid resource evidence.
 - Replaced terminal-only GPU cold start with Adaptive Resource Intelligence v2. Active Run PID/NVML
   memory, allocator peaks, phase/progress trajectories and durable checkpoints now feed a
   future-residual model across compatible GPUs. The existing planner distinguishes safe and
@@ -48,6 +55,11 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Prevented small allocator/cache maxima, a permanent equiprobable capacity tail, an absolute
+  `RAMPING` veto and the former one-second unknown-duration fallback from keeping physically idle
+  GPUs at one Run indefinitely. Neighbour candidates no longer impose provisional intrinsic lower
+  bounds, joint fit draws no longer correlate unrelated Runs by raw sample index, and real ramps,
+  hard OOM bounds, failed placements, run caps and throughput regressions remain safe blockers.
 - Made managed dataset publication transactional across the filesystem/registry boundary: a known
   immutable-version conflict is rejected before commit, a late registration failure removes only
   the directory created by that attempt, and stale conflicting remote records become explicitly

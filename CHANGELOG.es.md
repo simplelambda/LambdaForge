@@ -11,6 +11,13 @@ metadata empaquetada.
 
 ### Añadido
 
+- Evolucionado el scheduler existente a Adaptive Resource Intelligence v3. Las trayectorias vivas
+  aprenden ruido de crecimiento material, actualizan un posterior de supervivencia de pico
+  ponderado y consciente de fases y contraen colas raras sin borrarlas. La comparación coherente
+  WAIT/EXPLORE normaliza el orden científico, integra WaitRegret por capacidad ociosa, conserva la
+  escalera protegida y puede solicitar un checkpoint Lightning cooperativo antes de un probe útil.
+  ExplorationEvaluations persistidas muestran P(fit), hazard, rollback, valor informativo, espera y
+  motivo exacto sin spam. Runs podadas con perfil completo siguen siendo evidencia de recursos.
 - Sustituido el cold start GPU dependiente de Runs terminales por Adaptive Resource Intelligence
   v2. Memoria PID/NVML, picos del allocator, trayectorias de fase/progreso y checkpoints activos
   alimentan un modelo de residual futuro compartido entre GPU compatibles. El planner existente
@@ -47,6 +54,11 @@ metadata empaquetada.
 
 ### Corregido
 
+- Evitado que máximos minúsculos del allocator, una cola a capacidad equiprobable permanente, el
+  veto absoluto de `RAMPING` y la duración desconocida ficticia de un segundo mantengan GPU ociosas
+  con una Run indefinidamente. Los vecinos ya no imponen cotas provisionales intrínsecas y los draws
+  conjuntos no correlacionan Runs por índice; rampas reales, cotas OOM, packings fallidos, máximos de
+  Runs y regresiones de throughput continúan bloqueando de forma segura.
 - Hecha transaccional la publicación de datasets gestionados entre sistema de ficheros y registro:
   un conflicto conocido de versión inmutable se rechaza antes del commit, un fallo tardío de
   registro elimina solo el directorio creado por ese intento y un registro remoto conflictivo y

@@ -151,7 +151,15 @@ usa trayectorias PID/allocator activas censuradas, fase/progreso y checkpoints p
 incrementales `SAFE_ADMISSION` o `EXPLORATORY_ADMISSION` antes de que haya Runs terminales. Conserva
 un carril protegido, un escalón sin caracterizar por clase y comparte evidencia provisional entre
 GPU hermanas. En grupos grandes permite preguntas de recursos distintas en paralelo, pero nunca
-duplica un experimento equivalente ni ocupa el último carril protegido. Las partes de
+duplica un experimento equivalente ni ocupa el último carril protegido.
+Los máximos minúsculos del allocator son deriva cuando lo respalda la evidencia robusta
+física/allocator; actualiza un posterior de supervivencia ponderado y no convierte colas tardías
+raras en muestras equiprobables. `RAMPING` explica riesgo pero no es un veto duro. Integra fracción
+ociosa utilizable × tasa de valor científico normalizado como WaitRegret y compara
+WAIT/EXPLORE/CHECKPOINT_THEN_EXPLORE hasta el siguiente evento; nunca inventes un segundo de duración
+ni uses el score crudo como moneda. Persiste ExplorationEvaluations cambiadas y motivos WHY-WAIT sin
+spam. El pruning científico no determina completitud de recursos: un perfil podado exacto y con
+fases completas entrena el modelo de recursos aunque su objective siga censurado. Las partes de
 CPU/RAM/almacenamiento se basan en el máximo global duro para no sobreprometer recursos host.
 Prefiere atribución NVML por proceso; el fallback agregado queda censurado. Una OOM
 restringe el packing exacto salvo que residencia propia más asignación solicitada demuestre cota

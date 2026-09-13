@@ -305,6 +305,12 @@ def test_pruned_only_candidate_is_terminal_censored_evidence_not_failure(
     snapshot = study.refresh()
 
     assert snapshot["candidates"][0]["state"] == "pruned"
+    assert snapshot["candidates"][0]["latest_metrics"]["score"] == pytest.approx(0.1)
+    assert snapshot["candidates"][0]["current_objective"] == pytest.approx(0.1)
+    assert snapshot["candidates"][0]["best_objective"] == pytest.approx(0.1)
+    assert snapshot["candidates"][0]["best_evidence_state"] == "pruned"
+    assert "selection_objective" not in snapshot["candidates"][0]
+    assert "selection_standard_error" not in snapshot["candidates"][0]
     assert snapshot["hpo_analysis"]["candidate_observations"] == 0
     assert snapshot["hpo_analysis"]["censored_pruned_candidates"] == 1
     assert snapshot["counts"]["pruned_runs"] == 1
@@ -1096,6 +1102,43 @@ def test_lightning_bridge_records_epoch_wall_time_once_per_step(tmp_path: Path) 
     values = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert sum(value["name"] == "epoch_time_s" for value in values) == 1
     assert sum(value["name"] == "train_loss" for value in values) == 1
+
+
+def test_lightning_bridge_honors_resource_checkpoint_at_safe_epoch_boundary(
+    tmp_path: Path,
+) -> None:
+    request = tmp_path / "checkpoint.request"
+    request.write_text("requested", encoding="utf-8")
+    checkpoint_root = tmp_path / "checkpoints"
+    saved: list[Path] = []
+
+    def save_checkpoint(path: str) -> None:
+        destination = Path(path)
+        destination.write_text("checkpoint", encoding="utf-8")
+        saved.append(destination)
+
+    callback = AdaptiveHpoCallback(
+        None,
+        None,
+        None,
+        tmp_path / "training.jsonl",
+        resource_checkpoint_request_path=request,
+        resource_checkpoint_dir=checkpoint_root,
+    )
+    trainer = SimpleNamespace(
+        current_epoch=3,
+        callback_metrics={"loss": 0.5},
+        should_stop=False,
+        is_global_zero=True,
+        save_checkpoint=save_checkpoint,
+    )
+
+    callback.on_train_epoch_start(trainer)
+    callback.on_train_epoch_end(trainer)
+
+    assert saved == [checkpoint_root / "step-00000004.ckpt"]
+    assert saved[0].read_text(encoding="utf-8") == "checkpoint"
+    assert not request.exists()
 
 
 def test_lightning_bridge_emits_one_same_checkpoint_composite_utility(tmp_path: Path) -> None:

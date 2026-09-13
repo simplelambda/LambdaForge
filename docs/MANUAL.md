@@ -755,6 +755,25 @@ timeout exists.
 For GPU \(g\), placement reasons about \(C_g-E_g-\sum_i M_{i,future}\): usable capacity minus
 dynamic external occupancy and active future distributions. Here
 \(M_{i,future}(t)=m_i(t)+R_i(t)\), where the residual \(R_i\) remains non-negative and uncertain.
+The residual is a weighted empirical distribution, not equiprobable extrema. A weak Jeffreys
+survival prior is updated after material peak events and quiet progress cycles; robust
+physical/allocator dispersion separates measurement drift from material growth. Critical phase
+transitions preserve late-allocation risk until observed. Thus `RAMPING` explains state but is not
+an absolute placement veto.
+
+For an eligible GPU the planner integrates wait regret
+
+$$
+W_g(t_1)-W_g(t_0)=\int_{t_0}^{t_1} u_g(t)\,r_*(t)\,dt,
+$$
+
+where \(u_g\) is physically usable idle fraction and \(r_*\) the best normalized pending
+scientific-value rate. WAIT and EXPLORE are compared until the next observed step, phase,
+checkpoint or completion, not a timeout. Rollback GPU-seconds use the same opportunity rate;
+resource-information value remains separate from candidate priority. Unknown duration uses
+candidate/near history or live step-rate extrapolation and otherwise stays unknown. Lightning can
+honor a selective checkpoint request at a safe epoch boundary when rollback alone blocks a useful
+experiment.
 Cold start first creates progress, then uses live phase/step trajectories and checkpoints for
 incremental 1→2→3 experiments without waiting for terminal peaks. `SAFE_ADMISSION` uses supported
 future envelopes; `EXPLORATORY_ADMISSION` is chosen only when expected progress plus resource
@@ -798,6 +817,13 @@ physical used memory on every sample. Allocator heartbeats add phase, checkpoint
 evidence; aggregate fallback remains explicitly censored. OOM evidence separates intrinsic
 resident-plus-requested bytes from a failed placement signature. Consequently a failed
 `heavy+heavy` packing cannot reduce a global GPU concurrency ceiling or prohibit `heavy+small`.
+Scientific termination is separate from resource completeness: a performance-pruned Run with
+observed forward/backward/optimizer/validation phases and exact process telemetry contributes an
+exact resource profile while its objective remains censored. Changed plan comparisons are stored
+in `exploration-evaluations.jsonl`, including P(fit), hazard, wait regret and explicit reasons such
+as `RUN_CAP`, `HARD_LOWER_BOUND`, `KNOWN_FAILED_PLACEMENT`, `PROTECTED_LANE`,
+`THROUGHPUT_REGRESSION`, `ROLLBACK_DOMINATES` and `WAIT_CURRENTLY_BETTER`; repeated polls are
+suppressed.
 An atomic bounded active-evidence snapshot survives controller interruption as stale provisional
 knowledge. It can warm uncertainty after restart, but is never restored as a live process or exact
 peak; terminal evidence supersedes it and normal completion clears it.

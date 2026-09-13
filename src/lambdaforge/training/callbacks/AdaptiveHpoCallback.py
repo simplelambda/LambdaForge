@@ -29,6 +29,8 @@ class AdaptiveHpoCallback(CallbackBase):
         chart_exclude: Sequence[str] | None = None,
         objective: ObjectiveUtility | None = None,
         display_names: Mapping[str, str] | None = None,
+        resource_checkpoint_request_path: Path | None = None,
+        resource_checkpoint_dir: Path | None = None,
     ) -> None:
         super().__init__()
         self.metric = metric
@@ -41,12 +43,15 @@ class AdaptiveHpoCallback(CallbackBase):
             str(name): str(label) for name, label in (display_names or {}).items()
         }
         self.objective = objective
+        self.resource_checkpoint_request_path = resource_checkpoint_request_path
+        self.resource_checkpoint_dir = resource_checkpoint_dir
         self._validation_started: float | None = None
         self._epoch_started: float | None = None
         self._last_training_step: int | None = None
         self._written: set[tuple[int, str]] = set()
         self._chart_filter_written = False
         self._resource_signals: set[str] = set()
+        self._resource_phase_history: set[str] = set()
 
     @classmethod
     def from_environment(
@@ -60,6 +65,10 @@ class AdaptiveHpoCallback(CallbackBase):
         metrics = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
         stop = os.environ.get("LAMBDAFORGE_STOP_REQUEST_PATH")
         training = os.environ.get("LAMBDAFORGE_TRAINING_METRICS_PATH")
+        resource_checkpoint_request = os.environ.get(
+            "LAMBDAFORGE_RESOURCE_CHECKPOINT_REQUEST_PATH"
+        )
+        resource_checkpoint_dir = os.environ.get("LAMBDAFORGE_RESOURCE_CHECKPOINT_DIR")
         raw_objective = os.environ.get("LAMBDAFORGE_HPO_OBJECTIVE_CONFIG")
         try:
             decoded = json.loads(raw_objective) if raw_objective else None
@@ -77,6 +86,12 @@ class AdaptiveHpoCallback(CallbackBase):
             chart_exclude=chart_exclude,
             objective=ObjectiveUtility(decoded) if isinstance(decoded, dict) else None,
             display_names=display_names,
+            resource_checkpoint_request_path=(
+                Path(resource_checkpoint_request) if resource_checkpoint_request else None
+            ),
+            resource_checkpoint_dir=(
+                Path(resource_checkpoint_dir) if resource_checkpoint_dir else None
+            ),
         )
 
     def on_train_epoch_start(self, trainer: Any, *_: Any) -> None:
@@ -105,6 +120,7 @@ class AdaptiveHpoCallback(CallbackBase):
             scalars["epoch_time_s"] = time.perf_counter() - self._epoch_started
         if bool(getattr(trainer, "is_global_zero", True)):
             self._write_training(scalars, step)
+            self._cooperative_resource_checkpoint(trainer, step)
         self._resource_signal("epoch-complete", trainer)
         self._stop(trainer)
 
@@ -152,12 +168,14 @@ class AdaptiveHpoCallback(CallbackBase):
         if signal_key in self._resource_signals:
             return
         self._resource_signals.add(signal_key)
+        self._resource_phase_history.add(phase)
         payload: dict[str, Any] = {
             "pid": os.getpid(),
             "phase": phase,
             "step": step,
             "checkpoint_committed": checkpoint,
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "phases_seen": sorted(self._resource_phase_history),
         }
         callback_metrics = self._scalars(getattr(trainer, "callback_metrics", {}))
         for name in ("items_per_second", "items_per_sec", "throughput"):
@@ -188,6 +206,23 @@ class AdaptiveHpoCallback(CallbackBase):
     def _stop(self, trainer: Any) -> None:
         if self.stop_path is not None and self.stop_path.is_file():
             trainer.should_stop = True
+
+    def _cooperative_resource_checkpoint(self, trainer: Any, step: int) -> None:
+        """Honor a resource-plan checkpoint only at Lightning's safe epoch boundary."""
+        request = self.resource_checkpoint_request_path
+        root = self.resource_checkpoint_dir
+        if request is None or root is None or not request.is_file() or request.is_symlink():
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        destination = root / f"step-{step:08d}.ckpt"
+        try:
+            trainer.save_checkpoint(str(destination))
+        except Exception:
+            # Keep the request: the controller can continue comparing WAIT/EXPLORE and the normal
+            # scientific training failure path remains authoritative.
+            return
+        request.unlink(missing_ok=True)
+        self._resource_signal("checkpoint", trainer, checkpoint=True)
 
     def _write_training(self, values: dict[str, float], step: int) -> None:
         if self.training_metrics_path is None or not values:

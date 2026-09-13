@@ -644,7 +644,26 @@ trayectorias acotadas preservan el pico real y las transiciones; no hay un timeo
 
 Para la GPU \(g\), el planner razona con \(C_g-E_g-\sum_i M_{i,future}\): capacidad utilizable
 menos uso externo dinámico y distribuciones futuras activas. Aquí
-\(M_{i,future}(t)=m_i(t)+R_i(t)\), con residual no negativo e incierto. Cold start crea primero
+\(M_{i,future}(t)=m_i(t)+R_i(t)\), con residual no negativo e incierto. El residual es una
+distribución empírica ponderada, no extremos equiprobables. Una prior débil de supervivencia de
+Jeffreys se actualiza tras picos materiales y ciclos tranquilos; la dispersión robusta
+física/allocator separa deriva y crecimiento real. Las fases críticas conservan riesgo tardío
+hasta observarlas. Así, `RAMPING` explica el estado pero no veta absolutamente el placement.
+
+El planner integra arrepentimiento de espera
+
+$$
+W_g(t_1)-W_g(t_0)=\int_{t_0}^{t_1} u_g(t)\,r_*(t)\,dt,
+$$
+
+donde \(u_g\) es la fracción físicamente utilizable y ociosa y \(r_*\) la mejor tasa de valor
+científico pendiente normalizado. WAIT y EXPLORE se comparan hasta el siguiente step, fase,
+checkpoint o final observado, no mediante timeout. Los GPU-segundos de rollback usan la misma tasa
+y el valor informativo sigue separado de la prioridad. La duración desconocida usa historia o
+ritmo vivo y, si no existen, sigue desconocida. Lightning puede atender selectivamente una
+petición de checkpoint en un límite seguro de epoch cuando solo el rollback impide experimentar.
+
+Cold start crea primero
 progreso y después usa trayectorias vivas de fase/step y checkpoints para experimentar 1→2→3 sin
 esperar picos terminales. `SAFE_ADMISSION` usa envolventes respaldadas;
 `EXPLORATORY_ADMISSION` exige que progreso e información esperados superen rollback e interferencia.
@@ -684,6 +703,12 @@ LambdaForge atribuye VRAM por PID/árbol de procesos mediante NVML y reconcilia 
 muestra. Heartbeats del allocator añaden fase, checkpoint y picos breves; el fallback agregado queda
 censurado. La evidencia OOM separa memoria intrínseca de la firma del packing fallido: por ello
 `heavy+heavy` no reduce un techo global ni prohíbe `heavy+small`.
+La terminación científica y la completitud de recursos son distintas: una Run podada tras observar
+forward/backward/optimizador/validación y telemetría exacta aporta un perfil exacto aunque su
+objective siga censurado. `exploration-evaluations.jsonl` conserva comparaciones cambiadas con
+P(fit), hazard, wait regret y motivos como `RUN_CAP`, `HARD_LOWER_BOUND`,
+`KNOWN_FAILED_PLACEMENT`, `PROTECTED_LANE`, `THROUGHPUT_REGRESSION`, `ROLLBACK_DOMINATES` y
+`WAIT_CURRENTLY_BETTER`; se suprimen sondeos repetidos.
 Un snapshot activo acotado y atómico sobrevive a una interrupción del controlador como conocimiento
 provisional anterior. Puede informar la incertidumbre tras reiniciar, pero nunca se restaura como
 proceso vivo o pico exacto; la evidencia terminal lo sustituye y el cierre normal lo vacía.

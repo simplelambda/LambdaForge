@@ -238,6 +238,14 @@ incremental `SAFE_ADMISSION` or `EXPLORATORY_ADMISSION` steps before terminal Ru
 protected compatible-GPU lane, one uncharacterized ladder step per evidence class, and share
 provisional knowledge across sibling GPUs. Larger groups may explore distinct resource questions
 concurrently, but never duplicate an equivalent experiment or consume the final protected lane.
+Tiny allocator maxima are drift when robust physical/allocator evidence says so; update a weighted
+survival posterior and keep rare late-phase tails rare rather than equiprobable. `RAMPING` explains
+risk but is never itself a hard veto. Integrate usable-idle-fraction × normalized scientific-value
+rate as WaitRegret, compare WAIT/EXPLORE/CHECKPOINT_THEN_EXPLORE to the next evidence event, and
+never invent a one-second duration or use raw controller score as resource currency. Persist changed
+ExplorationEvaluations and explicit WHY-WAIT reasons without poll spam. Scientific pruning is
+independent of resource completeness; a phase-complete exact pruned profile trains the resource
+model while its objective remains censored.
 CPU/RAM/storage shares remain based on the hard global concurrency ceiling so dynamic GPU packing
 cannot over-promise host resources. Exact NVML process attribution is preferred; aggregate
 fallback remains censored. OOM constraints belong to the exact packing unless reliable candidate

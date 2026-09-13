@@ -32,12 +32,22 @@ class HpoParameterDashboard(Vertical):
                     classes="hpo-plot hpo-response-plot", allow_pan_and_zoom=True
                 )
             with Vertical(classes="hpo-plot-card"):
-                yield Label("Observed support", classes="hpo-plot-title")
+                yield Label(
+                    "Observed support · × pruned",
+                    classes="hpo-plot-title hpo-coverage-title",
+                )
                 yield InspectablePlotWidget(
                     classes="hpo-plot hpo-coverage-plot", allow_pan_and_zoom=True
                 )
 
-    def show_parameter(self, name: str, response: Mapping[str, Any]) -> None:
+    def show_parameter(
+        self,
+        name: str,
+        response: Mapping[str, Any],
+        *,
+        pruning_signal: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Render exact/predictive response separately from censored pruning evidence."""
         points = [value for value in response.get("points", ()) if isinstance(value, Mapping)]
         live_observed = response.get("source") == "live-observed"
         response_plot: Any = self.query_one(".hpo-response-plot")
@@ -86,30 +96,83 @@ class HpoParameterDashboard(Vertical):
         response_plot.set_xlabel(name)
         response_plot.set_ylabel("mean objective" if live_observed else "predicted objective")
 
-        support = [
-            int(point.get("support_count", point.get("support", 0)) or 0) for point in points
+        pruning_groups = [
+            value
+            for value in (pruning_signal or {}).get("groups", ())
+            if isinstance(value, Mapping)
         ]
-        if coordinates:
-            if numeric:
+        if pruning_groups:
+            pruning_numeric = all(
+                isinstance(value.get("value"), int | float)
+                and not isinstance(value.get("value"), bool)
+                for value in pruning_groups
+            )
+            support_coordinates: list[Any] = [
+                value.get("value")
+                if pruning_numeric
+                else str(value.get("label", value.get("value", "?")))
+                for value in pruning_groups
+            ]
+            support = [int(value.get("observations", 0) or 0) for value in pruning_groups]
+            pruned = [int(value.get("pruned", 0) or 0) for value in pruning_groups]
+        else:
+            pruning_numeric = numeric
+            support_coordinates = coordinates
+            support = [
+                int(point.get("support_count", point.get("support", 0)) or 0) for point in points
+            ]
+            pruned = [0] * len(support)
+        if support_coordinates:
+            if pruning_numeric:
                 coverage_plot.set_x_formatter(NumericAxisFormatter())
                 coverage_plot.set_xticks(None)
-            coverage_plot.bar(coordinates, support, bar_style="bright_magenta")
-            coverage_plot.set_inspection_points(
-                tuple(
-                    InspectionPoint(
-                        float(cast(int | float, value)) if numeric else float(position + 1),
-                        float(count),
-                        f"{name}={value}",
-                        f"observations={count}",
-                        "support",
-                    )
-                    for position, (value, count) in enumerate(
-                        zip(coordinates, support, strict=True)
-                    )
+            coverage_plot.bar(support_coordinates, support, bar_style="bright_magenta")
+            pruned_points = [
+                (position, coordinate, count)
+                for position, (coordinate, count) in enumerate(
+                    zip(support_coordinates, pruned, strict=True)
                 )
+                if count > 0
+            ]
+            if pruned_points:
+                coverage_plot.scatter(
+                    [
+                        float(cast(int | float, coordinate))
+                        if pruning_numeric
+                        else float(position + 1)
+                        for position, coordinate, _count in pruned_points
+                    ],
+                    [count for _position, _coordinate, count in pruned_points],
+                    marker="×",
+                    marker_style="bold bright_yellow",
+                )
+            inspection = [
+                InspectionPoint(
+                    float(cast(int | float, value)) if pruning_numeric else float(position + 1),
+                    float(count),
+                    f"{name}={value}",
+                    f"observations={count}",
+                    "support",
+                )
+                for position, (value, count) in enumerate(
+                    zip(support_coordinates, support, strict=True)
+                )
+            ]
+            inspection.extend(
+                InspectionPoint(
+                    float(cast(int | float, coordinate))
+                    if pruning_numeric
+                    else float(position + 1),
+                    float(count),
+                    f"{name}={coordinate}",
+                    f"pruned={count} (censored)",
+                    "pruned",
+                )
+                for position, coordinate, count in pruned_points
             )
+            coverage_plot.set_inspection_points(tuple(inspection))
         coverage_plot.set_xlabel(name)
-        coverage_plot.set_ylabel("observations")
+        coverage_plot.set_ylabel("candidate observations")
 
     @staticmethod
     def _number(value: Any) -> float | None:

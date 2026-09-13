@@ -1156,6 +1156,55 @@ def test_pruned_trial_detail_marks_partial_evidence_as_censored() -> None:
     asyncio.run(exercise())
 
 
+def test_pruned_trial_table_and_chart_show_partial_values_without_finalizing_them() -> None:
+    work = {
+        "work_id": "work-pruned",
+        "name": "study",
+        "state": "running",
+        "study": {
+            "objective": {"metric": "score", "mode": "max"},
+            "counts": {"candidates": 1, "pruned_runs": 1},
+            "candidates": [
+                {
+                    "trial": 4,
+                    "state": "pruned",
+                    "current_objective": 0.39,
+                    "best_objective": 0.42,
+                    "partially_censored": True,
+                    "parameters": {"width": 32},
+                    "runs": [
+                        {
+                            "key": "trial-00004-seed-7",
+                            "seed": 7,
+                            "state": "pruned",
+                            "latest_step": 8,
+                            "best_step": 6,
+                            "current_observed_objective": 0.39,
+                            "best_observed_objective": 0.42,
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(FakeServices())
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(StudyWorkspace(work, app.services))
+            await pilot.pause(0.1)
+            table = app.screen.query_one("#trial-table")
+            row = [str(value) for value in table.get_row_at(0)]
+            assert len(table.columns) == 9  # No meaningless all-empty final-SE column.
+            assert row[0] == "†"
+            assert row[2] == "censored †"
+            assert row[3:5] == ["0.39 †", "0.42 †"]
+            plot = app.screen.query_one(".study-objective-plot")
+            assert any(point.series == "pruned candidate" for point in plot._inspection_points)
+
+    asyncio.run(exercise())
+
+
 def test_studies_refresh_live_without_expanding_admission_json() -> None:
     def snapshot(state: str) -> dict[str, object]:
         return {
@@ -1428,6 +1477,29 @@ def test_hpo_workspace_exposes_parameter_evidence_actions_and_clickable_breadcru
             "strategy": "adaptive",
             "objective": {"metric": "__lambdaforge_utility__", "mode": "max"},
             "counts": {"candidates": 1, "completed_runs": 1},
+            "hpo_analysis": {
+                "parameters": [
+                    {
+                        "parameter": "hidden_dim",
+                        "pruning_signal": {
+                            "groups": [
+                                {
+                                    "value": 64.0,
+                                    "observations": 2,
+                                    "pruned": 1,
+                                    "pruned_rate": 0.5,
+                                },
+                                {
+                                    "value": 128.0,
+                                    "observations": 2,
+                                    "pruned": 0,
+                                    "pruned_rate": 0.0,
+                                },
+                            ]
+                        },
+                    }
+                ]
+            },
             "candidates": [
                 {
                     "trial": 7,
@@ -1475,6 +1547,8 @@ def test_hpo_workspace_exposes_parameter_evidence_actions_and_clickable_breadcru
             await pilot.pause(0.05)
             assert isinstance(app.screen, HpoParameterWorkspace)
             assert app.screen.query_one("#hpo-dispersion-table").row_count == 2
+            coverage_plot = app.screen.query_one(".hpo-coverage-plot")
+            assert any(point.series == "pruned" for point in coverage_plot._inspection_points)
             await pilot.click("#breadcrumb-1")
             assert isinstance(app.screen, StudyWorkspace)
 

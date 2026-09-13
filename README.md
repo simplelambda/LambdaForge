@@ -559,6 +559,14 @@ size. LambdaForge begins conservatively but does not wait for complete Runs: pha
 change points, allocator peaks and durable checkpoints make active trajectories provisional
 evidence that compatible GPUs can use immediately.
 
+Small new allocator maxima are not automatically treated as continued material growth. LambdaForge
+learns a measurement/drift scale from the physical and allocator trajectory, then updates a weak
+survival prior after each allocation/progress cycle. Its weighted future distribution retains a
+rare late-phase tail without giving that tail the same probability as the repeatedly observed light
+regime. First forward, backward, optimizer, validation and checkpoint transitions explicitly
+contract or preserve the relevant risk. The displayed `RAMPING`/`PROVISIONALLY_STABLE` state is an
+explanation; placement consumes the continuous peak hazard and weighted residual distribution.
+
 `SAFE_ADMISSION` fits after uncertainty and known OOM bounds are considered.
 `EXPLORATORY_ADMISSION` is a checkpoint-aware 1→2→3 packing step whose expected scientific progress
 and resource information exceed rollback and interference cost. With at least two interchangeable
@@ -566,6 +574,16 @@ GPUs, one remains a protected progress lane while an equivalent unvalidated expe
 most one sibling. A provisional success promotes the packing frontier before terminal epochs; a
 later OOM invalidates it. Thus a long cold start cannot remain at one Run per GPU merely because no
 training has finished.
+
+Waiting is also a decision with a cost. While useful work is pending and physically usable VRAM is
+idle, LambdaForge integrates idle fraction × normalized scientific-value rate. This *wait regret*
+eventually makes one bounded experiment preferable when fit probability is non-zero and no hard
+constraint applies; it is not a timeout. Controller score magnitude is never used as a currency:
+the resource layer normalizes scientific ordering, converts GPU-seconds to opportunity value and
+keeps resource information value separate. Unknown duration remains explicitly uncertain and is
+estimated from same/near history or live step rates—never replaced by one second. If rollback is
+the only obstacle and Lightning can checkpoint safely, LambdaForge may request one checkpoint at
+an epoch boundary before reevaluating the experiment.
 
 `gpu_memory` is optional. When present it remains the user's minimum safety floor for each new Run;
 the effective commitment is the larger of that floor, the learned upper envelope and any known OOM
@@ -601,6 +619,11 @@ than inventing a candidate size. The same or a dominated experiment is not repea
 new Attempt of the same logical Run resumes a valid checkpoint. It is never a bad scientific
 objective or a new Trial. Measured co-location throughput can also stop extra packing even when
 VRAM fits, because the goal is useful scientific work per wall-clock time rather than full memory.
+Performance-pruned Runs still train the resource model when their forward/backward/optimizer/
+validation phases and per-process measurements make the memory profile complete; their scientific
+objective remains censored. Resource diagnostics persist changed `RESOURCE_WAIT`,
+`RESOURCE_EXPLORE`, checkpoint, promotion, invalidation and recovery decisions with P(fit), peak
+hazard, rollback, wait regret and an explicit rejection reason, without emitting a record per poll.
 
 When several GPUs can accept one globally available Run, the resource planner uses the current
 ranked scientific frontier and device state instead of preferring GPU index zero. While eligible

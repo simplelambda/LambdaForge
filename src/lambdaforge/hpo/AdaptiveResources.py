@@ -111,6 +111,7 @@ class ResourceTrajectorySample:
     step: int | None = None
     phase: str | None = None
     checkpoint_step: int | None = None
+    phases_seen: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -243,6 +244,12 @@ class ResourceTrajectoryAnalysis:
     residual_samples: tuple[int, ...]
     phase: str | None
     reason: str
+    residual_weights: tuple[float, ...] = ()
+    growth_hazard: float = 1.0
+    expected_residual_growth_bytes: int = 0
+    measurement_noise_bytes: int = 0
+    critical_phases_seen: tuple[str, ...] = ()
+    next_decision_seconds: float | None = None
 
 
 class ResourceTrajectoryAnalyzer:
@@ -257,31 +264,111 @@ class ResourceTrajectoryAnalyzer:
     ) -> ResourceTrajectoryAnalysis:
         if not values:
             return ResourceTrajectoryAnalysis(
-                "STARTING", 0, 0, None, 0, (max(0, total_bytes),), None, "no live samples"
+                "STARTING",
+                0,
+                0,
+                None,
+                0,
+                (max(0, total_bytes),),
+                None,
+                "no live samples",
+                (1.0,),
             )
+        running_peaks: list[int] = []
+        material_gains: list[int] = []
+        peak = 0
+        for sample in values:
+            previous = peak
+            peak = max(peak, max(0, sample.physical_bytes))
+            running_peaks.append(peak)
+            material_gains.append(max(0, peak - previous))
         peak_index = max(range(len(values)), key=lambda index: values[index].physical_bytes)
-        peak = max(0, values[peak_index].physical_bytes)
         current = max(0, values[-1].physical_bytes)
+        gains = material_gains[1:]
+        positive = [value for value in gains if value > 0]
+
+        # Physical/NVML readings and the CUDA caching allocator move in small quanta.  Learn that
+        # scale from this trajectory instead of imposing a user-visible MB or percentage rule.
+        same_class_changes = [
+            abs(values[index].physical_bytes - values[index - 1].physical_bytes)
+            for index in range(1, len(values))
+            if values[index].phase == values[index - 1].phase
+            and values[index].step == values[index - 1].step
+            and values[index].physical_bytes != values[index - 1].physical_bytes
+        ]
+        allocator_disagreement: list[int] = []
+        for index in range(1, len(values)):
+            current_reserved = values[index].cuda_reserved_bytes
+            prior_reserved = values[index - 1].cuda_reserved_bytes
+            if current_reserved is None or prior_reserved is None:
+                continue
+            disagreement = abs(
+                (values[index].physical_bytes - values[index - 1].physical_bytes)
+                - (current_reserved - prior_reserved)
+            )
+            if disagreement > 0:
+                allocator_disagreement.append(disagreement)
+        midpoint = max(1, len(positive) // 2)
+        decaying_growth = (
+            len(positive) >= 4
+            and statistics.median(positive[midpoint:]) < statistics.median(positive[:midpoint])
+        )
+        lower_growth = (
+            sorted(positive)[: max(1, len(positive) // 2)] if decaying_growth else []
+        )
+        noise_evidence = [*same_class_changes, *allocator_disagreement, *lower_growth]
+        resolution = min(noise_evidence, default=0)
+        noise_centre = int(statistics.median(noise_evidence)) if noise_evidence else 0
+        noise_mad = (
+            int(statistics.median(abs(value - noise_centre) for value in noise_evidence))
+            if noise_evidence
+            else 0
+        )
+        noise_scale = max(resolution, noise_centre + int(1.4826 * noise_mad))
+        # A robust upper fence separates allocator drift from a genuine new allocation regime.
+        # ``>=`` deliberately recognizes a monotone ramp whose increments have zero dispersion.
+        material_cutoff = max(1, noise_centre + int(3.0 * 1.4826 * noise_mad))
+        material = [gain >= material_cutoff for gain in gains]
+        last_material = max((index for index, event in enumerate(material) if event), default=-1)
+        quiet_cycles = max(0, len(gains) - last_material - 1)
+        latest_material = bool(material and material[-1])
+
+        # Jeffreys' weak prior is updated by survival cycles after the latest material peak.  A
+        # critical allocation phase that has not happened yet retains probability mass, while
+        # observing first forward/backward/optimizer progressively contracts the live posterior.
+        normalized_phases = tuple(
+            dict.fromkeys(
+                _resource_phase_class(phase)
+                for item in values
+                for phase in ((item.phase,) if item.phase else ()) + item.phases_seen
+            )
+        )
+        critical = tuple(
+            phase
+            for phase in ("forward", "backward", "optimizer", "validation", "checkpoint")
+            if phase in normalized_phases
+        )
+        phase_survival = len(set(critical) & {"forward", "backward", "optimizer"}) / 3.0
+        hazard = (0.5 + (1.0 if latest_material else 0.0)) / (quiet_cycles + 1.0)
+        hazard *= 1.0 - 0.45 * phase_survival
+        if "validation" not in critical:
+            hazard = 1.0 - (1.0 - hazard) * 0.85
+        hazard = min(1.0, max(0.01, hazard))
+
         later_steps = {
             item.step
-            for item in values[peak_index + 1 :]
-            if item.step is not None and item.step != values[peak_index].step
+            for item in values[last_material + 2 :]
+            if item.step is not None
         }
-        increments = [
-            max(0, values[index].physical_bytes - values[index - 1].physical_bytes)
-            for index in range(1, len(values))
-        ]
-        positive = [value for value in increments if value > 0]
-        latest_growth = any(value > 0 for value in increments[max(0, peak_index - 1) :])
         phase = values[-1].phase
         if len(values) == 1 or peak <= 0:
             state, reason = "STARTING", "the first allocation cycle is not characterized"
-        elif peak_index >= len(values) - 2 and latest_growth:
-            state, reason = "RAMPING", "a new running maximum was observed recently"
+        elif latest_material:
+            state, reason = "RAMPING", "a material new running maximum was observed recently"
         elif len(later_steps) >= 2:
             state, reason = (
                 "PROVISIONALLY_STABLE",
-                "multiple progress cycles completed without a higher physical peak",
+                "multiple progress cycles completed without material memory growth",
             )
         else:
             state, reason = (
@@ -289,16 +376,30 @@ class ResourceTrajectoryAnalyzer:
                 "the running maximum is flat but later allocation phases remain possible",
             )
         empirical = tuple(max(0, int(value)) for value in historical_residuals)
+        spare = max(0, total_bytes - peak)
+        recent_positive = positive[max(0, len(positive) - max(1, int(math.sqrt(len(positive))))) :]
+        expected_growth = min(
+            spare,
+            int((statistics.median(recent_positive) if recent_positive else noise_scale) * hazard),
+        )
+        support = [0, max(0, expected_growth)]
+        support.extend(min(spare, value) for value in empirical)
+        support.append(spare)
+        # A capacity tail survives, but its posterior mass contracts on quiet allocation cycles.
+        weights = [max(0.0, 1.0 - hazard), max(0.01, hazard * 0.55)]
         if empirical:
-            residuals = tuple(sorted({0, *empirical}))
-        else:
-            typical_increment = int(statistics.median(positive)) if positive else 0
-            spare = max(0, total_bytes - peak)
-            # Distribution support, not a safety quantile. The capacity tail keeps a
-            # history-free plateau uncertain while other samples permit bounded exploration.
-            residuals = tuple(
-                sorted({0, typical_increment, min(spare, max(typical_increment * 2, peak)), spare})
+            weights.extend(max(0.01, hazard * 0.35 / len(empirical)) for _ in empirical)
+        weights.append(max(0.005, hazard * (0.30 if "validation" not in critical else 0.10)))
+        residuals, residual_weights = _coalesce_weighted_samples(support, weights)
+        intervals = [
+            values[index].elapsed_seconds - values[index - 1].elapsed_seconds
+            for index in range(1, len(values))
+            if values[index].elapsed_seconds > values[index - 1].elapsed_seconds
+            and (
+                values[index].step != values[index - 1].step
+                or values[index].phase != values[index - 1].phase
             )
+        ]
         return ResourceTrajectoryAnalysis(
             state,
             peak,
@@ -308,6 +409,12 @@ class ResourceTrajectoryAnalyzer:
             residuals,
             phase,
             reason,
+            residual_weights,
+            hazard,
+            expected_growth,
+            noise_scale,
+            critical,
+            statistics.median(intervals) if intervals else None,
         )
 
 
@@ -334,6 +441,11 @@ class ActiveResourceEvidence:
     co_runners: int = 0
     measurement_provenance: ResourceEvidenceQuality = "active-provisional"
     trajectory: tuple[ResourceTrajectorySample, ...] = ()
+    future_peak_weights: tuple[float, ...] = ()
+    growth_hazard: float = -1.0
+    expected_residual_growth_bytes: int = 0
+    next_decision_seconds: float | None = None
+    target_step: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the bounded portable right-censored snapshot."""
@@ -354,13 +466,21 @@ class ActiveResourceEvidence:
         payload["future_peak_samples"] = tuple(
             int(item) for item in payload.get("future_peak_samples", ())
         )
+        payload["future_peak_weights"] = tuple(
+            float(item) for item in payload.get("future_peak_weights", ())
+        )
         payload["trajectory"] = tuple(
             ResourceTrajectorySample(
                 **{
                     key: item
                     for key, item in sample.items()
                     if key in ResourceTrajectorySample.__dataclass_fields__
-                }
+                    and key != "phases_seen"
+                },
+                phases_seen=tuple(
+                    str(item) for item in sample.get("phases_seen", ())
+                    if isinstance(item, str)
+                ),
             )
             for sample in value.get("trajectory", ())
             if isinstance(sample, Mapping)
@@ -459,6 +579,9 @@ class ResourceProfileObservation:
     trajectory: tuple[Mapping[str, Any], ...] = ()
     measurement_quality: ResourceEvidenceQuality = "sampled-physical"
     timestamp_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    scientific_termination: str | None = None
+    resource_profile_quality: str = "CENSORED"
+    phases_seen: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -466,6 +589,7 @@ class ResourceProfileObservation:
         value["fixed_arguments"] = _portable(self.fixed_arguments)
         value["fidelity"] = dict(self.fidelity)
         value["trajectory"] = [dict(item) for item in self.trajectory]
+        value["phases_seen"] = list(self.phases_seen)
         return value
 
     @classmethod
@@ -478,6 +602,7 @@ class ResourceProfileObservation:
         payload["trajectory"] = tuple(
             dict(item) for item in payload.get("trajectory", ()) if isinstance(item, Mapping)
         )
+        payload["phases_seen"] = tuple(str(item) for item in payload.get("phases_seen", ()))
         return cls(**payload)
 
 
@@ -504,6 +629,9 @@ class ResourcePrediction:
     future_residual_samples: tuple[int, ...] = ()
     measurement_quality: ResourceEvidenceQuality = "unavailable"
     is_provisional: bool = False
+    sample_weights: tuple[float, ...] = ()
+    duration_samples: tuple[float, ...] = ()
+    duration_source: str = "unknown"
 
     @property
     def commitment_bytes(self) -> int:
@@ -590,21 +718,34 @@ class ResourceDemandModel:
         active_matches = [
             value for value in active_compatible if value.candidate_key == candidate_key
         ]
-        active_near = (
-            active_matches
-            or sorted(
-                active_compatible,
-                key=lambda value: _mixed_distance(
-                    parameters, value.parameters, self.parameter_schema
-                ),
-            )[: min(12, len(active_compatible))]
+        active_distances = sorted(
+            (
+                _mixed_distance(parameters, value.parameters, self.parameter_schema),
+                value,
+            )
+            for value in active_compatible
         )
+        support_scale = _active_support_scale(active_distances, self.parameter_schema)
+        active_support = max(
+            (
+                math.exp(-distance / max(support_scale, 1e-12))
+                for distance, _value in active_distances
+            ),
+            default=0.0,
+        )
+        active_near = active_matches or [
+            value
+            for distance, value in active_distances[: min(12, len(active_distances))]
+            if math.exp(-distance / max(support_scale, 1e-12)) > 1e-6
+        ]
         bounds = [
             value.lower_bound_bytes
             for value in compatible
             if value.candidate_key == candidate_key and value.lower_bound_bytes > 0
         ]
-        provisional_bounds = [value.running_peak_bytes for value in active_near]
+        # A neighbour informs the distribution but cannot create an intrinsic lower bound for a
+        # different candidate.  Only the exact resource identity is logically binding.
+        provisional_bounds = [value.running_peak_bytes for value in active_matches]
         known_lower = max([user_minimum_bytes, observed_prefix_peak_bytes, *bounds], default=0)
         provisional_lower = max([known_lower, *provisional_bounds], default=known_lower)
         exact_peaks = [value.observed_peak_bytes for value in evidence if value.peak_is_exact]
@@ -613,7 +754,36 @@ class ResourceDemandModel:
             for value in evidence
             if not value.peak_is_exact
         ]
-        durations = [value.duration_seconds for value in evidence if value.duration_seconds > 0]
+        exact_durations = [
+            value.duration_seconds
+            for value in candidate_matches
+            if value.duration_seconds > 0
+        ]
+        nearby_durations = [
+            value.duration_seconds for value in evidence if value.duration_seconds > 0
+        ]
+        compatible_durations = [
+            value.duration_seconds for value in compatible if value.duration_seconds > 0
+        ]
+        active_duration_estimates = [
+            value.elapsed_seconds * value.target_step / value.step
+            for value in active_near
+            if value.target_step is not None
+            and value.target_step > 0
+            and value.step is not None
+            and value.step > 0
+            and value.elapsed_seconds > 0
+        ]
+        if exact_durations:
+            durations, duration_source = exact_durations, "same-candidate-history"
+        elif nearby_durations:
+            durations, duration_source = nearby_durations, "nearby-compatible-history"
+        elif active_duration_estimates:
+            durations, duration_source = active_duration_estimates, "live-step-rate"
+        elif compatible_durations:
+            durations, duration_source = compatible_durations, "compatible-history"
+        else:
+            durations, duration_source = [], "unknown"
         peak_times = [
             value.time_to_peak_seconds
             for value in evidence
@@ -622,18 +792,30 @@ class ResourceDemandModel:
         if not exact_peaks:
             predicted = max(provisional_lower, max(censored, default=0), user_minimum_bytes)
             if active_near:
-                active_samples = [
-                    sample for value in active_near for sample in value.future_peak_samples
-                ]
-                samples = tuple(sorted(max(provisional_lower, value) for value in active_samples))
+                active_draws: list[int] = []
+                active_weights: list[float] = []
+                for value in active_near:
+                    distance = _mixed_distance(parameters, value.parameters, self.parameter_schema)
+                    proximity = 1.0 if value in active_matches else math.exp(
+                        -distance / max(support_scale, 1e-12)
+                    )
+                    weights = _normalized_weights(
+                        value.future_peak_weights, len(value.future_peak_samples)
+                    )
+                    for sample, weight in zip(value.future_peak_samples, weights, strict=True):
+                        active_draws.append(max(provisional_lower, sample))
+                        active_weights.append(weight * proximity)
+                samples, sample_weights = _coalesce_weighted_samples(active_draws, active_weights)
                 if not samples:
                     samples = (provisional_lower, total_bytes)
+                    sample_weights = (0.5, 0.5)
                 upper = max(samples)
                 support = "active-same-candidate" if active_matches else "active-near-compatible"
                 quality: ResourceEvidenceQuality = "active-provisional"
             else:
                 upper = max(predicted, total_bytes)
                 samples = tuple(sorted({known_lower, predicted, upper}))
+                sample_weights = _normalized_weights((), len(samples))
                 support = "censored-only" if evidence else "cold-start"
                 quality = "lower-bound-only" if evidence else "unavailable"
             return remember(
@@ -649,14 +831,17 @@ class ResourceDemandModel:
                     0,
                     support,
                     "poor",
-                    "mixed-live-residual-v2",
+                    "mixed-live-survival-v3",
                     samples,
                     provisional_lower,
-                    1.0 if active_matches else 0.5 if active_near else 0.0,
-                    0.0 if active_matches else 0.5 if active_near else 1.0,
+                    1.0 if active_matches else active_support if active_near else 0.0,
+                    0.0 if active_matches else 1.0 - active_support if active_near else 1.0,
                     tuple(max(0, value - provisional_lower) for value in samples),
                     quality,
                     bool(active_near),
+                    sample_weights,
+                    tuple(float(value) for value in durations),
+                    duration_source,
                 )
             )
         if not candidate_matches and len(exact_peaks) < 2:
@@ -695,13 +880,17 @@ class ResourceDemandModel:
                     0,
                     "sparse-near-compatible",
                     "poor",
-                    "schema-support-bootstrap-v2",
+                    "schema-support-bootstrap-v3",
                     samples,
                     provisional_lower,
                     max(0.0, 1.0 - distance),
                     distance,
                     tuple(max(0, value - provisional_lower) for value in samples),
                     "sampled-physical",
+                    False,
+                    _normalized_weights((), len(samples)),
+                    tuple(float(value) for value in durations),
+                    duration_source,
                 )
             )
         weighted = _weighted_peaks(parameters, evidence, self.parameter_schema)
@@ -770,7 +959,7 @@ class ResourceDemandModel:
                 else "moderate"
                 if len(exact_peaks) >= 3
                 else "poor",
-                "schema-loo-bootstrap-v2",
+                "schema-loo-bootstrap-v3",
                 tuple(sorted(calibrated)),
                 provisional_lower,
                 1.0 / (1.0 + nonconformity),
@@ -785,6 +974,10 @@ class ResourceDemandModel:
                     )
                     else "sampled-physical"
                 ),
+                False,
+                _normalized_weights((), len(calibrated)),
+                tuple(float(value) for value in durations),
+                duration_source,
             )
         )
 
@@ -883,6 +1076,11 @@ class ActiveResourceCommitment:
     exploration_signature: str | None = None
     trial: int | None = None
     seed: int | None = None
+    future_peak_weights: tuple[float, ...] = ()
+    growth_hazard: float = -1.0
+    expected_residual_growth_bytes: int = 0
+    next_decision_seconds: float | None = None
+    checkpoint_request_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -909,7 +1107,7 @@ class GPUResourceState:
     @property
     def provisional_committed_bytes(self) -> int:
         return sum(
-            int(statistics.median(value.future_peak_samples))
+            _weighted_quantile(value.future_peak_samples, value.future_peak_weights, 0.5)
             if value.future_peak_samples
             else max(value.current_bytes, value.running_peak_bytes)
             for value in self.active
@@ -961,16 +1159,115 @@ class AdmissionDecision:
     rollback_cost_seconds: float = 0.0
     resource_information_value: float = 0.0
     exploration_signature: str | None = None
+    exploration_evaluation: Mapping[str, Any] | None = None
     timestamp_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class ExplorationEvaluation:
+    """Dimensionally coherent comparison of WAIT and one bounded ladder increment."""
+
+    candidate: str
+    gpu: int
+    physical_free_bytes: int
+    provisional_headroom_bytes: int
+    resource_states: tuple[str, ...]
+    peak_hazard: float
+    fit_probability: float
+    scientific_value: float
+    normalized_scientific_value: float
+    scientific_value_rate: float | None
+    resource_information_value: float
+    rollback_seconds: float
+    rollback_value: float
+    interference_cost: float
+    wait_regret: float
+    final_delta_value: float
+    accepted: bool
+    rejection_reason: str
+    plan: str
+    experiment_signature: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class WaitRegretTracker:
+    """Integrate useful idle GPU opportunity without a timeout or age bonus."""
+
+    def __init__(self) -> None:
+        self._states: dict[int, tuple[float, float, str]] = {}
+
+    def update(
+        self,
+        device: GPUResourceState,
+        actions: Sequence[CandidateResourceAction],
+        normalized_values: Mapping[str, float],
+        *,
+        now: float,
+    ) -> float:
+        rates = [
+            normalized_values[action.key] / duration
+            for action in actions
+            if (duration := _candidate_duration(action.prediction_for(device), device)) is not None
+            and duration > 0
+            and action.prediction_for(device).known_lower_bound_bytes
+            < device.provisional_headroom_bytes
+        ]
+        best_rate = max(rates, default=0.0)
+        usable = (
+            min(device.free_bytes, device.provisional_headroom_bytes) / max(1, device.total_bytes)
+            if actions and len(device.active) < device.run_cap
+            else 0.0
+        )
+        signature = _digest(
+            {
+                "active": [
+                    {
+                        "candidate": value.candidate_key,
+                        "state": value.resource_state,
+                        "hazard_band": round(_commitment_growth_hazard(value), 1),
+                        "checkpoint": value.checkpoint_step,
+                    }
+                    for value in device.active
+                ],
+                "pending": [value.key for value in actions],
+                "usable_band": round(usable, 1),
+            }
+        )
+        previous = self._states.get(device.index)
+        if previous is None:
+            regret = 0.0
+        else:
+            previous_time, previous_regret, previous_signature = previous
+            # A real capacity/frontier/posterior event makes the former WAIT comparison stale;
+            # retain only a small continuity term and reintegrate from current evidence.
+            regret = previous_regret if previous_signature == signature else previous_regret * 0.25
+            regret += max(0.0, now - previous_time) * usable * best_rate
+        self._states[device.index] = (now, regret, signature)
+        return regret
+
+    def reset(self, gpu: int) -> None:
+        self._states.pop(gpu, None)
+
+
 class GPUPlacementPlanner:
     """Deterministic best-fit placement over a bounded scientific frontier."""
 
-    def __init__(self, model: ResourceDemandModel) -> None:
+    def __init__(
+        self,
+        model: ResourceDemandModel,
+        *,
+        wait_regret: WaitRegretTracker | None = None,
+    ) -> None:
+        self.model = model
+        self.wait_regret = wait_regret or WaitRegretTracker()
+        self.last_exploration_evaluations: tuple[ExplorationEvaluation, ...] = ()
+
+    def update_model(self, model: ResourceDemandModel) -> None:
         self.model = model
 
     def place(
@@ -979,11 +1276,20 @@ class GPUPlacementPlanner:
         devices: Sequence[GPUResourceState],
         *,
         max_launches: int,
+        now: float | None = None,
     ) -> tuple[tuple[AdmissionDecision, ...], tuple[AdmissionDecision, ...]]:
         ranked = sorted(
             actions[:_FRONTIER_LIMIT],
             key=lambda value: (-value.scientific_value, value.key),
         )
+        values = _normalized_scientific_values(ranked)
+        decision_time = float(now) if now is not None else 0.0
+        regrets = {
+            device.index: self.wait_regret.update(
+                device, ranked, values, now=decision_time
+            )
+            for device in devices
+        }
         mutable = list(devices)
         admitted: list[AdmissionDecision] = []
         blocked: list[AdmissionDecision] = []
@@ -997,14 +1303,12 @@ class GPUPlacementPlanner:
                 prediction = action.prediction_for(device)
                 state, reason = self._fit_state(action, device)
                 probability = _fit_probability(prediction, device.admission_headroom_bytes)
-                duration = (
-                    self.model.adjusted_duration(
+                adjusted_duration = self.model.adjusted_duration(
                         _action_compatibility(action, device),
                         prediction.predicted_duration_seconds,
                         len(device.active) + 1,
                     )
-                    or 1.0
-                )
+                duration = adjusted_duration if adjusted_duration is not None else math.inf
                 slack = device.admission_headroom_bytes - prediction.commitment_bytes
                 if state == "ADMITTED" and self._hurts_throughput(action, device):
                     state, reason = (
@@ -1128,11 +1432,20 @@ class GPUPlacementPlanner:
         # exists, evaluate one incremental co-location experiment rather than waiting for a long
         # Run to terminate.  This evolves the same planner: there is no compatibility scheduler.
         remaining_launches = max(0, max_launches - len(admitted))
+        evaluations: list[ExplorationEvaluation] = []
         if remaining_launches and blocked:
             by_key = {value.key: value for value in ranked}
             experiments: list[
                 tuple[
-                    float, float, int, CandidateResourceAction, GPUResourceState, str, float, float
+                    float,
+                    float,
+                    int,
+                    str,
+                    CandidateResourceAction,
+                    GPUResourceState,
+                    str,
+                    float,
+                    float,
                 ]
             ] = []
             for blocked_decision in blocked:
@@ -1140,20 +1453,36 @@ class GPUPlacementPlanner:
                 if uncertain_action is None:
                     continue
                 for device in mutable:
-                    evaluated = self._exploration_value(uncertain_action, device, mutable)
-                    if evaluated is None:
+                    policy_reason = next(
+                        (
+                            str(note.get("reason"))
+                            for note in blocked_decision.devices
+                            if note.get("gpu") == device.index
+                        ),
+                        "",
+                    )
+                    evaluated = self._exploration_value(
+                        uncertain_action,
+                        device,
+                        mutable,
+                        normalized_scientific_value=values.get(uncertain_action.key, 0.0),
+                        wait_regret=regrets.get(device.index, 0.0),
+                        policy_reason=policy_reason,
+                    )
+                    evaluations.append(evaluated)
+                    if not evaluated.accepted:
                         continue
-                    expected_value, probability, rollback, information, signature = evaluated
                     experiments.append(
                         (
-                            -expected_value,
+                            -evaluated.final_delta_value,
                             -uncertain_action.scientific_value,
                             device.index,
+                            uncertain_action.key,
                             uncertain_action,
                             device,
-                            signature,
-                            rollback,
-                            information,
+                            str(evaluated.experiment_signature),
+                            evaluated.rollback_seconds,
+                            evaluated.resource_information_value,
                         )
                     )
             if experiments:
@@ -1161,6 +1490,7 @@ class GPUPlacementPlanner:
                     _negative_value,
                     _negative_science,
                     _index,
+                    _candidate_sort_key,
                     uncertain_action,
                     selected_device,
                     signature,
@@ -1194,11 +1524,19 @@ class GPUPlacementPlanner:
                         rollback_cost_seconds=rollback,
                         resource_information_value=information,
                         exploration_signature=signature,
+                        exploration_evaluation=next(
+                            value.to_dict()
+                            for value in evaluations
+                            if value.candidate == uncertain_action.key
+                            and value.gpu == selected_device.index
+                        ),
                     )
                 )
+                self.wait_regret.reset(selected_device.index)
                 blocked = [
                     value for value in blocked if value.candidate_key != uncertain_action.key
                 ]
+        self.last_exploration_evaluations = tuple(evaluations)
         return tuple(admitted), tuple(blocked)
 
     def _exploration_value(
@@ -1206,18 +1544,51 @@ class GPUPlacementPlanner:
         action: CandidateResourceAction,
         device: GPUResourceState,
         all_devices: Sequence[GPUResourceState],
-    ) -> tuple[float, float, float, float, str] | None:
-        """Return observable expected-value terms for one bounded ladder increment."""
+        *,
+        normalized_scientific_value: float,
+        wait_regret: float,
+        policy_reason: str = "",
+    ) -> ExplorationEvaluation:
+        """Compare EXPLORE with WAIT until the next evidence-bearing event."""
         prediction = action.prediction_for(device)
-        if len(device.active) >= device.run_cap:
-            return None
-        if prediction.known_lower_bound_bytes >= device.provisional_headroom_bytes:
-            return None
-        if any(value.admission_mode == "EXPLORATORY_ADMISSION" for value in device.active):
-            return None
-        if any(value.resource_state in {"STARTING", "RAMPING"} for value in device.active):
-            return None
         signature = _resource_experiment_signature(action, device)
+
+        def rejected(reason: str, *, probability: float = 0.0) -> ExplorationEvaluation:
+            return ExplorationEvaluation(
+                action.key,
+                device.index,
+                device.free_bytes,
+                device.provisional_headroom_bytes,
+                tuple(value.resource_state for value in device.active),
+                max((_commitment_growth_hazard(value) for value in device.active), default=0.0),
+                probability,
+                action.scientific_value,
+                normalized_scientific_value,
+                None,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                wait_regret,
+                -math.inf,
+                False,
+                reason,
+                "WAIT",
+                signature,
+            )
+
+        if len(device.active) >= device.run_cap:
+            return rejected("RUN_CAP")
+        if device.active and not any(value.current_bytes > 0 for value in device.active):
+            return rejected("AWAITING_LIVE_TELEMETRY")
+        if policy_reason == "reserved-window-for-higher-value-heavy-action":
+            return rejected("PROTECTED_HEAVY_WINDOW")
+        if self._hurts_throughput(action, device):
+            return rejected("THROUGHPUT_REGRESSION")
+        if prediction.known_lower_bound_bytes > device.provisional_headroom_bytes:
+            return rejected("HARD_LOWER_BOUND")
+        if any(value.admission_mode == "EXPLORATORY_ADMISSION" for value in device.active):
+            return rejected("UNVALIDATED_LADDER_STEP")
         # Equivalent GPUs share live evidence. Never duplicate the same unvalidated ladder step,
         # but allow different resource questions to be explored in parallel on larger grants.
         # One sibling always remains outside an unvalidated packing as the protected progress
@@ -1232,13 +1603,13 @@ class GPUPlacementPlanner:
             if value.admission_mode == "EXPLORATORY_ADMISSION"
         )
         if any(value.exploration_signature == signature for value in exploring):
-            return None
+            return rejected("DUPLICATE_EXPERIMENT")
         exploration_lanes = sum(
             any(value.admission_mode == "EXPLORATORY_ADMISSION" for value in other.active)
             for other in interchangeable
         )
         if len(interchangeable) >= 2 and exploration_lanes >= len(interchangeable) - 1:
-            return None
+            return rejected("PROTECTED_LANE")
         if any(
             failure.hardware == device.hardware
             and failure.candidate_key == prediction.candidate_key
@@ -1247,30 +1618,84 @@ class GPUPlacementPlanner:
             and device.provisional_headroom_bytes <= failure.headroom_bytes
             for failure in self.model.placement_failures
         ):
-            return None
+            return rejected("KNOWN_FAILED_PLACEMENT")
         if any(
             failure.experiment_signature == signature for failure in self.model.placement_failures
         ):
-            return None
+            return rejected("DUPLICATE_FAILED_EXPERIMENT")
         probability = _joint_fit_probability(prediction, device)
         if probability <= 0:
-            return None
-        duration = max(1.0, prediction.predicted_duration_seconds or 1.0)
-        rollback = sum(
+            return rejected("HARD_PHYSICAL_CAPACITY", probability=probability)
+
+        candidate_duration = _candidate_duration(prediction, device)
+        horizon = _next_decision_horizon(prediction, device)
+        scientific_rate = (
+            normalized_scientific_value / candidate_duration
+            if candidate_duration is not None and candidate_duration > 0
+            else None
+        )
+        opportunity_rates = [
+            1.0 / value.remaining_seconds
+            for value in device.active
+            if value.remaining_seconds is not None and value.remaining_seconds > 0
+        ]
+        if scientific_rate is not None:
+            opportunity_rates.append(scientific_rate)
+        opportunity_rate = max(opportunity_rates, default=0.0)
+
+        peak_hazard = max(
+            (_commitment_growth_hazard(value) for value in device.active), default=0.0
+        )
+        expected_growth = sum(value.expected_residual_growth_bytes for value in device.active)
+        physical_margin = max(
+            0,
+            device.free_bytes
+            - prediction.known_lower_bound_bytes
+            - expected_growth,
+        )
+        pressure = 1.0 - physical_margin / max(1, device.free_bytes)
+        probability *= max(0.0, 1.0 - peak_hazard * max(0.0, pressure))
+        if probability <= 0:
+            return rejected("HIGH_GROWTH_HAZARD", probability=probability)
+
+        resident_rollback = sum(
             value.elapsed_seconds
             if not value.checkpoint_resumable
-            else max(
-                0.0,
-                value.elapsed_seconds - (value.checkpoint_elapsed_seconds or 0.0),
-            )
+            else max(0.0, value.elapsed_seconds - (value.checkpoint_elapsed_seconds or 0.0))
             for value in device.active
         )
-        rollback_fraction = rollback / (rollback + duration)
-        spread = max(prediction.samples, default=0) - min(prediction.samples, default=0)
-        information = action.scientific_value * spread / max(1, device.total_bytes)
-        success_value = probability * action.scientific_value
-        failure_information = (1.0 - probability) * information
-        rollback_cost = (1.0 - probability) * rollback_fraction
+        failed_new_progress = (horizon / 2.0) if horizon is not None else 0.0
+        rollback = resident_rollback * peak_hazard + failed_new_progress
+        rollback_value = (1.0 - probability) * rollback * opportunity_rate
+
+        entropy = _binary_entropy(probability)
+        transfer = sum(other.hardware == device.hardware for other in all_devices) / max(
+            1, len(all_devices)
+        )
+        # With no wall-time evidence, keep duration explicitly unknown. One normalized future
+        # scheduling decision is still a coherent value-of-information unit; this replaces the
+        # former and highly distorting fiction that every unknown Run lasts one second.
+        scheduling_window_value = (
+            opportunity_rate * horizon
+            if opportunity_rate > 0 and horizon is not None
+            else 1.0
+        )
+        information = (
+            entropy
+            * transfer
+            * scheduling_window_value
+            * max(0.0, 1.0 - peak_hazard)
+            * (device.free_bytes / max(1, device.total_bytes))
+        )
+        science_completed = (
+            probability
+            * scientific_rate
+            * min(candidate_duration, horizon)
+            if scientific_rate is not None
+            and candidate_duration is not None
+            and horizon is not None
+            else 0.0
+        )
         before = self.model.aggregate_throughput(
             _action_compatibility(action, device), len(device.active)
         )
@@ -1282,10 +1707,79 @@ class GPUPlacementPlanner:
             if before is not None and after is not None and before > 0
             else 0.0
         )
-        expected_value = success_value + failure_information - rollback_cost - interference
-        if expected_value <= 0:
-            return None
-        return expected_value, probability, rollback, information, signature
+        interference_value = interference * opportunity_rate * (horizon or 0.0)
+        expected_value = (
+            science_completed + information + wait_regret - rollback_value - interference_value
+        )
+        checkpointable = any(
+            value.checkpoint_request_path
+            and (
+                value.checkpoint_elapsed_seconds is None
+                or value.elapsed_seconds > value.checkpoint_elapsed_seconds
+            )
+            for value in device.active
+        )
+        checkpoint_delta = (
+            science_completed
+            + information
+            + wait_regret
+            - (1.0 - probability) * failed_new_progress * opportunity_rate
+            - interference_value
+        )
+        if expected_value <= 0 < checkpoint_delta and checkpointable:
+            return ExplorationEvaluation(
+                action.key,
+                device.index,
+                device.free_bytes,
+                device.provisional_headroom_bytes,
+                tuple(value.resource_state for value in device.active),
+                peak_hazard,
+                probability,
+                action.scientific_value,
+                normalized_scientific_value,
+                scientific_rate,
+                information,
+                rollback,
+                rollback_value,
+                interference_value,
+                wait_regret,
+                checkpoint_delta,
+                False,
+                "CHECKPOINT_REQUESTED",
+                "CHECKPOINT_THEN_EXPLORE",
+                signature,
+            )
+        reason = (
+            "THROUGHPUT_REGRESSION"
+            if interference > 0 and expected_value <= 0
+            else "ROLLBACK_DOMINATES"
+            if rollback_value > science_completed + information + wait_regret
+            else "WAIT_CURRENTLY_BETTER"
+            if expected_value <= 0
+            else "IDLE_OPPORTUNITY_DOMINATES"
+        )
+        return ExplorationEvaluation(
+            action.key,
+            device.index,
+            device.free_bytes,
+            device.provisional_headroom_bytes,
+            tuple(value.resource_state for value in device.active),
+            peak_hazard,
+            probability,
+            action.scientific_value,
+            normalized_scientific_value,
+            scientific_rate,
+            information,
+            rollback,
+            rollback_value,
+            interference_value,
+            wait_regret,
+            expected_value,
+            expected_value > 0,
+            reason,
+            "EXPLORE" if expected_value > 0 else "WAIT",
+            signature,
+        )
 
     def _fit_state(
         self, action: CandidateResourceAction, device: GPUResourceState
@@ -1372,6 +1866,7 @@ class ResourceHistoryStore:
         self._memory: list[ResourceProfileObservation] = []
         self._last_decision_signature: str | None = None
         self._last_ledger_signature: str | None = None
+        self._last_exploration_signature: str | None = None
         if self.study_root is not None:
             self.study_root.mkdir(parents=True, exist_ok=True)
 
@@ -1475,6 +1970,46 @@ class ResourceHistoryStore:
         self._last_decision_signature = signature
         for decision in decisions:
             self._append_mapping(self.study_root / "admission-decisions.jsonl", decision.to_dict())
+
+    def record_exploration_evaluations(
+        self, evaluations: Sequence[ExplorationEvaluation]
+    ) -> None:
+        """Persist changed WHY-WAIT/WHY-EXPLORE evidence without poll-cycle spam."""
+        if self.study_root is None or not evaluations:
+            return
+        bounded = tuple(evaluations[:_FRONTIER_LIMIT])
+        signature = _digest(
+            {
+                "evaluations": [
+                    {
+                        "candidate": value.candidate,
+                        "gpu": value.gpu,
+                        "accepted": value.accepted,
+                        "reason": value.rejection_reason,
+                        "plan": value.plan,
+                        "fit_band": round(value.fit_probability, 1),
+                        "hazard_band": round(value.peak_hazard, 1),
+                        "wait_regret_order": (
+                            int(math.floor(math.log10(1.0 + value.wait_regret)))
+                            if value.wait_regret > 0
+                            else 0
+                        ),
+                        "delta_sign": value.final_delta_value > 0,
+                    }
+                    for value in bounded
+                ]
+            }
+        )
+        if signature == self._last_exploration_signature:
+            return
+        self._last_exploration_signature = signature
+        for value in bounded:
+            self._append_mapping(
+                self.study_root / "exploration-evaluations.jsonl", value.to_dict()
+            )
+        if not any(value.accepted for value in bounded):
+            leading = max(bounded, key=lambda value: value.final_delta_value)
+            self.record_event("RESOURCE_WAIT", leading.to_dict())
 
     def persist_ledger(self, devices: Sequence[GPUResourceState]) -> None:
         if self.study_root is None:
@@ -1695,30 +2230,203 @@ def _empirical_support_distance(
     return statistics.median(distances)
 
 
+def _resource_phase_class(value: str | None) -> str:
+    """Normalize worker narration into allocation-relevant phase classes."""
+    normalized = str(value or "").lower().replace("_", "-")
+    if "backward" in normalized:
+        return "backward"
+    if "optimizer" in normalized:
+        return "optimizer"
+    if "validation" in normalized or "evaluation" in normalized:
+        return "validation"
+    if "checkpoint" in normalized:
+        return "checkpoint"
+    if "forward" in normalized or normalized == "training":
+        return "forward"
+    if normalized == "terminal":
+        return "terminal"
+    return normalized or "unknown"
+
+
+def _normalized_weights(weights: Sequence[float], count: int) -> tuple[float, ...]:
+    if count <= 0:
+        return ()
+    if len(weights) != count or any(value < 0 or not math.isfinite(value) for value in weights):
+        return tuple(1.0 / count for _ in range(count))
+    total = sum(weights)
+    if total <= 0:
+        return tuple(1.0 / count for _ in range(count))
+    return tuple(float(value) / total for value in weights)
+
+
+def _coalesce_weighted_samples(
+    samples: Sequence[int], weights: Sequence[float]
+) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    """Combine repeated support points without turning a rare tail into an equal draw."""
+    if not samples:
+        return (), ()
+    normalized = _normalized_weights(weights, len(samples))
+    combined: dict[int, float] = {}
+    for sample, weight in zip(samples, normalized, strict=True):
+        combined[max(0, int(sample))] = combined.get(max(0, int(sample)), 0.0) + weight
+    ordered = tuple(sorted(combined))
+    return ordered, _normalized_weights(tuple(combined[value] for value in ordered), len(ordered))
+
+
+def _weighted_cdf(samples: Sequence[int], weights: Sequence[float], limit: int) -> float:
+    normalized = _normalized_weights(weights, len(samples))
+    return sum(
+        weight
+        for sample, weight in zip(samples, normalized, strict=True)
+        if sample <= limit
+    )
+
+
+def _weighted_quantile(
+    samples: Sequence[int], weights: Sequence[float], quantile: float
+) -> int:
+    if not samples:
+        return 0
+    pairs = sorted(zip(samples, _normalized_weights(weights, len(samples)), strict=True))
+    target = min(1.0, max(0.0, quantile))
+    cumulative = 0.0
+    for sample, weight in pairs:
+        cumulative += weight
+        if cumulative >= target:
+            return int(sample)
+    return int(pairs[-1][0])
+
+
+def _active_support_scale(
+    distances: Sequence[tuple[float, ActiveResourceEvidence]],
+    schema: Mapping[str, Any],
+) -> float:
+    if not distances:
+        return 1.0
+    evidence = [value for _distance, value in distances]
+    pairwise = [
+        _mixed_distance(left.parameters, right.parameters, schema)
+        for index, left in enumerate(evidence)
+        for right in evidence[index + 1 :]
+    ]
+    if pairwise:
+        return max(statistics.median(pairwise), 1e-6)
+    nearest = distances[0][0]
+    # With one active neighbour, the remaining normalized domain distance is a weak support
+    # bandwidth: identical candidates share fully, boundary-to-boundary extrapolation vanishes.
+    return max(1e-6, 1.0 - nearest)
+
+
 def _fit_probability(prediction: ResourcePrediction, headroom: int) -> float:
     if prediction.known_lower_bound_bytes > headroom:
         return 0.0
     if not prediction.samples:
         return 0.0
-    return sum(sample <= headroom for sample in prediction.samples) / len(prediction.samples)
+    return _weighted_cdf(prediction.samples, prediction.sample_weights, headroom)
 
 
 def _joint_fit_probability(prediction: ResourcePrediction, device: GPUResourceState) -> float:
-    """Evaluate aligned deterministic draws of resident futures plus the queued Run."""
+    """Evaluate a bounded shared posterior plus independent run-specific residual draws.
+
+    Raw sample indices have no statistical relationship across Runs.  Deterministic quantile
+    rotations preserve a shared epistemic rank without manufacturing perfect correlation.
+    """
     candidate = prediction.samples or (prediction.predicted_peak_bytes,)
     resident = [
         value.future_peak_samples
         or (max(value.current_bytes, value.running_peak_bytes, value.commitment_bytes),)
         for value in device.active
     ]
-    draws = max([len(candidate), *(len(value) for value in resident)], default=1)
+    draws = max(_BOOTSTRAP_POINTS, len(candidate), *(len(value) for value in resident))
     fit = 0
     for index in range(draws):
-        used = device.external_bytes + candidate[index % len(candidate)]
-        used += sum(value[index % len(value)] for value in resident)
-        if used <= device.total_bytes and prediction.known_lower_bound_bytes <= device.free_bytes:
+        shared_quantile = (index + 0.5) / draws
+        used = device.external_bytes + _weighted_quantile(
+            candidate, prediction.sample_weights, shared_quantile
+        )
+        for resident_index, values in enumerate(resident):
+            commitment = device.active[resident_index]
+            # A stable irrational rotation gives each Run an independent residual component while
+            # retaining the common posterior quantile above.
+            rotation = ((resident_index + 1) * 0.6180339887498949) % 1.0
+            quantile = (0.7 * shared_quantile + 0.3 * ((shared_quantile + rotation) % 1.0))
+            used += _weighted_quantile(values, commitment.future_peak_weights, quantile)
+        if (
+            used <= device.total_bytes
+            and _weighted_quantile(candidate, prediction.sample_weights, shared_quantile)
+            <= device.free_bytes
+        ):
             fit += 1
     return fit / draws
+
+
+def _normalized_scientific_values(
+    actions: Sequence[CandidateResourceAction],
+) -> dict[str, float]:
+    """Translate controller ordering, not its arbitrary numeric scale, into planner utility."""
+    count = len(actions)
+    return {
+        action.key: (count - index) / max(1, count)
+        for index, action in enumerate(actions)
+    }
+
+
+def _commitment_growth_hazard(value: ActiveResourceCommitment) -> float:
+    if value.growth_hazard >= 0:
+        return min(1.0, value.growth_hazard)
+    return {
+        "STARTING": 0.8,
+        "RAMPING": 1.0,
+        "PLATEAU_UNCONFIRMED": 0.45,
+        "PROVISIONALLY_STABLE": 0.15,
+        "RESOURCE_STABLE": 0.05,
+    }.get(value.resource_state, 0.5)
+
+
+def _candidate_duration(
+    prediction: ResourcePrediction, device: GPUResourceState
+) -> float | None:
+    if prediction.predicted_duration_seconds is not None:
+        return prediction.predicted_duration_seconds
+    if prediction.duration_samples:
+        return statistics.median(prediction.duration_samples)
+    # Active progress is a legitimate current-Study estimate. It is explicitly uncertain and
+    # preferable to the former fabricated one-second duration.
+    resident = [
+        value.remaining_seconds
+        for value in device.active
+        if value.remaining_seconds is not None and value.remaining_seconds > 0
+    ]
+    return statistics.median(resident) if resident else None
+
+
+def _next_decision_horizon(
+    prediction: ResourcePrediction, device: GPUResourceState
+) -> float | None:
+    candidates = [
+        value
+        for commitment in device.active
+        for value in (commitment.next_decision_seconds, commitment.remaining_seconds)
+        if value is not None and value > 0
+    ]
+    candidates.extend(
+        value.elapsed_seconds - float(value.checkpoint_elapsed_seconds)
+        for value in device.active
+        if value.checkpoint_resumable
+        and value.checkpoint_elapsed_seconds is not None
+        and value.elapsed_seconds > value.checkpoint_elapsed_seconds
+    )
+    if prediction.predicted_time_to_envelope_seconds is not None:
+        candidates.append(prediction.predicted_time_to_envelope_seconds)
+    duration = _candidate_duration(prediction, device)
+    if duration is not None:
+        candidates.append(duration)
+    return min(candidates) if candidates else None
+
+
+def _binary_entropy(probability: float) -> float:
+    value = min(1.0 - 1e-12, max(1e-12, probability))
+    return -(value * math.log2(value) + (1.0 - value) * math.log2(1.0 - value))
 
 
 def _resource_experiment_signature(
@@ -1728,7 +2436,7 @@ def _resource_experiment_signature(
     candidate_samples = prediction.samples or (prediction.predicted_peak_bytes,)
     return _digest(
         {
-            "prediction_version": "mixed-live-residual-v2",
+            "prediction_version": "mixed-live-survival-v3",
             "hardware": device.hardware,
             "candidate": prediction.candidate_key,
             "residents": sorted(value.candidate_key for value in device.active),
@@ -1855,6 +2563,7 @@ __all__ = [
     "AdmissionDecision",
     "BoundedResourceTrajectory",
     "CandidateResourceAction",
+    "ExplorationEvaluation",
     "GPUPlacementPlanner",
     "GPUResourceState",
     "OOMResourceEvidence",
@@ -1866,6 +2575,7 @@ __all__ = [
     "ResourceTrajectorySample",
     "ResourceTrajectoryAnalysis",
     "ResourceTrajectoryAnalyzer",
+    "WaitRegretTracker",
     "oom_evidence",
     "resource_identity",
     "resource_state",

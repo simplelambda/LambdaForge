@@ -48,6 +48,7 @@ from lambdaforge.hpo.AdaptiveResources import (
     ResourceProfileObservation,
     ResourceTrajectoryAnalyzer,
     ResourceTrajectorySample,
+    WaitRegretTracker,
     oom_evidence,
     resource_identity,
     resource_state,
@@ -1031,6 +1032,18 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
             "LAMBDAFORGE_PROGRESS_PATH": str(run_dir / "progress.json"),
             "LAMBDAFORGE_RESOURCE_HEARTBEAT_PATH": str(resource_heartbeat_path),
         }
+        raw_resource_checkpoint_request = specification.get("hpo_checkpoint_request_path")
+        if raw_resource_checkpoint_request is not None:
+            run_environment.update(
+                {
+                    "LAMBDAFORGE_RESOURCE_CHECKPOINT_REQUEST_PATH": str(
+                        raw_resource_checkpoint_request
+                    ),
+                    "LAMBDAFORGE_RESOURCE_CHECKPOINT_DIR": str(
+                        checkpoint_root / "resource-admission"
+                    ),
+                }
+            )
         if fidelity is not None:
             run_environment.update(
                 {
@@ -2577,11 +2590,13 @@ def _execute_adaptive_dispatch(
         stop = control_root / f"{token}.stop"
         prune_evidence = stop.with_name(stop.name + ".evidence.json")
         checkpoint_manifest = control_root / f"{token}.checkpoint.json"
+        checkpoint_request = control_root / f"{token}.resource-checkpoint-request"
         raw_fidelity = specification.get("hpo_fidelity")
         continuing = isinstance(raw_fidelity, Mapping) and int(raw_fidelity.get("current", 0)) > 0
         if not continuing:
             metrics.unlink(missing_ok=True)
             checkpoint_manifest.unlink(missing_ok=True)
+            checkpoint_request.unlink(missing_ok=True)
         stop.unlink(missing_ok=True)
         prune_evidence.unlink(missing_ok=True)
         value = dict(specification)
@@ -2594,6 +2609,7 @@ def _execute_adaptive_dispatch(
                 "hpo_metrics_path": metrics,
                 "hpo_stop_path": stop,
                 "hpo_checkpoint_manifest_path": checkpoint_manifest,
+                "hpo_checkpoint_request_path": checkpoint_request,
                 "hpo_objective": objective_metric,
                 "hpo_objective_config": dict(specification["definition"].get("objective", {})),
             }
@@ -3057,6 +3073,8 @@ def _execute_gpu_admitted_runs(
         placement_failures=resource_store.load_placement_failures(),
         parameter_schema=policy.parameter_space,
     )
+    wait_regret = WaitRegretTracker()
+    planner = GPUPlacementPlanner(resource_model, wait_regret=wait_regret)
     active_commitments: dict[Any, ActiveResourceCommitment] = {}
     resource_trajectories: dict[Any, BoundedResourceTrajectory] = {}
     resource_metadata: dict[Any, dict[str, Any]] = {}
@@ -3169,7 +3187,7 @@ def _execute_gpu_admitted_runs(
                 )
                 if retry is not None and retry.get("resumed_after_resource_failure"):
                     resource_store.record_event(
-                        "RESOURCE_RECOVERY",
+                        "RESOURCE_RECOVER",
                         {
                             "trial": value.get("trial_index"),
                             "seed": value.get("seed"),
@@ -3192,7 +3210,7 @@ def _execute_gpu_admitted_runs(
                         == "EXPLORATORY_ADMISSION"
                     ):
                         resource_store.record_event(
-                            "RESOURCE_PACKING_INVALIDATED", placement.to_dict()
+                            "RESOURCE_INVALIDATE_PACKING", placement.to_dict()
                         )
                     resource_model = ResourceDemandModel(
                         resource_store.load(),
@@ -3356,7 +3374,7 @@ def _execute_gpu_admitted_runs(
                 )
             if resource_details.pop("resource_packing_promoted", False):
                 resource_store.record_event(
-                    "RESOURCE_PACKING_PROMOTED",
+                    "RESOURCE_PROMOTE_PACKING",
                     {
                         "candidate": resource_details.get("candidate_key"),
                         "hardware": resource_details.get("hardware"),
@@ -3385,6 +3403,7 @@ def _execute_gpu_admitted_runs(
                         max_parallel=policy.max_parallel,
                         configured_runs_per_gpu=policy.runs_per_gpu,
                         user_minimum_bytes=required,
+                        exploration_evaluations=(),
                     )
                 )
             continue
@@ -3396,12 +3415,41 @@ def _execute_gpu_admitted_runs(
             code_fingerprint=code_fingerprint,
             environment_fingerprint=environment_fingerprint,
         )
-        planner = GPUPlacementPlanner(resource_model)
+        planner.update_model(resource_model)
         admitted, blocked = planner.place(
             actions,
             devices,
             max_launches=max(0, parallelism - len(pending)),
+            now=now,
         )
+        resource_store.record_exploration_evaluations(planner.last_exploration_evaluations)
+        for evaluation in planner.last_exploration_evaluations:
+            if evaluation.plan != "CHECKPOINT_THEN_EXPLORE":
+                continue
+            selected_device = next(
+                (device for device in devices if device.index == evaluation.gpu), None
+            )
+            if selected_device is None:
+                continue
+            for commitment in selected_device.active:
+                raw_request = commitment.checkpoint_request_path
+                if raw_request is None:
+                    continue
+                request = Path(raw_request)
+                if request.exists():
+                    continue
+                atomic_json(
+                    request,
+                    {
+                        "reason": "resource-exploration-rollback-reduction",
+                        "candidate": evaluation.candidate,
+                        "gpu": evaluation.gpu,
+                        "requested_at_utc": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                resource_store.record_event(
+                    "RESOURCE_CHECKPOINT_REQUESTED", evaluation.to_dict()
+                )
         if (
             not admitted
             and queued
@@ -3464,6 +3512,7 @@ def _execute_gpu_admitted_runs(
                     max_parallel=policy.max_parallel,
                     configured_runs_per_gpu=policy.runs_per_gpu,
                     user_minimum_bytes=required,
+                    exploration_evaluations=planner.last_exploration_evaluations,
                 )
             )
         launched = False
@@ -3531,6 +3580,7 @@ def _execute_gpu_admitted_runs(
                 exploration_signature=selected_decision.exploration_signature,
                 trial=_optional_int(value.get("trial_index")),
                 seed=_optional_int(value.get("seed")),
+                future_peak_weights=prediction.sample_weights,
             )
             resource_metadata[future] = {
                 "candidate_key": value["resource_candidate_key"],
@@ -3593,9 +3643,29 @@ def _execute_gpu_admitted_runs(
             )
             leading = blocked[0] if blocked else None
             cause = f"; leading blocked trial={leading.trial}: {leading.reason}" if leading else ""
+            exploration = next(
+                (
+                    value
+                    for value in planner.last_exploration_evaluations
+                    if value.candidate == (leading.candidate_key if leading else None)
+                ),
+                planner.last_exploration_evaluations[0]
+                if planner.last_exploration_evaluations
+                else None,
+            )
+            why_wait = (
+                "; exploration="
+                f"GPU {exploration.gpu} P(fit)={exploration.fit_probability:.2f} "
+                f"peak_hazard={exploration.peak_hazard:.2f} "
+                f"rollback={exploration.rollback_seconds:.1f}s "
+                f"wait_regret={exploration.wait_regret:.3f} "
+                f"decision={exploration.plan} reason={exploration.rejection_reason}"
+                if exploration is not None
+                else ""
+            )
             print(
                 f"[hpo] waiting for resource-aware admission: {len(queued)} Run(s) pending; "
-                f"{states}{cause}",
+                f"{states}{cause}{why_wait}",
                 flush=True,
             )
             next_wait_log = now + _GPU_WAIT_LOG_SECONDS
@@ -4137,6 +4207,11 @@ def _update_active_resource_commitments(
                     step=step,
                     phase=phase,
                     checkpoint_step=_optional_int(snapshot.get("checkpoint_step")),
+                    phases_seen=tuple(
+                        str(value)
+                        for value in snapshot.get("phases_seen", ())
+                        if isinstance(value, str)
+                    ),
                 )
             )
             prediction = model.predict(
@@ -4224,6 +4299,19 @@ def _update_active_resource_commitments(
                 exploration_signature=commitments[future].exploration_signature,
                 trial=commitments[future].trial,
                 seed=commitments[future].seed,
+                future_peak_weights=analysis.residual_weights,
+                growth_hazard=analysis.growth_hazard,
+                expected_residual_growth_bytes=analysis.expected_residual_growth_bytes,
+                next_decision_seconds=analysis.next_decision_seconds,
+                checkpoint_request_path=(
+                    str(specification["hpo_checkpoint_request_path"])
+                    if specification.get("hpo_checkpoint_request_path") is not None
+                    and any(
+                        item.phase in {"backward", "optimizer-step", "validation"}
+                        for item in trajectory.values
+                    )
+                    else commitments[future].checkpoint_request_path
+                ),
             )
             details["resource_state"] = state
             if state in {"PLATEAU_UNCONFIRMED", "PROVISIONALLY_STABLE"} and state != previous_state:
@@ -4265,6 +4353,15 @@ def _update_active_resource_commitments(
                     co_runners=len(futures) - 1,
                     measurement_provenance=provenance,
                     trajectory=trajectory.values,
+                    future_peak_weights=analysis.residual_weights,
+                    growth_hazard=analysis.growth_hazard,
+                    expected_residual_growth_bytes=analysis.expected_residual_growth_bytes,
+                    next_decision_seconds=analysis.next_decision_seconds,
+                    target_step=(
+                        _optional_int(specification.get("hpo_fidelity", {}).get("target"))
+                        if isinstance(specification.get("hpo_fidelity"), Mapping)
+                        else None
+                    ),
                 )
             )
     return tuple(evidence)
@@ -4424,16 +4521,27 @@ def _resource_observation_for_result(
         if result.pruned
         else "failed"
     )
-    # Aggregate physical occupancy is exact only when no sibling shared the device.  With
-    # co-runners the conservative proportional attribution remains useful censored evidence, but
-    # must not masquerade as an exact per-Run target.
+    # Scientific termination and resource completeness are independent. A scientifically pruned
+    # Run can fully characterize its allocation phases; conversely, a completed Run observed only
+    # through aggregate device deltas remains censored.
     co_runners = int(metadata.get("max_co_runners", metadata.get("co_runners", 0)) or 0)
+    phases_seen = tuple(
+        dict.fromkeys(
+            str(phase)
+            for sample in trajectory
+            for phase in ((sample.phase,) if sample.phase is not None else ()) + sample.phases_seen
+        )
+    )
+    phase_text = " ".join(phases_seen).lower()
+    phase_complete = all(
+        marker in phase_text for marker in ("forward", "backward", "optimizer", "validation")
+    )
     exact = (
-        state == "completed"
+        state in {"completed", "pruned"}
         and observed > 0
-        and co_runners == 0
         and metadata.get("measurement_provenance") == "nvml-process-exact"
         and allocated is not None
+        and (phase_complete or state == "completed")
     )
     return ResourceProfileObservation(
         candidate_key=candidate,
@@ -4494,6 +4602,15 @@ def _resource_observation_for_result(
             if observed
             else "lower-bound-only"
         ),
+        scientific_termination=state,
+        resource_profile_quality=(
+            "PHASE_COMPLETE"
+            if exact and phase_complete
+            else "HIGH_QUALITY"
+            if exact
+            else "CENSORED"
+        ),
+        phases_seen=phases_seen,
     )
 
 
@@ -4631,10 +4748,11 @@ def _resource_admission_diagnostics(
     max_parallel: int | None,
     configured_runs_per_gpu: int,
     user_minimum_bytes: int,
+    exploration_evaluations: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """Expose the exact backend placement read model without frontend inference."""
     return {
-        "admission_version": 2,
+        "admission_version": 3,
         "summary": "admissible" if admitted else "waiting_for_resources" if pending else "idle",
         "pending_runs": pending,
         "max_parallel": max_parallel,
@@ -4692,6 +4810,7 @@ def _resource_admission_diagnostics(
         ],
         "admitted": [value.to_dict() for value in admitted],
         "resource_blocked": [value.to_dict() for value in blocked],
+        "exploration_evaluations": [value.to_dict() for value in exploration_evaluations],
     }
 
 

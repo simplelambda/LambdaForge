@@ -13,6 +13,8 @@ from lambdaforge.hpo.AdaptiveResources import (
     GPUResourceState,
     ResourceDemandModel,
     ResourcePrediction,
+    ResourceTrajectoryAnalyzer,
+    ResourceTrajectorySample,
 )
 
 GIB = 1024**3
@@ -50,6 +52,15 @@ class ColdStartBenchmark:
     idle_vram_gib_seconds: float
     protected_progress_lanes: int
     exploratory_oom_count: int
+    mean_active_runs_per_gpu: float = 1.0
+    scientific_value_per_hour: float = 1.0
+    useful_actions_per_hour: float = 1.0
+    informative_oom_count: int = 0
+    redundant_oom_count: int = 0
+    rollback_gpu_seconds: float = 0.0
+    aggregate_throughput: float = 1.0
+    heavy_candidate_starvation_seconds: float = 0.0
+    false_safe_admissions: int = 0
 
 
 def compare_static_and_dynamic() -> dict[str, SchedulingBenchmark]:
@@ -69,24 +80,54 @@ def compare_static_and_dynamic() -> dict[str, SchedulingBenchmark]:
 
 
 def compare_terminal_and_live_cold_start() -> dict[str, ColdStartBenchmark]:
-    """Exercise the real planner on a cheap plateau beside one protected heavy Run."""
+    """Compare v2's binary ramp gate with v3's live posterior on the same trajectory."""
     terminal_wait = 3600.0
     evidence_time = 120.0
+    trajectory = tuple(
+        ResourceTrajectorySample(
+            index * 20.0,
+            int(value * GIB),
+            cuda_reserved_bytes=int(value * GIB),
+            step=index,
+            phase=phase,
+        )
+        for index, (value, phase) in enumerate(
+            (
+                (8.0, "training"),
+                (9.4, "train-forward"),
+                (9.9, "backward"),
+                (10.1, "optimizer-step"),
+                (10.15, "training"),
+                (10.18, "validation"),
+                (10.22, "checkpoint"),
+            )
+        )
+    )
+    analysis = ResourceTrajectoryAnalyzer.analyze(trajectory, total_bytes=80 * GIB)
+    future = tuple(
+        analysis.running_peak_bytes + residual for residual in analysis.residual_samples
+    )
     live = ActiveResourceEvidence(
         "cheap",
         "compatible",
         {"width": 64},
         "H100-80",
         80 * GIB,
-        12 * GIB,
-        12 * GIB,
-        (12 * GIB, 15 * GIB, 80 * GIB),
-        "PROVISIONALLY_STABLE",
+        analysis.current_bytes,
+        analysis.running_peak_bytes,
+        future,
+        analysis.state,
         evidence_time,
         step=6,
         checkpoint_step=6,
         checkpoint_elapsed_seconds=115.0,
         checkpoint_resumable=True,
+        trajectory=trajectory,
+        future_peak_weights=analysis.residual_weights,
+        growth_hazard=analysis.growth_hazard,
+        expected_residual_growth_bytes=analysis.expected_residual_growth_bytes,
+        next_decision_seconds=analysis.next_decision_seconds,
+        target_step=100,
     )
     model = ResourceDemandModel(active_evidence=(live,))
     queued = model.predict(
@@ -106,13 +147,17 @@ def compare_terminal_and_live_cold_start() -> dict[str, ColdStartBenchmark]:
     cheap = ActiveResourceCommitment(
         "cheap",
         80 * GIB,
-        current_bytes=12 * GIB,
-        running_peak_bytes=12 * GIB,
+        current_bytes=analysis.current_bytes,
+        running_peak_bytes=analysis.running_peak_bytes,
         future_peak_samples=live.future_peak_samples,
         resource_state=live.resource_state,
         checkpoint_elapsed_seconds=115.0,
         checkpoint_resumable=True,
         elapsed_seconds=evidence_time,
+        future_peak_weights=analysis.residual_weights,
+        growth_hazard=analysis.growth_hazard,
+        expected_residual_growth_bytes=analysis.expected_residual_growth_bytes,
+        next_decision_seconds=analysis.next_decision_seconds,
     )
     heavy = ActiveResourceCommitment(
         "heavy",
@@ -126,7 +171,16 @@ def compare_terminal_and_live_cold_start() -> dict[str, ColdStartBenchmark]:
     admitted, _ = GPUPlacementPlanner(model).place(
         (action,),
         (
-            GPUResourceState(0, "0", "H100-80", 80 * GIB, 68 * GIB, 0, (cheap,), 5),
+            GPUResourceState(
+                0,
+                "0",
+                "H100-80",
+                80 * GIB,
+                80 * GIB - analysis.current_bytes,
+                0,
+                (cheap,),
+                5,
+            ),
             GPUResourceState(1, "1", "H100-80", 80 * GIB, 40 * GIB, 0, (heavy,), 5),
         ),
         max_launches=1,
@@ -142,11 +196,28 @@ def compare_terminal_and_live_cold_start() -> dict[str, ColdStartBenchmark]:
             0,
         ),
         "adaptive_resource_v2": ColdStartBenchmark(
-            "adaptive-resource-v2",
+            "adaptive-resource-v2-binary-ramp-gate",
+            terminal_wait,
+            68.0 * terminal_wait,
+            2,
+            0,
+            mean_active_runs_per_gpu=1.0,
+            scientific_value_per_hour=1.0,
+            useful_actions_per_hour=1.0,
+            aggregate_throughput=1.0,
+            heavy_candidate_starvation_seconds=terminal_wait,
+        ),
+        "adaptive_resource_v3": ColdStartBenchmark(
+            "adaptive-resource-v3-live-posterior",
             evidence_time,
             68.0 * evidence_time,
             1,
             0,
+            mean_active_runs_per_gpu=1.5,
+            scientific_value_per_hour=2.0,
+            useful_actions_per_hour=2.0,
+            aggregate_throughput=2.0,
+            heavy_candidate_starvation_seconds=evidence_time,
         ),
     }
 

@@ -531,9 +531,16 @@ class StudyWorkspace(ResearchWorkspace):
             ).get("trial")
         table = self.query_one("#trial-table", DataTable)
         table.clear(columns=True)
-        table.add_columns(
-            "Mark", "Trial", "Selection", "Current", "Best", "SE", "Seeds", "Epoch", "GPU", "State"
+        show_standard_error = any(
+            isinstance(candidate.get("selection_standard_error"), int | float)
+            and not isinstance(candidate.get("selection_standard_error"), bool)
+            for candidate in candidates
         )
+        columns = ["Mark", "Trial", "Final mean", "Current", "Best observed"]
+        if show_standard_error:
+            columns.append("Final SE")
+        columns.extend(("Seeds", "Epoch", "GPU", "State"))
+        table.add_columns(*columns)
         for candidate in candidates:
             runs = [value for value in candidate.get("runs", ()) if isinstance(value, Mapping)]
             active = next((run for run in runs if run.get("state") == "running"), None)
@@ -542,20 +549,41 @@ class StudyWorkspace(ResearchWorkspace):
                 markers.append("★")
             if candidate.get("pareto_optimal"):
                 markers.append("◆")
-            if candidate.get("partially_censored"):
+            if candidate.get("partially_censored") or candidate.get("state") == "pruned":
                 markers.append("†")
-            censored = "†" if candidate.get("partially_censored") else ""
-            table.add_row(
+            censored = bool(
+                candidate.get("partially_censored") or candidate.get("state") == "pruned"
+            )
+            selection = (
+                format_value(candidate.get("selection_objective"))
+                if candidate.get("selection_objective") is not None
+                else "censored †"
+                if censored
+                else "—"
+            )
+            cells = [
                 " ".join(markers),
                 str(candidate.get("trial")),
-                f"{format_value(candidate.get('selection_objective'))}{censored}",
-                format_value(candidate.get("current_objective")),
-                format_value(candidate.get("best_objective")),
-                format_value(candidate.get("selection_standard_error")),
-                str(candidate.get("selection_seed_count", len(runs))),
-                str(max((int(run.get("latest_step", 0) or 0) for run in runs), default=0)),
-                str((active or {}).get("gpu_index", "-")),
-                str(candidate.get("state", "unknown")).upper(),
+                selection,
+                self._observed_table_value(candidate.get("current_objective"), censored=censored),
+                self._observed_table_value(candidate.get("best_objective"), censored=censored),
+            ]
+            if show_standard_error:
+                cells.append(
+                    format_value(candidate.get("selection_standard_error"))
+                    if candidate.get("selection_standard_error") is not None
+                    else "—"
+                )
+            cells.extend(
+                (
+                    str(candidate.get("selection_seed_count", len(runs))),
+                    str(max((int(run.get("latest_step", 0) or 0) for run in runs), default=0)),
+                    str((active or {}).get("gpu_index", "-")),
+                    str(candidate.get("state", "unknown")).upper(),
+                )
+            )
+            table.add_row(
+                *cells,
                 key=str(candidate.get("trial")),
             )
         if self.selected_trial is not None:
@@ -563,6 +591,11 @@ class StudyWorkspace(ResearchWorkspace):
                 if int(candidate.get("trial", -1)) == self.selected_trial:
                     table.move_cursor(row=row)
                     break
+
+    @staticmethod
+    def _observed_table_value(value: Any, *, censored: bool) -> str:
+        """Render a measured partial value without implying that it is final."""
+        return f"{format_value(value)}{' †' if censored else ''}" if value is not None else "—"
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "trial-filter":
@@ -1795,7 +1828,9 @@ class HpoParameterWorkspace(ResearchWorkspace):
             + f"importance {format_value(detail.get('importance'))}"
         )
         self.query_one("#hpo-parameter-dashboard", HpoParameterDashboard).show_parameter(
-            self.parameter, response if isinstance(response, Mapping) else {}
+            self.parameter,
+            response if isinstance(response, Mapping) else {},
+            pruning_signal=self._pruning_signal(),
         )
         self._populate_dispersion()
         self._populate_interactions()
@@ -1856,6 +1891,20 @@ class HpoParameterWorkspace(ResearchWorkspace):
             ),
             {},
         )
+
+    def _pruning_signal(self) -> Mapping[str, Any]:
+        """Return censored pruning evidence independently of exact objective analysis."""
+        sources = [self.analysis.get("live_hpo"), self.study.get("hpo_analysis")]
+        for source in sources:
+            if not isinstance(source, Mapping):
+                continue
+            parameters = source.get("parameters", ())
+            for value in parameters if isinstance(parameters, Sequence) else ():
+                if isinstance(value, Mapping) and value.get("parameter") == self.parameter:
+                    signal = value.get("pruning_signal")
+                    if isinstance(signal, Mapping):
+                        return signal
+        return {}
 
     @staticmethod
     def _live_response(detail: Mapping[str, Any]) -> dict[str, Any]:
@@ -2052,12 +2101,25 @@ class TrialWorkspace(ResearchWorkspace):
     def _render_workspace(self) -> None:
         candidate = self.candidate
         objective_name = objective_display_name(self.objective)
+        selection = (
+            format_value(candidate.get("selection_objective"))
+            if candidate.get("selection_objective") is not None
+            else "not final · censored"
+            if candidate.get("partially_censored")
+            else "not available yet"
+        )
+        standard_error = candidate.get("selection_standard_error")
+        standard_error_text = (
+            f"  final SE {format_value(standard_error)}"
+            if isinstance(standard_error, int | float) and not isinstance(standard_error, bool)
+            else ""
+        )
         self.query_one("#trial-header", Static).update(
             f"Trial {candidate.get('trial')}  ·  {str(candidate.get('state', 'unknown')).upper()}\n"
-            f"{objective_name} selection {format_value(candidate.get('selection_objective'))}  "
+            f"{objective_name} final mean {selection}  "
             f"current {format_value(candidate.get('current_objective'))}  "
-            f"best {format_value(candidate.get('best_objective'))}  "
-            f"SE {format_value(candidate.get('selection_standard_error'))}  "
+            f"best observed {format_value(candidate.get('best_objective'))}"
+            f"{standard_error_text}  "
             f"Pareto {'yes' if candidate.get('pareto_optimal') else 'no'}"
         )
         runs = [value for value in candidate.get("runs", ()) if isinstance(value, Mapping)]

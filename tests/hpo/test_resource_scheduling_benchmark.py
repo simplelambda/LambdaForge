@@ -21,9 +21,15 @@ def test_dynamic_resource_planner_improves_useful_throughput_without_ooms() -> N
 
 def test_live_resource_evidence_materially_shortens_safe_cold_start() -> None:
     comparison = compare_terminal_and_live_cold_start()
-    old = comparison["terminal_only"]
-    new = comparison["adaptive_resource_v2"]
+    old = comparison["adaptive_resource_v2"]
+    new = comparison["adaptive_resource_v3"]
     assert new.time_to_first_two_way_packing_seconds < old.time_to_first_two_way_packing_seconds
     assert new.idle_vram_gib_seconds < old.idle_vram_gib_seconds
     assert new.protected_progress_lanes == 1
     assert new.exploratory_oom_count == 0
+    assert new.mean_active_runs_per_gpu > old.mean_active_runs_per_gpu
+    assert new.scientific_value_per_hour > old.scientific_value_per_hour
+    assert new.useful_actions_per_hour > old.useful_actions_per_hour
+    assert new.aggregate_throughput > old.aggregate_throughput
+    assert new.heavy_candidate_starvation_seconds < old.heavy_candidate_starvation_seconds
+    assert new.redundant_oom_count == new.false_safe_admissions == 0

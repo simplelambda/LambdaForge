@@ -788,6 +788,20 @@ class StudyTelemetry:
                 "latest_step": selected.get("current_step", latest_step),
                 "latest_complete_step": selected.get("current_step", latest_step),
             }
+        # A pruner may terminate immediately after the first valid objective checkpoint, before
+        # the worker writes an explicit all-time-best field.  The latest scalar is still a real
+        # observed value and, with no earlier best, is necessarily the best observed checkpoint.
+        fallback_best = latest.get(objective_metric)
+        if (
+            best_objective is None
+            and isinstance(fallback_best, int | float)
+            and not isinstance(fallback_best, bool)
+        ):
+            best_objective = float(fallback_best)
+            best_step = latest_step
+            if selected is not None:
+                selected["best"] = best_objective
+                selected["best_step"] = best_step
         return latest, latest_step, best_step, best_objective, selected, status
 
     @staticmethod
@@ -806,9 +820,13 @@ class StudyTelemetry:
 
     @staticmethod
     def _candidate_metrics(runs: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+        """Aggregate display metrics, including useful censored observations."""
         grouped: dict[str, list[float]] = {}
         for run in runs:
-            if run.get("state") not in {"succeeded", "running"}:
+            # A performance-pruned Run has no final objective, but its last reported metrics
+            # remain truthful observations for researchers inspecting the Study.  This summary
+            # is presentation telemetry only; adaptive fitting consumes final_objective instead.
+            if run.get("state") not in {"succeeded", "running", "retrying", "pruned"}:
                 continue
             for name, value in dict(run.get("latest_metrics", {})).items():
                 if isinstance(value, int | float) and not isinstance(value, bool):
@@ -829,6 +847,7 @@ class StudyTelemetry:
         current_values: list[float] = []
         selectable: list[tuple[float, Mapping[str, Any]]] = []
         provisional: list[tuple[float, Mapping[str, Any]]] = []
+        censored_evidence: list[tuple[float, Mapping[str, Any]]] = []
         censored = any(run.get("state") == "pruned" for run in runs)
         for run in runs:
             latest = run.get("latest_metrics", {})
@@ -836,7 +855,7 @@ class StudyTelemetry:
             current = latest.get(objective_metric)
             if isinstance(current, int | float) and not isinstance(current, bool):
                 current_values.append(float(current))
-            best = run.get("best_objective")
+            best = run.get("best_observed_objective", run.get("best_objective"))
             if not isinstance(best, int | float) or isinstance(best, bool):
                 continue
             pair = (float(best), run)
@@ -844,7 +863,12 @@ class StudyTelemetry:
                 selectable.append(pair)
             elif run.get("state") in {"running", "retrying"}:
                 provisional.append(pair)
-        evidence = selectable or provisional
+            elif run.get("state") == "pruned":
+                censored_evidence.append(pair)
+        # These values feed only the read model's "best observed" display.  In particular,
+        # censored Runs remain absent from selection_values and therefore cannot become an exact
+        # objective, a candidate mean, a Pareto point or surrogate-training evidence.
+        evidence = [*selectable, *provisional, *censored_evidence]
         constraints = StudyTelemetry._candidate_constraint_summary(
             runs, objective_constraints or {}
         )
@@ -899,7 +923,8 @@ class StudyTelemetry:
                     "best_objective": best_value,
                     "best_seed": best_run.get("seed"),
                     "best_step": best_run.get("best_step"),
-                    "best_is_provisional": not bool(selectable),
+                    "best_is_provisional": best_run.get("state") != "succeeded",
+                    "best_evidence_state": best_run.get("state"),
                 }
             )
         return output

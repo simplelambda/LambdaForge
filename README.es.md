@@ -482,12 +482,29 @@ GPU segura con menor holgura (best fit), por lo que puede juntar una configuraci
 pequeña. Empieza conservador, pero fase, progreso, cambios de trayectoria, allocator y checkpoints
 convierten Runs activas en evidencia provisional compartida antes de que terminen.
 
+Los pequeños máximos nuevos del allocator no se consideran automáticamente crecimiento material.
+LambdaForge aprende la escala de medición/deriva de la trayectoria física y del allocator y
+actualiza una prior débil de supervivencia tras cada ciclo de progreso. La distribución futura
+ponderada conserva una cola rara de fases tardías sin darle la misma probabilidad que al régimen
+ligero observado repetidamente. Forward, backward, optimizador, validación y checkpoint contraen o
+mantienen explícitamente el riesgo relevante. El estado visible `RAMPING` o
+`PROVISIONALLY_STABLE` solo explica; el placement consume hazard continuo y residual ponderado.
+
 `SAFE_ADMISSION` cabe considerando incertidumbre y cotas OOM. `EXPLORATORY_ADMISSION` es un paso
 1→2→3 consciente de checkpoints cuyo progreso e información esperados superan el coste de rollback
 e interferencia. Con dos o más GPU intercambiables queda un carril de progreso protegido y solo una
 hermana prueba el mismo escalón incierto. Un éxito provisional promueve el packing antes del último
 epoch; una OOM posterior lo invalida. Por ello un cold start largo no queda bloqueado con una Run
 por GPU solo porque ningún entreno haya terminado.
+
+Esperar también tiene coste. Si existe trabajo útil pendiente y VRAM físicamente utilizable ociosa,
+LambdaForge integra fracción ociosa × tasa de valor científico normalizado. Este *wait regret* hace
+que finalmente gane un experimento acotado cuando P(fit) es positiva y no hay impedimento duro; no
+es un timeout. La magnitud del score del controlador nunca se usa como moneda: recursos normaliza
+el orden científico, convierte GPU-segundos a coste de oportunidad y separa el valor informativo.
+Una duración desconocida sigue siendo incierta y se estima con historia compatible o ritmo vivo,
+nunca como un segundo. Si solo domina el rollback y Lightning permite guardar estado, puede pedir
+un checkpoint seguro al límite de epoch y volver a evaluar.
 
 `gpu_memory` es opcional. Si se declara conserva su semántica de suelo de seguridad mínimo para
 cada lanzamiento; el compromiso efectivo es el máximo entre ese suelo, la envolvente superior
@@ -523,6 +540,10 @@ No se repite el mismo experimento o uno dominado, pero `heavy+heavy` no prohíbe
 un objective malo ni otro Trial.
 La interferencia medida entre co-runners también puede impedir añadir otro proceso aunque quepa en
 VRAM: se maximiza trabajo científico útil por tiempo, no memoria ocupada.
+Una Run podada por rendimiento sí enseña recursos cuando sus fases y medidas por proceso completan
+el perfil; su objective científico continúa censurado. Los diagnósticos persisten cambios
+`RESOURCE_WAIT`, `RESOURCE_EXPLORE`, checkpoint, promoción, invalidación y recuperación con P(fit),
+hazard, rollback, wait regret y motivo explícito, sin escribir en cada sondeo.
 
 Cada evento terminal replanifica la frontera científica contra el estado físico actual. Cada Run empaquetado posee un proceso
 spawn nuevo que termina al acabar el Run; no se reutiliza un worker CUDA ocioso cuyo contexto
