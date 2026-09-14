@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import tomli
@@ -37,6 +37,7 @@ from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveResources import (
     ActiveResourceCommitment,
     ActiveResourceEvidence,
+    AdmissionMode,
     BoundedResourceTrajectory,
     CandidateResourceAction,
     GPUPlacementPlanner,
@@ -45,13 +46,15 @@ from lambdaforge.hpo.AdaptiveResources import (
     ResourceDemandModel,
     ResourceEvidenceQuality,
     ResourceHistoryStore,
+    ResourcePhaseModel,
     ResourceProfileObservation,
     ResourceTrajectoryAnalyzer,
     ResourceTrajectorySample,
+    ResourceTrajectoryStatistics,
+    ScientificActionValue,
     WaitRegretTracker,
     oom_evidence,
     resource_identity,
-    resource_state,
 )
 from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservation
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
@@ -1290,8 +1293,12 @@ def _execute_adaptive_group(
     candidate_parameters = {
         trial: dict(by_trial[trial][0].get("trial_parameters", {})) for trial in all_trials
     }
-    selector = AdaptiveSampler(candidate_parameters, mode=mode)
-    bayesian = BayesianSampler(candidate_parameters, mode=mode)
+    selector = AdaptiveSampler(
+        candidate_parameters, mode=mode, parameter_space=policy.parameter_space
+    )
+    bayesian = BayesianSampler(
+        candidate_parameters, mode=mode, parameter_space=policy.parameter_space
+    )
     survival_model = SurvivalModel(candidate_parameters)
     racer = AdaptiveSeedRacer(
         mode=mode,
@@ -1478,6 +1485,7 @@ def _execute_adaptive_group(
             practical_margin=policy.scientific_margin,
             fingerprint=str(specifications[0]["execution_id"]),
             candidate_pool=candidate_parameters,
+            parameter_space=policy.parameter_space,
         )
 
     def propose(count: int) -> tuple[int, ...]:
@@ -1671,7 +1679,7 @@ def _execute_adaptive_group(
             for result in outcomes
             if result.duration_seconds > 0 and result.termination_type != "scheduler_preempted"
         ]
-        default_cost = statistics.fmean(durations) if durations else 1.0
+        default_cost = statistics.fmean(durations) if durations else None
         options: list[tuple[float, int, str, dict[str, Any], dict[str, Any]]] = []
         scientific = scientific_snapshot()
         optimization_weight = float(scientific["optimization_weight"])
@@ -1726,7 +1734,11 @@ def _execute_adaptive_group(
                 decision.probability_competitive,
                 1.0 - decision.probability_competitive,
             )
-            cost_ratio = cost / max(default_cost, 1e-9)
+            cost_ratio = (
+                cost / max(default_cost, 1e-9)
+                if cost is not None and default_cost is not None
+                else 1.0
+            )
             value_proxy = (
                 optimization_weight * optimization_value + information_weight * information_value
             )
@@ -1833,7 +1845,11 @@ def _execute_adaptive_group(
             current, target = int(fidelity["current"]), int(fidelity["target"])
             incremental_fraction = max(1, target - current) / max(1, current)
             base_cost = result.duration_seconds if result.duration_seconds > 0 else default_cost
-            cost = max(1e-9, base_cost * incremental_fraction)
+            cost = (
+                max(1e-9, base_cost * incremental_fraction)
+                if base_cost is not None
+                else None
+            )
             maximum = max(1, int(fidelity["maximum"]))
             fidelity_gain = max(0.0, min(1.0, (target - current) / maximum))
             information_value = min(
@@ -1845,7 +1861,11 @@ def _execute_adaptive_group(
                 optimization_weight * optimization_value + information_weight * information_value
             )
             value_proxy = combined_value
-            cost_ratio = cost / max(default_cost, 1e-9)
+            cost_ratio = (
+                cost / max(default_cost, 1e-9)
+                if cost is not None and default_cost is not None
+                else 1.0
+            )
             options.append(
                 (
                     combined_value / max(cost_ratio, 1e-9),
@@ -1891,6 +1911,7 @@ def _execute_adaptive_group(
                 candidate_parameters,
                 mode=mode,
                 practical_margin=policy.scientific_margin,
+                parameter_space=policy.parameter_space,
             ).rank(
                 provisional_values,
                 selected=proposed,
@@ -1995,12 +2016,34 @@ def _execute_adaptive_group(
             seen.add(selected_key)
             selected["hpo_scheduler_action"] = option_action
             selected["hpo_scheduler_priority"] = float(option_score)
+            raw_optimization_value = option_evidence.get("optimization_value")
+            raw_information_value = option_evidence.get("information_value")
+            normalized_value = (
+                optimization_weight * float(raw_optimization_value)
+                + information_weight * float(raw_information_value)
+                if isinstance(raw_optimization_value, int | float)
+                and not isinstance(raw_optimization_value, bool)
+                and isinstance(raw_information_value, int | float)
+                and not isinstance(raw_information_value, bool)
+                else None
+            )
             selected["hpo_scientific_value"] = {
                 "score": float(option_score),
-                "optimization_value": option_evidence.get("optimization_value"),
-                "information_value": option_evidence.get("information_value"),
+                "normalized_value": normalized_value,
+                "rank": len(specifications) + 1,
+                "optimization_value": raw_optimization_value,
+                "information_value": raw_information_value,
+                "uncertainty": option_evidence.get(
+                    "expected_uncertainty_reduction",
+                    scientific.get("scientific_uncertainty"),
+                ),
                 "expected_cost_seconds": option_evidence.get("expected_cost_seconds"),
-                "purpose": option_evidence.get("purpose", option_action),
+                "evidence_kind": option_evidence.get(
+                    "value_basis",
+                    option_evidence.get(
+                        "value_method", option_evidence.get("purpose", option_action)
+                    ),
+                ),
             }
             specifications.append(selected)
             pool_trial = int(selected.get("candidate_pool_index", selected["trial_index"]))
@@ -3073,7 +3116,7 @@ def _execute_gpu_admitted_runs(
         placement_failures=resource_store.load_placement_failures(),
         parameter_schema=policy.parameter_space,
     )
-    wait_regret = WaitRegretTracker()
+    wait_regret = WaitRegretTracker(resource_store.load_wait_regret())
     planner = GPUPlacementPlanner(resource_model, wait_regret=wait_regret)
     active_commitments: dict[Any, ActiveResourceCommitment] = {}
     resource_trajectories: dict[Any, BoundedResourceTrajectory] = {}
@@ -3083,6 +3126,7 @@ def _execute_gpu_admitted_runs(
     consecutive_probe_failures = 0
     frontier_expanded_without_terminal_event = False
     next_resource_sample = 0.0
+    scheduling_started = time.monotonic()
     while queued or pending:
         done: set[Any] = set()
         if pending:
@@ -3423,6 +3467,7 @@ def _execute_gpu_admitted_runs(
             now=now,
         )
         resource_store.record_exploration_evaluations(planner.last_exploration_evaluations)
+        resource_store.persist_wait_regret(wait_regret)
         for evaluation in planner.last_exploration_evaluations:
             if evaluation.plan != "CHECKPOINT_THEN_EXPLORE":
                 continue
@@ -3494,6 +3539,13 @@ def _execute_gpu_admitted_runs(
                 )
                 continue
         resource_store.record_decisions((*admitted, *blocked))
+        resource_store.record_trace(
+            elapsed_seconds=max(0.0, now - scheduling_started),
+            devices=devices,
+            actions=actions,
+            decisions=(*admitted, *blocked),
+            exploration_evaluations=planner.last_exploration_evaluations,
+        )
         resource_store.persist_ledger(devices)
         by_candidate = {action.key: action for action in actions}
         slots = tuple(
@@ -3599,6 +3651,7 @@ def _execute_gpu_admitted_runs(
                 "trajectory": resource_trajectories.setdefault(future, BoundedResourceTrajectory()),
                 "admission_mode": selected_decision.admission_mode,
                 "exploration_signature": selected_decision.exploration_signature,
+                "predicted_fit_probability": selected_decision.fit_probability,
                 "resident_candidates": tuple(
                     sorted(item.candidate_key for item in selected_device.active)
                 ),
@@ -4207,6 +4260,14 @@ def _update_active_resource_commitments(
                     step=step,
                     phase=phase,
                     checkpoint_step=_optional_int(snapshot.get("checkpoint_step")),
+                    checkpoint_duration_seconds=(
+                        float(snapshot["checkpoint_duration_seconds"])
+                        if isinstance(
+                            snapshot.get("checkpoint_duration_seconds"), int | float
+                        )
+                        and not isinstance(snapshot.get("checkpoint_duration_seconds"), bool)
+                        else None
+                    ),
                     phases_seen=tuple(
                         str(value)
                         for value in snapshot.get("phases_seen", ())
@@ -4244,17 +4305,17 @@ def _update_active_resource_commitments(
                 trajectory.values,
                 historical_residuals=prediction.future_residual_samples,
                 total_bytes=total,
+                trajectory_statistics=trajectory.statistics,
+                phase_model=model.phase_model(
+                    str(details.get("compatibility_key", "")),
+                    str(details.get("hardware", f"cuda-vram-{total}")),
+                ),
             )
             future_samples = tuple(
                 max(analysis.running_peak_bytes, analysis.running_peak_bytes + residual)
                 for residual in analysis.residual_samples
             )
-            state = resource_state(
-                prediction,
-                observed_peak_bytes=current,
-                phase=phase,
-                trajectory=trajectory.values,
-            )
+            state = analysis.state
             previous_state = details.get("resource_state")
             remaining = commitments[future].remaining_seconds
             raw_prediction = details.get("prediction")
@@ -4303,6 +4364,9 @@ def _update_active_resource_commitments(
                 growth_hazard=analysis.growth_hazard,
                 expected_residual_growth_bytes=analysis.expected_residual_growth_bytes,
                 next_decision_seconds=analysis.next_decision_seconds,
+                next_decision_uncertainty_seconds=(
+                    analysis.next_decision_uncertainty_seconds
+                ),
                 checkpoint_request_path=(
                     str(specification["hpo_checkpoint_request_path"])
                     if specification.get("hpo_checkpoint_request_path") is not None
@@ -4311,6 +4375,23 @@ def _update_active_resource_commitments(
                         for item in trajectory.values
                     )
                     else commitments[future].checkpoint_request_path
+                ),
+                evidence_cycles=analysis.evidence_cycles,
+                phase_hazards=analysis.phase_hazards,
+                tail_probability=analysis.tail_probability,
+                last_material_peak_time=analysis.last_material_peak_time,
+                checkpoint_cadence_seconds=analysis.checkpoint_cadence_seconds,
+                checkpoint_duration_seconds=(
+                    float(snapshot["checkpoint_duration_seconds"])
+                    if isinstance(snapshot.get("checkpoint_duration_seconds"), int | float)
+                    and not isinstance(snapshot.get("checkpoint_duration_seconds"), bool)
+                    else commitments[future].checkpoint_duration_seconds
+                ),
+                throughput=(
+                    float(snapshot["throughput"])
+                    if isinstance(snapshot.get("throughput"), int | float)
+                    and not isinstance(snapshot.get("throughput"), bool)
+                    else commitments[future].throughput
                 ),
             )
             details["resource_state"] = state
@@ -4357,11 +4438,15 @@ def _update_active_resource_commitments(
                     growth_hazard=analysis.growth_hazard,
                     expected_residual_growth_bytes=analysis.expected_residual_growth_bytes,
                     next_decision_seconds=analysis.next_decision_seconds,
+                    next_decision_uncertainty_seconds=(
+                        analysis.next_decision_uncertainty_seconds
+                    ),
                     target_step=(
                         _optional_int(specification.get("hpo_fidelity", {}).get("target"))
                         if isinstance(specification.get("hpo_fidelity"), Mapping)
                         else None
                     ),
+                    trajectory_statistics=trajectory.statistics.to_dict(),
                 )
             )
     return tuple(evidence)
@@ -4420,6 +4505,31 @@ def _resource_actions(
             f"{candidate}:trial={specification.get('trial_index')}:"
             f"seed={specification.get('seed')}:retry={specification.get('controller_retry', 0)}"
         )
+        raw_contract = specification.get("hpo_scientific_value")
+        contract = None
+        if isinstance(raw_contract, Mapping):
+            normalized = raw_contract.get("normalized_value")
+            contract = ScientificActionValue(
+                rank=int(raw_contract.get("rank", position + 1)),
+                normalized_value=(
+                    min(1.0, max(0.0, float(normalized)))
+                    if isinstance(normalized, int | float) and not isinstance(normalized, bool)
+                    else None
+                ),
+                uncertainty=(
+                    float(raw_contract["uncertainty"])
+                    if isinstance(raw_contract.get("uncertainty"), int | float)
+                    and not isinstance(raw_contract.get("uncertainty"), bool)
+                    else None
+                ),
+                expected_cost_seconds=(
+                    float(raw_contract["expected_cost_seconds"])
+                    if isinstance(raw_contract.get("expected_cost_seconds"), int | float)
+                    and not isinstance(raw_contract.get("expected_cost_seconds"), bool)
+                    else None
+                ),
+                evidence_kind=str(raw_contract.get("evidence_kind", "rank-only")),
+            )
         output.append(
             CandidateResourceAction(
                 unique,
@@ -4427,6 +4537,7 @@ def _resource_actions(
                 scientific_value,
                 prediction,
                 device_predictions,
+                contract,
             )
         )
     return tuple(output)
@@ -4455,7 +4566,11 @@ def _resource_observation_for_result(
         int(allocated) if isinstance(allocated, int) else 0,
     )
     if peaks:
-        terminal_trajectory = BoundedResourceTrajectory(trajectory)
+        terminal_trajectory = (
+            raw_trajectory
+            if isinstance(raw_trajectory, BoundedResourceTrajectory)
+            else BoundedResourceTrajectory(trajectory)
+        )
         terminal_trajectory.append(
             ResourceTrajectorySample(
                 elapsed_seconds=max(0.0, result.duration_seconds),
@@ -4532,9 +4647,30 @@ def _resource_observation_for_result(
             for phase in ((sample.phase,) if sample.phase is not None else ()) + sample.phases_seen
         )
     )
-    phase_text = " ".join(phases_seen).lower()
-    phase_complete = all(
-        marker in phase_text for marker in ("forward", "backward", "optimizer", "validation")
+    prior_phase_model = ResourcePhaseModel()
+    raw_execution = specification.get("execution_dir")
+    if raw_execution is not None:
+        prior = ResourceHistoryStore(
+            Path(str(raw_execution)) / "hpo-control" / "resources"
+        ).load()
+        prior_phase_model = ResourcePhaseModel.from_observations(
+            tuple(
+                value
+                for value in prior
+                if value.compatibility_key == compatibility
+                and value.hardware == str(metadata.get("hardware", "unknown"))
+            )
+        )
+    known_complete, _missing_phases = prior_phase_model.completeness(phases_seen)
+    trajectory_statistics = (
+        raw_trajectory.statistics
+        if isinstance(raw_trajectory, BoundedResourceTrajectory)
+        else ResourceTrajectoryStatistics.from_samples(trajectory, reconstructed=True)
+    )
+    phase_complete = (
+        known_complete
+        and bool(phases_seen)
+        and trajectory_statistics.cycles_since_material_peak >= 1
     )
     exact = (
         state in {"completed", "pruned"}
@@ -4611,6 +4747,36 @@ def _resource_observation_for_result(
             else "CENSORED"
         ),
         phases_seen=phases_seen,
+        predicted_fit_probability=(
+            float(metadata["predicted_fit_probability"])
+            if isinstance(metadata.get("predicted_fit_probability"), int | float)
+            else None
+        ),
+        placement_succeeded=(False if memory_failure else True if result.ok else None),
+        admission_mode=(
+            cast(AdmissionMode, str(metadata["admission_mode"]))
+            if metadata.get("admission_mode")
+            in {"SAFE_ADMISSION", "EXPLORATORY_ADMISSION"}
+            else None
+        ),
+        predicted_peak_bytes=(
+            int(prediction["predicted_peak_bytes"])
+            if isinstance(prediction := metadata.get("prediction"), Mapping)
+            and isinstance(prediction.get("predicted_peak_bytes"), int | float)
+            else None
+        ),
+        predicted_time_to_envelope_seconds=(
+            float(prediction["predicted_time_to_envelope_seconds"])
+            if isinstance(prediction, Mapping)
+            and isinstance(prediction.get("predicted_time_to_envelope_seconds"), int | float)
+            else None
+        ),
+        checkpoint_duration_seconds=(
+            statistics.median(trajectory_statistics.checkpoint_durations)
+            if trajectory_statistics.checkpoint_durations
+            else None
+        ),
+        trajectory_statistics=trajectory_statistics.to_dict(),
     )
 
 
@@ -4802,6 +4968,17 @@ def _resource_admission_diagnostics(
                         "checkpoint_resumable": item.checkpoint_resumable,
                         "measurement_provenance": item.measurement_provenance,
                         "admission_mode": item.admission_mode,
+                        "growth_hazard": item.growth_hazard,
+                        "evidence_cycles": item.evidence_cycles,
+                        "phase_hazards": dict(item.phase_hazards),
+                        "tail_probability": item.tail_probability,
+                        "last_material_peak_time": item.last_material_peak_time,
+                        "next_decision_seconds": item.next_decision_seconds,
+                        "next_decision_uncertainty_seconds": (
+                            item.next_decision_uncertainty_seconds
+                        ),
+                        "checkpoint_cadence_seconds": item.checkpoint_cadence_seconds,
+                        "checkpoint_duration_seconds": item.checkpoint_duration_seconds,
                     }
                     for item in value.active
                 ],

@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, ClassVar
 
+from lambdaforge.hpo.ParameterSpace import ParameterSpace
+
 _INACTIVE = "<inactive>"
 _PARAMETER_STATES = (
     "PREFERRED",
@@ -73,7 +75,7 @@ class CandidateDesignValue:
     optimization_value: float
     information_value: float
     counterfactual_match_quality: float
-    expected_cost: float
+    expected_cost: float | None
     cost_ratio: float
     score: float
     predicted_objective: float
@@ -115,6 +117,7 @@ class _ScientificDesignBasis:
         pool: Mapping[int, Mapping[str, Any]],
         *,
         reference_budget: int,
+        parameter_space: ParameterSpace,
     ) -> None:
         self.pool = tuple(
             (int(trial), dict(parameters)) for trial, parameters in sorted(pool.items())
@@ -123,6 +126,7 @@ class _ScientificDesignBasis:
             tuple(parameters for _trial, parameters in self.pool),
             max(1, reference_budget),
         )
+        self.parameter_space = parameter_space
         # Match against sqrt(R) representatives for R Monte Carlo reference points.  Scientific
         # live cost is therefore bounded by its inference precision rather than by proposal-pool
         # cardinality; terminal analysis naturally uses a denser support.
@@ -165,7 +169,9 @@ class _ScientificDesignBasis:
             if matched is None:
                 matched = min(
                     support,
-                    key=lambda parameters: _mixed_distance(reference, parameters, ignore=(name,)),
+                    key=lambda parameters: self.parameter_space.distance(
+                        reference, parameters, ignore=(name,)
+                    ),
                 )
             encoded = json.dumps(matched, sort_keys=True, separators=(",", ":"), default=str)
             previous = counts.get(encoded)
@@ -290,6 +296,7 @@ class ScientificQuestionAnalyzer:
         practical_margin: float | None,
         fingerprint: str,
         candidate_pool: Mapping[int, Mapping[str, Any]] | None = None,
+        parameter_space: ParameterSpace | Mapping[str, Any] | None = None,
         final: bool = False,
     ) -> dict[str, Any]:
         """Return one versioned scientific-understanding snapshot."""
@@ -311,6 +318,22 @@ class ScientificQuestionAnalyzer:
                     "margin": margin,
                     "fingerprint": fingerprint,
                     "candidate_pool": candidate_pool,
+                    "parameter_space": (
+                        [
+                            {
+                                "name": value.name,
+                                "kind": value.kind,
+                                "low": value.low,
+                                "high": value.high,
+                                "values": value.values,
+                                "scale": value.scale,
+                                "when": value.when,
+                            }
+                            for value in parameter_space.descriptors
+                        ]
+                        if isinstance(parameter_space, ParameterSpace)
+                        else parameter_space
+                    ),
                     "final": final,
                 },
                 sort_keys=True,
@@ -334,6 +357,11 @@ class ScientificQuestionAnalyzer:
         }
         for trial, values in parameters.items():
             pool.setdefault(trial, values)
+        geometry = (
+            parameter_space
+            if isinstance(parameter_space, ParameterSpace)
+            else ParameterSpace.from_schema(parameter_space, tuple(pool.values()))
+        )
         noise = SeedNoiseModel.fit(outcomes)
         natural_scale = cls._natural_scale(rows, objective)
         resamples = cls._resample_count(
@@ -341,7 +369,7 @@ class ScientificQuestionAnalyzer:
             len({name for value in pool.values() for name in value}),
             final=final,
         )
-        basis = cls._design_basis(pool, reference_budget=resamples)
+        basis = cls._design_basis(pool, reference_budget=resamples, parameter_space=geometry)
         distance_cache: dict[str, dict[int, float]] = {}
         distance_order_cache: dict[str, tuple[int, tuple[int, ...]]] = {}
         model = _MixedKnnModel(
@@ -351,6 +379,7 @@ class ScientificQuestionAnalyzer:
             natural_scale=natural_scale,
             distance_cache=distance_cache,
             distance_order_cache=distance_order_cache,
+            parameter_space=geometry,
         )
         rng = random.Random(cls._seed(fingerprint, "scientific-questions"))
         realizations = cls._realizations(
@@ -376,6 +405,7 @@ class ScientificQuestionAnalyzer:
                     distance_cache=distance_cache,
                     distance_order_cache=distance_order_cache,
                     validation_error=model.validation_error,
+                    parameter_space=geometry,
                 ),
             )
             for realization in realizations
@@ -518,11 +548,27 @@ class ScientificQuestionAnalyzer:
         pool: Mapping[int, Mapping[str, Any]],
         *,
         reference_budget: int,
+        parameter_space: ParameterSpace,
     ) -> _ScientificDesignBasis:
         """Reuse immutable proposal-pool geometry across event-driven evidence updates."""
         key = hashlib.sha256(
             json.dumps(
-                {"pool": pool, "reference_budget": reference_budget},
+                {
+                    "pool": pool,
+                    "reference_budget": reference_budget,
+                    "space": [
+                        {
+                            "name": value.name,
+                            "kind": value.kind,
+                            "low": value.low,
+                            "high": value.high,
+                            "values": value.values,
+                            "scale": value.scale,
+                            "when": value.when,
+                        }
+                        for value in parameter_space.descriptors
+                    ],
+                },
                 sort_keys=True,
                 separators=(",", ":"),
                 default=str,
@@ -533,7 +579,11 @@ class ScientificQuestionAnalyzer:
             if cached is not None:
                 cls._basis_cache.move_to_end(key)
                 return cached
-            basis = _ScientificDesignBasis(pool, reference_budget=reference_budget)
+            basis = _ScientificDesignBasis(
+                pool,
+                reference_budget=reference_budget,
+                parameter_space=parameter_space,
+            )
             cls._basis_cache[key] = basis
             cls._basis_cache.move_to_end(key)
             while len(cls._basis_cache) > cls._BASIS_CACHE_LIMIT:
@@ -1327,10 +1377,16 @@ class ExperimentalDesignPolicy:
         *,
         mode: str,
         practical_margin: float | None,
+        parameter_space: ParameterSpace | Mapping[str, Any] | None = None,
     ) -> None:
         self.candidates = {int(key): dict(value) for key, value in candidates.items()}
         self.mode = mode
         self.practical_margin = practical_margin
+        self.parameter_space = (
+            parameter_space
+            if isinstance(parameter_space, ParameterSpace)
+            else ParameterSpace.from_schema(parameter_space, tuple(self.candidates.values()))
+        )
 
     def rank(
         self,
@@ -1349,7 +1405,13 @@ class ExperimentalDesignPolicy:
             return ()
         noise = SeedNoiseModel.fit(outcomes)
         scale = float(scientific_state.get("natural_utility_scale", 1.0) or 1.0)
-        model = _MixedKnnModel(self.candidates, rows, noise=noise, natural_scale=scale)
+        model = _MixedKnnModel(
+            self.candidates,
+            rows,
+            noise=noise,
+            natural_scale=scale,
+            parameter_space=self.parameter_space,
+        )
         questions = [
             value
             for key in ("parameter_questions", "interaction_questions")
@@ -1363,7 +1425,7 @@ class ExperimentalDesignPolicy:
         durations = [
             float(value) for value in (costs or {}).values() if _finite(value) and float(value) > 0
         ]
-        median_cost = statistics.median(durations) if durations else 1.0
+        median_cost = statistics.median(durations) if durations else None
         incumbent = (max if self.mode == "max" else min)(rows.values())
         sign = 1.0 if self.mode == "max" else -1.0
         selected_set = set(selected)
@@ -1411,7 +1473,11 @@ class ExperimentalDesignPolicy:
                 sum(value[0] for value in targeted[: max(1, int(math.sqrt(len(targeted) or 1)))]),
             )
             expected_cost = self._cost(trial, costs or {}, model, median_cost)
-            cost_ratio = expected_cost / max(median_cost, 1e-12)
+            cost_ratio = (
+                expected_cost / max(median_cost, 1e-12)
+                if expected_cost is not None and median_cost is not None
+                else 1.0
+            )
             score = (w_opt * optimization_value + w_info * information_value) / max(
                 cost_ratio, 1e-12
             )
@@ -1525,7 +1591,8 @@ class ExperimentalDesignPolicy:
         if not references:
             return 1.0
         distances = sorted(
-            _mixed_distance(parameters, reference, ignore=names) for reference in references
+            self.parameter_space.distance(parameters, reference, ignore=names)
+            for reference in references
         )
         nearest = distances[0]
         rank = sum(distance <= nearest for distance in distances) / len(distances)
@@ -1545,13 +1612,18 @@ class ExperimentalDesignPolicy:
         trial: int,
         costs: Mapping[int, float],
         model: _MixedKnnModel,
-        fallback: float,
-    ) -> float:
+        fallback: float | None,
+    ) -> float | None:
         if trial in costs and _finite(costs[trial]) and float(costs[trial]) > 0:
             return float(costs[trial])
         neighbours = sorted(
             (
-                (_mixed_distance(self.candidates[trial], self.candidates[other]), float(cost))
+                (
+                    self.parameter_space.distance(
+                        self.candidates[trial], self.candidates[other]
+                    ),
+                    float(cost),
+                )
                 for other, cost in costs.items()
                 if other in self.candidates and _finite(cost) and float(cost) > 0
             ),
@@ -1574,6 +1646,7 @@ class _MixedKnnModel:
         distance_cache: dict[str, dict[int, float]] | None = None,
         distance_order_cache: dict[str, tuple[int, tuple[int, ...]]] | None = None,
         validation_error: float | None = None,
+        parameter_space: ParameterSpace | None = None,
     ) -> None:
         self.parameters = {
             trial: dict(values) for trial, values in parameters.items() if trial in rows
@@ -1581,6 +1654,9 @@ class _MixedKnnModel:
         self.rows = {trial: float(rows[trial]) for trial in self.parameters}
         self.noise = noise
         self.natural_scale = max(float(natural_scale), 1e-12)
+        self.parameter_space = parameter_space or ParameterSpace.from_schema(
+            None, tuple(self.parameters.values())
+        )
         # Objective realizations change their values and included candidates, but the mixed-space
         # geometry does not.  Sharing this cache prevents every resample from recalculating the
         # same query-to-observation distances.
@@ -1679,7 +1755,7 @@ class _MixedKnnModel:
         distances = self._distance_cache.setdefault(key, {})
         for trial, observed in self.parameters.items():
             if trial not in distances:
-                distances[trial] = _mixed_distance(parameters, observed)
+                distances[trial] = self.parameter_space.distance(parameters, observed)
         return distances
 
     def _ordered_trials(self, key: str, distances: Mapping[int, float]) -> tuple[int, ...]:
@@ -1730,24 +1806,7 @@ def _normal_expected_improvement(mean: float, deviation: float, threshold: float
 def _mixed_distance(
     left: Mapping[str, Any], right: Mapping[str, Any], *, ignore: Sequence[str] = ()
 ) -> float:
-    ignored = set(ignore)
-    names = sorted((set(left) | set(right)) - ignored)
-    if not names:
-        return 0.0
-    values: list[float] = []
-    for name in names:
-        first, second = left.get(name, _INACTIVE), right.get(name, _INACTIVE)
-        if (
-            isinstance(first, int | float)
-            and not isinstance(first, bool)
-            and isinstance(second, int | float)
-            and not isinstance(second, bool)
-        ):
-            scale = max(abs(float(first)), abs(float(second)), 1.0)
-            values.append(min(1.0, abs(float(first) - float(second)) / scale))
-        else:
-            values.append(0.0 if first == second else 1.0)
-    return math.sqrt(statistics.fmean(value * value for value in values))
+    return ParameterSpace.from_schema(None, (left, right)).distance(left, right, ignore=ignore)
 
 
 def _projected_key(parameters: Mapping[str, Any], *, ignore: Sequence[str]) -> str:

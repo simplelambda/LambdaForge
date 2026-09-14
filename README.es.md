@@ -483,12 +483,16 @@ pequeña. Empieza conservador, pero fase, progreso, cambios de trayectoria, allo
 convierten Runs activas en evidencia provisional compartida antes de que terminen.
 
 Los pequeños máximos nuevos del allocator no se consideran automáticamente crecimiento material.
-LambdaForge aprende la escala de medición/deriva de la trayectoria física y del allocator y
-actualiza una prior débil de supervivencia tras cada ciclo de progreso. La distribución futura
-ponderada conserva una cola rara de fases tardías sin darle la misma probabilidad que al régimen
-ligero observado repetidamente. Forward, backward, optimizador, validación y checkpoint contraen o
-mantienen explícitamente el riesgo relevante. El estado visible `RAMPING` o
-`PROVISIONALLY_STABLE` solo explica; el placement consume hazard continuo y residual ponderado.
+LambdaForge separa jitter, deriva del allocator, asignación monótona y picos abruptos, y actualiza
+una prior débil de supervivencia tras progreso o transiciones de fase significativos, no tras cada
+sondeo de NVML. Cambiar la frecuencia de monitorización no fabrica confianza. La trayectoria
+acotada sirve para mostrar datos; estadísticas incrementales versionadas conservan todos los ciclos
+de una Run larga. La distribución futura mantiene colas raras incluso inferiores al uno por ciento
+y compone incertidumbre de candidato y residentes con integración exacta de soportes pequeños. Las
+fases relevantes se aprenden por familia de Work compatible: se conserva el riesgo de validation o
+checkpoint cuando la historia lo justifica, sin exigir a un Work genérico un ciclo de entrenamiento
+fijo. `RAMPING` o `PROVISIONALLY_STABLE` explican el estado; el placement consume hazard por fase y
+el residual ponderado.
 
 `SAFE_ADMISSION` cabe considerando incertidumbre y cotas OOM. `EXPLORATORY_ADMISSION` es un paso
 1→2→3 consciente de checkpoints cuyo progreso e información esperados superan el coste de rollback
@@ -498,13 +502,14 @@ epoch; una OOM posterior lo invalida. Por ello un cold start largo no queda bloq
 por GPU solo porque ningún entreno haya terminado.
 
 Esperar también tiene coste. Si existe trabajo útil pendiente y VRAM físicamente utilizable ociosa,
-LambdaForge integra fracción ociosa × tasa de valor científico normalizado. Este *wait regret* hace
-que finalmente gane un experimento acotado cuando P(fit) es positiva y no hay impedimento duro; no
-es un timeout. La magnitud del score del controlador nunca se usa como moneda: recursos normaliza
-el orden científico, convierte GPU-segundos a coste de oportunidad y separa el valor informativo.
-Una duración desconocida sigue siendo incierta y se estima con historia compatible o ritmo vivo,
-nunca como un segundo. Si solo domina el rollback y Lightning permite guardar estado, puede pedir
-un checkpoint seguro al límite de epoch y volver a evaluar.
+LambdaForge integra fracción ociosa × tasa de valor científico normalizado. Este *wait regret*
+cierra cada tramo temporal con su tasa anterior, sobrevive a reinicios y no se descuenta porque
+cambien frontera, hazard o checkpoint. Solo se reinicia cuando la oportunidad desaparece o se
+satisface; las cotas físicas, políticas del sitio, run cap y throughput negativo siguen mandando.
+El controlador científico entrega rango, valor normalizado, incertidumbre y coste esperado, por lo
+que su score interno nunca es moneda de recursos. La duración desconocida sigue siendo incierta.
+El cálculo de checkpoint trata cada residente por separado, conserva el rollback no
+checkpointable, cobra el coste aprendido y espera confirmación durable antes de explorar.
 
 `gpu_memory` es opcional. Si se declara conserva su semántica de suelo de seguridad mínimo para
 cada lanzamiento; el compromiso efectivo es el máximo entre ese suelo, la envolvente superior
@@ -847,7 +852,23 @@ lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
 python -m pip install "lambdaforge[analysis-report]==0.14.0"
 lf results report EXECUTION --output study-report.html
+lf results replay EXECUTION --policy ari-v3.1
+lf results replay EXECUTION --policy ari-v2-compat --json
 ```
+
+El replay de recursos lee la traza versionada del scheduler, nunca texto de terminal. Es factual
+hasta que la política elegida toma una decisión distinta; desde ahí cada métrica se etiqueta como
+simulación condicionada por la traza, y los resultados terminales propios de la rama real pasan a
+`null` en vez de atribuirse a otra política. `recorded`, `ari-v3-compat` y `ari-v2-compat` permiten auditar
+sin mantener schedulers antiguos en producción. Los Studies nuevos informan tiempo a cada nivel de
+concurrencia, capacidad ociosa, tasa científica/útil, throughput, OOM, rollback, checkpoint,
+starvation, calibración de P(fit) y error de predicción cuando existe evidencia. Un Study antiguo
+sin traza sigue siendo legible, pero no puede prometer replay contrafactual.
+
+Todo el HPO comparte un único `ParameterSpace` authored. `scale: log` usa coordenadas logarítmicas
+en Sobol, sampler bayesiano y fallback, similitud de recursos, diseño científico y análisis final;
+integer, categorical e inactividad condicional también significan lo mismo. Los diccionarios de
+candidatos y sus identidades científicas no cambian.
 
 El análisis distingue cuatro conceptos. `current_observed_objective` es el último paso con todos los
 componentes necesarios; `best_observed_objective`, la mejor observación completa;

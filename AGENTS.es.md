@@ -27,7 +27,7 @@ runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada 
 | Operar Work | `lf show/logs/cancel/retry/delete SELECTOR`; Run: `show/logs WORK --run CLAVE` |
 | Jobs de bajo nivel | `lf jobs list/show/logs/cancel/retry/delete/clear`; `lf doctor --on CLUSTER` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
-| Resultados | `lf results list/show/compare/analyze/report` |
+| Resultados | `lf results list/show/compare/analyze/report/replay` |
 | Perfiles de clúster | Consola; `lf clusters add/set/unset/...` para automatización |
 | Limpiar almacenamiento seguro | `lf clean`; aplicar con `--apply` |
 
@@ -138,6 +138,9 @@ por el `proposal_pool_size` bruto: reutiliza geometría/distancias, puntúa una 
 representativa rotatoria e incluye siempre la propuesta del optimizador. Nunca escanees todo el
 pool por parámetro/pareja/remuestreo ni retrases la recogida de Futures, limpieza GPU o admisión por
 análisis explicativo. El pool determinista completo sigue siendo la autoridad de optimización.
+`ParameterSpace` es la única geometría authored para Sobol, sampler adaptive/Bayesian, diseño
+científico, similitud de recursos y Study Analysis. Log usa coordenadas log; integer, categorical y
+actividad condicional no se reinfieren de candidatos observados. Mappings e IDs no cambian.
 `objective.constraints.METRICA.min/max` declara guardas del mismo checkpoint. Entre seeds,
 `seed_aggregation` es `mean` legacy, `worst` o `lcb` con `confidence`; evidencia ausente o LCB
 insuficiente es no factible. Un componente de utilidad también puede ser constraint. Nunca infieras guardas o pesos
@@ -152,14 +155,17 @@ incrementales `SAFE_ADMISSION` o `EXPLORATORY_ADMISSION` antes de que haya Runs 
 un carril protegido, un escalón sin caracterizar por clase y comparte evidencia provisional entre
 GPU hermanas. En grupos grandes permite preguntas de recursos distintas en paralelo, pero nunca
 duplica un experimento equivalente ni ocupa el último carril protegido.
-Los máximos minúsculos del allocator son deriva cuando lo respalda la evidencia robusta
-física/allocator; actualiza un posterior de supervivencia ponderado y no convierte colas tardías
-raras en muestras equiprobables. `RAMPING` explica riesgo pero no es un veto duro. Integra fracción
-ociosa utilizable × tasa de valor científico normalizado como WaitRegret y compara
-WAIT/EXPLORE/CHECKPOINT_THEN_EXPLORE hasta el siguiente evento; nunca inventes un segundo de duración
-ni uses el score crudo como moneda. Persiste ExplorationEvaluations cambiadas y motivos WHY-WAIT sin
-spam. El pruning científico no determina completitud de recursos: un perfil podado exacto y con
-fases completas entrena el modelo de recursos aunque su objective siga censurado. Las partes de
+Los máximos minúsculos del allocator son deriva cuando la evidencia robusta lo indica; crecimiento
+con signo persistente sigue siendo rampa. `ResourceTrajectoryStatistics`, no la curva visual
+acotada, es la autoridad incremental. El hazard avanza por progreso/asignación, nunca por sondeos
+duplicados; conserva colas raras por fase y aprende fases relevantes de Works compatibles. Integra
+WaitRegret por tramos físicos exactos, persístelo entre reinicios y reinícialo solo cuando desaparece
+o se satisface la oportunidad ociosa útil. Compara WAIT/EXPLORE/CHECKPOINT_THEN_EXPLORE hasta el
+próximo evento; rollback es por residente, el coste de checkpoint se aprende y una petición no es
+confirmación durable. No inventes duración de un segundo ni uses el score bruto: consume rango,
+valor normalizado, incertidumbre y coste de `ScientificActionValue`. Persiste evaluaciones cambiadas
+y WHY-WAIT sin spam. La estimación del próximo evento conserva incertidumbre de cadencia si hay
+intervalos repetidos; en otro caso sigue desconocida. El pruning científico no determina completitud de recursos. Las partes de
 CPU/RAM/almacenamiento se basan en el máximo global duro para no sobreprometer recursos host.
 Prefiere atribución NVML por proceso; el fallback agregado queda censurado. Una OOM
 restringe el packing exacto salvo que residencia propia más asignación solicitada demuestre cota
@@ -231,6 +237,12 @@ respuesta, señal de poda y matriz acotada.
 La calidad retrospectiva del pruner vive en `hpo-control/state.json` → `pruner_calibration`: informa
 ahorro simulado, falsos prunes, regret y calibración probabilística/de curva sin inventar un
 objective completo para Runs censurados.
+
+Scheduling persiste una traza acotada versionada. `lf results replay EXECUTION --policy
+recorded|ari-v3.1|ari-v3-compat|ari-v2-compat --json` usa ResultStore; solo es factual hasta
+`counterfactual_divergence` y etiqueta el resto como simulación condicionada por la traza. Las
+políticas antiguas son aproximaciones solo de replay, nunca schedulers productivos. Si un Study
+antiguo carece de traza, falla explícitamente sin parsear logs humanos ni fabricar métricas.
 
 El runtime científico nunca depende del renderizado; el widget base `textual-plot` de la Consola
 solo visualiza telemetría acotada. Studies nombra objective, propuestos/planificados, GPU y época

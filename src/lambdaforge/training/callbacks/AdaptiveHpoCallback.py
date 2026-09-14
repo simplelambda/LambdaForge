@@ -52,6 +52,7 @@ class AdaptiveHpoCallback(CallbackBase):
         self._chart_filter_written = False
         self._resource_signals: set[str] = set()
         self._resource_phase_history: set[str] = set()
+        self._last_checkpoint_duration_seconds: float | None = None
 
     @classmethod
     def from_environment(
@@ -177,6 +178,8 @@ class AdaptiveHpoCallback(CallbackBase):
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),
             "phases_seen": sorted(self._resource_phase_history),
         }
+        if self._last_checkpoint_duration_seconds is not None:
+            payload["checkpoint_duration_seconds"] = self._last_checkpoint_duration_seconds
         callback_metrics = self._scalars(getattr(trainer, "callback_metrics", {}))
         for name in ("items_per_second", "items_per_sec", "throughput"):
             if name in callback_metrics:
@@ -215,12 +218,14 @@ class AdaptiveHpoCallback(CallbackBase):
             return
         root.mkdir(parents=True, exist_ok=True)
         destination = root / f"step-{step:08d}.ckpt"
+        started = time.perf_counter()
         try:
             trainer.save_checkpoint(str(destination))
         except Exception:
             # Keep the request: the controller can continue comparing WAIT/EXPLORE and the normal
             # scientific training failure path remains authoritative.
             return
+        self._last_checkpoint_duration_seconds = time.perf_counter() - started
         request.unlink(missing_ok=True)
         self._resource_signal("checkpoint", trainer, checkpoint=True)
 

@@ -31,7 +31,7 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Work operations | `lf show/logs/cancel/retry/delete SELECTOR`; study Run: `show/logs WORK --run KEY` |
 | Low-level jobs | `lf jobs list/show/logs/cancel/retry/delete`; `lf jobs clear [--apply]` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
-| Results | `lf results list/show/compare/analyze/report` |
+| Results | `lf results list/show/compare/analyze/report/replay` |
 | Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Cluster profiles | Research Console; `lf clusters add/set/unset/...` for automation |
 | Preview safe storage cleanup | `lf clean [--on CLUSTER]`; add `--apply` after review |
@@ -223,6 +223,10 @@ raw `proposal_pool_size`: reuse immutable matching geometry and mixed-space dist
 rotating representative shortlist, and always retain the optimizer proposal. Never scan the full
 pool once per parameter/pair/resample or let explanatory analysis delay Future collection, GPU
 cleanup or admission. The full deterministic pool remains authoritative for optimization.
+`ParameterSpace` is the single authored geometry for Sobol, adaptive/Bayesian sampling, scientific
+design, resource similarity and Study Analysis. Log scales use log coordinates; integer,
+categorical and conditional activity semantics must not be re-inferred from observed candidates.
+Candidate mappings and IDs remain unchanged.
 `objective.constraints.METRIC.min/max` are explicit same-checkpoint guardrails. Across seeds,
 `seed_aggregation` is legacy `mean`, `worst` or `lcb` with optional `confidence`; missing/insufficient
 LCB evidence is infeasible. A utility component may also be constrained. Never
@@ -238,14 +242,18 @@ incremental `SAFE_ADMISSION` or `EXPLORATORY_ADMISSION` steps before terminal Ru
 protected compatible-GPU lane, one uncharacterized ladder step per evidence class, and share
 provisional knowledge across sibling GPUs. Larger groups may explore distinct resource questions
 concurrently, but never duplicate an equivalent experiment or consume the final protected lane.
-Tiny allocator maxima are drift when robust physical/allocator evidence says so; update a weighted
-survival posterior and keep rare late-phase tails rare rather than equiprobable. `RAMPING` explains
-risk but is never itself a hard veto. Integrate usable-idle-fraction × normalized scientific-value
-rate as WaitRegret, compare WAIT/EXPLORE/CHECKPOINT_THEN_EXPLORE to the next evidence event, and
-never invent a one-second duration or use raw controller score as resource currency. Persist changed
-ExplorationEvaluations and explicit WHY-WAIT reasons without poll spam. Scientific pruning is
-independent of resource completeness; a phase-complete exact pruned profile trains the resource
-model while its objective remains censored.
+Tiny allocator maxima are drift when robust physical/allocator evidence says so; persistent signed
+growth remains a ramp. `ResourceTrajectoryStatistics`, not the bounded display curve, is the
+incremental authority. Hazard advances on progress/allocation evidence, never duplicate polling;
+keep phase-specific rare tails and learn relevant phases from compatible Works rather than require a
+training checklist. Integrate WaitRegret as exact physical segments, persist it across restart and
+reset only when useful idle opportunity disappears or is satisfied. Compare
+WAIT/EXPLORE/CHECKPOINT_THEN_EXPLORE to the next evidence event; checkpoint rollback is per resident,
+checkpoint cost is learned and a request is not durable acknowledgement. Never invent a one-second
+duration or use raw controller score as resource currency: consume `ScientificActionValue` rank,
+normalized value, uncertainty and cost. Persist changed evaluations and WHY-WAIT reasons without
+poll spam. Next-event estimates retain cadence uncertainty when repeated intervals exist; otherwise
+it remains unknown. Scientific pruning is independent of resource completeness.
 CPU/RAM/storage shares remain based on the hard global concurrency ceiling so dynamic GPU packing
 cannot over-promise host resources. Exact NVML process attribution is preferred; aggregate
 fallback remains censored. OOM constraints belong to the exact packing unless reliable candidate
@@ -314,6 +322,12 @@ includes response points, pruning signal and a bounded matrix.
 Retrospective pruner quality lives in `hpo-control/state.json` → `pruner_calibration`; it reports
 simulated savings, false prunes, regret and probability/curve calibration without fabricating a
 full objective for censored Runs.
+
+Resource scheduling persists a bounded versioned trace. `lf results replay EXECUTION --policy
+recorded|ari-v3.1|ari-v3-compat|ari-v2-compat --json` uses the ResultStore API; it is factual only
+until `counterfactual_divergence` and labels the remainder trace-conditioned simulation. Legacy
+policies exist only as replay approximations, never production schedulers. Missing old trace data
+must fail explicitly rather than parse human logs or fabricate metrics.
 
 The scientific runtime never depends on rendering; the Research Console's base `textual-plot`
 widget only visualizes bounded telemetry. Lightning study views label the objective,

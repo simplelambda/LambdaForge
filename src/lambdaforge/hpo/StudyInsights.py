@@ -7,11 +7,13 @@ import json
 import math
 import statistics
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from threading import Lock
 from typing import Any, ClassVar, TypeVar
 
+from lambdaforge.hpo.ParameterSpace import INACTIVE as PARAMETER_INACTIVE
+from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.hpo.ScientificDesign import ScientificQuestionAnalyzer
 
 _T = TypeVar("_T")
@@ -42,6 +44,7 @@ class StudyInsightAnalyzer:
         practical_margin: float | None = None,
         fingerprint: str | None = None,
         candidate_pool: Mapping[int, Mapping[str, Any]] | None = None,
+        parameter_space: ParameterSpace | Mapping[str, Any] | None = None,
         final: bool = False,
     ) -> dict[str, Any]:
         """Return one compact JSON-shaped HPO interpretation snapshot."""
@@ -59,6 +62,11 @@ class StudyInsightAnalyzer:
                     "practical_margin": practical_margin,
                     "fingerprint": fingerprint,
                     "candidate_pool": candidate_pool,
+                    "parameter_space": (
+                        parameter_space.to_schema()
+                        if isinstance(parameter_space, ParameterSpace)
+                        else parameter_space
+                    ),
                     "final": final,
                 },
                 sort_keys=True,
@@ -123,9 +131,24 @@ class StudyInsightAnalyzer:
                 for name in parameters
             }
         )
+        geometry_points = tuple(
+            dict(value)
+            for value in (
+                *(candidate_pool or {}).values(),
+                *(item[0] for item in observations),
+                *(item[0] for item in pruning_observations),
+            )
+        )
+        geometry = (
+            parameter_space
+            if isinstance(parameter_space, ParameterSpace)
+            else ParameterSpace.from_schema(parameter_space, geometry_points)
+        )
+        names = sorted(set(names) | set(geometry.names))
         truncated_parameters = max(0, len(names) - cls.MAX_PARAMETERS)
         insights = [
-            cls._parameter(name, observations, mode=mode) for name in names[: cls.MAX_PARAMETERS]
+            cls._parameter(name, observations, mode=mode, parameter_space=geometry)
+            for name in names[: cls.MAX_PARAMETERS]
         ]
         relationship_names = [
             str(value["parameter"])
@@ -138,7 +161,9 @@ class StudyInsightAnalyzer:
             )[: cls.MAX_RELATIONSHIP_PARAMETERS]
         ]
         relationship_observations = cls._bounded(observations, cls.MAX_RELATIONSHIP_CANDIDATES)
-        relationships = cls._relationships(relationship_names, relationship_observations)
+        relationships = cls._relationships(
+            relationship_names, relationship_observations, parameter_space=geometry
+        )
         enriched: list[dict[str, Any]] = []
         for value in insights:
             name = str(value["parameter"])
@@ -160,14 +185,18 @@ class StudyInsightAnalyzer:
             enriched.append(
                 {
                     **value,
-                    "response": cls._response(name, observations, mode=mode),
+                    "response": cls._response(
+                        name, observations, mode=mode, parameter_space=geometry
+                    ),
                     "joint_relationships": joint,
                     "interaction_context": interaction_context,
                     "higher_order_caution": (
                         "Pairwise summaries are incomplete; higher-order/context-dependent "
                         "interactions may remain in the joint surrogate."
                     ),
-                    "pruning_signal": cls._pruning_signal(name, pruning_observations),
+                    "pruning_signal": cls._pruning_signal(
+                        name, pruning_observations, parameter_space=geometry
+                    ),
                 }
             )
         insights = enriched
@@ -191,6 +220,7 @@ class StudyInsightAnalyzer:
             practical_margin=practical_margin,
             fingerprint=evidence_fingerprint,
             candidate_pool=candidate_pool,
+            parameter_space=geometry,
             final=final,
         )
         result = {
@@ -273,17 +303,12 @@ class StudyInsightAnalyzer:
         observations: Sequence[tuple[Mapping[str, Any], float, bool]],
         *,
         mode: str,
+        parameter_space: ParameterSpace,
     ) -> dict[str, Any]:
         rows = [
             (parameters.get(name, _INACTIVE), value) for parameters, value, _done in observations
         ]
-        present = [value for value, _objective in rows if value is not _INACTIVE]
-        numeric = bool(present) and all(
-            isinstance(value, int | float)
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            for value in present
-        )
+        numeric = parameter_space.descriptor(name).kind in {"continuous", "integer"}
         return (
             cls._numeric(name, rows, mode=mode)
             if numeric
@@ -473,18 +498,14 @@ class StudyInsightAnalyzer:
         observations: Sequence[tuple[Mapping[str, Any], float, bool]],
         *,
         mode: str,
+        parameter_space: ParameterSpace,
     ) -> dict[str, Any]:
         """Return bounded points for a visual marginal-response panel."""
         rows = [
             (parameters.get(name, _INACTIVE), value) for parameters, value, _done in observations
         ]
         present = [row for row in rows if row[0] is not _INACTIVE]
-        numeric = bool(present) and all(
-            isinstance(value, int | float)
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            for value, _objective in present
-        )
+        numeric = parameter_space.descriptor(name).kind in {"continuous", "integer"}
         if numeric:
             ordered = sorted((float(value), objective) for value, objective in present)
             bins = min(12, len(ordered))
@@ -525,6 +546,8 @@ class StudyInsightAnalyzer:
         cls,
         names: Sequence[str],
         observations: Sequence[tuple[Mapping[str, Any], float, bool]],
+        *,
+        parameter_space: ParameterSpace,
     ) -> dict[str, list[dict[str, Any]]]:
         """Estimate bounded joint predictive gain without claiming causal interaction.
 
@@ -535,7 +558,9 @@ class StudyInsightAnalyzer:
         output: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
         for left_index, left in enumerate(names):
             for right in names[left_index + 1 :]:
-                detail = cls._joint_gain(left, right, observations)
+                detail = cls._joint_gain(
+                    left, right, observations, parameter_space=parameter_space
+                )
                 if detail is None:
                     continue
                 output[left].append({"parameter": right, **detail})
@@ -557,6 +582,8 @@ class StudyInsightAnalyzer:
         left: str,
         right: str,
         observations: Sequence[tuple[Mapping[str, Any], float, bool]],
+        *,
+        parameter_space: ParameterSpace,
     ) -> dict[str, Any] | None:
         rows = [
             (parameters.get(left, _INACTIVE), parameters.get(right, _INACTIVE), value)
@@ -584,8 +611,6 @@ class StudyInsightAnalyzer:
                 "confidence": 0.0,
                 "confidence_label": "low",
             }
-        left_distance = cls._distance_function(left_values)
-        right_distance = cls._distance_function(right_values)
         targets = [row[2] for row in rows]
 
         def error(use_left: bool, use_right: bool) -> float:
@@ -597,9 +622,29 @@ class StudyInsightAnalyzer:
                         continue
                     components = []
                     if use_left:
-                        components.append(left_distance(row[0], candidate[0]))
+                        components.append(
+                            parameter_space.value_distance(
+                                left,
+                                PARAMETER_INACTIVE if row[0] is _INACTIVE else row[0],
+                                (
+                                    PARAMETER_INACTIVE
+                                    if candidate[0] is _INACTIVE
+                                    else candidate[0]
+                                ),
+                            )
+                        )
                     if use_right:
-                        components.append(right_distance(row[1], candidate[1]))
+                        components.append(
+                            parameter_space.value_distance(
+                                right,
+                                PARAMETER_INACTIVE if row[1] is _INACTIVE else row[1],
+                                (
+                                    PARAMETER_INACTIVE
+                                    if candidate[1] is _INACTIVE
+                                    else candidate[1]
+                                ),
+                            )
+                        )
                     distance = math.sqrt(
                         sum(value * value for value in components) / len(components)
                     )
@@ -643,6 +688,8 @@ class StudyInsightAnalyzer:
         cls,
         name: str,
         observations: Sequence[tuple[Mapping[str, Any], bool]],
+        *,
+        parameter_space: ParameterSpace,
     ) -> dict[str, Any]:
         """Summarize terminal pruning as censored evidence, never as a fake objective."""
         rows = [(parameters.get(name, _INACTIVE), pruned) for parameters, pruned in observations]
@@ -654,13 +701,7 @@ class StudyInsightAnalyzer:
                 "pruned_rate": None,
                 "groups": [],
             }
-        present = [value for value, _pruned in rows if value is not _INACTIVE]
-        numeric = bool(present) and all(
-            isinstance(value, int | float)
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            for value in present
-        )
+        numeric = parameter_space.descriptor(name).kind in {"continuous", "integer"}
         groups: list[dict[str, Any]] = []
         if numeric:
             ordered = sorted(
@@ -726,32 +767,6 @@ class StudyInsightAnalyzer:
             "rate_lower": max(0.0, mean - 1.645 * deviation),
             "rate_upper": min(1.0, mean + 1.645 * deviation),
         }
-
-    @classmethod
-    def _distance_function(cls, values: Sequence[Any]) -> Callable[[Any, Any], float]:
-        numeric = all(
-            isinstance(value, int | float)
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            for value in values
-            if value is not _INACTIVE
-        )
-        present = [float(value) for value in values if value is not _INACTIVE and numeric]
-        if numeric and present:
-            low, high = min(present), max(present)
-            width = max(high - low, 1e-12)
-
-            def distance(left: Any, right: Any) -> float:
-                if left is _INACTIVE or right is _INACTIVE:
-                    return 0.0 if left is right else 1.0
-                return min(1.0, abs(float(left) - float(right)) / width)
-
-            return distance
-
-        def categorical(left: Any, right: Any) -> float:
-            return 0.0 if cls._category(left) == cls._category(right) else 1.0
-
-        return categorical
 
     @staticmethod
     def _interaction_matrix(

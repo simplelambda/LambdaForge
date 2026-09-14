@@ -3,24 +3,15 @@
 from __future__ import annotations
 
 import importlib
-import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any
 
 import torch
 
 from lambdaforge.hpo.AdaptiveSampler import CandidateObservation
+from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.hpo.SurvivalModel import SurvivalAcquisitionPolicy, SurvivalEstimate
-
-
-@dataclass(frozen=True, slots=True)
-class _EncodedColumn:
-    name: str
-    numeric_bounds: tuple[float, float] | None
-    categories: Mapping[str, int] | None
-    conditional: bool
 
 
 class BayesianSampler:
@@ -31,7 +22,13 @@ class BayesianSampler:
     never by pretending that an inactive value is an ordinary category.
     """
 
-    def __init__(self, candidates: Mapping[int, Mapping[str, Any]], *, mode: str) -> None:
+    def __init__(
+        self,
+        candidates: Mapping[int, Mapping[str, Any]],
+        *,
+        mode: str,
+        parameter_space: ParameterSpace | Mapping[str, Any] | None = None,
+    ) -> None:
         if mode not in {"min", "max"}:
             raise ValueError("Bayesian sampler mode must be min or max.")
         self.candidates = {
@@ -39,7 +36,16 @@ class BayesianSampler:
             for trial, parameters in candidates.items()
         }
         self.mode = mode
-        self._vectors, self._categorical = self._encode(self.candidates)
+        self.parameter_space = (
+            parameter_space
+            if isinstance(parameter_space, ParameterSpace)
+            else ParameterSpace.from_schema(parameter_space, tuple(self.candidates.values()))
+        )
+        self._vectors = {
+            trial: self.parameter_space.encode(parameters)
+            for trial, parameters in self.candidates.items()
+        }
+        self._categorical = self.parameter_space.categorical_dimensions
         self.last_diagnostics: dict[str, Any] = {}
         self.survival_policy = SurvivalAcquisitionPolicy()
 
@@ -260,56 +266,5 @@ class BayesianSampler:
             "fit_gpytorch_mll": fit.fit_gpytorch_mll,
             "ExactMarginalLogLikelihood": mlls.ExactMarginalLogLikelihood,
         }
-
-    @staticmethod
-    def _encode(
-        candidates: Mapping[int, Mapping[str, Any]],
-    ) -> tuple[dict[int, tuple[float, ...]], tuple[int, ...]]:
-        names = sorted({name for candidate in candidates.values() for name in candidate})
-        columns: list[_EncodedColumn] = []
-        for name in names:
-            present = [candidate[name] for candidate in candidates.values() if name in candidate]
-            numeric = bool(present) and all(
-                isinstance(value, int | float)
-                and not isinstance(value, bool)
-                and math.isfinite(float(value))
-                for value in present
-            )
-            conditional = len(present) != len(candidates)
-            if numeric:
-                values = [float(value) for value in present]
-                column = _EncodedColumn(name, (min(values), max(values)), None, conditional)
-            else:
-                keys = sorted({json.dumps(value, sort_keys=True, default=str) for value in present})
-                column = _EncodedColumn(
-                    name, None, {key: index for index, key in enumerate(keys)}, conditional
-                )
-            columns.append(column)
-        categorical: list[int] = []
-        vectors: dict[int, tuple[float, ...]] = {}
-        for trial, candidate in candidates.items():
-            vector: list[float] = []
-            for column in columns:
-                active = column.name in candidate
-                if column.numeric_bounds is not None:
-                    low, high = column.numeric_bounds
-                    width = high - low
-                    value = float(candidate[column.name]) if active else low
-                    vector.append(0.0 if width <= 0 else (value - low) / width)
-                else:
-                    assert column.categories is not None
-                    key = (
-                        json.dumps(candidate[column.name], sort_keys=True, default=str)
-                        if active
-                        else ""
-                    )
-                    vector.append(float(column.categories.get(key, 0)))
-                    categorical.append(len(vector) - 1)
-                if column.conditional:
-                    vector.append(1.0 if active else 0.0)
-                    categorical.append(len(vector) - 1)
-            vectors[int(trial)] = tuple(vector)
-        return vectors, tuple(sorted(set(categorical)))
-
 
 __all__ = ["BayesianSampler"]

@@ -12,6 +12,7 @@ from typing import Any
 
 from lambdaforge.analysis.Report import write_html
 from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
+from lambdaforge.hpo.ResourceReplay import ReplayPolicyName, ResourceSchedulerReplay
 from lambdaforge.ProjectContext import ProjectContext
 from lambdaforge.work.config import WorkConfig
 from lambdaforge.work.failure import render_scientific_failures, scientific_failures
@@ -338,6 +339,16 @@ class ResultStore:
             "findings": value.get("findings", []),
             "path": str(path),
         }
+
+    def resource_replay(
+        self, selector: str, *, policy: ReplayPolicyName = "ari-v3.1"
+    ) -> dict[str, Any]:
+        """Replay one Study's canonical resource trace without parsing human logs."""
+        selected = self.select(selector)
+        if selected.get("already_deleted"):
+            raise ValueError(f"Work Execution {selector!r} was already deleted.")
+        execution_dir = self._execution_dir(Path(str(selected["_manifest_path"])).resolve())
+        return ResourceSchedulerReplay.from_execution(execution_dir).replay(policy)
 
     def report(
         self,

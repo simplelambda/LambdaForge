@@ -1370,6 +1370,65 @@ def test_study_resources_show_exact_persisted_admission_reason() -> None:
     asyncio.run(exercise())
 
 
+def test_study_resources_render_v31_wait_explanation_without_raw_json() -> None:
+    work = {
+        "name": "capacity-study",
+        "primary_job_id": "job-capacity",
+        "state": "running",
+        "study": {
+            "objective": {"metric": "loss", "mode": "min"},
+            "counts": {"candidates": 1},
+            "candidates": [],
+            "admission": {
+                "current": {
+                    "admission_version": 3,
+                    "summary": "waiting_for_resources",
+                    "pending_runs": 1,
+                    "devices": [],
+                    "admitted": [],
+                    "resource_blocked": [],
+                    "exploration_evaluations": [
+                        {
+                            "candidate": "candidate-1",
+                            "gpu": 0,
+                            "plan": "WAIT",
+                            "rejection_reason": "ROLLBACK_DOMINATES",
+                            "fit_probability": 0.84,
+                            "tail_probability": 0.005,
+                            "peak_hazard": 0.1,
+                            "evidence_cycles": 12,
+                            "phase_hazards": {"validation": 0.2},
+                            "fit_uncertainty_sources": ["resident:a:phase:validation"],
+                            "rollback_seconds": 300.0,
+                            "resource_information_value": 0.2,
+                            "wait_regret": 0.4,
+                            "wait_regret_details": {
+                                "current_idle_usable_fraction": 0.5,
+                                "scientific_opportunity_rate": 0.01,
+                            },
+                            "final_delta_value": -0.1,
+                        }
+                    ],
+                }
+            },
+        },
+    }
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(FakeServices())
+        async with app.run_test() as pilot:
+            app.push_screen(StudyWorkspace(work, app.services))
+            await pilot.pause(0.1)
+            text = str(app.screen.query_one("#study-resource-content").render())
+            assert "WHY WAIT / WHY EXPLORE" in text
+            assert "ROLLBACK_DOMINATES" in text
+            assert "P(fit) / tail" in text
+            assert "validation=0.2" in text
+            assert "wait regret" in text
+
+    asyncio.run(exercise())
+
+
 def test_metric_labels_hide_internal_objective_names() -> None:
     assert metric_display_name("val_balanced_accuracy") == "Balanced accuracy"
     assert metric_display_name("train_loss") == "Train loss"

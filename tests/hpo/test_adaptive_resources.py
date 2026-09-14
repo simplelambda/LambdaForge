@@ -581,9 +581,9 @@ def test_live_plateau_enables_one_protected_checkpoint_aware_cold_start_probe() 
     assert len(admitted) == 1
     assert admitted[0].target_gpu == 0
     assert admitted[0].admission_mode == "EXPLORATORY_ADMISSION"
-    # ARI v3 includes the bounded progress of the newly explored Run as well as resident work
-    # since its checkpoint.
-    assert admitted[0].rollback_cost_seconds == 3.25
+    # Unknown checkpoint cadence is not misread as the five-second checkpoint age. The next
+    # evidence event therefore comes from the real duration estimate (500 s), not a tiny horizon.
+    assert admitted[0].rollback_cost_seconds == 250.75
 
 
 def test_concurrency_ladder_allows_only_one_uncharacterized_increment() -> None:
@@ -1210,6 +1210,7 @@ def test_checkpoint_then_explore_is_selected_when_it_removes_dominant_rollback()
         growth_hazard=0.2,
         resource_state="PLATEAU_UNCONFIRMED",
         checkpoint_request_path="/owned/checkpoint.request",
+        checkpoint_duration_seconds=2.0,
     )
     planner = GPUPlacementPlanner(ResourceDemandModel())
 

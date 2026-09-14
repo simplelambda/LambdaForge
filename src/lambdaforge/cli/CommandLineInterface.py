@@ -414,6 +414,26 @@ class CommandLineInterface:
     @staticmethod
     def _results(arguments: Any) -> int:
         store = ResultStore(arguments.root)
+        if arguments.result_command == "replay":
+            payload = store.resource_replay(arguments.selector, policy=arguments.policy)
+            if arguments.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                metrics = payload["metrics"]
+                print(
+                    f"Resource replay · {payload['policy']} · {payload['events']} events · "
+                    f"mean concurrency/GPU={metrics['mean_active_runs_per_gpu']:.3g}"
+                )
+                divergence = payload.get("counterfactual_divergence")
+                print(
+                    "No counterfactual divergence."
+                    if divergence is None
+                    else (
+                        f"Divergence at {divergence['elapsed_seconds']:.3g}s; "
+                        "later values are simulated."
+                    )
+                )
+            return 0
         if arguments.result_command == "analyze":
             payload = store.analysis(arguments.selector, recompute=arguments.recompute)
             if arguments.json:

@@ -560,12 +560,16 @@ change points, allocator peaks and durable checkpoints make active trajectories 
 evidence that compatible GPUs can use immediately.
 
 Small new allocator maxima are not automatically treated as continued material growth. LambdaForge
-learns a measurement/drift scale from the physical and allocator trajectory, then updates a weak
-survival prior after each allocation/progress cycle. Its weighted future distribution retains a
-rare late-phase tail without giving that tail the same probability as the repeatedly observed light
-regime. First forward, backward, optimizer, validation and checkpoint transitions explicitly
-contract or preserve the relevant risk. The displayed `RAMPING`/`PROVISIONALLY_STABLE` state is an
-explanation; placement consumes the continuous peak hazard and weighted residual distribution.
+separates jitter, allocator drift, monotonic allocation and abrupt peaks, then updates a weak
+survival prior after meaningful progress or phase transitions—not after every NVML poll. Changing
+the monitoring frequency therefore does not manufacture confidence. A bounded trajectory remains
+available for display, while versioned incremental sufficient statistics preserve all progress
+cycles in a long Run. Its weighted future distribution retains rare tails (including sub-percent
+mass) and composes candidate/resident uncertainty using exact small-support integration. Allocation
+phases are learned per compatible Work family: validation or checkpoint risk is retained when
+history supports it, but a generic Work is never forced to exhibit a fixed training lifecycle.
+The displayed `RAMPING`/`PROVISIONALLY_STABLE` state is an explanation; placement consumes the
+continuous phase hazard and weighted residual distribution.
 
 `SAFE_ADMISSION` fits after uncertainty and known OOM bounds are considered.
 `EXPLORATORY_ADMISSION` is a checkpoint-aware 1→2→3 packing step whose expected scientific progress
@@ -577,13 +581,15 @@ training has finished.
 
 Waiting is also a decision with a cost. While useful work is pending and physically usable VRAM is
 idle, LambdaForge integrates idle fraction × normalized scientific-value rate. This *wait regret*
-eventually makes one bounded experiment preferable when fit probability is non-zero and no hard
-constraint applies; it is not a timeout. Controller score magnitude is never used as a currency:
-the resource layer normalizes scientific ordering, converts GPU-seconds to opportunity value and
-keeps resource information value separate. Unknown duration remains explicitly uncertain and is
-estimated from same/near history or live step rates—never replaced by one second. If rollback is
-the only obstacle and Lightning can checkpoint safely, LambdaForge may request one checkpoint at
-an epoch boundary before reevaluating the experiment.
+closes each physical time segment at its previous rate, survives controller restarts and is not
+discounted merely because the frontier, hazard or checkpoint changed. It resets only when the
+opportunity disappears or is satisfied; hard memory/site/run-cap and measured negative-throughput
+constraints always win. The scientific controller supplies explicit rank, normalized value,
+uncertainty and expected-cost semantics, so its raw surrogate score is never resource currency.
+Unknown duration remains explicitly uncertain and is estimated from same/near history or live step
+rates—never replaced by one second. Checkpoint comparison accounts for each resident separately:
+non-checkpointable rollback remains, learned checkpoint cost is charged, and admission waits for a
+durable checkpoint acknowledgement rather than trusting the request file.
 
 `gpu_memory` is optional. When present it remains the user's minimum safety floor for each new Run;
 the effective commitment is the larger of that floor, the learned upper envelope and any known OOM
@@ -945,7 +951,23 @@ lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
 python -m pip install "lambdaforge[analysis-report]==0.14.0"
 lf results report EXECUTION --output study-report.html
+lf results replay EXECUTION --policy ari-v3.1
+lf results replay EXECUTION --policy ari-v2-compat --json
 ```
+
+Resource replay reads the Study's versioned scheduler trace, never terminal prose. It is factual
+until the selected compatibility policy first disagrees; every later metric is explicitly marked
+as trace-conditioned simulation, and branch-specific terminal outcomes become `null` rather than
+being attributed to the wrong policy. `recorded`, `ari-v3-compat` and `ari-v2-compat` support audit and
+comparison without keeping obsolete schedulers in production. New Studies report time to each
+concurrency level, idle capacity, useful/scientific rate, throughput, OOM/rollback/checkpoint cost,
+starvation, P(fit) calibration and peak/time-to-envelope errors when the evidence exists. An older
+Study without the trace remains readable but cannot claim counterfactual replay.
+
+All HPO components share one authored `ParameterSpace`. In particular, `scale: log` uses logarithmic
+coordinates in Sobol generation, Bayesian and dependency-light samplers, resource similarity,
+scientific design and final analysis; integer, categorical and conditional inactivity semantics
+are likewise identical. Candidate dictionaries and scientific identities are unchanged.
 
 The analysis keeps four objective concepts separate. `current_observed_objective` is the latest
 step at which every required component was present; `best_observed_objective` is the best complete

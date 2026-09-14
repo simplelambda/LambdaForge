@@ -11,6 +11,19 @@ metadata empaquetada.
 
 ### Añadido
 
+- Refinada Adaptive Resource Intelligence a v3.1 con estadísticas suficientes incrementales
+  invariantes al sondeo, hazard de pico por fases aprendidas, persistencia segmentada exacta de
+  WaitRegret, rollback/coste de checkpoint por Run residente y composición conjunta de P(fit) que
+  conserva colas. Scheduling consume ahora un contrato `ScientificActionValue` explícito y
+  persiste trazas y calibración versionadas y acotadas sin usar el score bruto como moneda.
+- Añadidos `lf results replay EXECUTION --policy ...` y la API equivalente de `ResultStore`: el
+  replay es factual hasta la primera divergencia y después queda marcado como simulación
+  condicionada por la traza. El benchmark informa concurrencia, utilización, tasa científica,
+  throughput, clases OOM, rollback/checkpoint, starvation, calibración y error predictivo; lo que
+  la evidencia no permite medir queda a null.
+- Añadido un único `ParameterSpace` authored para Sobol, sampling adaptive/Bayesian, diseño
+  científico, similitud de recursos y Study Analysis, con semántica común logarítmica, ordinal,
+  categórica y de inactividad condicional sin cambiar identidades de candidatos.
 - Evolucionado el scheduler existente a Adaptive Resource Intelligence v3. Las trayectorias vivas
   aprenden ruido de crecimiento material, actualizan un posterior de supervivencia de pico
   ponderado y consciente de fases y contraen colas raras sin borrarlas. La comparación coherente
@@ -54,6 +67,10 @@ metadata empaquetada.
 
 ### Corregido
 
+- Evitado que la cadencia de monitorización, el downsampling visual o los cambios de frontera
+  fabriquen confianza o borren liveness. Corregida la semántica de tiempo hasta el próximo
+  checkpoint y el rollback mixto checkpointable/no checkpointable; las colas raras subporcentuales
+  ya no desaparecen por un cuantil fijo.
 - Evitado que máximos minúsculos del allocator, una cola a capacidad equiprobable permanente, el
   veto absoluto de `RAMPING` y la duración desconocida ficticia de un segundo mantengan GPU ociosas
   con una Run indefinidamente. Los vecinos ya no imponen cotas provisionales intrínsecas y los draws

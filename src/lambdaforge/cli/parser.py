@@ -313,4 +313,13 @@ def build_parser() -> argparse.ArgumentParser:
     result_report.add_argument("--output", type=Path, required=True)
     result_report.add_argument("--root", type=Path)
     result_report.add_argument("--recompute", action="store_true")
+    result_replay = result_commands.add_parser("replay")
+    result_replay.add_argument("selector")
+    result_replay.add_argument(
+        "--policy",
+        choices=("recorded", "ari-v2-compat", "ari-v3-compat", "ari-v3.1"),
+        default="ari-v3.1",
+    )
+    result_replay.add_argument("--root", type=Path)
+    result_replay.add_argument("--json", action="store_true")
     return parser

@@ -703,15 +703,35 @@ LambdaForge atribuye VRAM por PID/árbol de procesos mediante NVML y reconcilia 
 muestra. Heartbeats del allocator añaden fase, checkpoint y picos breves; el fallback agregado queda
 censurado. La evidencia OOM separa memoria intrínseca de la firma del packing fallido: por ello
 `heavy+heavy` no reduce un techo global ni prohíbe `heavy+small`.
-La terminación científica y la completitud de recursos son distintas: una Run podada tras observar
-forward/backward/optimizador/validación y telemetría exacta aporta un perfil exacto aunque su
-objective siga censurado. `exploration-evaluations.jsonl` conserva comparaciones cambiadas con
+La terminación científica y la completitud de recursos son distintas. Las fases relevantes se
+aprenden de Runs compatibles; no existe una lista universal
+forward/backward/optimizador/validación. Una Run podada cuyas fases cubren el riesgo de asignación
+aprendido y cuya telemetría es exacta aporta un perfil exacto aunque su objective siga censurado.
+Un pico tardío histórico de validation/checkpoint conserva el perfil actual como censurado hasta
+observarlo o representarlo en la cola. `exploration-evaluations.jsonl` conserva comparaciones con
 P(fit), hazard, wait regret y motivos como `RUN_CAP`, `HARD_LOWER_BOUND`,
 `KNOWN_FAILED_PLACEMENT`, `PROTECTED_LANE`, `THROUGHPUT_REGRESSION`, `ROLLBACK_DOMINATES` y
 `WAIT_CURRENTLY_BETTER`; se suprimen sondeos repetidos.
 Un snapshot activo acotado y atómico sobrevive a una interrupción del controlador como conocimiento
 provisional anterior. Puede informar la incertidumbre tras reiniciar, pero nunca se restaura como
 proceso vivo o pico exacto; la evidencia terminal lo sustituye y el cierre normal lo vacía.
+
+ARI v3.1 separa la trayectoria visual de `ResourceTrajectoryStatistics`. La primera sigue acotada;
+la segunda conserva incrementalmente ciclos de progreso/optimizer, visitas y máximos por fase,
+picos materiales, sketches robustos de crecimiento/ruido/residuales y cadencia de checkpoints. El
+hazard se actualiza con progreso y asignación, no con cantidad de sondeos, así que muestras
+duplicadas no fabrican confianza. La convolución ponderada exacta conserva colas discretas raras en
+P(fit), con un ensemble explícito independiente/epistémico compartido para varias Runs. Placements
+posteriores calibran la probabilidad sin contaminar el objetivo científico.
+
+WaitRegret es una integral atómica versionada. Un cambio de frontera cierra el tramo anterior con
+su tasa y fracción ociosa previas; no borra la oportunidad perdida. Solo se reinicia si desaparece
+la oportunidad factible o la capacidad utilizable, o una admisión la satisface. Cotas físicas,
+packings dominados, run caps, política del sitio y regresión de throughput siguen siendo absolutas.
+Checkpoint calcula rollback por residente, cobra la duración aprendida y espera evidencia durable
+antes de tratarlo como reducido. El horizonte usa tiempo *hasta* el próximo evento y cadencia
+aprendida, nunca edad desde el checkpoint anterior. Los intervalos repetidos aportan una
+incertidumbre robusta de cadencia; sin evidencia suficiente queda explícitamente desconocida.
 
 El aislamiento sigue el límite de Run. Tanto en CPU como GPU cada Run adaptativo usa un proceso
 nuevo de un worker: matar uno no rompe un pool compartido ni cancela candidatos ajenos. Un worker
@@ -732,6 +752,39 @@ compatibles; lo incompatible no se convierte en prior exacto. Resources en la Co
 mismo modelo de lectura: memoria física libre, uso externo, compromiso actual/futuro, headroom,
 P(fit), bloqueo y backfill. El análisis final registra muestreo condicionado por recursos para no
 describir como mala una región pesada simplemente infra-muestreada.
+
+#### Replay del scheduler de recursos
+
+Cada estado cambiado queda en una traza acotada y versionada con dispositivos, frontera científica,
+predicciones, admisiones/bloqueos y evaluación exploratoria. Reutiliza observaciones existentes y
+no copia outputs ni checkpoints:
+
+```bash
+lf results replay EXECUTION --policy recorded
+lf results replay EXECUTION --policy ari-v3.1 --json
+lf results replay EXECUTION --policy ari-v3-compat --json
+lf results replay EXECUTION --policy ari-v2-compat --json
+python -m benchmarks.resource_scheduling --execution .lambdaforge/runs/WORK/EXECUTION
+```
+
+Solo es exacto mientras la política coincida con las admisiones registradas. La primera diferencia
+es `counterfactual_divergence`; lo posterior se etiqueta como simulación condicionada por la traza,
+nunca como hecho. Un resultado científico terminal u OOM de la rama real pasa a `null` en una rama
+alternativa en vez de reasignarse falsamente. Las políticas compatibles solo existen en replay. Las métricas cubren llegada a
+concurrencia, packing medio, VRAM/cómputo ocioso medible, tasas científica/útil y throughput, Runs
+completas/podadas, tipos de OOM, rollback/checkpoint, starvation, bloqueo, falsos seguros/esperas,
+calibración de P(fit) y errores de predicción. Evidencia ausente da `null`. El benchmark sin
+argumentos es solo regresión sintética; `--execution` usa evidencia cuantitativa de una traza real.
+
+#### Geometría canónica de parámetros
+
+`ParameterSpace` es la autoridad matemática del search authored: encoding/decoding transformado,
+distancia, máscara de actividad, bounds, categorías, condicionales, soporte y posición en frontera.
+Los parámetros log se normalizan en espacio log; los integer mantienen topología ordinal; los
+categorical son discretos; un condicional inactivo usa un bit de actividad y no finge ser el valor
+mínimo. Sobol, selección adaptive/Bayesian, similitud de recursos, diseño científico,
+coverage/effects y Study Analysis consumen la misma geometría. Los candidatos persistidos y sus
+fingerprints no cambian.
 
 ### 7.3 Continuación multi-fidelidad
 

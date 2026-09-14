@@ -817,9 +817,12 @@ physical used memory on every sample. Allocator heartbeats add phase, checkpoint
 evidence; aggregate fallback remains explicitly censored. OOM evidence separates intrinsic
 resident-plus-requested bytes from a failed placement signature. Consequently a failed
 `heavy+heavy` packing cannot reduce a global GPU concurrency ceiling or prohibit `heavy+small`.
-Scientific termination is separate from resource completeness: a performance-pruned Run with
-observed forward/backward/optimizer/validation phases and exact process telemetry contributes an
-exact resource profile while its objective remains censored. Changed plan comparisons are stored
+Scientific termination is separate from resource completeness. Resource-relevant phases are
+learned from compatible Runs; there is no universal forward/backward/optimizer/validation
+checklist. A performance-pruned Run whose observed phases cover the learned allocation risk and
+whose process telemetry is exact contributes an exact resource profile while its objective remains
+censored. A late validation/checkpoint peak in history keeps the current profile censored until
+that risk is observed or represented in its tail. Changed plan comparisons are stored
 in `exploration-evaluations.jsonl`, including P(fit), hazard, wait regret and explicit reasons such
 as `RUN_CAP`, `HARD_LOWER_BOUND`, `KNOWN_FAILED_PLACEMENT`, `PROTECTED_LANE`,
 `THROUGHPUT_REGRESSION`, `ROLLBACK_DOMINATES` and `WAIT_CURRENTLY_BETTER`; repeated polls are
@@ -827,6 +830,24 @@ suppressed.
 An atomic bounded active-evidence snapshot survives controller interruption as stale provisional
 knowledge. It can warm uncertainty after restart, but is never restored as a live process or exact
 peak; terminal evidence supersedes it and normal completion clears it.
+
+ARI v3.1 separates the display trajectory from `ResourceTrajectoryStatistics`. The former remains
+bounded; the latter incrementally retains progress/optimizer cycles, phase visits and maxima,
+material peaks, robust growth/noise/allocator residual sketches and checkpoint cadence. Hazard is
+updated by progress and allocation events rather than polling count, so duplicate monitor samples
+do not create confidence. Exact weighted convolution preserves rare discrete tails in P(fit), with
+a small explicit independent/shared-epistemic ensemble for multiple Runs. Subsequent placement
+outcomes calibrate probability bins without contaminating the scientific objective.
+
+WaitRegret is a versioned atomic integral. A changed frontier closes the previous segment at its
+previous idle fraction and scientific-value rate; it does not erase accumulated opportunity loss.
+It resets only when pending feasible opportunity or usable capacity disappears, or an admission
+satisfies it. Physical lower bounds, failed dominated packings, run caps, site policy and measured
+throughput regression remain absolute. Checkpoint planning computes rollback per resident, charges
+learned checkpoint duration, and waits for a durable checkpoint event before treating rollback as
+reduced. The next-event horizon uses learned checkpoint cadence and time *until* the next event,
+never time elapsed since the last checkpoint. Repeated intervals provide a robust cadence
+uncertainty; insufficient evidence remains explicitly unknown.
 
 Failure isolation follows the Run boundary. CPU and GPU adaptive Runs both use fresh one-worker
 processes, so a killed worker cannot poison a shared pool or cancel unrelated candidates. A worker
@@ -849,6 +870,42 @@ Research Console Resources tab renders the same read model: physical free memory
 current/future commitment, predicted headroom, P(fit), blocking reason and backfill explanation.
 Final Study Analysis records resource-conditioned sampling so an under-sampled heavy region is not
 described as scientifically poor.
+
+#### Resource scheduler replay
+
+Every changed scheduler state is recorded as a bounded versioned trace containing device state,
+the scientific frontier, predictions, admissions/blocks and exploration evaluation. It references
+existing observations rather than copying outputs or checkpoints. Replay is available through the
+same result service used by CLI and future interfaces:
+
+```bash
+lf results replay EXECUTION --policy recorded
+lf results replay EXECUTION --policy ari-v3.1 --json
+lf results replay EXECUTION --policy ari-v3-compat --json
+lf results replay EXECUTION --policy ari-v2-compat --json
+python -m benchmarks.resource_scheduling --execution .lambdaforge/runs/WORK/EXECUTION
+```
+
+Replay is exact only while the selected policy agrees with recorded admissions. The first mismatch
+is `counterfactual_divergence`; subsequent metrics are explicitly trace-conditioned simulation,
+not reconstructed fact. A terminal scientific outcome or OOM from the recorded branch becomes
+`null` for an alternative branch instead of being falsely reassigned. Compatibility policies
+exist only in replay. Metrics cover concurrency
+arrival, mean packing, idle VRAM/compute where measurable, scientific/useful action rates,
+throughput, completed/pruned rates, OOM classes, rollback/checkpoint cost, heavy starvation,
+resource-blocked time, false-safe/conservative behavior, P(fit) calibration and prediction error.
+Missing evidence is `null`, never fabricated. The no-argument benchmark remains only a synthetic
+regression; use `--execution` for quantitative trace-derived evidence.
+
+#### Canonical parameter geometry
+
+`ParameterSpace` is the mathematical authority for the authored search schema. It owns transformed
+encoding/decoding, distance, active masks, bounds, categories, conditionals, support and boundary
+position. Log dimensions are normalized in log space; integers retain ordinal topology;
+categoricals are discrete; inactive conditional values have an activity bit and are not encoded as
+the lowest value. Sobol, adaptive and Bayesian selection, resource similarity, scientific design,
+coverage/effects and Study Analysis all consume this geometry. Persisted candidate mappings and
+fingerprints remain unchanged.
 
 ### 7.3 Multi-fidelity continuation
 

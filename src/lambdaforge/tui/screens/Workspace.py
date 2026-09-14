@@ -899,13 +899,18 @@ class StudyWorkspace(ResearchWorkspace):
     def _resource_text(self) -> str:
         admission = self.study.get("admission", {})
         current = admission.get("current", {}) if isinstance(admission, Mapping) else {}
-        if current.get("admission_version") == 2:
+        if int(current.get("admission_version", 0) or 0) >= 2:
             devices = [value for value in current.get("devices", ()) if isinstance(value, Mapping)]
             admitted = [
                 value for value in current.get("admitted", ()) if isinstance(value, Mapping)
             ]
             blocked = [
                 value for value in current.get("resource_blocked", ()) if isinstance(value, Mapping)
+            ]
+            explorations = [
+                value
+                for value in current.get("exploration_evaluations", ())
+                if isinstance(value, Mapping)
             ]
             lines = [
                 "[b]RESOURCE-AWARE ADMISSION[/b]",
@@ -945,11 +950,34 @@ class StudyWorkspace(ResearchWorkspace):
                         if active.get("trial") is not None
                         else str(active.get("candidate", "Run"))[:24]
                     )
+                    next_seconds = active.get("next_decision_seconds")
+                    next_uncertainty = active.get("next_decision_uncertainty_seconds")
+                    next_event = (
+                        f"{format_value(next_seconds)}s"
+                        if isinstance(next_seconds, int | float)
+                        and not isinstance(next_seconds, bool)
+                        else "unknown"
+                    )
+                    if (
+                        isinstance(next_uncertainty, int | float)
+                        and not isinstance(next_uncertainty, bool)
+                    ):
+                        next_event = (
+                            f"{format_value(next_seconds)} ± "
+                            f"{format_value(next_uncertainty)}s"
+                        )
                     lines.append(
                         f"    {identity} · current "
                         f"{self._resource_bytes(active.get('current_bytes'))} · future "
                         f"{self._resource_bytes(active.get('future_commitment_bytes'))} · "
                         f"{active.get('resource_state', 'unknown')}"
+                    )
+                    lines.append(
+                        "      hazard "
+                        f"{format_value(active.get('growth_hazard'))} · tail "
+                        f"{format_value(active.get('tail_probability'))} · cycles "
+                        f"{active.get('evidence_cycles', 0)} · next event "
+                        f"{next_event}"
                     )
                 if active_runs:
                     lines.append("")
@@ -976,6 +1004,39 @@ class StudyWorkspace(ResearchWorkspace):
                         f"lower bound "
                         f"{self._resource_bytes(prediction.get('known_lower_bound_bytes'))} · "
                         f"{value.get('reason', 'waiting')}"
+                    )
+            if explorations:
+                lines.extend(("", "[b]WHY WAIT / WHY EXPLORE[/b]"))
+                for value in explorations[:6]:
+                    wait = value.get("wait_regret_details", {})
+                    wait = wait if isinstance(wait, Mapping) else {}
+                    hazards = value.get("phase_hazards", {})
+                    hazards = hazards if isinstance(hazards, Mapping) else {}
+                    hazard_summary = ", ".join(
+                        f"{name}={format_value(amount)}"
+                        for name, amount in list(hazards.items())[:3]
+                    ) or "unavailable"
+                    sources = value.get("fit_uncertainty_sources", ())
+                    uncertainty = ", ".join(map(str, sources)) if sources else "none identified"
+                    lines.extend(
+                        (
+                            f"Trial candidate {str(value.get('candidate', '?'))[:24]} · "
+                            f"GPU {value.get('gpu', '?')} · {value.get('plan', 'WAIT')}",
+                            f"  decision           {value.get('rejection_reason', 'unavailable')}",
+                            f"  P(fit) / tail      {format_value(value.get('fit_probability'))} / "
+                            f"{format_value(value.get('tail_probability'))}",
+                            f"  hazard / cycles    {format_value(value.get('peak_hazard'))} / "
+                            f"{value.get('evidence_cycles', 0)}",
+                            f"  phase hazards      {hazard_summary}",
+                            f"  uncertainty        {uncertainty}",
+                            f"  rollback / info    {format_value(value.get('rollback_seconds'))}s / "
+                            f"{format_value(value.get('resource_information_value'))}",
+                            f"  wait regret        {format_value(value.get('wait_regret'))} · "
+                            f"idle {format_value(wait.get('current_idle_usable_fraction'))} · "
+                            f"rate {format_value(wait.get('scientific_opportunity_rate'))}",
+                            f"  final delta        {format_value(value.get('final_delta_value'))}",
+                            "",
+                        )
                     )
             lines.extend(
                 (

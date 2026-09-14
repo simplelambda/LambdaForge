@@ -12,6 +12,19 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Refined Adaptive Resource Intelligence to v3.1 with polling-invariant incremental sufficient
+  statistics, learned phase-specific peak hazard, exact segmented WaitRegret persistence,
+  per-resident checkpoint rollback/cost and tail-aware joint P(fit) composition. Scheduling now
+  consumes an explicit `ScientificActionValue` contract and persists compact, versioned traces and
+  calibration evidence without turning raw controller scores into resource currency.
+- Added `lf results replay EXECUTION --policy ...` and the matching `ResultStore` API for factual
+  replay through the first counterfactual divergence and explicitly trace-conditioned simulation
+  afterwards. The trace benchmark reports concurrency, utilization, scientific rate, throughput,
+  OOM classes, rollback/checkpoint cost, starvation, calibration and prediction error; unknown
+  counterfactual quantities remain null.
+- Added one canonical authored `ParameterSpace` for Sobol, adaptive/Bayesian sampling, scientific
+  design, resource similarity and post-hoc Study Analysis, with shared logarithmic, ordinal,
+  categorical and conditional-inactivity semantics while preserving candidate identities.
 - Evolved the existing scheduler to Adaptive Resource Intelligence v3. Live trajectories now learn
   material-growth noise, update a weighted phase-aware peak-survival posterior and contract rare
   capacity tails without erasing them. A dimensionally coherent WAIT/EXPLORE comparison normalizes
@@ -55,6 +68,10 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Prevented monitor cadence, bounded display downsampling and changing candidate frontiers from
+  manufacturing confidence or erasing resource-scheduling liveness. Fixed time-to-next-checkpoint
+  semantics and mixed checkpointable/non-checkpointable rollback accounting; rare sub-percent
+  capacity tails now remain represented rather than disappearing at a fixed quantile.
 - Prevented small allocator/cache maxima, a permanent equiprobable capacity tail, an absolute
   `RAMPING` veto and the former one-second unknown-duration fallback from keeping physically idle
   GPUs at one Run indefinitely. Neighbour candidates no longer impose provisional intrinsic lower

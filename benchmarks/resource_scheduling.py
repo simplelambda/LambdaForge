@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from lambdaforge.hpo.AdaptiveResources import (
     ActiveResourceCommitment,
@@ -16,6 +18,7 @@ from lambdaforge.hpo.AdaptiveResources import (
     ResourceTrajectoryAnalyzer,
     ResourceTrajectorySample,
 )
+from lambdaforge.hpo.ResourceReplay import ResourceSchedulerReplay
 
 GIB = 1024**3
 
@@ -80,7 +83,7 @@ def compare_static_and_dynamic() -> dict[str, SchedulingBenchmark]:
 
 
 def compare_terminal_and_live_cold_start() -> dict[str, ColdStartBenchmark]:
-    """Compare v2's binary ramp gate with v3's live posterior on the same trajectory."""
+    """Keep the original idealized cold-start regression; it is not empirical evidence."""
     terminal_wait = 3600.0
     evidence_time = 120.0
     trajectory = tuple(
@@ -330,11 +333,31 @@ def _action(run: SyntheticRun) -> CandidateResourceAction:
     )
 
 
+def replay_execution(execution: Path) -> dict[str, object]:
+    """Compare replay-only policies from a real Study's canonical decision trace."""
+    replay = ResourceSchedulerReplay.from_execution(execution)
+    return {
+        policy: replay.replay(policy)
+        for policy in ("recorded", "ari-v2-compat", "ari-v3-compat", "ari-v3.1")
+    }
+
+
 if __name__ == "__main__":
-    print(
-        json.dumps(
-            {key: asdict(value) for key, value in compare_static_and_dynamic().items()},
-            indent=2,
-            sort_keys=True,
-        )
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--execution",
+        type=Path,
+        help="real execution-* directory; emits trace-derived replay metrics",
     )
+    arguments = parser.parse_args()
+    payload = (
+        replay_execution(arguments.execution)
+        if arguments.execution is not None
+        else {
+            "synthetic_regression_only": {
+                key: asdict(value) for key, value in compare_static_and_dynamic().items()
+            },
+            "note": "Use --execution for quantitative trace-derived replay evidence.",
+        }
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))

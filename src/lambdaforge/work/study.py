@@ -595,6 +595,7 @@ class StudyTelemetry:
                         candidates,
                         objective,
                         practical_margin=_practical_margin(initialization),
+                        parameter_space=_parameter_space(initialization),
                     )
                     if str(index.get("strategy", "")) == "adaptive"
                     else None
@@ -974,6 +975,14 @@ def _practical_margin(initialization: Mapping[str, Any]) -> float | None:
         and math.isfinite(float(value))
         else None
     )
+
+
+def _parameter_space(initialization: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    policy = initialization.get("policy", {})
+    if not isinstance(policy, Mapping):
+        return None
+    value = policy.get("parameter_space")
+    return dict(value) if isinstance(value, Mapping) else None
 
 
 def study_run_key(specification: Mapping[str, Any]) -> str:

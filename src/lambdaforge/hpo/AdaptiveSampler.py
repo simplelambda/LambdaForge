@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.hpo.SurvivalModel import SurvivalAcquisitionPolicy, SurvivalEstimate
 
 
@@ -29,7 +30,13 @@ class AdaptiveSampler:
     optimizer dependency while making proposal order depend on actual results.
     """
 
-    def __init__(self, candidates: Mapping[int, Mapping[str, Any]], *, mode: str) -> None:
+    def __init__(
+        self,
+        candidates: Mapping[int, Mapping[str, Any]],
+        *,
+        mode: str,
+        parameter_space: ParameterSpace | Mapping[str, Any] | None = None,
+    ) -> None:
         if mode not in {"min", "max"}:
             raise ValueError("Adaptive sampler mode must be min or max.")
         self.candidates = {
@@ -37,7 +44,11 @@ class AdaptiveSampler:
             for trial, parameters in candidates.items()
         }
         self.mode = mode
-        self._numeric_bounds = self._bounds(tuple(self.candidates.values()))
+        self.parameter_space = (
+            parameter_space
+            if isinstance(parameter_space, ParameterSpace)
+            else ParameterSpace.from_schema(parameter_space, tuple(self.candidates.values()))
+        )
         self.last_diagnostics: dict[str, Any] = {}
         self.survival_policy = SurvivalAcquisitionPolicy()
 
@@ -222,46 +233,8 @@ class AdaptiveSampler:
         }
         return tuple(proposed)
 
-    @staticmethod
-    def _bounds(
-        candidates: Sequence[Mapping[str, Any]],
-    ) -> dict[str, tuple[float, float]]:
-        names = {str(name) for candidate in candidates for name in candidate}
-        output: dict[str, tuple[float, float]] = {}
-        for name in names:
-            values = [
-                float(candidate[name])
-                for candidate in candidates
-                if isinstance(candidate.get(name), int | float)
-                and not isinstance(candidate.get(name), bool)
-                and math.isfinite(float(candidate[name]))
-            ]
-            if values:
-                output[name] = (min(values), max(values))
-        return output
-
     def _distance(self, left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
-        names = sorted(set(left) | set(right))
-        if not names:
-            return 0.0
-        squared = 0.0
-        for name in names:
-            first, second = left.get(name), right.get(name)
-            bounds = self._numeric_bounds.get(name)
-            if (
-                bounds is not None
-                and isinstance(first, int | float)
-                and not isinstance(first, bool)
-                and isinstance(second, int | float)
-                and not isinstance(second, bool)
-            ):
-                low, high = bounds
-                width = high - low
-                delta = 0.0 if width <= 0 else (float(first) - float(second)) / width
-            else:
-                delta = 0.0 if first == second else 1.0
-            squared += delta * delta
-        return math.sqrt(squared / len(names))
+        return self.parameter_space.distance(left, right)
 
 
 __all__ = ["AdaptiveSampler", "CandidateObservation"]

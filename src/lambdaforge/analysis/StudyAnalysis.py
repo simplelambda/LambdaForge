@@ -104,6 +104,7 @@ class StudyAnalysis:
             practical_margin=equivalence_margin,
             fingerprint=fingerprint,
             final=resolved_status == "final",
+            parameter_space=authored_space,
         )
         generated_findings = findings(
             candidates=aggregates,
