@@ -941,10 +941,19 @@ class ResourceDemandModel:
         ]
         active_distances = sorted(
             (
-                _mixed_distance(parameters, value.parameters, self.parameter_space),
-                value,
-            )
-            for value in active_compatible
+                (
+                    _mixed_distance(parameters, value.parameters, self.parameter_space),
+                    value,
+                )
+                for value in active_compatible
+            ),
+            key=lambda item: (
+                item[0],
+                item[1].candidate_key,
+                item[1].phase or "",
+                item[1].step if item[1].step is not None else -1,
+                item[1].running_peak_bytes,
+            ),
         )
         support_scale = _active_support_scale(active_distances, self.parameter_space)
         active_support = max(
@@ -1427,7 +1436,7 @@ class ExplorationEvaluation:
     rollback_value: float
     interference_cost: float
     wait_regret: float
-    final_delta_value: float
+    final_delta_value: float | None
     accepted: bool
     rejection_reason: str
     plan: str
@@ -1701,6 +1710,14 @@ class GPUPlacementPlanner:
             _slack, negative_probability, _duration, selected = min(choices)
             device = mutable[selected]
             selected_prediction = action.prediction_for(device)
+            cold_start_lane = (
+                not device.active
+                and selected_prediction.support == "cold-start"
+                and selected_prediction.commitment_bytes > device.admission_headroom_bytes
+            )
+            admission_mode: AdmissionMode = (
+                "EXPLORATORY_ADMISSION" if cold_start_lane else "SAFE_ADMISSION"
+            )
             commitment = ActiveResourceCommitment(
                 action.key,
                 selected_prediction.commitment_bytes,
@@ -1711,6 +1728,7 @@ class GPUPlacementPlanner:
                 ),
                 trial=_trial(action.specification),
                 seed=_optional_int(action.specification.get("seed")),
+                admission_mode=admission_mode,
             )
             mutable[selected] = GPUResourceState(
                 device.index,
@@ -1725,15 +1743,20 @@ class GPUPlacementPlanner:
             higher = next(
                 (item for item in blocked if item.scientific_value > action.scientific_value), None
             )
+            admission_reason = (
+                "cold-start protected progress lane on an otherwise idle GPU"
+                if cold_start_lane
+                else "highest-value feasible action"
+                if higher is None
+                else "safe backfill while a higher-value action is resource-blocked"
+            )
             admitted.append(
                 AdmissionDecision(
                     action.key,
                     _trial(action.specification),
                     "ADMITTED",
                     device.index,
-                    "highest-value feasible action"
-                    if higher is None
-                    else "safe backfill while a higher-value action is resource-blocked",
+                    admission_reason,
                     action.scientific_value,
                     selected_prediction.to_dict(),
                     tuple(device_notes),
@@ -1745,10 +1768,15 @@ class GPUPlacementPlanner:
                     ),
                     backfill=higher is not None,
                     displaced_candidate=higher.candidate_key if higher is not None else None,
-                    admission_mode="SAFE_ADMISSION",
+                    admission_mode=admission_mode,
                 )
             )
-            self.wait_regret.reset(device.index, reason="safe-work-admitted")
+            self.wait_regret.reset(
+                device.index,
+                reason=(
+                    "cold-start-progress-admitted" if cold_start_lane else "safe-work-admitted"
+                ),
+            )
         # Conservative upper envelopes are deliberately broad at cold start.  Once live evidence
         # exists, evaluate one incremental co-location experiment rather than waiting for a long
         # Run to terminate.  This evolves the same planner: there is no compatibility scheduler.
@@ -1793,9 +1821,12 @@ class GPUPlacementPlanner:
                     evaluations.append(evaluated)
                     if not evaluated.accepted:
                         continue
+                    delta = evaluated.final_delta_value
+                    if delta is None:
+                        continue
                     experiments.append(
                         (
-                            -evaluated.final_delta_value,
+                            -delta,
                             -uncertain_action.scientific_value,
                             device.index,
                             uncertain_action.key,
@@ -1817,7 +1848,16 @@ class GPUPlacementPlanner:
                     signature,
                     rollback,
                     information,
-                ) = min(experiments)
+                ) = min(
+                    experiments,
+                    key=lambda item: (
+                        item[0],
+                        item[1],
+                        item[2],
+                        item[3],
+                        item[6],
+                    ),
+                )
                 selected_prediction = uncertain_action.prediction_for(selected_device)
                 probability = _joint_fit_probability(selected_prediction, selected_device)
                 admitted.append(
@@ -1891,7 +1931,7 @@ class GPUPlacementPlanner:
                 0.0,
                 0.0,
                 wait_regret,
-                -math.inf,
+                None,
                 False,
                 reason,
                 "WAIT",
@@ -2188,6 +2228,14 @@ class GPUPlacementPlanner:
             return "RESOURCE_BLOCKED", "known-failed-placement-dominates-current-condition"
         if prediction.known_lower_bound_bytes > device.admission_headroom_bytes:
             return "RESOURCE_BLOCKED", "dominated-by-known-oom-lower-bound"
+        # A cold-start envelope deliberately spans up to the whole device because no completed
+        # resource profile exists yet. Driver/context overhead means live free VRAM is normally a
+        # little below total VRAM, so requiring that deliberately broad envelope to fit would
+        # leave every otherwise idle GPU blocked forever. The first Run on each idle GPU is a
+        # protected exploratory baseline; the hard lower bound and any known failed placement
+        # above still fail closed, and co-location remains governed by live evidence.
+        if not device.active and prediction.support == "cold-start":
+            return "ADMITTED", "cold-start-protected-progress-lane"
         if prediction.commitment_bytes > device.admission_headroom_bytes:
             return "RESOURCE_BLOCKED", "future-envelope-exceeds-predicted-headroom"
         return "ADMITTED", "fits-conservative-future-envelope"
@@ -2408,7 +2456,10 @@ class ResourceHistoryStore:
                             if value.wait_regret > 0
                             else 0
                         ),
-                        "delta_sign": value.final_delta_value > 0,
+                        "delta_sign": (
+                            value.final_delta_value is not None
+                            and value.final_delta_value > 0
+                        ),
                     }
                     for value in bounded
                 ]
@@ -2422,7 +2473,14 @@ class ResourceHistoryStore:
                 self.study_root / "exploration-evaluations.jsonl", value.to_dict()
             )
         if not any(value.accepted for value in bounded):
-            leading = max(bounded, key=lambda value: value.final_delta_value)
+            leading = max(
+                bounded,
+                key=lambda value: (
+                    value.final_delta_value
+                    if value.final_delta_value is not None
+                    else -math.inf
+                ),
+            )
             self.record_event("RESOURCE_WAIT", leading.to_dict())
 
     def persist_ledger(self, devices: Sequence[GPUResourceState]) -> None:

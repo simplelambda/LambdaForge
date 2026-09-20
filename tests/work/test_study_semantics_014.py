@@ -51,7 +51,7 @@ def test_five_runs_per_each_of_two_gpus_has_no_artificial_three_run_limit() -> N
     assert slots == (0, 1)
 
 
-def test_automatic_startup_fills_parallel_slots_with_distinct_candidates() -> None:
+def test_startup_count_helper_requires_scientific_geometry_not_parallelism() -> None:
     policy = AdaptiveSearchPolicy(
         runs_per_gpu=10,
         max_parallel=20,
@@ -60,8 +60,24 @@ def test_automatic_startup_fills_parallel_slots_with_distinct_candidates() -> No
     )
 
     assert policy.startup_trials is None
-    assert _adaptive_startup_trial_count(policy, parallelism=20, candidate_budget=500) == 20
-    assert _adaptive_startup_trial_count(policy, parallelism=20, candidate_budget=12) == 12
+    assert (
+        _adaptive_startup_trial_count(
+            policy,
+            parallelism=20,
+            candidate_budget=500,
+            geometry_required=13,
+        )
+        == 13
+    )
+    assert (
+        _adaptive_startup_trial_count(
+            policy,
+            parallelism=2,
+            candidate_budget=500,
+            geometry_required=13,
+        )
+        == 13
+    )
     explicit = AdaptiveSearchPolicy(
         startup_trials=6,
         candidate_budget=500,

@@ -131,7 +131,11 @@ El mismo `{file: ../data/dna/design}` apunta entonces a `PROYECTO/data/dna/desig
 `/scratch/USUARIO/WISDOM/data/dna/design` remoto. Hasta 10 MiB sigue siendo un snapshot automático
 del bundle. Por encima del límite LambdaForge no copia implícitamente: la ruta debe estar dentro del
 proyecto local, su equivalente remoto debe existir y se comparan tipo, bytes y SHA-256 antes del
-scheduler y otra vez en el worker. Un mirror ausente o desactualizado falla de forma segura.
+scheduler y otra vez en el worker. El SHA-256 de un directorio usa una identidad de árbol canónica
+y versionada: normaliza Unicode, ordena los componentes por bytes, usa `/` como separador lógico,
+delimita cada registro e incluye directorios vacíos, pero excluye permisos y fechas del host. Por
+tanto no depende de `find`, del `sort` del shell, del locale ni del orden de creación. Un mirror
+ausente, cambiante o desactualizado falla de forma segura.
 Sincronizarlo mediante el servicio recomendado por el clúster es responsabilidad explícita del
 investigador. Para cientos de GB/TB es preferible un dataset gestionado: verificar el mirror también
 lee todos los bytes, mientras el dataset aporta identidad y placements reutilizables.
@@ -328,10 +332,13 @@ una utilidad compuesta explícita de rangos fijos. Siempre que `search` tenga `o
 política adaptativa segura completa: inicio Sobol, propuestas dependientes de resultados, carrera
 probabilística de seeds, pruning de curvas, detección de convergencia y confirmación con seeds
 nuevas. Un pool Sobol scrambled proporciona puntos reproducibles que cubren el espacio. Si se omite
-`startup_trials`, la primera oleada crece desde el mínimo histórico de diez hasta el paralelismo
-seguro de ejecución (acotado por `trials`), de modo que cada slot inicialmente disponible recibe
-un candidato distinto. Un `startup_trials` explícito sigue siendo autoritativo. Después, los
-resultados eligen los candidatos siguientes. `sampler: auto` usa qLogNEI con GP mixto de BoTorch si está instalado el extra
+`startup_trials`, LambdaForge deriva un `InitialDesignPlan` del `ParameterSpace` declarado: conserva
+de forma greedy el rank útil de efectos principales/curvatura, cubre niveles categóricos, estados
+condicionales activo/inactivo y soporte numérico bajo/interior/alto, y desempata mediante
+D-optimal/maximin determinista. Su número de anchors nunca depende de GPUs, `runs_per_gpu` ni
+`max_parallel`. Un `startup_trials` explícito sigue siendo el presupuesto autoritativo de anchors,
+con la misma selección geométrica. Después, los resultados eligen los candidatos siguientes.
+`sampler: auto` usa qLogNEI con GP mixto de BoTorch si está instalado el extra
 `lambdaforge[adaptive-hpo]` y existe evidencia suficiente, con fallback k-NN determinista ante una
 dependencia ausente o un fallo numérico. El GP ve conjuntamente todas las dimensiones codificadas,
 incluidas categorías y activación condicional, y qLogNEI incorpora el error estándar entre seeds.
@@ -421,7 +428,7 @@ search:
   trials: 40
   proposal_pool_size: 640
   min_seeds: 1
-  # Override exacto opcional; omitido significa max(10, slots seguros), acotado por trials.
+  # Presupuesto científico exacto opcional; omitido deriva de la geometría, no del hardware.
   startup_trials: 10
   seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.002}
   confirmation_top_k: 2
@@ -433,7 +440,8 @@ search:
   # Omite ambos campos para consumir los 40 candidatos completos (valor seguro por defecto).
   convergence_patience: 8
   min_improvement: 0.0005
-  runs_per_gpu: 4
+  runs_per_gpu: auto  # o un entero positivo como máximo duro por GPU
+  max_parallel: auto  # o un entero positivo como máximo duro global
   failure_retries: 1
   early_stopping: {enabled: true, min_step: 5, confirmations: 2,
                    probability_threshold: 0.05, equivalence_margin: 0.002}
@@ -446,6 +454,15 @@ resources:
   cpu: 16            # reserva total; parte estable por cada posible Run concurrente
   memory: 32GiB      # reserva total; las partes nunca exceden este límite exterior
 ```
+
+La ejecución separa tres capas. La **planificación científica** decide qué evidencia debería
+existir: anchors protegidos, candidatos de optimización, probes emparejados y acciones de
+seed/fidelidad. La **planificación de recursos** decide qué cabe de forma segura ahora. El
+**dispatch** crea el proceso aislado. Por ello un anchor necesario puede esperar recursos sin estar
+cancelado. Si una cota inferior dura demuestra que es imposible en todos los dispositivos
+asignados, LambdaForge lo reemplaza por el candidato que mejor conserva sus obligaciones y registra
+`REPLACE_STARTUP_ANCHOR`. La capacidad física sobrante no agranda el diseño protegido: mientras hay
+poca evidencia ejecuta puntos `OPPORTUNISTIC_COVERAGE` que sí pueden replanificarse.
 
 El `proposal_pool_size` determinista se almacena una sola vez; cada especificación ligera de
 candidato/seed referencia solo sus propios valores. La memoria de planificación crece así de forma
@@ -464,10 +481,24 @@ racha de récords deliberadamente opt-in: un valor positivo deja de proponer sol
 cantidad de resultados completos no mejora el incumbent más que `min_improvement`; no es una
 prueba de cobertura multidimensional. El evento final indica si se agotó el presupuesto de
 candidatos, Runs o tiempo, el pool de propuestas, o esta convergencia explícita. Pruning y carrera
-de seeds siguen ahorrando cómputo sin recortar el presupuesto de candidatos declarado.
+de seeds siguen ahorrando cómputo sin recortar el presupuesto de candidatos declarado. La cobertura
+distingue **search coverage** (región intentada o podada científicamente) de **response coverage**
+(respuesta completa comparable), junto con diversidad de contextos emparejados. El controlador
+puede pedir `COVER_PARAMETER_VALUE` o `COVER_INTERACTION_CELL` si una conclusión está confundida por
+soporte estrecho. No hay cuotas mágicas: el valor de otro probe cae cuando evidencia diversa
+resuelve la pregunta.
 
-El ejemplo permite **como máximo** ocho entrenos simultáneos, cuatro en cada GPU; no pide crear ocho
-slots idénticos. Cada candidato recibe una distribución de memoria futura aprendida de Runs
+`PERFORMANCE_PRUNE` significa que no compensa continuar una Run para encontrar el óptimo; no dice
+que su curva parcial carezca de información. Si después esa Run censurada es la vía más barata para
+resolver una pregunta, LambdaForge puede registrar `SCIENTIFIC_CONTINUATION` y reanudar el mismo
+Trial y seed desde su checkpoint durable como un nuevo Attempt. No consume otro slot de `trials`,
+evita el pruning competitivo y sí consume presupuesto de Runs/tiempo. El prune original permanece
+visible y sigue siendo correcto.
+
+Con `auto`, ARI puede aumentar el packing de cada GPU hasta que VRAM física, recursos host,
+throughput o política del sitio indiquen esperar. Sustituirlo por `runs_per_gpu: 4` impondría
+**como máximo** cuatro Runs por dispositivo; no exigiría crear cuatro slots fijos. Cada candidato
+recibe una distribución de memoria futura aprendida de Runs
 terminales y activas censuradas compatibles. La memoria física es la autoridad y el headroom futuro se
 aproxima mediante
 
@@ -550,7 +581,11 @@ el perfil; su objective científico continúa censurado. Los diagnósticos persi
 `RESOURCE_WAIT`, `RESOURCE_EXPLORE`, checkpoint, promoción, invalidación y recuperación con P(fit),
 hazard, rollback, wait regret y motivo explícito, sin escribir en cada sondeo.
 
-Cada evento terminal replanifica la frontera científica contra el estado físico actual. Cada Run empaquetado posee un proceso
+Cada evento terminal replanifica la frontera científica contra el estado físico actual. La
+disponibilidad física también es un evento: si la cola ejecutable queda vacía y una GPU concedida
+tiene capacidad admisible, se solicita inmediatamente una frontera científica acotada sin esperar
+a que termine otra Run. El controlador sigue eligiendo la acción y el planner decide si es segura o
+si merece un único escalón exploratorio. Cada Run empaquetado posee un proceso
 spawn nuevo que termina al acabar el Run; no se reutiliza un worker CUDA ocioso cuyo contexto
 podría retener VRAM y bloquear para siempre la cola.
 Una GPU llena no falla todo el estudio; si otra admite dos de cuatro slots, ejecuta
@@ -595,9 +630,11 @@ La planificación está dirigida por eventos. Cada Run terminal hace que el slot
 `controller_value`, coste incremental y prioridad en `hpo-control/decisions.jsonl`. El valor es una
 heurística auditable en escala común, no ganancia de información ni probabilidad calibrada: seeds
 usan reducción relativa del error estándar, regiones nuevas usan cobertura/escasez y promociones
-usan incertidumbre de fidelidad, todo dividido por coste incremental observado. Las acciones en
-cola aún no despachadas son provisionales: nueva evidencia puede sustituirlas con coste científico
-cero y registrar `CANCEL_QUEUED_ACTION` con prioridad anterior/nueva y motivo. Startup es una cola
+usan incertidumbre de fidelidad, todo dividido por coste incremental observado. Las acciones que
+no son anchors y aún no se despacharon son provisionales: nueva evidencia puede sustituirlas con
+coste científico cero y registrar `CANCEL_PLANNED_DISPATCH` o `CANCEL_SCIENTIFIC_ACTION` según se
+abandone solo el plan de despacho o también la acción científica. Un anchor inicial protegido
+registra `DEFER_STARTUP_ANCHOR` y continúa como deuda científica. Startup es un diseño protegido
 de cobertura, no una barrera:
 puede empezar trabajo guiado por el modelo mientras quedan Runs iniciales lentos. Los candidatos
 pendientes condicionan el surrogate en su fidelidad objetivo real, las identidades en cola evitan
@@ -752,6 +789,15 @@ tras un launcher command reduce su concurrencia si recibe menos GPU que el máxi
 concedida se usa como una, dos como dos y nunca se inventa una tercera. Además, pedir GPU fuerza un
 entorno CUDA; un fallo del launcher ya no puede degradar silenciosamente a PyTorch CPU.
 
+El grant command puede cambiar durante un Study largo. LambdaForge consulta los tokens opacos
+actuales mediante `gpu_access.visibility_command`; con el prefijo habitual `[gpu, exec]` deriva
+automáticamente `[gpu, env]`. Solo admite que un token heredado desaparezca o se restaure, nunca
+acepta identificadores físicos nuevos. Si el grant se reduce, detiene exclusivamente el worker
+verificado de cada token revocado y reencola su Run lógica usando checkpoint; las demás continúan.
+Si el probe de propiedad falla temporalmente, conserva las Runs activas pero no admite otras
+nuevas. Un comando personalizado debe imprimir en su primera línea no vacía los tokens actuales
+separados por comas.
+
 ## Observación y operación
 
 ```bash
@@ -784,6 +830,22 @@ acotados se refrescan en vivo sin solapar peticiones. **Run Work** presenta vali
 durable como una sola operación visible, también al elegir un YAML reciente. Las acciones
 destructivas requieren confirmación y mantienen el preview y límites de propiedad de la CLI. La automatización
 debe consumir los comandos `--json`, no analizar la interfaz a pantalla completa.
+
+Las vistas de colección usan modelos de lectura deliberadamente ligeros. Overview hace una lectura
+del inventario por proveedor directo —o solo del estado de Jobs activos si el scheduler no tiene
+inventario—, consulta los contadores del registro local de datasets y
+nunca transfiere los índices de candidatos/Runs de todos los Studies. Work y Studies tampoco
+sondean recursos ni datasets. Abrir un Study carga su índice acotado; el análisis HPO, el historial
+completo del controlador y los logs se solicitan solo al abrir sus pestañas. Curvas por epoch,
+artefactos y logs aislados se leen únicamente al entrar en una seed. `lf overview --json` conserva
+este contrato compacto; `lf show WORK` y `lf show WORK --run CLAVE --json` añaden los siguientes
+niveles de detalle. Si el proveedor no permite confirmar un Job más allá de `unknown`, el borrado
+ofrece una operación explícita solo sobre el historial local: no toca el proceso ni el workspace
+remotos no verificados. Si el cómputo aún puede estar activo, primero hay que reconectar y cancelarlo.
+El worker mantiene `study/interactive.json` como índice compacto separado del resumen rico
+autoritativo; los resúmenes legacy demasiado grandes se proyectan en el host de ejecución y el
+historial completo se descarga en páginas JSONL acotadas solo al abrir Action history. Los redraws
+vivos conservan fila seleccionada, scroll de tablas/logs y viewport manual de cada gráfica.
 
 `LightningRunner` registra curvas escalares, `epoch_time_s`, `validation_time_s`, el pico de
 tensores vivos (`gpu_mem_mb`) y la caché del allocator de PyTorch (`gpu_reserved_mb` y

@@ -83,36 +83,41 @@ class StudyScreen(DataScreen):
         counts = study.get("counts", {})
         objective = study.get("objective", {})
         candidates = study.get("candidates", [])
-        comparable = [
-            candidate
-            for candidate in candidates
-            if isinstance(candidate.get("selection_objective"), int | float)
-        ]
-        reverse = str(objective.get("mode", "max")) == "max"
-        leader = (
-            sorted(
-                comparable,
-                key=lambda candidate: float(candidate["selection_objective"]),
-                reverse=reverse,
-            )[0]
-            if comparable
-            else None
-        )
-        partial = [
-            candidate
-            for candidate in candidates
-            if candidate.get("selection_objective") is None
-            and isinstance(candidate.get("best_objective"), int | float)
-        ]
-        partial_leader = (
-            sorted(
-                partial,
-                key=lambda candidate: float(candidate["best_objective"]),
-                reverse=reverse,
-            )[0]
-            if partial
-            else None
-        )
+        leader = study.get("leader")
+        partial_leader = study.get("partial_leader")
+        if not isinstance(leader, dict):
+            comparable = [
+                candidate
+                for candidate in candidates
+                if isinstance(candidate.get("selection_objective"), int | float)
+            ]
+            reverse = str(objective.get("mode", "max")) == "max"
+            leader = (
+                sorted(
+                    comparable,
+                    key=lambda candidate: float(candidate["selection_objective"]),
+                    reverse=reverse,
+                )[0]
+                if comparable
+                else None
+            )
+        if not isinstance(partial_leader, dict):
+            partial = [
+                candidate
+                for candidate in candidates
+                if candidate.get("selection_objective") is None
+                and isinstance(candidate.get("best_objective"), int | float)
+            ]
+            reverse = str(objective.get("mode", "max")) == "max"
+            partial_leader = (
+                sorted(
+                    partial,
+                    key=lambda candidate: float(candidate["best_objective"]),
+                    reverse=reverse,
+                )[0]
+                if partial
+                else None
+            )
         lines = [
             f"{item.get('name', 'Study')} · {str(item.get('state', 'unknown')).upper()} · "
             f"{item.get('cluster', 'local')}",
@@ -124,7 +129,7 @@ class StudyScreen(DataScreen):
             (
                 f"Current lead  Trial {leader.get('trial')} · "
                 f"{objective_display_name(objective)} "
-                f"{format_value(leader.get('selection_objective'))}"
+                f"{format_value(leader.get('selection_objective', leader.get('value')))}"
                 if leader is not None
                 else "Current lead  not comparable yet"
             ),
@@ -136,9 +141,12 @@ class StudyScreen(DataScreen):
             reason = current.get("reason")
             lines.append(f"Admission   {status}" + (f" · {reason}" if reason else ""))
         if partial_leader is not None:
+            partial_value = partial_leader.get(
+                "best_objective", partial_leader.get("value")
+            )
             lines.append(
                 f"Best partial/censored  Trial {partial_leader.get('trial')} · best observed "
-                f"{format_value(partial_leader.get('best_objective'))}† · not a final seed mean"
+                f"{format_value(partial_value)}† · not a final seed mean"
             )
         lines.append("Enter/right opens Trials, seeds, HPO analysis, resources and logs.")
         return "\n".join(lines)

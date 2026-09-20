@@ -92,6 +92,96 @@ def test_research_work_exposes_numbered_attempt_history_for_machine_clients() ->
     assert work["attempt_history"][1]["job_id"] == "job-2"
 
 
+def test_research_work_overview_omits_candidate_and_run_detail() -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    record = JobRecord(
+        "job-study-summary",
+        "local",
+        "local",
+        "job-study-summary",
+        JobState.RUNNING,
+        ("python", "work.py"),
+        "/tmp/work",
+        {},
+        now,
+        now,
+        metadata={
+            "name": "study",
+            "scientific_identity": "sha256:summary",
+            "study_expected": True,
+            "remote_state": {
+                "study": {
+                    "study_telemetry_version": 1,
+                    "strategy": "adaptive",
+                    "objective": {"metric": "score", "mode": "max"},
+                    "counts": {"candidates": 2, "active_runs": 1},
+                    "candidates": [
+                        {"trial": 1, "selection_objective": 0.7, "runs": [{"seed": 1}]},
+                        {"trial": 2, "selection_objective": 0.8, "runs": [{"seed": 2}]},
+                    ],
+                }
+            },
+        },
+        job_type="work",
+    )
+
+    study = aggregate_research_work((record,))[0].to_dict(study_detail="overview")["study"]
+
+    assert study["detail_level"] == "overview"
+    assert study["leader"] == {"trial": 2, "value": 0.8, "field": "selection_objective"}
+    assert "candidates" not in study
+
+
+def test_unknown_work_delete_forgets_history_without_touching_unverified_workspace(
+    tmp_path: Path,
+) -> None:
+    profile = ClusterProfile(
+        "local",
+        workspace=str(tmp_path),
+        storage={
+            "state_root": str(tmp_path / "state"),
+            "cache_root": str(tmp_path / "cache"),
+            "run_root": str(tmp_path / "jobs"),
+            "dataset_root": str(tmp_path / "datasets"),
+        },
+    )
+    catalog = ClusterCatalog({"local": profile})
+    store = JobStore(tmp_path / "job-records")
+    now = datetime.now(timezone.utc).isoformat()
+    owned = tmp_path / "jobs" / "job-unknown"
+    owned.mkdir(parents=True)
+    (owned / "evidence.txt").write_text("preserve", encoding="utf-8")
+    store.write(
+        JobRecord(
+            "job-unknown",
+            "local",
+            "local",
+            "job-unknown",
+            JobState.UNKNOWN,
+            ("python", "work.py"),
+            str(owned / "work"),
+            {},
+            now,
+            now,
+            metadata={"name": "unknown-study", "scientific_identity": "sha256:unknown"},
+            job_type="work",
+        )
+    )
+    jobs = JobService(catalog, store)
+    service = WorkService(catalog, jobs=jobs, storage=StorageService(catalog))
+
+    preview = service.delete("unknown-study")
+    assert preview["unknown_history_only"] == ["job-unknown"]
+    assert preview["workspaces"] == []
+    assert owned.is_dir()
+
+    applied = service.delete("unknown-study", apply=True)
+    assert applied["applied"] is True
+    assert owned.is_dir()
+    assert (owned / "evidence.txt").read_text(encoding="utf-8") == "preserve"
+    assert not (store.root / "job-unknown.json").exists()
+
+
 def test_research_work_ignores_legacy_single_run_telemetry_for_normal_work() -> None:
     now = datetime.now(timezone.utc).isoformat()
     normal = JobRecord(

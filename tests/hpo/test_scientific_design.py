@@ -145,9 +145,7 @@ def test_joint_effect_is_reported_as_context_dependent() -> None:
 
 def test_seed_noise_never_uses_between_candidate_spread() -> None:
     unresolved = SeedNoiseModel.fit({1: {1: 0.0}, 2: {1: 100.0}})
-    calibrated = SeedNoiseModel.fit(
-        {1: {1: 0.0, 2: 0.2}, 2: {1: 100.0, 2: 100.2}}
-    )
+    calibrated = SeedNoiseModel.fit({1: {1: 0.0, 2: 0.2}, 2: {1: 100.0, 2: 100.2}})
 
     assert unresolved.variance is None
     assert calibrated.calibrated
@@ -204,6 +202,8 @@ def test_experimental_design_can_choose_a_matched_scientific_probe() -> None:
         "RESOLVE_PARAMETER",
         "RESOLVE_INTERACTION",
         "EXPLORE_COVERAGE",
+        "COVER_PARAMETER_VALUE",
+        "COVER_INTERACTION_CELL",
         "OPTIMIZE",
     }
 
@@ -222,6 +222,32 @@ def test_scientific_analysis_is_deterministic_and_tracks_pruned_regions() -> Non
     question = first["parameter_questions"][0]
     assert question["support"]["pruned_candidates"] == 1
     assert first["practical_optimal_region"]["members"]
+
+
+def test_one_pruned_seed_censors_completed_siblings_from_response_fitting() -> None:
+    analysis = _analyze(
+        [
+            {
+                "trial": 1,
+                "parameters": {"x": 0},
+                "state": "pruned",
+                "runs": [
+                    {"seed": 1, "state": "succeeded", "final_objective": 0.8},
+                    {
+                        "seed": 2,
+                        "state": "pruned",
+                        "best_observed_objective": 0.2,
+                        "censored": True,
+                    },
+                ],
+            },
+            _candidate(2, {"x": 1}, [0.7]),
+        ]
+    )
+
+    support = analysis["parameter_questions"][0]["support"]
+    assert support["completed_candidates"] == 1
+    assert support["pruned_candidates"] == 1
 
 
 def test_practical_region_distinguishes_constrained_and_flexible_parameters() -> None:
@@ -250,9 +276,7 @@ def test_new_interaction_evidence_reopens_a_previously_flat_question() -> None:
     ]
     before = _analyze(initial, margin=0.1)
     before_left = next(
-        question
-        for question in before["parameter_questions"]
-        if question["parameter"] == "left"
+        question for question in before["parameter_questions"] if question["parameter"] == "left"
     )
 
     expanded = list(initial)
@@ -263,9 +287,7 @@ def test_new_interaction_evidence_reopens_a_previously_flat_question() -> None:
         )
     after = _analyze(expanded, margin=0.1)
     after_left = next(
-        question
-        for question in after["parameter_questions"]
-        if question["parameter"] == "left"
+        question for question in after["parameter_questions"] if question["parameter"] == "left"
     )
 
     assert before_left["conclusion_kind"] == "PRACTICALLY_EQUIVALENT"
@@ -334,7 +356,7 @@ def test_controller_value_moves_between_interaction_probe_and_optimization() -> 
         },
     )[0]
 
-    assert evidence_first.purpose == "RESOLVE_INTERACTION"
+    assert evidence_first.purpose in {"RESOLVE_INTERACTION", "COVER_INTERACTION_CELL"}
     assert evidence_first.target_questions
     assert optimization_first.purpose == "OPTIMIZE"
     assert optimization_first.optimization_value > 0
@@ -353,8 +375,7 @@ def test_large_proposal_pool_keeps_live_scientific_analysis_bounded() -> None:
         for trial in range(1, 4097)
     }
     candidates = [
-        _candidate(trial, pool[trial], [0.4 + (trial % 11) / 100])
-        for trial in range(1, 23)
+        _candidate(trial, pool[trial], [0.4 + (trial % 11) / 100]) for trial in range(1, 23)
     ]
 
     started = time.perf_counter()

@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.ProcessIdentity import ProcessIdentity
+from lambdaforge.controlplane.ResearchWork import study_overview
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 from lambdaforge.training.orchestration.ProcessGuard import ProcessGuard
 
@@ -140,6 +141,25 @@ class ProcessSupervisor:
             environment["LAMBDAFORGE_STUDY_PATH"] = str(job_dir / "study")
             environment["LAMBDAFORGE_GPU_ACCESS_MODE"] = gpu_mode
             environment["LAMBDAFORGE_REQUESTED_GPUS"] = str(gpu_count)
+            raw_visibility = gpu_access.get("visibility_command", ())
+            visibility = (
+                tuple(str(value) for value in raw_visibility)
+                if isinstance(raw_visibility, Sequence)
+                and not isinstance(raw_visibility, str | bytes)
+                else ()
+            )
+            prefix = gpu_access.get("command_prefix", ())
+            if (
+                not visibility
+                and gpu_mode == "command"
+                and isinstance(prefix, Sequence)
+                and not isinstance(prefix, str | bytes)
+                and len(prefix) >= 2
+                and str(prefix[-1]) == "exec"
+            ):
+                visibility = (*tuple(str(value) for value in prefix[:-1]), "env")
+            if visibility:
+                environment["LAMBDAFORGE_GPU_VISIBILITY_COMMAND"] = json.dumps(visibility)
             cache_root = request.get("cache_root")
             if cache_root:
                 environment["LAMBDAFORGE_CACHE_ROOT"] = str(cache_root)
@@ -344,6 +364,9 @@ class ProcessSupervisor:
             state = cls._read_json(child / "state.json")
             request = cls._read_json(child / "request.json")
             if state and request and state.get("job_id") == child.name:
+                study = cls._read_json(child / "study" / "summary.json")
+                if study is not None:
+                    state = {**state, "study": study_overview(study)}
                 states.append({"state": state, "request": request})
         return tuple(states)
 

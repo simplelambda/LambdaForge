@@ -9,7 +9,12 @@ import pytest
 
 from lambdaforge.cli import CommandLineInterface
 from lambdaforge.controlplane import NativeEnvironmentError
-from lambdaforge.diagnostics import DiagnosticClassifier, DiagnosticContext, ErrorCategory
+from lambdaforge.diagnostics import (
+    DiagnosticClassifier,
+    DiagnosticContext,
+    ErrorCategory,
+    work_failure_diagnostic,
+)
 
 
 def test_invalid_work_is_local_configuration_error(
@@ -128,3 +133,34 @@ def test_immutable_model_pickle_failure_is_classified_as_internal() -> None:
 
     assert value.category is ErrorCategory.INTERNAL
     assert "lambdaforge bug" in " ".join(value.details).lower()
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "'<' not supported between instances of 'ActiveResourceEvidence' and "
+        "'ActiveResourceEvidence'",
+        "Object of type PosixPath is not JSON serializable",
+    ),
+)
+def test_internal_resource_and_analysis_type_errors_are_not_configuration_errors(
+    message: str,
+) -> None:
+    value = DiagnosticClassifier().classify(
+        TypeError(message),
+        DiagnosticContext(("run", "study.yaml"), "run"),
+    )
+
+    assert value.category is ErrorCategory.INTERNAL
+
+
+def test_work_failure_diagnostic_is_strict_json_with_a_path_context(tmp_path: Path) -> None:
+    value = work_failure_diagnostic(
+        name="study",
+        source=tmp_path / "study.yaml",
+        error={"type": "RuntimeError", "message": "failed"},
+        run_dir=tmp_path / "runs" / "attempt-0001",
+    ).to_dict()
+
+    json.dumps(value, allow_nan=False)
+    assert value["context"]["run_dir"] == str(tmp_path / "runs" / "attempt-0001")

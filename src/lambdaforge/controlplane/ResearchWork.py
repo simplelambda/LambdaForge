@@ -68,8 +68,22 @@ class ResearchWork:
     study_expected: bool = False
     study_job_id: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return the stable additive read-model payload used by TUI and wrappers."""
+    def to_dict(self, *, study_detail: str = "full") -> dict[str, Any]:
+        """Return the stable read model at the requested Study detail level.
+
+        Collection views use ``overview`` so a list of Work never becomes an
+        accidental transfer of every candidate and Run.  The explicit Study
+        endpoint remains the authority for the bounded candidate index.
+        """
+        if study_detail not in {"full", "overview"}:
+            raise ValueError("study_detail must be 'full' or 'overview'.")
+        study = (
+            study_overview(self.study)
+            if self.study is not None and study_detail == "overview"
+            else copy.deepcopy(self.study)
+            if self.study is not None
+            else None
+        )
         return {
             "work_id": self.work_id,
             "name": self.name,
@@ -89,10 +103,72 @@ class ResearchWork:
             "attempt_history": [attempt.to_dict() for attempt in self.attempt_history],
             "created_at_utc": self.created_at_utc,
             "updated_at_utc": self.updated_at_utc,
-            "study": copy.deepcopy(self.study) if self.study is not None else None,
+            "study": study,
             "study_expected": self.study_expected,
             "study_job_id": self.study_job_id,
         }
+
+
+def study_overview(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Project full Study telemetry onto the fields required by collection views."""
+    if value.get("detail_level") == "overview":
+        return copy.deepcopy(dict(value))
+    objective = value.get("objective")
+    objective = dict(objective) if isinstance(objective, Mapping) else {}
+    candidates = value.get("candidates", ())
+    candidates = (
+        [item for item in candidates if isinstance(item, Mapping)]
+        if isinstance(candidates, Sequence) and not isinstance(candidates, str | bytes)
+        else []
+    )
+    mode = str(objective.get("mode", "max"))
+
+    def choose(field: str, *, partial_only: bool = False) -> dict[str, Any] | None:
+        comparable = [
+            item
+            for item in candidates
+            if isinstance(item.get(field), int | float)
+            and not isinstance(item.get(field), bool)
+            and (not partial_only or item.get("selection_objective") is None)
+        ]
+        if not comparable:
+            return None
+        selected = sorted(
+            comparable,
+            key=lambda item: float(item[field]),
+            reverse=mode == "max",
+        )[0]
+        return {
+            "trial": selected.get("trial"),
+            "value": selected.get(field),
+            "field": field,
+        }
+
+    counts = value.get("counts")
+    cost = value.get("cost")
+    admission = value.get("admission")
+    current_admission = admission.get("current") if isinstance(admission, Mapping) else None
+    return {
+        "study_telemetry_version": value.get("study_telemetry_version"),
+        "detail_level": "overview",
+        "name": value.get("name"),
+        "execution_id": value.get("execution_id"),
+        "strategy": value.get("strategy"),
+        "objective": copy.deepcopy(objective),
+        "planned_runs": value.get("planned_runs"),
+        "planned_candidates": value.get("planned_candidates"),
+        "counts": copy.deepcopy(dict(counts)) if isinstance(counts, Mapping) else {},
+        "cost": copy.deepcopy(dict(cost)) if isinstance(cost, Mapping) else {},
+        "admission": {
+            "current": copy.deepcopy(dict(current_admission))
+            if isinstance(current_admission, Mapping)
+            else None
+        },
+        "leader": choose("selection_objective"),
+        "partial_leader": choose("best_objective", partial_only=True),
+        "finished": value.get("finished"),
+        "updated_at_utc": value.get("updated_at_utc"),
+    }
 
 
 def _is_parameter_study_summary(value: Mapping[str, Any] | None) -> bool:

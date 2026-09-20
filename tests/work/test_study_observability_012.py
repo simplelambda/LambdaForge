@@ -21,6 +21,7 @@ from lambdaforge.controlplane import ClusterCatalog, ClusterProfile, JobService,
 from lambdaforge.controlplane.jobs import JobRecord
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.hpo.StudyInsights import StudyInsightAnalyzer
+from lambdaforge.study_projection import interactive_study
 from lambdaforge.training.callbacks.AdaptiveHpoCallback import AdaptiveHpoCallback
 from lambdaforge.work.study import StudyTelemetry
 
@@ -84,6 +85,141 @@ def test_study_telemetry_folds_live_metrics_without_copying_run_evidence(
     assert snapshot["counts"]["active_runs"] == 1
     assert json.loads((tmp_path / "progress.json").read_text())["completed"] == 0
     assert training.read_text(encoding="utf-8").count("val_loss") == 2
+    interactive = json.loads((tmp_path / "study" / "interactive.json").read_text())
+    assert interactive["detail_level"] == "interactive"
+    assert interactive["candidates"][0]["runs"][0]["latest_step"] == 2
+    assert "metrics_path" not in interactive["candidates"][0]["runs"][0]
+
+
+def test_interactive_study_projection_omits_per_run_bulk() -> None:
+    payload = {
+        "study_telemetry_version": 1,
+        "candidates": [
+            {
+                "trial": 1,
+                "parameters": {"width": 64},
+                "runs": [
+                    {
+                        "key": "trial-00001-seed-4",
+                        "state": "failed",
+                        "best_objective": 0.7,
+                        "log_path": "/remote/large.log",
+                        "failure": {"traceback": "x" * 1_000_000},
+                    }
+                ],
+            }
+        ],
+        "admission": {"current": {"summary": "idle"}, "recent": [{}] * 1000},
+    }
+
+    projected = interactive_study(payload)
+
+    run = projected["candidates"][0]["runs"][0]
+    assert run == {
+        "key": "trial-00001-seed-4",
+        "state": "failed",
+        "best_objective": 0.7,
+    }
+    assert projected["admission"] == {
+        "current": {"summary": "idle"},
+        "updated_at_utc": None,
+    }
+
+
+def test_study_snapshot_exposes_initial_design_and_coverage_state(tmp_path: Path) -> None:
+    root = tmp_path / "execution" / "study"
+    control = tmp_path / "execution" / "hpo-control"
+    control.mkdir(parents=True)
+    (control / "state.json").write_text(
+        json.dumps(
+            {
+                "initial_design": {
+                    "mode": "automatic",
+                    "full_rank": 3,
+                    "effective_rank": 3,
+                    "required_anchors": 3,
+                    "anchors_pending": 2,
+                },
+                "coverage": {
+                    "search_coverage": 1,
+                    "response_coverage": 0,
+                    "obligation_count": 4,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    study = StudyTelemetry(root)
+    study.initialize(
+        name="coverage",
+        execution_id="execution-1",
+        strategy="adaptive",
+        objective={"metric": "score", "mode": "max"},
+        specifications=(),
+    )
+
+    snapshot = study.refresh()
+
+    assert snapshot["initial_design"]["required_anchors"] == 3
+    assert snapshot["coverage_state"]["search_coverage"] == 1
+
+
+def test_scientific_continuation_keeps_prior_prune_attempt_in_telemetry(
+    tmp_path: Path,
+) -> None:
+    study = StudyTelemetry(tmp_path / "study")
+    original = _specification()
+    study.initialize(
+        name="continuation",
+        execution_id="execution-1",
+        strategy="adaptive",
+        objective={"metric": "score", "mode": "max"},
+        specifications=(original,),
+    )
+    study.schedule((original,))
+    first = tmp_path / "run" / "attempts" / "attempt-0001"
+    first.mkdir(parents=True)
+    (first / "metrics.jsonl").touch()
+    (first / "training-metrics.jsonl").touch()
+    study.run_started(
+        original,
+        run_dir=first,
+        metrics_path=first / "metrics.jsonl",
+        training_metrics_path=first / "training-metrics.jsonl",
+    )
+    study._write_run(  # noqa: SLF001 - this is a persistence-format regression
+        "trial-00001-seed-4",
+        {
+            "state": "pruned",
+            "attempt_id": "attempt-0001",
+            "termination_type": "performance_pruned",
+            "termination": {"type": "performance_pruned", "common_step": 7},
+            "finished_at_utc": "2026-01-01T00:00:00+00:00",
+        },
+    )
+    continuation = {
+        **original,
+        "hpo_phase": "scientific_continuation",
+        "hpo_scientific_continuation": True,
+        "hpo_original_prune": {"type": "performance_pruned", "common_step": 7},
+        "hpo_target_questions": ["width response"],
+    }
+    second = tmp_path / "run" / "attempts" / "attempt-0002"
+    second.mkdir()
+    (second / "metrics.jsonl").touch()
+    (second / "training-metrics.jsonl").touch()
+    study.run_started(
+        continuation,
+        run_dir=second,
+        metrics_path=second / "metrics.jsonl",
+        training_metrics_path=second / "training-metrics.jsonl",
+    )
+
+    run = study.refresh()["candidates"][0]["runs"][0]
+    assert run["scientific_continuation"] is True
+    assert run["continued_from_attempt"] == "attempt-0001"
+    assert run["attempt_history"][0]["termination_type"] == "performance_pruned"
+    assert run["original_prune"]["common_step"] == 7
 
 
 def test_study_telemetry_preserves_best_epoch_outside_the_bounded_tail(
@@ -927,6 +1063,18 @@ def test_job_service_returns_downsampled_curves_and_only_the_selected_run_log(
         "INITIALIZE",
         "PROMOTE",
     ]
+    large_history = [
+        {"action": "PROPOSE", "trial": index, "reason": "x" * 4_096}
+        for index in range(300)
+    ]
+    (study_root / "controller-history.jsonl").write_text(
+        "".join(json.dumps(action) + "\n" for action in large_history),
+        encoding="utf-8",
+    )
+    paged = service.study_actions("job-1")
+    assert len(paged) == 300
+    assert paged[0]["trial"] == 0
+    assert paged[-1]["trial"] == 299
     assert len(detail["curves"]["val_loss"]) == 20
     assert detail["curves"]["val_loss"][0]["step"] == 1
     assert detail["curves"]["val_loss"][-1]["step"] == 100

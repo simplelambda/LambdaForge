@@ -672,6 +672,44 @@ def test_positive_convergence_patience_remains_an_explicit_early_stop(
     assert decisions[-1]["reason"] == "explicit-record-convergence"
 
 
+def test_adaptive_controller_restores_durable_runs_without_reexecuting_them(
+    tmp_path: Path,
+) -> None:
+    config = WorkConfig.from_mapping(
+        {
+            "name": "restartable-adaptive-study",
+            "run": "tests.work_cases.FlatAdaptiveScoreWork",
+            "seeds": [1],
+            "search": {
+                "strategy": "adaptive",
+                "trials": 2,
+                "startup_trials": 2,
+                "max_parallel": 1,
+                "confirmation_seeds": [],
+                "early_stopping": False,
+                "choice": {"values": [0, 1]},
+            },
+            "objective": {"metric": "score", "mode": "max"},
+            "resources": {"cpu": 1},
+        },
+        source=tmp_path / "restartable.yaml",
+    )
+    first = WorkRunner().run(config)
+    original_attempts = [run.attempt_id for run in first.runs]
+    (first.execution_dir / "result.json").unlink()
+
+    restored = WorkRunner().run(config)
+
+    assert [run.attempt_id for run in restored.runs] == original_attempts
+    decisions = [
+        json.loads(line)
+        for line in (restored.execution_dir / "hpo-control" / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert any(value["action"] == "RESTORE_CONTROLLER" for value in decisions)
+
+
 def test_bayesian_provider_failure_is_audited_before_deterministic_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -746,11 +784,11 @@ def test_gpu_packing_can_learn_automatically_or_keep_an_explicit_safety_floor(
     assert config.resources.gpu_count == 2
 
 
-def test_gpu_parallelism_is_a_maximum_not_an_immediate_free_memory_requirement() -> None:
+def test_gpu_parallelism_respects_the_hard_host_cpu_ceiling() -> None:
     resources = ResourceRequest(gpu_count=2, gpu_memory_bytes=30 * 1024**3)
     policy = AdaptiveSearchPolicy(runs_per_gpu=3)
 
-    assert _adaptive_parallelism(resources, policy) == 6
+    assert _adaptive_parallelism(resources, policy) == 1
 
 
 def test_gpu_admission_uses_any_device_that_fits_and_waits_without_failing() -> None:
@@ -1249,6 +1287,60 @@ def test_gpu_resource_trajectory_keeps_sampling_when_dispatch_queue_is_empty(
     assert updates >= 1
 
 
+def test_gpu_dispatch_refills_an_empty_runtime_queue_before_active_run_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deferred controller actions must not leave a physically usable GPU idle for hours."""
+    gib = 1024**3
+    future: Future[Any] = Future()
+
+    class FrontierRequested(RuntimeError):
+        pass
+
+    class DeferredPool:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def submit(self, function: Any, value: dict[str, Any]) -> Future[Any]:
+            del function, value
+            return future
+
+        def shutdown(self, **kwargs: Any) -> None:
+            del kwargs
+
+    def refill(queued: Any, pending: Any) -> list[dict[str, Any]]:
+        assert not queued
+        assert len(pending) == 1
+        raise FrontierRequested("resource readiness requested a scientific action")
+
+    monkeypatch.setattr(
+        "lambdaforge.work.runner._gpu_memory_inventory",
+        lambda count: ((70 * gib, 80 * gib),) * count,
+    )
+    monkeypatch.setattr("lambdaforge.work.runner.ProcessPoolExecutor", DeferredPool)
+    monkeypatch.setattr(
+        "lambdaforge.work.runner.wait",
+        lambda futures, **kwargs: (set(), set(futures)),
+    )
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_LAUNCH_STAGGER_SECONDS", 0.0)
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_RESOURCE_SAMPLE_SECONDS", 0.0)
+
+    with pytest.raises(FrontierRequested, match="resource readiness"):
+        _execute_gpu_admitted_runs(
+            [{"trial_index": 1, "seed": 1}],
+            resources=ResourceRequest(gpu_count=2),
+            policy=AdaptiveSearchPolicy(runs_per_gpu=1, early_stopping=False),
+            parallelism=2,
+            visible_gpus=("gpu-a", "gpu-b"),
+            objective_metric="score",
+            objective_mode="max",
+            telemetry=None,
+            results=[],
+            executors=[],
+            on_resource_blocked=refill,
+        )
+
+
 def test_gpu_run_failure_still_exits_its_cuda_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1586,6 +1678,46 @@ def test_probabilistic_curve_pruning_keeps_a_slow_improving_run(tmp_path: Path) 
 
     assert not Path(specifications[0]["hpo_stop_path"]).exists()
     assert Path(specifications[2]["hpo_stop_path"]).is_file()
+
+
+def test_pruning_without_fidelity_does_not_invent_a_min_step_forecast_horizon(
+    tmp_path: Path,
+) -> None:
+    """A currently leading curve must not be pruned by a long local-linear extrapolation."""
+    curves = (
+        (0.44, 0.45, 0.46, 0.46, 0.46),
+        (0.55, 0.54, 0.53, 0.50, 0.48),
+    )
+    specifications = []
+    for trial, curve in enumerate(curves, 1):
+        metrics = tmp_path / f"forecast-{trial}.jsonl"
+        metrics.write_text(
+            "".join(
+                json.dumps({"name": "score", "value": value, "step": step}) + "\n"
+                for step, value in enumerate(curve, 40)
+            ),
+            encoding="utf-8",
+        )
+        specifications.append(
+            {
+                "trial_index": trial,
+                "seed": 4,
+                "hpo_metrics_path": metrics,
+                "hpo_stop_path": tmp_path / f"forecast-{trial}.stop",
+            }
+        )
+
+    _request_early_stops(
+        specifications,
+        metric="score",
+        mode="max",
+        min_step=40,
+        confirmations=1,
+        probability_threshold=0.02,
+        margin=0.015,
+    )
+
+    assert not Path(specifications[1]["hpo_stop_path"]).exists()
 
 
 def test_default_pruning_requires_two_distinct_uncompetitive_steps(tmp_path: Path) -> None:

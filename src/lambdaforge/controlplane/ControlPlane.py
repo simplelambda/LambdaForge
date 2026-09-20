@@ -38,6 +38,10 @@ from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPo
 from lambdaforge.controlplane.Transport import Transport
 from lambdaforge.execution.ConfigurationResourceResolver import ConfigurationResourceResolver
 from lambdaforge.execution.ResourceRequest import ResourceRequest
+from lambdaforge.work.managed import (
+    CANONICAL_FINGERPRINT_ALGORITHM,
+    LEGACY_FINGERPRINT_ALGORITHM,
+)
 
 
 class ControlPlane:
@@ -420,23 +424,70 @@ class ControlPlane:
 import hashlib
 import json
 import sys
+import unicodedata
 from pathlib import Path
+from stat import S_ISDIR, S_ISREG
 
 path = Path(sys.argv[1])
+algorithm = sys.argv[2]
 try:
     if path.is_symlink() or (not path.is_file() and not path.is_dir()):
         raise ValueError("path is missing, symbolic, or not a regular file/directory")
-    digest = hashlib.sha256()
+    records = []
+    if path.is_file():
+        raw = path.name
+        records = [("file", "", raw, path, (), (raw.encode("utf-8", errors="strict"),))]
+    else:
+        identities = {}
+        for item in path.rglob("*"):
+            if item.is_symlink():
+                raise ValueError(f"content contains symbolic link: {item}")
+            mode = item.stat(follow_symlinks=False).st_mode
+            if S_ISDIR(mode):
+                kind = "directory"
+            elif S_ISREG(mode):
+                kind = "file"
+            else:
+                raise ValueError(f"content contains special filesystem entry: {item}")
+            relative_path = item.relative_to(path)
+            normalized = tuple(unicodedata.normalize("NFC", part) for part in relative_path.parts)
+            encoded_key = tuple(part.encode("utf-8", errors="strict") for part in normalized)
+            relative = "/".join(normalized)
+            raw_relative = relative_path.as_posix()
+            raw_key = tuple(
+                part.encode("utf-8", errors="strict") for part in relative_path.parts
+            )
+            if relative in identities and identities[relative] != item:
+                raise ValueError("content contains canonically colliding Unicode paths")
+            identities[relative] = item
+            records.append((kind, relative, raw_relative, item, encoded_key, raw_key))
+        records.sort(key=lambda record: record[4] if algorithm.endswith("v2") else record[5])
+
+    if algorithm == "lambdaforge-content-v2":
+        digest = hashlib.sha256(b"LambdaForge content identity\0v2\0")
+        digest.update(b"F" if path.is_file() else b"D")
+    elif algorithm == "lambdaforge-content-v1":
+        digest = hashlib.sha256()
+    else:
+        raise ValueError(f"unsupported fingerprint algorithm: {algorithm}")
     size = 0
-    entries = (path,) if path.is_file() else tuple(sorted(path.rglob("*")))
-    for item in entries:
-        if item.is_symlink():
-            raise ValueError(f"content contains symbolic link: {item}")
-        if not item.is_file():
+    for kind, relative, raw_relative, item, _key, _raw_key in records:
+        if algorithm == "lambdaforge-content-v1" and kind == "directory":
             continue
-        relative = item.name if path.is_file() else item.relative_to(path).as_posix()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
+        if algorithm == "lambdaforge-content-v1":
+            legacy_relative = raw_relative
+            digest.update(legacy_relative.encode("utf-8"))
+            digest.update(b"\0")
+        else:
+            encoded = relative.encode("utf-8", errors="strict")
+            digest.update(b"F" if kind == "file" else b"D")
+            digest.update(len(encoded).to_bytes(8, byteorder="big", signed=False))
+            digest.update(encoded)
+            if kind == "directory":
+                continue
+        before = item.stat(follow_symlinks=False)
+        if algorithm == "lambdaforge-content-v2":
+            digest.update(before.st_size.to_bytes(8, byteorder="big", signed=False))
         with item.open("rb") as handle:
             while True:
                 chunk = handle.read(1024 * 1024)
@@ -444,6 +495,9 @@ try:
                     break
                 digest.update(chunk)
                 size += len(chunk)
+        after = item.stat(follow_symlinks=False)
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError(f"content changed while it was being fingerprinted: {item}")
     print(json.dumps({
         "kind": "file" if path.is_file() else "directory",
         "sha256": digest.hexdigest(),
@@ -455,8 +509,17 @@ except Exception as error:
 """
         for expected in inputs:
             remote_path = str(expected["remote_path"])
+            algorithm = str(expected.get("fingerprint_algorithm", LEGACY_FINGERPRINT_ALGORITHM))
+            if algorithm not in {
+                LEGACY_FINGERPRINT_ALGORITHM,
+                CANONICAL_FINGERPRINT_ALGORITHM,
+            }:
+                raise ValueError(
+                    f"Shared project input {expected['configured']!r} uses unsupported "
+                    f"fingerprint algorithm {algorithm!r}. Rebuild its execution bundle."
+                )
             result = transport.run(
-                (*profile.command_prefix, profile.python, "-c", probe, remote_path),
+                (*profile.command_prefix, profile.python, "-c", probe, remote_path, algorithm),
                 timeout=None,
             )
             if result.returncode:

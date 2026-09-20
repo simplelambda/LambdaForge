@@ -102,9 +102,13 @@ class CoverageDashboard(Vertical):
             )
 
         plot = self.query_one("#coverage-plot", InspectablePlotWidget)
+        viewport = plot.user_viewport()
         plot.clear()
-        plot.set_xlimits(None, None)
-        plot.set_ylimits(0.0, 1.05)
+        if viewport is None:
+            plot.set_xlimits(None, None)
+            plot.set_ylimits(0.0, 1.05)
+        else:
+            plot.restore_viewport(viewport)
         if rows:
             labels = [name.replace("_", " ") for name, *_rest in rows]
             values = [row[2] for row in rows]

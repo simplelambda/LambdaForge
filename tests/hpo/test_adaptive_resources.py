@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 from typing import Any
@@ -169,9 +170,42 @@ def test_cold_start_is_one_run_per_gpu_until_evidence_exists() -> None:
         )
         for index in range(10)
     ]
-    admitted, _ = GPUPlacementPlanner(model).place(unknown, (gpu(0), gpu(1)), max_launches=10)
+    # Driver/context overhead means physical free VRAM is normally slightly below the nominal
+    # device total. That must not collapse a two-GPU cold start to one progress lane.
+    admitted, _ = GPUPlacementPlanner(model).place(
+        unknown,
+        (gpu(0, free=79), gpu(1, free=79)),
+        max_launches=10,
+    )
     assert len(admitted) == 2
     assert {value.target_gpu for value in admitted} == {0, 1}
+    assert {value.admission_mode for value in admitted} == {"EXPLORATORY_ADMISSION"}
+
+
+def test_rejected_resource_probe_is_strict_json() -> None:
+    """A rejected GPU probe is telemetry, not a controller-fatal infinity."""
+    queued = action("c2", 70 * GIB, 1.0)
+    resident = ActiveResourceCommitment(
+        "first",
+        40 * GIB,
+        current_bytes=0,
+        admission_mode="EXPLORATORY_ADMISSION",
+    )
+    planner = GPUPlacementPlanner(ResourceDemandModel())
+
+    admitted, _blocked = planner.place(
+        (queued,),
+        (gpu(0, free=60, active=(resident,)),),
+        max_launches=1,
+    )
+
+    assert not admitted
+    rejected = [value for value in planner.last_exploration_evaluations if not value.accepted]
+    assert rejected and rejected[0].final_delta_value is None
+    json.dumps(
+        [value.to_dict() for value in planner.last_exploration_evaluations],
+        allow_nan=False,
+    )
 
 
 def test_one_neighbour_does_not_collapse_between_candidate_uncertainty() -> None:
@@ -496,6 +530,42 @@ def test_active_snapshot_survives_restart_only_as_provisional_evidence(tmp_path:
 
     store.persist_active(())
     assert ResourceHistoryStore(tmp_path / "study").load_active() == ()
+
+
+def test_equal_distance_active_evidence_has_a_deterministic_tie_break() -> None:
+    """Equivalent live neighbours must never ask Python to order evidence objects."""
+    active = tuple(
+        ActiveResourceEvidence(
+            candidate_key=key,
+            compatibility_key="compatible",
+            parameters={"width": 64},
+            hardware="H100-80",
+            total_bytes=80 * GIB,
+            current_bytes=8 * GIB,
+            running_peak_bytes=10 * GIB,
+            future_peak_samples=(10 * GIB, 20 * GIB),
+            resource_state="PLATEAU_UNCONFIRMED",
+            elapsed_seconds=30.0,
+            phase="training",
+            step=3,
+        )
+        for key in ("candidate-b", "candidate-a")
+    )
+    model = ResourceDemandModel(
+        active_evidence=active,
+        parameter_schema={"width": {"values": [64, 128]}},
+    )
+
+    predicted = model.predict(
+        candidate_key="candidate-new",
+        compatibility_key="compatible",
+        parameters={"width": 64},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+
+    assert predicted.is_provisional is True
+    assert predicted.provisional_lower_bound_bytes == 0
 
 
 def test_bounded_trajectory_preserves_the_true_peak_and_transitions() -> None:

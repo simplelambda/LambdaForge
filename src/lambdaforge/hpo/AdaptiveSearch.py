@@ -73,7 +73,9 @@ class ControllerValuePolicy:
 class AdaptiveSearchPolicy:
     """Sequential candidate, fidelity and probability-driven seed policy."""
 
-    runs_per_gpu: int = 1
+    # ``None`` is the canonical internal representation of authored ``auto``.  Integer values
+    # remain hard user process-count caps; the default stays one for backward compatibility.
+    runs_per_gpu: int | None = 1
     max_parallel: int | None = None
     min_seeds: int = 1
     candidate_budget: int = 20
@@ -83,8 +85,8 @@ class AdaptiveSearchPolicy:
     early_stopping_confirmations: int = 2
     early_stopping_probability_threshold: float = 0.05
     early_stopping_equivalence_margin: float = 0.0
-    # ``None`` means automatic: preserve the historical ten-point floor while opening enough
-    # distinct space-filling candidates to occupy the configured execution parallelism.
+    # ``None`` means automatic geometry-derived initial design.  Scientific startup size is
+    # deliberately independent of GPUs and execution parallelism.
     startup_trials: int | None = None
     failure_retries: int = 1
     seed_probability_threshold: float = 0.1
@@ -108,7 +110,6 @@ class AdaptiveSearchPolicy:
 
     def __post_init__(self) -> None:
         for name in (
-            "runs_per_gpu",
             "min_seeds",
             "confirmation_top_k",
             "candidate_budget",
@@ -117,6 +118,12 @@ class AdaptiveSearchPolicy:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"search.{name} must be a positive integer.")
+        if self.runs_per_gpu is not None and (
+            isinstance(self.runs_per_gpu, bool)
+            or not isinstance(self.runs_per_gpu, int)
+            or self.runs_per_gpu < 1
+        ):
+            raise ValueError("search.runs_per_gpu must be a positive integer or auto.")
         if self.startup_trials is not None and (
             isinstance(self.startup_trials, bool)
             or not isinstance(self.startup_trials, int)
@@ -126,7 +133,7 @@ class AdaptiveSearchPolicy:
         if self.max_parallel is not None and (
             isinstance(self.max_parallel, bool) or self.max_parallel < 1
         ):
-            raise ValueError("search.max_parallel must be a positive integer or null.")
+            raise ValueError("search.max_parallel must be a positive integer, auto or null.")
         if self.early_stopping_min_step < 1:
             raise ValueError("search.early_stopping.min_step must be >= 1.")
         if self.early_stopping_confirmations < 1:
@@ -243,6 +250,15 @@ class AdaptiveSearchPolicy:
             value.get("proposal_pool_size", max(candidate_budget, min(4096, candidate_budget * 16)))
         )
         maximum = value.get("max_parallel")
+        if isinstance(maximum, str) and maximum.lower() != "auto":
+            raise ValueError("search.max_parallel must be a positive integer, auto or null.")
+        raw_runs_per_gpu = value.get("runs_per_gpu", 1)
+        if isinstance(raw_runs_per_gpu, str):
+            if raw_runs_per_gpu.lower() != "auto":
+                raise ValueError("search.runs_per_gpu must be a positive integer or auto.")
+            parsed_runs_per_gpu = None
+        else:
+            parsed_runs_per_gpu = int(raw_runs_per_gpu)
         raw_confirmation = value.get("confirmation_seeds", ())
         if not isinstance(raw_confirmation, (list, tuple)):
             raise TypeError("search.confirmation_seeds must be a list of integers.")
@@ -257,8 +273,10 @@ class AdaptiveSearchPolicy:
         if raw_fidelity is not None and not isinstance(raw_fidelity, Mapping):
             raise TypeError("search.fidelity must be a mapping.")
         return cls(
-            runs_per_gpu=int(value.get("runs_per_gpu", 1)),
-            max_parallel=int(maximum) if maximum is not None else None,
+            runs_per_gpu=parsed_runs_per_gpu,
+            max_parallel=(
+                int(maximum) if maximum is not None and not isinstance(maximum, str) else None
+            ),
             min_seeds=int(value.get("min_seeds", 1)),
             candidate_budget=candidate_budget,
             proposal_pool_size=proposal_pool_size,
@@ -310,8 +328,8 @@ class AdaptiveSearchPolicy:
     def to_dict(self) -> dict[str, Any]:
         return {
             "strategy": "adaptive",
-            "runs_per_gpu": self.runs_per_gpu,
-            "max_parallel": self.max_parallel,
+            "runs_per_gpu": self.runs_per_gpu if self.runs_per_gpu is not None else "auto",
+            "max_parallel": self.max_parallel if self.max_parallel is not None else "auto",
             "min_seeds": self.min_seeds,
             "trials": self.candidate_budget,
             "proposal_pool_size": self.proposal_pool_size,

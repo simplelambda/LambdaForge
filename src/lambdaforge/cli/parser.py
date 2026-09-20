@@ -155,6 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="cleanup argv paired with --gpu-claim-command (for example: gpu release)",
     )
+    add.add_argument(
+        "--gpu-visibility-command",
+        nargs="+",
+        help=(
+            "argv that prints the currently granted CUDA tokens; required for dynamic grant "
+            "shrink/growth unless a '... exec' launcher has a sibling '... env' command"
+        ),
+    )
     cluster_commands.add_parser("list").add_argument("--json", action="store_true")
     for operation in ("show", "inspect", "test", "resources", "storage"):
         item = cluster_commands.add_parser(operation)

@@ -96,6 +96,10 @@ class ConsoleServices:
         self._last_overview = value
         return value
 
+    def research_snapshot(self) -> dict[str, Any]:
+        """Load only collection-level Work/Study data for those root screens."""
+        return self.overview.research_snapshot()
+
     def cluster_rows(self) -> list[dict[str, Any]]:
         clusters = (self._last_overview or {}).get("clusters", ())
         snapshots = {

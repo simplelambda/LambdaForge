@@ -5,15 +5,97 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISDIR, S_ISREG
 from types import MappingProxyType
 from typing import Any
 
 from lambdaforge.runtime import CrossProcessFileLock
 from lambdaforge.work.atomic import atomic_build_file, atomic_write_bytes, atomic_write_text
 from lambdaforge.work.models import atomic_json
+
+CANONICAL_FINGERPRINT_ALGORITHM = "lambdaforge-content-v2"
+LEGACY_FINGERPRINT_ALGORITHM = "lambdaforge-content-v1"
+
+
+def _canonical_relative_path(root: Path, item: Path) -> tuple[str, tuple[bytes, ...]]:
+    relative = item.relative_to(root)
+    normalized = tuple(unicodedata.normalize("NFC", part) for part in relative.parts)
+    encoded = tuple(part.encode("utf-8", errors="strict") for part in normalized)
+    return "/".join(normalized), encoded
+
+
+def _canonical_entries(
+    path: Path,
+) -> tuple[tuple[str, str, str, Path, tuple[bytes, ...], tuple[bytes, ...]], ...]:
+    """Return a safe tree inventory in locale- and platform-independent order."""
+    if path.is_symlink() or (not path.is_file() and not path.is_dir()):
+        raise ValueError(f"Managed content must be a regular file or directory: {path}")
+    if path.is_file():
+        raw = path.name
+        return (("file", "", raw, path, (), (raw.encode("utf-8", errors="strict"),)),)
+    entries: list[
+        tuple[str, str, str, Path, tuple[bytes, ...], tuple[bytes, ...]]
+    ] = []
+    identities: dict[str, Path] = {}
+    for item in path.rglob("*"):
+        if item.is_symlink():
+            raise ValueError(f"Managed content cannot contain symbolic links: {item}")
+        mode = item.stat(follow_symlinks=False).st_mode
+        if S_ISDIR(mode):
+            kind = "directory"
+        elif S_ISREG(mode):
+            kind = "file"
+        else:
+            raise ValueError(f"Managed content cannot contain special filesystem entries: {item}")
+        relative, key = _canonical_relative_path(path, item)
+        raw_relative_path = item.relative_to(path)
+        raw_relative = raw_relative_path.as_posix()
+        raw_key = tuple(part.encode("utf-8", errors="strict") for part in raw_relative_path.parts)
+        previous = identities.setdefault(relative, item)
+        if previous != item:
+            raise ValueError(
+                "Managed content contains paths that collide after canonical Unicode "
+                f"normalization: {previous} and {item}"
+            )
+        entries.append((kind, relative, raw_relative, item, key, raw_key))
+    entries.sort(key=lambda entry: entry[4])
+    return tuple(entries)
+
+
+def canonical_fingerprint(path: Path) -> tuple[str, int]:
+    """Hash one path using LambdaForge's versioned portable content format.
+
+    The identity is independent of filesystem enumeration, locale, host path
+    separators, timestamps and permissions. Logical paths use NFC Unicode and
+    length-delimited records, so copied trees have the same identity on
+    supported operating systems without ambiguous record boundaries.
+    """
+    root = Path(path)
+    entries = _canonical_entries(root)
+    digest = hashlib.sha256(b"LambdaForge content identity\0v2\0")
+    digest.update(b"F" if root.is_file() else b"D")
+    size = 0
+    for kind, relative, _raw_relative, item, _key, _raw_key in entries:
+        encoded = relative.encode("utf-8", errors="strict")
+        digest.update(b"F" if kind == "file" else b"D")
+        digest.update(len(encoded).to_bytes(8, byteorder="big", signed=False))
+        digest.update(encoded)
+        if kind == "directory":
+            continue
+        before = item.stat(follow_symlinks=False)
+        digest.update(before.st_size.to_bytes(8, byteorder="big", signed=False))
+        with item.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+        after = item.stat(follow_symlinks=False)
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError(f"Managed content changed while it was being fingerprinted: {item}")
+    return digest.hexdigest(), size
 
 
 def owned_path(root: Path, value: str | Path, *, must_exist: bool = False) -> Path:
@@ -38,18 +120,31 @@ def owned_path(root: Path, value: str | Path, *, must_exist: bool = False) -> Pa
 
 
 def fingerprint(path: Path) -> tuple[str, int]:
-    """Return a stable SHA-256 and byte count for a regular file or safe tree."""
+    """Return the historical SHA-256 and byte count for compatible persisted data.
+
+    Ordering is explicitly based on UTF-8 path components rather than host
+    ``Path`` ordering. This preserves existing POSIX identities while removing
+    locale, directory-enumeration and operating-system ordering differences.
+    New cross-machine input contracts use :func:`canonical_fingerprint`.
+    """
     if path.is_symlink() or (not path.is_file() and not path.is_dir()):
         raise ValueError(f"Managed content must be a regular file or directory: {path}")
     digest = hashlib.sha256()
     size = 0
-    entries = (path,) if path.is_file() else tuple(sorted(path.rglob("*")))
-    for item in entries:
+    entries: tuple[tuple[str, Path], ...]
+    if path.is_file():
+        entries = ((path.name, path),)
+    else:
+        entries = tuple(
+            (raw_relative, item)
+            for kind, _relative, raw_relative, item, _key, _raw_key in sorted(
+                _canonical_entries(path), key=lambda entry: entry[5]
+            )
+            if kind == "file"
+        )
+    for relative, item in entries:
         if item.is_symlink():
             raise ValueError(f"Managed content cannot contain symbolic links: {item}")
-        if not item.is_file():
-            continue
-        relative = item.name if path.is_file() else item.relative_to(path).as_posix()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         with item.open("rb") as handle:

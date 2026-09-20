@@ -519,6 +519,14 @@ class ClusterEditor(ModalScreen[bool]):
                             placeholder="For example: gpu release",
                             id="cluster-gpu-release",
                         )
+                        yield Label("Live allocation visibility command", classes="field-label")
+                        yield Input(
+                            value=shlex.join(
+                                tuple(str(item) for item in gpu.get("visibility_command", ()))
+                            ),
+                            placeholder="For example: gpu env (auto-derived from gpu exec)",
+                            id="cluster-gpu-visibility",
+                        )
                         yield Static(
                             "LambdaForge treats CUDA_VISIBLE_DEVICES values as opaque grants and "
                             "never replaces them with guessed physical indices.",
@@ -592,6 +600,9 @@ class ClusterEditor(ModalScreen[bool]):
                     "command_prefix": list(shlex.split(self._input("cluster-gpu-prefix"))),
                     "claim_command": list(shlex.split(self._input("cluster-gpu-claim"))),
                     "release_command": list(shlex.split(self._input("cluster-gpu-release"))),
+                    "visibility_command": list(
+                        shlex.split(self._input("cluster-gpu-visibility"))
+                    ),
                 }
             )
         descriptor = self._advanced()
@@ -1068,8 +1079,11 @@ class LambdaForgeApp(App[None]):
                 )
             with Vertical(id="content"):
                 yield OverviewScreen(self.services.overview_snapshot, id="overview")
-                yield WorkScreen(self.services.overview_snapshot, id="work")
-                yield StudyScreen(self.services.overview_snapshot, id="studies")
+                research_loader = getattr(
+                    self.services, "research_snapshot", self.services.overview_snapshot
+                )
+                yield WorkScreen(research_loader, id="work")
+                yield StudyScreen(research_loader, id="studies")
                 yield ClusterScreen(self.services.cluster_rows, id="clusters")
                 yield DatasetScreen(self.services.dataset_rows, id="datasets")
                 yield ResultsScreen(self.services.result_rows, id="results")

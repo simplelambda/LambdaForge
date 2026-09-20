@@ -1595,6 +1595,8 @@ def test_hpo_workspace_exposes_parameter_evidence_actions_and_clickable_breadcru
             assert "Composite selection score" in str(
                 screen.query_one("#hpo-objective-card").render()
             )
+            screen.query_one("#study-tabs", TabbedContent).active = "study-hpo"
+            await pilot.pause(0.15)
             parameters = screen.query_one("#hpo-parameter-table")
             assert parameters.row_count == 1
             assert "64, 128, 256" in str(parameters.get_row_at(0)[1])
@@ -1615,6 +1617,69 @@ def test_hpo_workspace_exposes_parameter_evidence_actions_and_clickable_breadcru
             await pilot.pause(0.05)
             assert isinstance(app.screen, HpoActionWorkspace)
             assert "credible improvement" in str(app.screen.query_one(".workspace-panel").render())
+
+    asyncio.run(exercise())
+
+
+def test_study_heavy_analysis_and_logs_are_loaded_only_for_their_tabs() -> None:
+    class LazyServices(FakeServices):
+        def result_analysis(self, selector):
+            self.calls.append(("result_analysis", selector))
+            return {
+                "winner": {},
+                "seed_analysis": {},
+                "surrogate": {},
+                "parameter_importance": {},
+                "findings": [],
+            }
+
+        def work_logs(self, job_id, *, tail=2_000):
+            self.calls.append(("work_logs", job_id))
+            return {"text": "study output"}
+
+        def study_actions(self, job_id):
+            self.calls.append(("study_actions", job_id))
+            return ({"action": "PROPOSE", "trial": 1, "reason": "coverage"},)
+
+    work = {
+        "work_id": "work-lazy",
+        "name": "lazy-study",
+        "execution_id": "execution-lazy",
+        "primary_job_id": "job-lazy",
+        "state": "succeeded",
+        "study_expected": True,
+        "study": {
+            "study_telemetry_version": 1,
+            "strategy": "adaptive",
+            "objective": {"metric": "score", "mode": "max"},
+            "counts": {"candidates": 0, "completed_runs": 0},
+            "candidates": [],
+        },
+    }
+    services = LazyServices()
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(services)
+        async with app.run_test(size=(120, 38)) as pilot:
+            app.push_screen(StudyWorkspace(work, services))
+            await pilot.pause(0.1)
+            assert not any(call[0] == "result_analysis" for call in services.calls)
+            assert not any(call[0] == "work_logs" for call in services.calls)
+            assert not any(call[0] == "study_actions" for call in services.calls)
+
+            app.screen.query_one("#study-tabs", TabbedContent).active = "study-hpo"
+            await pilot.pause(0.1)
+            assert ("result_analysis", "execution-lazy") in services.calls
+            assert not any(call[0] == "work_logs" for call in services.calls)
+            assert not any(call[0] == "study_actions" for call in services.calls)
+
+            app.screen.query_one("#hpo-tabs", TabbedContent).active = "hpo-actions-pane"
+            await pilot.pause(0.1)
+            assert ("study_actions", "job-lazy") in services.calls
+
+            app.screen.query_one("#study-tabs", TabbedContent).active = "study-logs"
+            await pilot.pause(0.1)
+            assert ("work_logs", "job-lazy") in services.calls
 
     asyncio.run(exercise())
 
@@ -1990,6 +2055,8 @@ def test_live_study_hpo_parameters_do_not_require_a_final_execution() -> None:
         app = LambdaForgeApp(services)
         async with app.run_test(size=(130, 42)) as pilot:
             app.push_screen(StudyWorkspace(work, services))
+            await pilot.pause(0.15)
+            app.screen.query_one("#study-tabs", TabbedContent).active = "study-hpo"
             await pilot.pause(0.15)
             table = app.screen.query_one("#hpo-parameter-table")
             assert table.row_count == 1

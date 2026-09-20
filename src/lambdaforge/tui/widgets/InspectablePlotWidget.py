@@ -72,6 +72,34 @@ class InspectablePlotWidget(PlotWidget):
     def set_inspection_points(self, points: Sequence[InspectionPoint]) -> None:
         self._inspection_points = tuple(points)
 
+    def user_viewport(self) -> tuple[float, float, float, float] | None:
+        """Return an explicitly panned/zoomed viewport, or ``None`` for auto limits.
+
+        ``textual-plot`` currently exposes limit setters but no matching public getter.  Keep
+        that small compatibility detail in this adapter so live telemetry refreshes do not throw
+        away a researcher's position.
+        """
+        if all(
+            bool(getattr(self, field, True))
+            for field in ("_auto_x_min", "_auto_x_max", "_auto_y_min", "_auto_y_max")
+        ):
+            return None
+        return (
+            float(self._x_min),
+            float(self._x_max),
+            float(self._y_min),
+            float(self._y_max),
+        )
+
+    def restore_viewport(self, viewport: tuple[float, float, float, float] | None) -> None:
+        """Restore a user's viewport after redrawing the same semantic series."""
+        if viewport is None:
+            self.set_xlimits(None, None)
+            self.set_ylimits(None, None)
+            return
+        self.set_xlimits(viewport[0], viewport[1])
+        self.set_ylimits(viewport[2], viewport[3])
+
     def on_click(self, event: Click) -> None:
         if event.button != 1 or not self._inspection_points:
             return

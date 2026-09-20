@@ -61,12 +61,14 @@ from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
 from lambdaforge.hpo.BayesianSampler import BayesianSampler
 from lambdaforge.hpo.CurveEvidence import CompletedCurve, audit_pruner, predict_curve
+from lambdaforge.hpo.InitialDesign import AnchorState, CoverageState, InitialDesignPlanner
 from lambdaforge.hpo.ObjectiveUtility import (
     ObjectiveUtility,
     aggregate_constraint,
     constraint_satisfied,
     pareto_front,
 )
+from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.hpo.ScientificDesign import (
     ExperimentalDesignPolicy,
     ScientificQuestionAnalyzer,
@@ -82,7 +84,12 @@ from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
 from lambdaforge.work.cache import WorkCache
 from lambdaforge.work.checkpoints import CheckpointCollection
 from lambdaforge.work.config import RunDefinition, WorkConfig, import_work_class
-from lambdaforge.work.managed import fingerprint
+from lambdaforge.work.managed import (
+    CANONICAL_FINGERPRINT_ALGORITHM,
+    LEGACY_FINGERPRINT_ALGORITHM,
+    canonical_fingerprint,
+    fingerprint,
+)
 from lambdaforge.work.models import (
     WorkConfiguration,
     WorkFidelity,
@@ -230,7 +237,21 @@ class WorkRunner:
             if not path.is_absolute():
                 raise ValueError(f"Invalid shared-input identity file: {marker}")
             try:
-                digest, size = fingerprint(path)
+                algorithm = str(
+                    value.get("fingerprint_algorithm", LEGACY_FINGERPRINT_ALGORITHM)
+                )
+                if algorithm not in {
+                    LEGACY_FINGERPRINT_ALGORITHM,
+                    CANONICAL_FINGERPRINT_ALGORITHM,
+                }:
+                    raise ValueError(
+                        f"unsupported fingerprint algorithm {algorithm!r}"
+                    )
+                digest, size = (
+                    canonical_fingerprint(path)
+                    if algorithm == CANONICAL_FINGERPRINT_ALGORITHM
+                    else fingerprint(path)
+                )
             except (OSError, ValueError) as error:
                 raise ValueError(
                     f"Shared project input {value.get('configured')!r} is not usable at {path}: "
@@ -1133,6 +1154,14 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         ),
         target_step=fidelity.target if fidelity is not None else None,
     )
+    if specification.get("hpo_scientific_continuation"):
+        termination = {
+            **dict(termination),
+            "scientific_continuation": True,
+            "original_prune": dict(specification.get("hpo_original_prune", {})),
+            "target_questions": list(specification.get("hpo_target_questions", ())),
+            "checkpoint_used": resuming,
+        }
     if specification.get("resumed_after_resource_failure"):
         termination = {
             **dict(termination),
@@ -1222,15 +1251,45 @@ def _execute_adaptive_group(
         by_trial.setdefault(int(specification["trial_index"]), []).append(specification)
     all_trials = sorted(by_trial)
     candidate_budget = min(policy.candidate_budget, len(all_trials))
-    startup_trial_count = _adaptive_startup_trial_count(
-        policy,
-        parallelism=parallelism,
-        candidate_budget=candidate_budget,
+    candidate_parameters = {
+        trial: dict(by_trial[trial][0].get("trial_parameters", {})) for trial in all_trials
+    }
+    parameter_space = ParameterSpace.from_schema(
+        policy.parameter_space, tuple(candidate_parameters.values())
     )
+    initial_design = InitialDesignPlanner.plan(
+        candidate_parameters,
+        parameter_space,
+        candidate_budget=candidate_budget,
+        startup_trials=policy.startup_trials,
+    )
+    startup_trial_count = len(initial_design.anchors)
+    anchor_trials = set(initial_design.trials)
+    anchor_states: dict[int, AnchorState] = {trial: "RESERVED" for trial in anchor_trials}
+    anchor_obligations = {
+        anchor.trial: tuple(anchor.obligations) for anchor in initial_design.anchors
+    }
+    anchor_replacements: list[dict[str, Any]] = []
     control_root = Path(str(specifications[0]["execution_dir"])) / "hpo-control"
     control_root.mkdir(parents=True, exist_ok=True)
     decisions_path = control_root / "decisions.jsonl"
     state_path = control_root / "state.json"
+    restored_state: dict[str, Any] = {}
+    if (
+        not bool(specifications[0].get("restart"))
+        and state_path.is_file()
+        and not state_path.is_symlink()
+    ):
+        try:
+            decoded_state = json.loads(state_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(decoded_state, dict)
+                and int(decoded_state.get("state_version", 0)) >= 4
+                and decoded_state.get("execution_id") == study_execution_id
+            ):
+                restored_state = decoded_state
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            restored_state = {}
     decision_number = 0
     if decisions_path.is_file():
         with decisions_path.open(encoding="utf-8") as existing_decisions:
@@ -1257,7 +1316,9 @@ def _execute_adaptive_group(
     completed: dict[int, list[WorkResult]] = {trial: [] for trial in all_trials}
     outcomes: list[WorkResult] = []
     telemetry = StudyTelemetry.from_environment()
-    if telemetry is not None:
+    if telemetry is not None and (
+        not restored_state or not (telemetry.root / "index.json").is_file()
+    ):
         telemetry.initialize(
             name=str(definition["name"]),
             execution_id=str(specifications[0]["execution_id"]),
@@ -1289,17 +1350,15 @@ def _execute_adaptive_group(
             "manual_weights": False,
         },
         survival_acquisition=SurvivalAcquisitionPolicy().to_dict(),
+        initial_design=initial_design.to_dict(),
     )
-    candidate_parameters = {
-        trial: dict(by_trial[trial][0].get("trial_parameters", {})) for trial in all_trials
-    }
     selector = AdaptiveSampler(
         candidate_parameters, mode=mode, parameter_space=policy.parameter_space
     )
     bayesian = BayesianSampler(
         candidate_parameters, mode=mode, parameter_space=policy.parameter_space
     )
-    survival_model = SurvivalModel(candidate_parameters)
+    survival_model = SurvivalModel(candidate_parameters, parameter_space=parameter_space)
     racer = AdaptiveSeedRacer(
         mode=mode,
         margin=policy.equivalence_margin,
@@ -1312,6 +1371,89 @@ def _execute_adaptive_group(
     pending_fidelity_by_trial: dict[int, float] = {}
     pending_observations: list[tuple[int, float]] = []
     scheduled_run_keys: set[tuple[int, int | None, str, int]] = set()
+    pending_actions: dict[tuple[int, int | None, str, int], dict[str, Any]] = {}
+
+    if restored_state:
+        raw_proposed = restored_state.get("proposed_pool_trials", ())
+        proposed.extend(
+            int(value)
+            for value in raw_proposed
+            if isinstance(value, int) and not isinstance(value, bool) and value in by_trial
+        )
+        raw_public = restored_state.get("public_trial_map", {})
+        if isinstance(raw_public, Mapping):
+            for raw_pool, raw_public_trial in raw_public.items():
+                try:
+                    pool_trial = int(raw_pool)
+                    public_index = int(raw_public_trial)
+                except (TypeError, ValueError):
+                    continue
+                if pool_trial in by_trial and public_index > 0:
+                    proposal_numbers[pool_trial] = public_index
+                    pool_trials_by_proposal[public_index] = pool_trial
+        design_state = restored_state.get("initial_design", {})
+        if isinstance(design_state, Mapping):
+            raw_anchors = design_state.get("anchors", ())
+            raw_replacement_anchors = design_state.get("replacement_anchors", ())
+            anchors_to_restore = [
+                value
+                for collection in (raw_anchors, raw_replacement_anchors)
+                if isinstance(collection, Sequence) and not isinstance(collection, str | bytes)
+                for value in collection
+            ]
+            for raw_anchor in anchors_to_restore:
+                if not isinstance(raw_anchor, Mapping):
+                    continue
+                raw_trial = raw_anchor.get("pool_trial")
+                if not isinstance(raw_trial, int) or isinstance(raw_trial, bool):
+                    continue
+                state = str(raw_anchor.get("state", "RESERVED"))
+                if state in {
+                    "RESERVED",
+                    "WAITING_FOR_RESOURCES",
+                    "DISPATCHED",
+                    "OBSERVED",
+                    "CENSORED",
+                    "INFEASIBLE",
+                    "REPLACED",
+                }:
+                    anchor_states[raw_trial] = state  # type: ignore[assignment]
+                obligations = raw_anchor.get("obligations", ())
+                if isinstance(obligations, Sequence) and not isinstance(obligations, str | bytes):
+                    anchor_obligations[raw_trial] = tuple(str(value) for value in obligations)
+                if state not in {"INFEASIBLE", "REPLACED"}:
+                    anchor_trials.add(raw_trial)
+                else:
+                    anchor_trials.discard(raw_trial)
+            raw_replacements = design_state.get("replacements", ())
+            if isinstance(raw_replacements, Sequence) and not isinstance(
+                raw_replacements, str | bytes
+            ):
+                anchor_replacements.extend(
+                    dict(value) for value in raw_replacements if isinstance(value, Mapping)
+                )
+        for raw_run in restored_state.get("runs", ()):
+            if not isinstance(raw_run, Mapping):
+                continue
+            raw_path = raw_run.get("result_path")
+            if not isinstance(raw_path, str):
+                continue
+            result_path = Path(raw_path)
+            if not result_path.is_file() or result_path.is_symlink():
+                continue
+            raw_pool_trial = raw_run.get("pool_trial")
+            if not isinstance(raw_pool_trial, int) or isinstance(raw_pool_trial, bool):
+                continue
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+                result = _work_result_from_mapping(payload)
+                pool_trial = raw_pool_trial
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+            if result.execution_id != study_execution_id or pool_trial not in completed:
+                continue
+            completed[pool_trial].append(result)
+            outcomes.append(result)
 
     def scheduling_key(specification: Mapping[str, Any]) -> tuple[int, int | None, str, int]:
         raw_fidelity = specification.get("hpo_fidelity")
@@ -1326,7 +1468,7 @@ def _execute_adaptive_group(
     def public_trial(pool_trial: int) -> int:
         public_trial = proposal_numbers.get(pool_trial)
         if public_trial is None:
-            public_trial = len(proposal_numbers) + 1
+            public_trial = max(proposal_numbers.values(), default=0) + 1
             proposal_numbers[pool_trial] = public_trial
             pool_trials_by_proposal[public_trial] = pool_trial
         return public_trial
@@ -1416,6 +1558,50 @@ def _execute_adaptive_group(
             return None
         return value
 
+    def scientific_continuation_specification(
+        result: WorkResult,
+        *,
+        target_questions: Sequence[str],
+    ) -> dict[str, Any] | None:
+        """Resume one censored logical Run as a new checkpoint-compatible Attempt."""
+        if result.termination_type != "performance_pruned" or not _result_checkpoint_available(
+            result
+        ):
+            return None
+        pool_trial = pool_trial_for(result)
+        raw = next(
+            (value for value in by_trial[pool_trial] if value.get("seed") == result.seed),
+            None,
+        )
+        if raw is None:
+            return None
+        value = prepared(pool_trial, raw, phase="scientific_continuation")
+        value["hpo_scientific_continuation"] = True
+        value["hpo_probe_purpose"] = "SCIENTIFIC_CONTINUATION"
+        value["hpo_target_questions"] = list(target_questions)
+        value["hpo_original_prune"] = dict(result.termination)
+        if policy.fidelity is not None:
+            observed = result.termination.get(
+                "common_step", result.termination.get("observed_step")
+            )
+            current = (
+                int(observed)
+                if isinstance(observed, int) and not isinstance(observed, bool)
+                else int((result.fidelity or {}).get("current", 0))
+            )
+            unfinished_target = int((result.fidelity or {}).get("target", policy.fidelity.minimum))
+            target = min(policy.fidelity.maximum, max(current + 1, unfinished_target))
+            if target <= current:
+                return None
+            value["hpo_fidelity"] = {
+                "current": current,
+                "target": target,
+                "maximum": policy.fidelity.maximum,
+            }
+        if scheduling_key(value) in scheduled_run_keys:
+            return None
+        return value
+
     def pool_trial_for(result: WorkResult) -> int:
         public_trial = int((result.trial or {"index": 0})["index"])
         return pool_trials_by_proposal[public_trial]
@@ -1447,7 +1633,17 @@ def _execute_adaptive_group(
         candidates: list[dict[str, Any]] = []
         for pool_trial in proposed:
             runs = []
-            for result in completed[pool_trial]:
+            latest_results: dict[int | None, WorkResult] = {}
+            for candidate_result in completed[pool_trial]:
+                previous = latest_results.get(candidate_result.seed)
+                if previous is None or candidate_result.attempt_number >= previous.attempt_number:
+                    latest_results[candidate_result.seed] = candidate_result
+            for result in latest_results.values():
+                unresolved_original_prune = bool(
+                    result.termination.get("scientific_continuation")
+                    and result.termination_type != "completed"
+                    and isinstance(result.termination.get("original_prune"), Mapping)
+                )
                 runs.append(
                     {
                         "seed": result.seed,
@@ -1455,6 +1651,7 @@ def _execute_adaptive_group(
                         "state": (
                             "pruned"
                             if result.termination_type == "performance_pruned"
+                            or unresolved_original_prune
                             else result.status
                         ),
                         "final_objective": (
@@ -1464,7 +1661,14 @@ def _execute_adaptive_group(
                         ),
                         "best_observed_objective": _result_objective(result, metric),
                         "fidelity": dict(result.fidelity or {}),
-                        "censored": result.termination_type == "performance_pruned",
+                        "censored": (
+                            result.termination_type == "performance_pruned"
+                            or unresolved_original_prune
+                        ),
+                        "scientific_continuation": bool(
+                            result.termination.get("scientific_continuation")
+                        ),
+                        "original_prune": result.termination.get("original_prune"),
                     }
                 )
             candidates.append(
@@ -1614,10 +1818,23 @@ def _execute_adaptive_group(
             )
         return selected
 
-    started = time.monotonic()
-    best_value: float | None = None
-    stale_events = 0
-    search_converged = False
+    restored_controller = restored_state.get("controller", {})
+    restored_controller = restored_controller if isinstance(restored_controller, Mapping) else {}
+    raw_elapsed = restored_controller.get("elapsed_seconds")
+    restored_elapsed = (
+        max(0.0, float(raw_elapsed))
+        if isinstance(raw_elapsed, int | float) and not isinstance(raw_elapsed, bool)
+        else 0.0
+    )
+    started = time.monotonic() - restored_elapsed
+    raw_best = restored_controller.get("best_value")
+    best_value: float | None = (
+        float(raw_best)
+        if isinstance(raw_best, int | float) and not isinstance(raw_best, bool)
+        else None
+    )
+    stale_events = int(restored_controller.get("stale_events", 0) or 0)
+    search_converged = bool(restored_controller.get("search_converged", False))
 
     def allowance() -> int:
         if policy.max_runs is None:
@@ -1631,16 +1848,88 @@ def _execute_adaptive_group(
 
     def persist_state() -> None:
         scientific = scientific_snapshot()
+
+        def coverage_trial_state(trial: int, results: Sequence[WorkResult]) -> str:
+            if inflight_by_trial.get(trial, 0) > 0:
+                return "active"
+            if results:
+                latest_by_seed: dict[int | None, WorkResult] = {}
+                for candidate_result in results:
+                    previous = latest_by_seed.get(candidate_result.seed)
+                    if (
+                        previous is None
+                        or candidate_result.attempt_number >= previous.attempt_number
+                    ):
+                        latest_by_seed[candidate_result.seed] = candidate_result
+                if any(
+                    latest.termination_type == "performance_pruned"
+                    or (
+                        latest.termination.get("scientific_continuation")
+                        and latest.termination_type != "completed"
+                        and isinstance(latest.termination.get("original_prune"), Mapping)
+                    )
+                    for latest in latest_by_seed.values()
+                ):
+                    return "pruned"
+                if any(
+                    latest.termination_type == "completed" for latest in latest_by_seed.values()
+                ):
+                    return "completed"
+            if trial in proposed:
+                return "pending"
+            return anchor_states.get(trial, "never_attempted")
+
+        coverage = CoverageState.summarize(
+            initial_design,
+            candidate_parameters,
+            {trial: coverage_trial_state(trial, results) for trial, results in completed.items()},
+            parameter_space,
+            relevant_interactions=tuple(
+                tuple(str(name) for name in value.get("parameters", ())[:2])
+                for value in scientific.get("interaction_questions", ())
+                if isinstance(value, Mapping)
+            ),
+        )
+        design_state = initial_design.to_dict(anchor_states)
+        if anchor_replacements:
+            design_state["replacements"] = list(anchor_replacements)
+            design_state["replacement_anchors"] = [
+                {
+                    "pool_trial": trial,
+                    "state": anchor_states.get(trial, "RESERVED"),
+                    "obligations": list(anchor_obligations.get(trial, ())),
+                    "selection_reason": "hard-infeasible anchor replacement",
+                }
+                for trial in sorted(anchor_trials - set(initial_design.trials))
+            ]
+            active_anchor_states = [anchor_states.get(trial, "RESERVED") for trial in anchor_trials]
+            design_state.update(
+                {
+                    "anchors_observed": active_anchor_states.count("OBSERVED"),
+                    "anchors_censored": active_anchor_states.count("CENSORED"),
+                    "anchors_pending": sum(
+                        state in {"RESERVED", "WAITING_FOR_RESOURCES", "DISPATCHED"}
+                        for state in active_anchor_states
+                    ),
+                }
+            )
         atomic_json(
             state_path,
             {
-                "state_version": 2,
+                "state_version": 4,
+                "execution_id": study_execution_id,
                 "updated_at_utc": datetime.now(timezone.utc).isoformat(),
                 "proposed_pool_trials": list(proposed),
                 "public_trial_map": {
                     str(pool_trial): public for pool_trial, public in proposal_numbers.items()
                 },
                 "completed_runs": len(outcomes),
+                "controller": {
+                    "best_value": best_value,
+                    "stale_events": stale_events,
+                    "search_converged": search_converged,
+                    "elapsed_seconds": max(0.0, time.monotonic() - started),
+                },
                 "pruner_calibration": (
                     _pruner_calibration(
                         outcomes,
@@ -1654,6 +1943,8 @@ def _execute_adaptive_group(
                     else None
                 ),
                 "scientific_understanding": scientific,
+                "initial_design": design_state,
+                "coverage": coverage,
                 "runs": [
                     {
                         "trial": int((result.trial or {"index": 0})["index"]),
@@ -1662,13 +1953,53 @@ def _execute_adaptive_group(
                         "status": result.status,
                         "run_id": result.run_id,
                         "attempt_id": result.attempt_id,
+                        "pool_trial": pool_trials_by_proposal.get(
+                            int((result.trial or {"index": 0})["index"])
+                        ),
+                        "result_path": str((result.run_dir / "result.json").resolve()),
                         "objective": _result_objective(result, metric),
                         "fidelity": dict(result.fidelity or {}),
                     }
                     for result in outcomes
                 ],
+                "pending_actions": list(pending_actions.values()),
             },
         )
+
+    def pending_record(specification: Mapping[str, Any]) -> dict[str, Any]:
+        """Persist only the identity and controller semantics needed to rebuild a dispatch."""
+        return {
+            "candidate_pool_index": int(
+                specification.get("candidate_pool_index", specification["trial_index"])
+            ),
+            "trial_index": int(specification["trial_index"]),
+            "seed": specification.get("seed"),
+            "phase": str(specification.get("hpo_phase", "search")),
+            "fidelity": dict(specification.get("hpo_fidelity", {})),
+            "startup_anchor": bool(specification.get("hpo_startup_anchor")),
+            "opportunistic": bool(specification.get("hpo_opportunistic")),
+            "scientific_continuation": bool(specification.get("hpo_scientific_continuation")),
+            "resume_preempted": bool(specification.get("hpo_resume_preempted")),
+            "probe_purpose": specification.get("hpo_probe_purpose"),
+            "target_questions": list(specification.get("hpo_target_questions", ())),
+            "scheduler_action": specification.get("hpo_scheduler_action"),
+            "scheduler_priority": specification.get("hpo_scheduler_priority"),
+            "original_prune": dict(specification.get("hpo_original_prune", {})),
+        }
+
+    def persist_pending_state() -> None:
+        """Patch the durable dispatch identities without recomputing scientific analysis."""
+        if not state_path.is_file() or state_path.is_symlink():
+            return
+        try:
+            current = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(current, dict) or current.get("execution_id") != study_execution_id:
+            return
+        current["pending_actions"] = list(pending_actions.values())
+        current["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+        atomic_json(state_path, current)
 
     def next_event_action(capacity: int) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
         """Choose one action for a newly free slot from all currently useful action types."""
@@ -1845,11 +2176,7 @@ def _execute_adaptive_group(
             current, target = int(fidelity["current"]), int(fidelity["target"])
             incremental_fraction = max(1, target - current) / max(1, current)
             base_cost = result.duration_seconds if result.duration_seconds > 0 else default_cost
-            cost = (
-                max(1e-9, base_cost * incremental_fraction)
-                if base_cost is not None
-                else None
-            )
+            cost = max(1e-9, base_cost * incremental_fraction) if base_cost is not None else None
             maximum = max(1, int(fidelity["maximum"]))
             fidelity_gain = max(0.0, min(1.0, (target - current) / maximum))
             information_value = min(
@@ -1894,6 +2221,113 @@ def _execute_adaptive_group(
                 )
             )
 
+        # Performance pruning answers an optimization question only. A checkpointed censored
+        # Run may still be the cheapest matched observation for an unresolved scientific question.
+        scientific_questions = [
+            value
+            for key in ("parameter_questions", "interaction_questions")
+            for value in scientific.get(key, ())
+            if isinstance(value, Mapping) and float(value.get("entropy", 0.0) or 0.0) > 1e-12
+        ]
+        exact_contexts = []
+        for trial, results in completed.items():
+            latest_results: dict[int | None, WorkResult] = {}
+            for candidate_result in results:
+                previous = latest_results.get(candidate_result.seed)
+                if previous is None or candidate_result.attempt_number >= previous.attempt_number:
+                    latest_results[candidate_result.seed] = candidate_result
+            unresolved_prune = any(
+                candidate_result.termination_type == "performance_pruned"
+                or (
+                    candidate_result.termination.get("scientific_continuation")
+                    and candidate_result.termination_type != "completed"
+                    and isinstance(candidate_result.termination.get("original_prune"), Mapping)
+                )
+                for candidate_result in latest_results.values()
+            )
+            if not unresolved_prune and any(
+                candidate_result.termination_type == "completed"
+                for candidate_result in latest_results.values()
+            ):
+                exact_contexts.append(candidate_parameters[trial])
+        for (trial, _seed), result in latest_by_seed.items():
+            if result.termination_type != "performance_pruned":
+                continue
+            parameters = candidate_parameters[trial]
+            relevant: list[tuple[float, Mapping[str, Any], tuple[str, ...]]] = []
+            for question in scientific_questions:
+                names = (
+                    (str(question["parameter"]),)
+                    if question.get("parameter") is not None
+                    else tuple(str(value) for value in question.get("parameters", ())[:2])
+                )
+                if not names or any(name not in parameter_space.names for name in names):
+                    continue
+                entropy = min(1.0, max(0.0, float(question.get("entropy", 0.0))))
+                matched_context = min(
+                    (
+                        parameter_space.distance(parameters, context, ignore=names)
+                        for context in exact_contexts
+                    ),
+                    default=1.0,
+                )
+                relevance = entropy * (0.5 + 0.5 * matched_context)
+                relevant.append((relevance, question, names))
+            if not relevant:
+                continue
+            relevance, question, names = max(relevant, key=lambda value: value[0])
+            question_text = str(
+                question.get(
+                    "question",
+                    "Resolve " + " × ".join(names) + " with matched continuation evidence",
+                )
+            )
+            specification = scientific_continuation_specification(
+                result, target_questions=(question_text,)
+            )
+            if specification is None:
+                continue
+            fidelity = result.fidelity or {}
+            reached = int(fidelity.get("current", 0))
+            maximum = max(1, int(fidelity.get("maximum", fidelity.get("target", 1))))
+            remaining_fraction = max(1 / maximum, 1.0 - reached / maximum)
+            expected_cost = (
+                result.duration_seconds * remaining_fraction / max(1e-6, 1 - remaining_fraction)
+                if result.duration_seconds > 0 and remaining_fraction < 1
+                else default_cost
+            )
+            cost_ratio = (
+                expected_cost / max(default_cost, 1e-9)
+                if expected_cost is not None and default_cost is not None
+                else 1.0
+            )
+            information_value = min(1.0, relevance * math.sqrt(remaining_fraction))
+            controller_value = information_weight * information_value
+            options.append(
+                (
+                    controller_value / max(cost_ratio, 1e-9),
+                    3,
+                    "SCIENTIFIC_CONTINUATION",
+                    specification,
+                    {
+                        "purpose": "SCIENTIFIC_CONTINUATION",
+                        "optimization_value": 0.0,
+                        "information_value": information_value,
+                        "controller_value": controller_value,
+                        "expected_uncertainty_reduction": relevance,
+                        "expected_cost_seconds": expected_cost,
+                        "cost_ratio": cost_ratio,
+                        "checkpoint": str(result.run_dir.resolve().parent.parent / "checkpoints"),
+                        "original_prune": dict(result.termination),
+                        "target_questions": [question_text],
+                        "reason": (
+                            "a checkpointed performance-pruned Run is the most relevant "
+                            "matched context for an unresolved scientific question"
+                        ),
+                    },
+                )
+            )
+
         proposal: tuple[int, ...] = ()
         if len(proposed) < candidate_budget and not search_converged:
             proposal = propose(1)
@@ -1918,6 +2352,14 @@ def _execute_adaptive_group(
                 scientific_state=scientific,
                 costs=costs_by_trial,
                 required_candidates=proposal,
+                search_covered=tuple(
+                    trial
+                    for trial, results in completed.items()
+                    if any(
+                        result.termination_type in {"completed", "performance_pruned"}
+                        for result in results
+                    )
+                ),
                 decision_key=f"{study_execution_id}:{decision_number}",
             )
             # Scientific design exposes a bounded ranked frontier.  Placement, not this layer,
@@ -1999,13 +2441,18 @@ def _execute_adaptive_group(
             if len(specifications) >= min(8, max(1, capacity)):
                 break
             selected = dict(option_specification)
-            if option_action in {"START_NEW", "DESIGNED_PROBE"}:
+            if option_action in {
+                "START_NEW",
+                "DESIGNED_PROBE",
+                "COVER_PARAMETER_VALUE",
+                "COVER_INTERACTION_CELL",
+            }:
                 pool_trial = int(option_evidence["pool_trial"])
                 if pool_trial not in proposed:
                     if len(proposed) + len(selected_new_trials) >= candidate_budget:
                         continue
                 selected = initial_specifications(pool_trial)[0]
-                if option_action == "DESIGNED_PROBE":
+                if option_action != "START_NEW":
                     selected["hpo_probe_purpose"] = option_evidence.get("purpose")
                     selected["hpo_target_questions"] = list(
                         option_evidence.get("target_questions", ())
@@ -2108,9 +2555,14 @@ def _execute_adaptive_group(
             if telemetry is not None:
                 telemetry.schedule(values)
             for value in values:
-                scheduled_run_keys.add(scheduling_key(value))
+                key = scheduling_key(value)
+                scheduled_run_keys.add(key)
+                pending_actions[key] = pending_record(value)
                 trial = int(value.get("candidate_pool_index", value["trial_index"]))
                 inflight_by_trial[trial] = inflight_by_trial.get(trial, 0) + 1
+                if trial in anchor_trials:
+                    anchor_states[trial] = "DISPATCHED"
+            persist_pending_state()
 
         register(limited)
 
@@ -2136,18 +2588,26 @@ def _execute_adaptive_group(
                 )
                 pending_observations.append((pending_trial, pending_fraction))
             trial = pool_trial_for(result)
+            completed_key = (
+                trial,
+                result.seed,
+                str(result.study_phase or "search"),
+                int((result.fidelity or {}).get("target", 0)),
+            )
+            pending_actions.pop(completed_key, None)
             if result.termination_type == "scheduler_preempted":
-                scheduled_run_keys.discard(
-                    (
-                        trial,
-                        result.seed,
-                        str(result.study_phase or "search"),
-                        int((result.fidelity or {}).get("target", 0)),
-                    )
-                )
+                scheduled_run_keys.discard(completed_key)
             inflight_by_trial[trial] = max(0, inflight_by_trial.get(trial, 1) - 1)
             completed[trial].append(result)
             outcomes.append(result)
+            if trial in anchor_trials:
+                anchor_states[trial] = (
+                    "CENSORED"
+                    if result.termination_type == "performance_pruned"
+                    else "OBSERVED"
+                    if result.termination_type == "completed"
+                    else anchor_states.get(trial, "DISPATCHED")
+                )
             result_fidelity = result.fidelity or {}
             reached_final_fidelity = int(result_fidelity.get("target", 1)) >= int(
                 result_fidelity.get("maximum", 1)
@@ -2206,11 +2666,26 @@ def _execute_adaptive_group(
                     "PERFORMANCE_PRUNE",
                     **prune_event,
                 )
+            if result.study_phase == "scientific_continuation":
+                record_decision(
+                    "SCIENTIFIC_CONTINUATION_COMPLETE",
+                    trial=int((result.trial or {"index": 0})["index"]),
+                    seed=result.seed,
+                    termination_type=result.termination_type,
+                    checkpoint_used=result.resumed_from_checkpoint,
+                    target_questions=list(result.termination.get("target_questions", ())),
+                    reason=(
+                        "target continuation boundary produced new evidence"
+                        if result.termination_type == "completed"
+                        else "scientific continuation ended before complete response evidence"
+                    ),
+                )
             if result.study_phase == "confirmation":
                 return [dict(value) for value in queued_specifications]
             stale_queue = [dict(value) for value in queued_specifications]
             for stale in stale_queue:
                 scheduled_run_keys.discard(scheduling_key(stale))
+                pending_actions.pop(scheduling_key(stale), None)
                 stale_trial = int(stale.get("candidate_pool_index", stale["trial_index"]))
                 inflight_by_trial[stale_trial] = max(0, inflight_by_trial.get(stale_trial, 1) - 1)
             if result.termination_type == "performance_pruned" and deferred_queue:
@@ -2231,7 +2706,7 @@ def _execute_adaptive_group(
                             ),
                         )
                     record_decision(
-                        "CANCEL_QUEUED_ACTION",
+                        "CANCEL_PLANNED_DISPATCH",
                         reason="candidate-level-performance-prune",
                         trial=int(deferred_value["trial_index"]),
                         seed=deferred_value.get("seed"),
@@ -2250,6 +2725,15 @@ def _execute_adaptive_group(
                 ):
                     deferred_queue.append(stale)
                     deferred_keys.add(key)
+            # A completed identity can still be present in the local deferred queue when a
+            # previously prepared dispatch frontier is invalidated at the same time as its
+            # sibling finishes.  The scientific anchor remains represented by ``anchor_states``;
+            # executing the same candidate/seed/fidelity again would be accidental replication.
+            retained_deferred_identities = [
+                value for value in deferred_queue if scheduling_key(value) not in scheduled_run_keys
+            ]
+            deferred_queue.clear()
+            deferred_queue.extend(retained_deferred_identities)
             if not within_time():
                 return ()
             # Start with the scientifically best action for each genuinely free slot.  When that
@@ -2262,39 +2746,70 @@ def _execute_adaptive_group(
             )
             if remaining_capacity <= 0:
                 return ()
-            # Startup is space-filling evidence, not a barrier. Alternate deferred startup work
-            # with model-driven actions as soon as at least two outcomes exist.
-            use_deferred = bool(deferred_queue) and (len(outcomes) < 2 or len(outcomes) % 2 == 1)
+            # Protected anchors are scientific debt, not a queue-parity heuristic. They may wait
+            # or reorder, but an acquisition update cannot silently erase them.
+            protected_index = next(
+                (
+                    index
+                    for index, value in enumerate(deferred_queue)
+                    if value.get("hpo_startup_anchor")
+                    and scheduling_key(value) not in scheduled_run_keys
+                    and not completed[int(value.get("candidate_pool_index", value["trial_index"]))]
+                ),
+                None,
+            )
             evidence: dict[str, Any]
-            if use_deferred:
-                specifications = [deferred_queue.popleft()]
-                action = "START_NEW"
+            if protected_index is not None:
+                protected = deferred_queue[protected_index]
+                del deferred_queue[protected_index]
+                specifications = [protected]
+                action = "STARTUP_ANCHOR"
                 evidence = {
-                    "reason": "asynchronous-space-filling-startup",
+                    "reason": "protected initial-design coverage obligation remains unresolved",
                     "controller_value": None,
-                    "value_basis": "required-space-filling-coverage",
+                    "value_basis": "protected-initial-design-debt",
                     "expected_cost_seconds": None,
                     "score": None,
                     "alternatives": [],
+                    "obligations": next(
+                        (
+                            list(anchor.obligations)
+                            for anchor in initial_design.anchors
+                            if anchor.trial
+                            == int(protected.get("candidate_pool_index", protected["trial_index"]))
+                        ),
+                        [],
+                    ),
                 }
             else:
                 action, specifications, evidence = next_event_action(remaining_capacity)
                 if not specifications and deferred_queue:
                     specifications = [deferred_queue.popleft()]
-                    action = "START_NEW"
+                    action = "OPPORTUNISTIC_COVERAGE"
                     evidence = {
-                        "reason": "remaining-space-filling-startup",
+                        "reason": "otherwise idle capacity can collect useful broad coverage",
                         "alternatives": [],
                     }
             specifications = list(specifications[:remaining_capacity])
             if not specifications:
                 for stale in stale_queue:
+                    if stale.get("hpo_startup_anchor"):
+                        key = scheduling_key(stale)
+                        if key not in {scheduling_key(value) for value in deferred_queue}:
+                            deferred_queue.append(stale)
+                        record_decision(
+                            "DEFER_STARTUP_ANCHOR",
+                            reason="dispatch plan changed; scientific obligation remains reserved",
+                            trial=int(stale["trial_index"]),
+                            seed=stale.get("seed"),
+                        )
+                        continue
                     if telemetry is not None:
                         telemetry.queued_action_cancelled(
                             stale, reason="no longer useful after new HPO evidence"
                         )
                     record_decision(
-                        "CANCEL_QUEUED_ACTION",
+                        "CANCEL_SCIENTIFIC_ACTION",
                         reason="superseded-by-new-evidence",
                         trial=int(stale["trial_index"]),
                         seed=stale.get("seed"),
@@ -2326,6 +2841,18 @@ def _execute_adaptive_group(
             for stale in stale_queue:
                 if scheduling_key(stale) in selected_keys:
                     continue
+                if stale.get("hpo_startup_anchor"):
+                    key = scheduling_key(stale)
+                    if key not in {scheduling_key(value) for value in deferred_queue}:
+                        deferred_queue.append(stale)
+                    record_decision(
+                        "CANCEL_PLANNED_DISPATCH",
+                        reason="replanned before dispatch; protected anchor remains waiting",
+                        trial=int(stale["trial_index"]),
+                        seed=stale.get("seed"),
+                        scientific_state="RESERVED",
+                    )
+                    continue
                 cancellation = {
                     "reason": "superseded-by-new-evidence",
                     "trial": int(stale["trial_index"]),
@@ -2347,7 +2874,7 @@ def _execute_adaptive_group(
                     telemetry.queued_action_cancelled(
                         stale, reason="superseded by new HPO evidence before dispatch"
                     )
-                record_decision("CANCEL_QUEUED_ACTION", **cancellation)
+                record_decision("CANCEL_SCIENTIFIC_ACTION", **cancellation)
             preemption = _request_scheduler_preemption(
                 pending_specifications,
                 alternatives=(
@@ -2433,6 +2960,85 @@ def _execute_adaptive_group(
             )
             return specifications
 
+        def replace_infeasible_anchors(
+            infeasible: Sequence[Mapping[str, Any]],
+            reason: str,
+        ) -> Sequence[dict[str, Any]]:
+            replacements: list[dict[str, Any]] = []
+            state_changed = False
+            for old_specification in infeasible:
+                old_trial = int(
+                    old_specification.get("candidate_pool_index", old_specification["trial_index"])
+                )
+                if old_trial not in anchor_trials or not old_specification.get(
+                    "hpo_startup_anchor"
+                ):
+                    continue
+                anchor_states[old_trial] = "INFEASIBLE"
+                state_changed = True
+                pending_actions.pop(scheduling_key(old_specification), None)
+                new_trial = initial_design.replacement(
+                    old_trial,
+                    candidates=candidate_parameters,
+                    parameter_space=parameter_space,
+                    unavailable=tuple(proposed),
+                    obligation_keys=anchor_obligations.get(old_trial),
+                )
+                if new_trial is None:
+                    continue
+                old_public = proposal_numbers[old_trial]
+                replacement_public = public_trial(new_trial)
+                proposed[proposed.index(old_trial)] = new_trial
+                scheduled_run_keys.discard(scheduling_key(old_specification))
+                inflight_by_trial[old_trial] = max(0, inflight_by_trial.get(old_trial, 1) - 1)
+                anchor_trials.remove(old_trial)
+                anchor_trials.add(new_trial)
+                anchor_states[old_trial] = "REPLACED"
+                anchor_states[new_trial] = "RESERVED"
+                obligations = anchor_obligations[old_trial]
+                anchor_obligations[new_trial] = obligations
+                value = prepared(new_trial, by_trial[new_trial][0])
+                value["hpo_startup_anchor"] = True
+                value["hpo_probe_purpose"] = "EXPLORE_COVERAGE"
+                value["hpo_target_questions"] = [
+                    "Preserve the initial design obligations of a physically infeasible anchor"
+                ]
+                value["hpo_replaces_pool_trial"] = old_trial
+                replacement = {
+                    "old_pool_trial": old_trial,
+                    "replacement_pool_trial": new_trial,
+                    "old_public_trial": old_public,
+                    "replacement_public_trial": replacement_public,
+                    "obligations_preserved": list(obligations),
+                    "physical_reason": reason,
+                }
+                anchor_replacements.append(replacement)
+                if telemetry is not None:
+                    telemetry.startup_anchor_replaced(
+                        old_specification,
+                        replacement_trial=replacement_public,
+                        reason=reason,
+                    )
+                record_decision("REPLACE_STARTUP_ANCHOR", **replacement)
+                replacements.append(value)
+            if replacements:
+                register(replacements)
+            if state_changed:
+                persist_state()
+            return replacements
+
+        def queued_candidate_cancelled(value: Mapping[str, Any]) -> None:
+            pending_actions.pop(scheduling_key(value), None)
+            persist_pending_state()
+            record_decision(
+                "CANCEL_PLANNED_DISPATCH",
+                reason="candidate-level-performance-prune",
+                trial=int(value["trial_index"]),
+                seed=value.get("seed"),
+                started=False,
+                compute_seconds=0.0,
+            )
+
         _execute_adaptive_dispatch(
             limited,
             resources=resources,
@@ -2445,14 +3051,8 @@ def _execute_adaptive_group(
             telemetry=telemetry,
             on_result=observed,
             on_resource_blocked=resource_frontier,
-            on_queued_cancel=lambda value: record_decision(
-                "CANCEL_QUEUED_ACTION",
-                reason="candidate-level-performance-prune",
-                trial=int(value["trial_index"]),
-                seed=value.get("seed"),
-                started=False,
-                compute_seconds=0.0,
-            ),
+            on_resource_infeasible=replace_infeasible_anchors,
+            on_queued_cancel=queued_candidate_cancelled,
         )
         # The dispatcher returns only after both its process set and its mutable queue are empty;
         # queued actions invalidated by candidate pruning have no WorkResult callback to decrement
@@ -2462,35 +3062,160 @@ def _execute_adaptive_group(
         if telemetry is not None and observed_trials:
             telemetry.candidates_observed(observed_trials)
 
-    startup = selector.initial(startup_trial_count)
-    proposed.extend(startup)
-    record_decision(
-        "START_NEW",
-        reason="space-filling-startup",
-        pool_trials=list(startup),
-        public_trials=[public_trial(trial) for trial in startup],
-    )
-    # Fill the first wave with distinct space-filling candidates before scheduling a second seed
-    # for any candidate.  This gives the sampler broad evidence and avoids leaving expensive
-    # parallel hardware idle during startup.
-    startup_by_trial = [initial_specifications(trial) for trial in startup]
-    startup_specs = [
-        values[seed_index]
-        for seed_index in range(max((len(values) for values in startup_by_trial), default=0))
-        for values in startup_by_trial
-        if seed_index < len(values)
-    ]
-    for value in startup_specs:
-        value["hpo_probe_purpose"] = "EXPLORE_COVERAGE"
-        value["hpo_target_questions"] = ["Establish broad initial search-space evidence"]
-    # Deferred startup Runs remain a provisional planning pool. Only specifications handed to the
-    # dispatcher enter ``scheduled_run_keys``; this lets every result re-rank the undispatched tail.
-    startup_width = max(1, min(parallelism, allowance(), len(startup_specs)))
-    execute(
-        startup_specs[:startup_width],
-        startup,
-        deferred=startup_specs[startup_width:],
-    )
+    startup = initial_design.trials
+    if restored_state:
+        for pool_trial, results in completed.items():
+            for result in results:
+                scheduled_run_keys.add(
+                    (
+                        pool_trial,
+                        result.seed,
+                        str(result.study_phase or "search"),
+                        int((result.fidelity or {}).get("target", 0)),
+                    )
+                )
+
+        def restore_action(raw_action: Mapping[str, Any]) -> dict[str, Any] | None:
+            raw_pool = raw_action.get("candidate_pool_index")
+            if (
+                not isinstance(raw_pool, int)
+                or isinstance(raw_pool, bool)
+                or raw_pool not in by_trial
+            ):
+                return None
+            seed = raw_action.get("seed")
+            raw = next((value for value in by_trial[raw_pool] if value.get("seed") == seed), None)
+            if raw is None:
+                return None
+            value = prepared(raw_pool, raw, phase=str(raw_action.get("phase", "search")))
+            fidelity = raw_action.get("fidelity")
+            if isinstance(fidelity, Mapping) and fidelity:
+                value["hpo_fidelity"] = dict(fidelity)
+            for persisted, runtime in (
+                ("startup_anchor", "hpo_startup_anchor"),
+                ("opportunistic", "hpo_opportunistic"),
+                ("scientific_continuation", "hpo_scientific_continuation"),
+                ("resume_preempted", "hpo_resume_preempted"),
+                ("probe_purpose", "hpo_probe_purpose"),
+                ("target_questions", "hpo_target_questions"),
+                ("scheduler_action", "hpo_scheduler_action"),
+                ("scheduler_priority", "hpo_scheduler_priority"),
+                ("original_prune", "hpo_original_prune"),
+            ):
+                if persisted in raw_action and raw_action[persisted] is not None:
+                    value[runtime] = raw_action[persisted]
+            value["hpo_controller_restart"] = True
+            return value
+
+        recovered = [
+            specification
+            for value in restored_state.get("pending_actions", ())
+            if isinstance(value, Mapping)
+            for specification in [restore_action(value)]
+            if specification is not None and scheduling_key(specification) not in scheduled_run_keys
+        ]
+        recovered_keys = {scheduling_key(value) for value in recovered}
+        for anchor_trial in sorted(anchor_trials):
+            if anchor_states.get(anchor_trial) in {"OBSERVED", "CENSORED"}:
+                continue
+            attempted = {result.seed for result in completed[anchor_trial]}
+            raw = next(
+                (value for value in by_trial[anchor_trial] if value.get("seed") not in attempted),
+                None,
+            )
+            if raw is None:
+                continue
+            value = prepared(anchor_trial, raw)
+            value["hpo_startup_anchor"] = True
+            value["hpo_probe_purpose"] = "EXPLORE_COVERAGE"
+            value["hpo_target_questions"] = ["Restore protected initial-design evidence debt"]
+            value["hpo_controller_restart"] = True
+            if scheduling_key(value) not in recovered_keys:
+                recovered.append(value)
+                recovered_keys.add(scheduling_key(value))
+        if not recovered and within_time() and allowance() > 0:
+            _action, recovered, _evidence = next_event_action(min(parallelism, allowance()))
+            for value in recovered:
+                value["hpo_controller_restart"] = True
+        record_decision(
+            "RESTORE_CONTROLLER",
+            reason="reconstructed durable candidates, attempts, anchors and pending actions",
+            completed_runs=len(outcomes),
+            proposed_candidates=len(proposed),
+            pending_actions=len(recovered),
+        )
+        persist_state()
+        if recovered:
+            recovered_width = min(parallelism, allowance(), len(recovered))
+            execute(
+                recovered[:recovered_width],
+                proposed,
+                deferred=recovered[recovered_width:],
+            )
+    else:
+        proposed.extend(startup)
+        record_decision(
+            "START_NEW",
+            reason="geometry-derived-protected-initial-design",
+            pool_trials=list(startup),
+            public_trials=[public_trial(trial) for trial in startup],
+            initial_design=initial_design.to_dict(),
+        )
+        # Fill the first wave with distinct space-filling candidates before scheduling a second
+        # seed for any candidate. This gives broad evidence without idling parallel hardware.
+        startup_by_trial = [initial_specifications(trial) for trial in startup]
+        startup_specs = [
+            values[seed_index]
+            for seed_index in range(max((len(values) for values in startup_by_trial), default=0))
+            for values in startup_by_trial
+            if seed_index < len(values)
+        ]
+        first_anchor_trials: set[int] = set()
+        for value in startup_specs:
+            pool_trial = int(value["candidate_pool_index"])
+            first_for_anchor = pool_trial not in first_anchor_trials
+            if first_for_anchor:
+                first_anchor_trials.add(pool_trial)
+                value["hpo_startup_anchor"] = True
+            value["hpo_probe_purpose"] = "EXPLORE_COVERAGE"
+            value["hpo_target_questions"] = ["Establish broad initial search-space evidence"]
+        first_anchor_specs = [value for value in startup_specs if value.get("hpo_startup_anchor")]
+        additional_anchor_specs = [
+            value for value in startup_specs if not value.get("hpo_startup_anchor")
+        ]
+        first_wave_capacity = max(1, min(parallelism, allowance(), candidate_budget))
+        opportunistic_trials = InitialDesignPlanner.opportunistic(
+            candidate_parameters,
+            parameter_space,
+            reference=startup,
+            count=max(0, first_wave_capacity - len(first_anchor_specs)),
+        )
+        opportunistic_specs: list[dict[str, Any]] = []
+        for trial in opportunistic_trials:
+            value = initial_specifications(trial)[0]
+            value["hpo_probe_purpose"] = "OPPORTUNISTIC_COVERAGE"
+            value["hpo_target_questions"] = [
+                "Use otherwise idle startup capacity for broad non-protected coverage"
+            ]
+            value["hpo_opportunistic"] = True
+            opportunistic_specs.append(value)
+        proposed.extend(trial for trial in opportunistic_trials if trial not in proposed)
+        persist_state()
+        startup_width = max(
+            1,
+            min(
+                parallelism,
+                allowance(),
+                len(first_anchor_specs) + len(opportunistic_specs),
+            ),
+        )
+        # Only protected anchors reserve public candidate budget while waiting.
+        initial_queue = [*first_anchor_specs, *opportunistic_specs, *additional_anchor_specs]
+        execute(
+            initial_queue[:startup_width],
+            startup,
+            deferred=initial_queue[startup_width:],
+        )
 
     estimates = racer.estimates(values_by_trial())
     ranked = sorted(
@@ -2602,6 +3327,8 @@ def _execute_adaptive_dispatch(
         Sequence[dict[str, Any]],
     ]
     | None = None,
+    on_resource_infeasible: Callable[[Sequence[Mapping[str, Any]], str], Sequence[dict[str, Any]]]
+    | None = None,
     on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[WorkResult, ...]:
     if not specifications:
@@ -2612,10 +3339,12 @@ def _execute_adaptive_dispatch(
     effective_parallelism = parallelism
     if resources.gpu_count and len(visible_gpus) < resources.gpu_count:
         effective_resources = replace(resources, gpu_count=len(visible_gpus))
-        effective_parallelism = min(
-            parallelism,
-            len(visible_gpus) * policy.runs_per_gpu,
+        gpu_ceiling = (
+            len(visible_gpus) * policy.runs_per_gpu
+            if policy.runs_per_gpu is not None
+            else parallelism
         )
+        effective_parallelism = min(parallelism, gpu_ceiling)
         print(
             f"[hpo] site granted {len(visible_gpus)} of the requested "
             f"{resources.gpu_count} GPU(s); continuing within the exact inherited allocation "
@@ -2634,12 +3363,18 @@ def _execute_adaptive_dispatch(
         prune_evidence = stop.with_name(stop.name + ".evidence.json")
         checkpoint_manifest = control_root / f"{token}.checkpoint.json"
         checkpoint_request = control_root / f"{token}.resource-checkpoint-request"
+        worker_identity = control_root / f"{token}.worker.json"
         raw_fidelity = specification.get("hpo_fidelity")
-        continuing = isinstance(raw_fidelity, Mapping) and int(raw_fidelity.get("current", 0)) > 0
+        continuing = (
+            bool(specification.get("hpo_scientific_continuation"))
+            or (isinstance(raw_fidelity, Mapping) and int(raw_fidelity.get("current", 0)) > 0)
+            or bool(specification.get("hpo_controller_restart"))
+        )
         if not continuing:
             metrics.unlink(missing_ok=True)
             checkpoint_manifest.unlink(missing_ok=True)
             checkpoint_request.unlink(missing_ok=True)
+            worker_identity.unlink(missing_ok=True)
         stop.unlink(missing_ok=True)
         prune_evidence.unlink(missing_ok=True)
         value = dict(specification)
@@ -2653,6 +3388,7 @@ def _execute_adaptive_dispatch(
                 "hpo_stop_path": stop,
                 "hpo_checkpoint_manifest_path": checkpoint_manifest,
                 "hpo_checkpoint_request_path": checkpoint_request,
+                "hpo_worker_identity_path": worker_identity,
                 "hpo_objective": objective_metric,
                 "hpo_objective_config": dict(specification["definition"].get("objective", {})),
             }
@@ -2678,6 +3414,15 @@ def _execute_adaptive_dispatch(
             return ()
         return tuple(prepare_specification(value) for value in on_resource_blocked(queued, pending))
 
+    def dispatch_resource_replacement(
+        infeasible: Sequence[Mapping[str, Any]], reason: str
+    ) -> Sequence[dict[str, Any]]:
+        if on_resource_infeasible is None:
+            return ()
+        return tuple(
+            prepare_specification(value) for value in on_resource_infeasible(infeasible, reason)
+        )
+
     results: list[WorkResult] = []
     executors: list[ProcessPoolExecutor] = []
     try:
@@ -2698,6 +3443,9 @@ def _execute_adaptive_dispatch(
                 on_result=dispatch_refill if on_result is not None else None,
                 on_resource_blocked=(
                     dispatch_resource_frontier if on_resource_blocked is not None else None
+                ),
+                on_resource_infeasible=(
+                    dispatch_resource_replacement if on_resource_infeasible is not None else None
                 ),
                 on_queued_cancel=on_queued_cancel,
             )
@@ -2898,9 +3646,8 @@ def _retry_failed_result(
     if not _is_gpu_memory_failure(result):
         return None
     kind = str(result.failure.get("type", ""))
-    if (
-        specification.get("resource_admission_mode") == "EXPLORATORY_ADMISSION"
-        or specification.get("resumed_after_resource_failure")
+    if specification.get("resource_admission_mode") == "EXPLORATORY_ADMISSION" or specification.get(
+        "resumed_after_resource_failure"
     ):
         retry = dict(specification)
         retry.pop("gpu_index", None)
@@ -3084,6 +3831,8 @@ def _execute_gpu_admitted_runs(
         Sequence[dict[str, Any]],
     ]
     | None = None,
+    on_resource_infeasible: Callable[[Sequence[Mapping[str, Any]], str], Sequence[dict[str, Any]]]
+    | None = None,
     on_queued_cancel: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
     """Launch only Runs that currently fit, waiting through temporary VRAM pressure."""
@@ -3099,7 +3848,9 @@ def _execute_gpu_admitted_runs(
     last_launch = [float("-inf")] * resources.gpu_count
     # Numeric runs_per_gpu is a policy ceiling. Resource failures constrain exact packings, never
     # a permanent device-wide concurrency cap.
-    run_limits = [policy.runs_per_gpu] * resources.gpu_count
+    run_limits = [
+        policy.runs_per_gpu if policy.runs_per_gpu is not None else parallelism
+    ] * resources.gpu_count
     raw_execution_dir = prepared[0].get("execution_dir")
     control_root = (
         Path(str(raw_execution_dir)) / "hpo-control" if raw_execution_dir is not None else None
@@ -3125,7 +3876,12 @@ def _execute_gpu_admitted_runs(
     next_wait_log = 0.0
     consecutive_probe_failures = 0
     frontier_expanded_without_terminal_event = False
+    frontier_identities: set[tuple[Any, Any, Any, int]] = set()
     next_resource_sample = 0.0
+    next_visibility_probe = 0.0
+    granted_slots = set(range(len(visible_gpus)))
+    visibility_probe_required = bool(os.environ.get("LAMBDAFORGE_GPU_VISIBILITY_COMMAND"))
+    visibility_probe_available = not visibility_probe_required
     scheduling_started = time.monotonic()
     while queued or pending:
         done: set[Any] = set()
@@ -3135,16 +3891,42 @@ def _execute_gpu_admitted_runs(
             frontier_expanded_without_terminal_event = False
             next_resource_sample = 0.0
             value, slot, pool = pending.pop(future)
+            retry: dict[str, Any] | None
             try:
                 result = future.result()
             except BaseException as error:
-                retry = _retry_specification(
-                    value,
-                    reason=f"{type(error).__name__}: {error}",
-                    policy=policy,
-                    telemetry=telemetry,
-                    controller_error=error,
-                )
+                allocation_revoked = bool(value.pop("hpo_allocation_revoked", False))
+                if not allocation_revoked and visibility_probe_required:
+                    # The site may revoke a token and terminate its process between two normal
+                    # controller probes.  Re-read the authoritative grant while classifying the
+                    # resulting broken future so that allocation churn does not consume a normal
+                    # failure retry or become a scientific failure.  An unavailable probe is not
+                    # evidence of revocation and therefore continues through the ordinary path.
+                    failure_grant = _current_gpu_grant(visible_gpus)
+                    allocation_revoked = (
+                        failure_grant is not None
+                        and visible_gpus[slot] not in failure_grant
+                    )
+                if allocation_revoked:
+                    retry = dict(value)
+                    retry["hpo_controller_restart"] = True
+                    retry["resumed_after_allocation_revocation"] = True
+                    retry["gpu_slot"] = None
+                    retry["gpu_index"] = None
+                    if telemetry is not None:
+                        telemetry.run_retrying(
+                            retry,
+                            reason="allocated GPU token was revoked by the site",
+                            retry=int(retry.get("failure_retry", 0) or 0),
+                        )
+                else:
+                    retry = _retry_specification(
+                        value,
+                        reason=f"{type(error).__name__}: {error}",
+                        policy=policy,
+                        telemetry=telemetry,
+                        controller_error=error,
+                    )
                 if retry is not None:
                     queued.append(retry)
                 else:
@@ -3303,6 +4085,9 @@ def _execute_gpu_admitted_runs(
                 active_commitments.pop(future, None)
                 resource_trajectories.pop(future, None)
                 resource_metadata.pop(future, None)
+                raw_identity = value.get("hpo_worker_identity_path")
+                if raw_identity is not None:
+                    Path(str(raw_identity)).unlink(missing_ok=True)
 
         if policy.early_stopping and pending:
             _request_early_stops(
@@ -3326,6 +4111,43 @@ def _execute_gpu_admitted_runs(
             telemetry.refresh()
 
         now = time.monotonic()
+        if now >= next_visibility_probe:
+            observed_grant = _current_gpu_grant(visible_gpus)
+            next_visibility_probe = now + _GPU_ADMISSION_POLL_SECONDS
+            if observed_grant is not None:
+                visibility_probe_available = True
+                current_slots = {
+                    index for index, token in enumerate(visible_gpus) if token in observed_grant
+                }
+                revoked_slots = granted_slots - current_slots
+                restored_slots = current_slots - granted_slots
+                # Recheck every still-running worker on a denied slot, rather than only on the
+                # transition.  Its identity record may appear just after the first probe.
+                for _future, (value, slot, _pool) in tuple(pending.items()):
+                    if slot in current_slots:
+                        continue
+                    value["hpo_allocation_revoked"] = True
+                    _terminate_revoked_gpu_worker(value)
+                if revoked_slots:
+                    print(
+                        "[hpo] site GPU grant shrank; revoked token(s) "
+                        + ", ".join(visible_gpus[index] for index in sorted(revoked_slots))
+                        + ". Their Runs will resume from durable checkpoints; unaffected GPUs "
+                        "continue normally.",
+                        flush=True,
+                    )
+                if restored_slots:
+                    print(
+                        "[hpo] site GPU grant expanded; token(s) "
+                        + ", ".join(visible_gpus[index] for index in sorted(restored_slots))
+                        + " are eligible for admission again.",
+                        flush=True,
+                    )
+                granted_slots = current_slots
+            elif visibility_probe_required:
+                # Losing the ownership probe is not proof that an existing token was revoked, so
+                # healthy workers keep running.  It is also not permission to launch new work.
+                visibility_probe_available = False
         if not queued and not pending:
             continue
         if now < next_resource_sample:
@@ -3435,6 +4257,52 @@ def _execute_gpu_admitted_runs(
             run_limits=run_limits,
             hardware_labels=hardware_labels,
         )
+        admission_slots = granted_slots if visibility_probe_available else set()
+        # HPO planning used to refill only after a terminal Run event.  A narrow initial
+        # frontier could therefore be fully admitted while another GPU stayed idle for hours;
+        # the scientifically deferred actions were not the dispatcher's actual queue.  Resource
+        # readiness is itself an event: ask once for a bounded frontier whenever useful physical
+        # capacity exists and no dispatchable action remains.  The existing planner still decides
+        # whether a second lane is safe/exploratory, so this does not bypass memory policy.
+        if (
+            not queued
+            and on_resource_blocked is not None
+            and not frontier_expanded_without_terminal_event
+            and len(pending) < parallelism
+            and any(
+                active[index] < run_limits[index]
+                and (required <= 0 or memory[index][0] >= required)
+                for index in sorted(admission_slots)
+            )
+        ):
+            alternatives = tuple(
+                on_resource_blocked(
+                    (),
+                    tuple(item for item, _slot, _pool in pending.values()),
+                )
+            )
+            known = {
+                (
+                    value.get("candidate_pool_index", value.get("trial_index")),
+                    value.get("seed"),
+                    value.get("hpo_phase", "search"),
+                    int((value.get("hpo_fidelity") or {}).get("target", 0)),
+                )
+                for value in queued
+            }
+            for alternative in alternatives:
+                key = (
+                    alternative.get("candidate_pool_index", alternative.get("trial_index")),
+                    alternative.get("seed"),
+                    alternative.get("hpo_phase", "search"),
+                    int((alternative.get("hpo_fidelity") or {}).get("target", 0)),
+                )
+                if key not in known and key not in frontier_identities:
+                    alternative["hpo_resource_frontier_extension"] = True
+                    queued.append(alternative)
+                    known.add(key)
+                    frontier_identities.add(key)
+            frontier_expanded_without_terminal_event = True
         if not queued:
             resource_store.persist_ledger(devices)
             if telemetry is not None:
@@ -3448,6 +4316,8 @@ def _execute_gpu_admitted_runs(
                         configured_runs_per_gpu=policy.runs_per_gpu,
                         user_minimum_bytes=required,
                         exploration_evaluations=(),
+                        granted_slots=admission_slots,
+                        allocation_probe_available=visibility_probe_available,
                     )
                 )
             continue
@@ -3462,7 +4332,7 @@ def _execute_gpu_admitted_runs(
         planner.update_model(resource_model)
         admitted, blocked = planner.place(
             actions,
-            devices,
+            tuple(value for value in devices if value.index in admission_slots),
             max_launches=max(0, parallelism - len(pending)),
             now=now,
         )
@@ -3492,9 +4362,7 @@ def _execute_gpu_admitted_runs(
                         "requested_at_utc": datetime.now(timezone.utc).isoformat(),
                     },
                 )
-                resource_store.record_event(
-                    "RESOURCE_CHECKPOINT_REQUESTED", evaluation.to_dict()
-                )
+                resource_store.record_event("RESOURCE_CHECKPOINT_REQUESTED", evaluation.to_dict())
         if (
             not admitted
             and queued
@@ -3524,11 +4392,12 @@ def _execute_gpu_admitted_runs(
                     alternative.get("hpo_phase", "search"),
                     int((alternative.get("hpo_fidelity") or {}).get("target", 0)),
                 )
-                if key in known:
+                if key in known or key in frontier_identities:
                     continue
                 alternative["hpo_resource_frontier_extension"] = True
                 queued.append(alternative)
                 known.add(key)
+                frontier_identities.add(key)
                 added += 1
             frontier_expanded_without_terminal_event = True
             if added:
@@ -3552,6 +4421,7 @@ def _execute_gpu_admitted_runs(
             int(decision.target_gpu)
             for decision in admitted
             if decision.target_gpu is not None
+            and int(decision.target_gpu) in admission_slots
             and now - last_launch[int(decision.target_gpu)] >= _GPU_LAUNCH_STAGGER_SECONDS
         )
         if telemetry is not None:
@@ -3565,6 +4435,8 @@ def _execute_gpu_admitted_runs(
                     configured_runs_per_gpu=policy.runs_per_gpu,
                     user_minimum_bytes=required,
                     exploration_evaluations=planner.last_exploration_evaluations,
+                    granted_slots=admission_slots,
+                    allocation_probe_available=visibility_probe_available,
                 )
             )
         launched = False
@@ -3601,7 +4473,11 @@ def _execute_gpu_admitted_runs(
                 max_workers=1,
                 mp_context=multiprocessing.get_context("spawn"),
                 initializer=_initialize_gpu_worker,
-                initargs=(visible_gpus[slot],),
+                initargs=(
+                    visible_gpus[slot],
+                    str(value.get("hpo_worker_identity_path", "")),
+                    os.getpid(),
+                ),
             )
             executors.append(pool)
             try:
@@ -3737,12 +4613,23 @@ def _execute_gpu_admitted_runs(
             totals = ", ".join(
                 f"GPU {device.token}={_memory_text(device.total_bytes)}" for device in devices
             )
-            raise RuntimeError(
+            reason = (
                 "RESOURCE_INFEASIBLE_ON_DEVICE_TYPE: every pending scientific action has a "
                 "known resource lower bound above every allocated GPU's physical capacity. "
                 "LambdaForge stopped instead of waiting or retrying forever. "
                 f"Allocated devices: {totals}. Pending evidence: {details}."
             )
+            replacements = (
+                tuple(on_resource_infeasible(tuple(queued), reason))
+                if on_resource_infeasible is not None
+                else ()
+            )
+            if replacements:
+                queued.clear()
+                queued.extend(replacements)
+                frontier_expanded_without_terminal_event = False
+                continue
+            raise RuntimeError(reason)
         if queued and not pending and not launched:
             time.sleep(_GPU_ADMISSION_POLL_SECONDS)
 
@@ -3957,7 +4844,7 @@ def _gpu_admission_diagnostics(
     return {
         "pending_runs": pending,
         "max_parallel": max_parallel,
-        "runs_per_gpu": configured_limit,
+        "runs_per_gpu": configured_runs_per_gpu or "auto",
         "effective_runs_per_gpu": min(
             (_gpu_run_limit(runs_per_gpu, index) for index in usable),
             default=configured_limit,
@@ -4262,9 +5149,7 @@ def _update_active_resource_commitments(
                     checkpoint_step=_optional_int(snapshot.get("checkpoint_step")),
                     checkpoint_duration_seconds=(
                         float(snapshot["checkpoint_duration_seconds"])
-                        if isinstance(
-                            snapshot.get("checkpoint_duration_seconds"), int | float
-                        )
+                        if isinstance(snapshot.get("checkpoint_duration_seconds"), int | float)
                         and not isinstance(snapshot.get("checkpoint_duration_seconds"), bool)
                         else None
                     ),
@@ -4364,9 +5249,7 @@ def _update_active_resource_commitments(
                 growth_hazard=analysis.growth_hazard,
                 expected_residual_growth_bytes=analysis.expected_residual_growth_bytes,
                 next_decision_seconds=analysis.next_decision_seconds,
-                next_decision_uncertainty_seconds=(
-                    analysis.next_decision_uncertainty_seconds
-                ),
+                next_decision_uncertainty_seconds=(analysis.next_decision_uncertainty_seconds),
                 checkpoint_request_path=(
                     str(specification["hpo_checkpoint_request_path"])
                     if specification.get("hpo_checkpoint_request_path") is not None
@@ -4438,9 +5321,7 @@ def _update_active_resource_commitments(
                     growth_hazard=analysis.growth_hazard,
                     expected_residual_growth_bytes=analysis.expected_residual_growth_bytes,
                     next_decision_seconds=analysis.next_decision_seconds,
-                    next_decision_uncertainty_seconds=(
-                        analysis.next_decision_uncertainty_seconds
-                    ),
+                    next_decision_uncertainty_seconds=(analysis.next_decision_uncertainty_seconds),
                     target_step=(
                         _optional_int(specification.get("hpo_fidelity", {}).get("target"))
                         if isinstance(specification.get("hpo_fidelity"), Mapping)
@@ -4650,9 +5531,7 @@ def _resource_observation_for_result(
     prior_phase_model = ResourcePhaseModel()
     raw_execution = specification.get("execution_dir")
     if raw_execution is not None:
-        prior = ResourceHistoryStore(
-            Path(str(raw_execution)) / "hpo-control" / "resources"
-        ).load()
+        prior = ResourceHistoryStore(Path(str(raw_execution)) / "hpo-control" / "resources").load()
         prior_phase_model = ResourcePhaseModel.from_observations(
             tuple(
                 value
@@ -4755,8 +5634,7 @@ def _resource_observation_for_result(
         placement_succeeded=(False if memory_failure else True if result.ok else None),
         admission_mode=(
             cast(AdmissionMode, str(metadata["admission_mode"]))
-            if metadata.get("admission_mode")
-            in {"SAFE_ADMISSION", "EXPLORATORY_ADMISSION"}
+            if metadata.get("admission_mode") in {"SAFE_ADMISSION", "EXPLORATORY_ADMISSION"}
             else None
         ),
         predicted_peak_bytes=(
@@ -4912,17 +5790,21 @@ def _resource_admission_diagnostics(
     blocked: Sequence[Any],
     pending: int,
     max_parallel: int | None,
-    configured_runs_per_gpu: int,
+    configured_runs_per_gpu: int | None,
     user_minimum_bytes: int,
     exploration_evaluations: Sequence[Any] = (),
+    granted_slots: set[int] | None = None,
+    allocation_probe_available: bool = True,
 ) -> dict[str, Any]:
     """Expose the exact backend placement read model without frontend inference."""
     return {
         "admission_version": 3,
         "summary": "admissible" if admitted else "waiting_for_resources" if pending else "idle",
         "pending_runs": pending,
-        "max_parallel": max_parallel,
-        "runs_per_gpu": configured_runs_per_gpu,
+        "max_parallel": max_parallel if max_parallel is not None else "auto",
+        "runs_per_gpu": (
+            configured_runs_per_gpu if configured_runs_per_gpu is not None else "auto"
+        ),
         "gpu_memory_semantics": (
             "user-safety-floor-and-learned-candidate-specific-future-envelope"
             if user_minimum_bytes
@@ -4939,6 +5821,16 @@ def _resource_admission_diagnostics(
                 "external_bytes": value.external_bytes,
                 "lf_current_resident_bytes": sum(item.current_bytes for item in value.active),
                 "future_committed_bytes": value.future_committed_bytes,
+                "allocation_granted": (
+                    True if granted_slots is None else value.index in granted_slots
+                ),
+                "allocation_state": (
+                    "granted"
+                    if granted_slots is None or value.index in granted_slots
+                    else "revoked"
+                    if allocation_probe_available
+                    else "probe-unavailable"
+                ),
                 "provisional_committed_bytes": value.provisional_committed_bytes,
                 "predicted_headroom_bytes": value.predicted_headroom_bytes,
                 "provisional_headroom_bytes": value.provisional_headroom_bytes,
@@ -5064,10 +5956,15 @@ def _memory_text(value: int) -> str:
 
 
 def _adaptive_parallelism(resources: ResourceRequest, policy: AdaptiveSearchPolicy) -> int:
+    run_budget = policy.max_runs or (
+        policy.candidate_budget * max(1, policy.min_seeds)
+        + policy.confirmation_top_k * len(policy.confirmation_seeds)
+    )
+    host_ceiling = max(1, min(resources.cpu_cores, run_budget))
     derived = (
-        resources.gpu_count * policy.runs_per_gpu
-        if resources.gpu_count
-        else policy.max_parallel or resources.cpu_cores
+        min(host_ceiling, resources.gpu_count * policy.runs_per_gpu)
+        if resources.gpu_count and policy.runs_per_gpu is not None
+        else host_ceiling
     )
     maximum = min(int(derived), policy.max_parallel) if policy.max_parallel else int(derived)
     return max(1, maximum)
@@ -5076,16 +5973,19 @@ def _adaptive_parallelism(resources: ResourceRequest, policy: AdaptiveSearchPoli
 def _adaptive_startup_trial_count(
     policy: AdaptiveSearchPolicy,
     *,
-    parallelism: int,
+    parallelism: int | None = None,
     candidate_budget: int,
+    geometry_required: int | None = None,
 ) -> int:
-    """Resolve the distinct space-filling startup width.
+    """Compatibility helper for callers that already computed the scientific design size.
 
-    An explicit ``startup_trials`` remains authoritative.  Automatic startup retains the
-    historical ten-candidate statistical floor but grows to the number of executable slots, so
-    increasing safe parallelism cannot accidentally leave hardware idle before evidence exists.
+    ``parallelism`` is deliberately ignored. New controller code uses :class:`InitialDesignPlan`
+    directly; this helper remains only for narrow external tests of the old internal function.
     """
-    requested = policy.startup_trials if policy.startup_trials is not None else max(10, parallelism)
+    del parallelism
+    requested = policy.startup_trials if policy.startup_trials is not None else geometry_required
+    if requested is None:
+        raise ValueError("Automatic startup size requires a geometry-derived design plan.")
     return min(candidate_budget, requested)
 
 
@@ -5119,9 +6019,96 @@ def _visible_gpu_tokens(gpu_count: int) -> tuple[str, ...]:
     return tuple(str(index) for index in range(gpu_count))
 
 
-def _initialize_gpu_worker(slot: str) -> None:
+def _current_gpu_grant(initial_tokens: Sequence[str]) -> frozenset[str] | None:
+    """Read the site's current allocation without treating physical visibility as ownership.
+
+    ``None`` means that an authoritative probe was not configured or was temporarily
+    unavailable.  Callers preserve the last known grant in that case; they never broaden it.
+    """
+    raw = os.environ.get("LAMBDAFORGE_GPU_VISIBILITY_COMMAND")
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+        if not isinstance(decoded, list) or not decoded or not all(
+            isinstance(value, str) and value for value in decoded
+        ):
+            return None
+        completed = subprocess.run(
+            tuple(decoded),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    line = next((value.strip() for value in completed.stdout.splitlines() if value.strip()), "")
+    disabled = {"-1", "none", "nodevfiles", "void"}
+    reported = {
+        value.strip()
+        for value in line.split(",")
+        if value.strip() and value.strip().lower() not in disabled
+    }
+    # A probe can shrink or restore the allocation inherited at launch, never introduce a token
+    # the Work was not originally granted.
+    return frozenset(value for value in initial_tokens if value in reported)
+
+
+def _terminate_revoked_gpu_worker(specification: Mapping[str, Any]) -> None:
+    """Terminate only the verified one-Run worker attached to a revoked token."""
+    raw = specification.get("hpo_worker_identity_path")
+    if raw is None:
+        return
+    path = Path(str(raw))
+    if not path.is_file() or path.is_symlink():
+        return
+    try:
+        psutil = __import__("psutil")
+    except ImportError:
+        return
+    try:
+        identity = json.loads(path.read_text(encoding="utf-8"))
+        pid = int(identity["pid"])
+        controller_pid = int(identity["controller_pid"])
+        if controller_pid != os.getpid():
+            return
+        process = psutil.Process(pid)
+        ancestors = {parent.pid for parent in process.parents()}
+        if controller_pid not in ancestors:
+            return
+        owned = [*process.children(recursive=True), process]
+        for child in reversed(owned):
+            try:
+                child.terminate()
+            except psutil.Error:
+                pass
+        _gone, alive = psutil.wait_procs(owned, timeout=2.0)
+        for child in alive:
+            try:
+                child.kill()
+            except psutil.Error:
+                pass
+    except (OSError, ValueError, TypeError, KeyError, psutil.Error):
+        return
+
+
+def _initialize_gpu_worker(slot: str, identity_path: str, controller_pid: int) -> None:
     """Narrow one worker to a token already present in the parent allocation."""
     os.environ["CUDA_VISIBLE_DEVICES"] = slot
+    if identity_path:
+        atomic_json(
+            Path(identity_path),
+            {
+                "pid": os.getpid(),
+                "controller_pid": controller_pid,
+                "gpu_token": slot,
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
 
 def _adaptive_run_resources(resources: ResourceRequest, parallelism: int) -> ResourceRequest:
@@ -5331,6 +6318,18 @@ def _active_checkpoint_available(specification: Mapping[str, Any]) -> bool:
         return False
 
 
+def _result_checkpoint_available(result: WorkResult) -> bool:
+    """Return whether a terminal Run retains a non-symlinked owned checkpoint payload."""
+    try:
+        run_root = result.run_dir.resolve().parent.parent
+        checkpoint_root = run_root / "checkpoints"
+        if checkpoint_root.is_symlink() or not checkpoint_root.is_dir():
+            return False
+        return any(path.is_file() and not path.is_symlink() for path in checkpoint_root.rglob("*"))
+    except OSError:
+        return False
+
+
 def _request_early_stops(
     specifications: Sequence[Mapping[str, Any]],
     *,
@@ -5349,7 +6348,9 @@ def _request_early_stops(
     evaluator = ObjectiveUtility(objective or {"metric": metric, "mode": mode})
     histories: list[tuple[Mapping[str, Any], tuple[tuple[int, float], ...]]] = []
     for ordinal, specification in enumerate(specifications, 1):
-        if specification.get("hpo_phase") == "confirmation":
+        if specification.get("hpo_phase") == "confirmation" or specification.get(
+            "hpo_scientific_continuation"
+        ):
             continue
         resolved = dict(specification)
         resolved.setdefault("trial_index", ordinal)
@@ -5384,17 +6385,29 @@ def _request_early_stops(
         for value, _history in histories
         if isinstance(value.get("hpo_fidelity"), Mapping)
     ]
-    # Predict to the next real decision boundary when fidelity defines one. Without it, keep the
-    # horizon deliberately local; uncertainty still expands with distance.
+    # Predict to the next *authored* decision boundary when fidelity defines one. ``min_step`` is
+    # only an evidence-eligibility rule, not a scientific forecast horizon. Treating it as a
+    # horizon made a study with min_step=40 extrapolate from epoch 44 to epoch 84. Without an
+    # authored boundary, use only one observed local window: enough to recognize a genuinely slow
+    # improving curve without inventing a long-range endpoint.
+    local_spans = [
+        history[-1][0] - history[-min(5, len(history))][0]
+        for _specification, history in histories
+        if history
+    ]
+    local_horizon = max(1, round(statistics.median(local_spans))) if local_spans else 1
     target_step = (
         max(common_step + 1, min(fidelity_targets))
         if fidelity_targets
-        else common_step + max(1, min_step)
+        else common_step + local_horizon
     )
     observed: list[tuple[int, int | None, float, float, int, str]] = []
+    current_by_trial: dict[int, list[float]] = {}
     for specification, history in histories:
         comparable = [(step, value) for step, value in history if step <= common_step]
         if comparable:
+            trial = int(specification["trial_index"])
+            current_by_trial.setdefault(trial, []).append(float(comparable[-1][1]))
             mean, deviation = predict_curve(
                 comparable,
                 target_step=target_step,
@@ -5402,7 +6415,7 @@ def _request_early_stops(
             )
             observed.append(
                 (
-                    int(specification["trial_index"]),
+                    trial,
                     int(specification["seed"]) if specification.get("seed") is not None else None,
                     mean,
                     deviation,
@@ -5439,6 +6452,7 @@ def _request_early_stops(
         comparable = [(step, value) for step, value in history if step <= common_step]
         if not comparable:
             continue
+        current_by_trial.setdefault(trial, []).append(float(comparable[-1][1]))
         mean, deviation = predict_curve(
             comparable,
             target_step=target_step,
@@ -5505,6 +6519,18 @@ def _request_early_stops(
             if int(specification["trial_index"]) == trial
         ]
         if not trial_specifications:
+            continue
+        candidate_current = statistics.fmean(current_by_trial.get(trial, (mean,)))
+        reference_current = statistics.fmean(
+            current_by_trial.get(incumbent_trial, (incumbent[0],))
+        )
+        # A candidate that remains competitive at the exact common checkpoint must not be killed
+        # solely because a short noisy slope projects poorly. Wait for another comparable step.
+        if sign * (candidate_current - reference_current) >= -margin:
+            evidence_path = Path(str(trial_specifications[0]["hpo_stop_path"])).with_name(
+                f"trial-{trial:05d}.prune-evidence.json"
+            )
+            evidence_path.unlink(missing_ok=True)
             continue
         evidence_path = Path(str(trial_specifications[0]["hpo_stop_path"])).with_name(
             f"trial-{trial:05d}.prune-evidence.json"
@@ -5850,8 +6876,20 @@ def _candidate_values_by_rung(
     selected: dict[tuple[int, int], dict[int, dict[int | None, tuple[int, float, WorkResult]]]] = {}
     for raw_trial, results in results_by_trial.items():
         trial = int(raw_trial)
+        latest_by_seed: dict[int | None, WorkResult] = {}
+        for result in results:
+            previous = latest_by_seed.get(result.seed)
+            if previous is None or result.attempt_number >= previous.attempt_number:
+                latest_by_seed[result.seed] = result
         if any(
-            result.pruned or result.termination_type == "performance_pruned" for result in results
+            result.pruned
+            or result.termination_type == "performance_pruned"
+            or (
+                result.termination.get("scientific_continuation")
+                and result.termination_type != "completed"
+                and isinstance(result.termination.get("original_prune"), Mapping)
+            )
+            for result in latest_by_seed.values()
         ):
             continue
         for result in results:

@@ -119,7 +119,7 @@ class StudyAnalysis:
             pruning=pruning,
             constraints=constraint_summary,
         )
-        return {
+        analysis = {
             "analysis_version": ANALYSIS_VERSION,
             "source": {
                 "execution_id": source.get("execution_id"),
@@ -188,6 +188,7 @@ class StudyAnalysis:
                 ),
             },
         }
+        return _portable_analysis_value(analysis)
 
     @staticmethod
     def _resource_conditioning(source: Mapping[str, Any]) -> dict[str, Any]:
@@ -432,6 +433,17 @@ class StudyAnalysis:
                 if isinstance(event, Mapping) and isinstance(event.get("proposal_pool_size"), int):
                     return int(event["proposal_pool_size"])
         return None
+
+
+def _portable_analysis_value(value: Any) -> Any:
+    """Keep the analysis document strict JSON when scientific parameters contain paths."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _portable_analysis_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_portable_analysis_value(item) for item in value]
+    return value
 
 
 __all__ = ["ANALYSIS_VERSION", "StudyAnalysis"]

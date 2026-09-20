@@ -14,6 +14,7 @@ from typing import Any
 
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility, aggregate_constraint, pareto_front
 from lambdaforge.hpo.StudyInsights import StudyInsightAnalyzer
+from lambdaforge.study_projection import interactive_study
 from lambdaforge.work.models import WorkResult, atomic_json
 
 
@@ -197,8 +198,29 @@ class StudyTelemetry:
         training_metrics_path: Path,
     ) -> None:
         """Publish one process-owned state record; no shared-file lock is required."""
+        key = study_run_key(specification)
+        previous = self._run_state(key)
+        history = [
+            dict(value)
+            for value in previous.get("attempt_history", ())
+            if isinstance(value, Mapping)
+        ]
+        previous_attempt = previous.get("attempt_id")
+        if previous_attempt and not any(
+            value.get("attempt_id") == previous_attempt for value in history
+        ):
+            history.append(
+                {
+                    "attempt_id": previous_attempt,
+                    "phase": previous.get("phase"),
+                    "state": previous.get("state"),
+                    "termination_type": previous.get("termination_type"),
+                    "termination": dict(previous.get("termination", {})),
+                    "finished_at_utc": previous.get("finished_at_utc"),
+                }
+            )
         self._write_run(
-            study_run_key(specification),
+            key,
             {
                 "state": "running",
                 "trial": int(specification["trial_index"]),
@@ -218,6 +240,17 @@ class StudyTelemetry:
                 "failure": None,
                 "finished_at_utc": None,
                 "prune_reason": None,
+                "attempt_id": run_dir.name,
+                "attempt_history": history[-8:],
+                "scientific_continuation": bool(specification.get("hpo_scientific_continuation")),
+                "continued_from_attempt": (
+                    previous_attempt if specification.get("hpo_scientific_continuation") else None
+                ),
+                "original_prune": (
+                    dict(specification.get("hpo_original_prune", {}))
+                    if specification.get("hpo_scientific_continuation")
+                    else None
+                ),
                 "started_at_utc": _now(),
                 "updated_at_utc": _now(),
             },
@@ -272,6 +305,12 @@ class StudyTelemetry:
                 "prune_reason": result.prune_reason,
                 "termination_type": result.termination_type,
                 "termination": dict(result.termination),
+                "scientific_continuation": bool(specification.get("hpo_scientific_continuation")),
+                "original_prune": (
+                    dict(specification.get("hpo_original_prune", {}))
+                    if specification.get("hpo_scientific_continuation")
+                    else None
+                ),
                 "updated_at_utc": _now(),
             },
         )
@@ -316,6 +355,33 @@ class StudyTelemetry:
                 "parameters": dict(specification.get("trial_parameters", {})),
                 "termination_type": "not_started_cancelled",
                 "termination": {"type": "not_started_cancelled", "reason": reason},
+                "finished_at_utc": _now(),
+                "updated_at_utc": _now(),
+            },
+        )
+
+    def startup_anchor_replaced(
+        self,
+        specification: Mapping[str, Any],
+        *,
+        replacement_trial: int,
+        reason: str,
+    ) -> None:
+        """Expose physical replacement without calling the scientific obligation cancelled."""
+        self._write_run(
+            study_run_key(specification),
+            {
+                "state": "replaced",
+                "trial": int(specification["trial_index"]),
+                "seed": specification.get("seed"),
+                "phase": specification.get("hpo_phase", "search"),
+                "parameters": dict(specification.get("trial_parameters", {})),
+                "termination_type": "startup_anchor_replaced",
+                "termination": {
+                    "type": "startup_anchor_replaced",
+                    "reason": reason,
+                    "replacement_trial": replacement_trial,
+                },
                 "finished_at_utc": _now(),
                 "updated_at_utc": _now(),
             },
@@ -523,6 +589,7 @@ class StudyTelemetry:
                         break
             controller = self._read(self.root / "controller.json")
             admission = self._read(self.root / "admission.json")
+            control_state = self._read(self.root.parent / "hpo-control" / "state.json")
             recent_decisions = [
                 value for value in controller.get("recent", ()) if isinstance(value, Mapping)
             ]
@@ -586,6 +653,16 @@ class StudyTelemetry:
                     },
                 },
                 "admission": admission,
+                "initial_design": (
+                    dict(control_state.get("initial_design", {}))
+                    if isinstance(control_state.get("initial_design"), Mapping)
+                    else None
+                ),
+                "coverage_state": (
+                    dict(control_state.get("coverage", {}))
+                    if isinstance(control_state.get("coverage"), Mapping)
+                    else None
+                ),
                 "cost": {
                     "wall_seconds": total_wall_seconds,
                     "gpu_seconds": total_gpu_seconds,
@@ -604,6 +681,9 @@ class StudyTelemetry:
                 "updated_at_utc": _now(),
             }
             atomic_json(self.root / "summary.json", snapshot)
+            # Interactive readers consume this bounded index.  The full summary remains local to
+            # the worker/result pipeline and may grow with rich per-Run diagnostics.
+            atomic_json(self.root / "interactive.json", interactive_study(snapshot))
             if self.progress_path is not None:
                 scheduled = int(snapshot["counts"]["scheduled_runs"])
                 atomic_json(

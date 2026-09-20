@@ -404,7 +404,13 @@ class JobService:
         """Create a collision-resistant human-sortable job identifier."""
         return f"job-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
 
-    def get(self, job_id: str, *, refresh: bool = True) -> JobRecord:
+    def get(
+        self,
+        job_id: str,
+        *,
+        refresh: bool = True,
+        include_study: bool = True,
+    ) -> JobRecord:
         """Load and optionally refresh a non-terminal scheduler state."""
         record = self.store.get(job_id)
         if not refresh or record.scheduler_id is None or record.state.terminal:
@@ -462,7 +468,7 @@ class JobService:
                     remote_state = dict(remote_state) if isinstance(remote_state, Mapping) else {}
                     remote_state["progress"] = dict(progress)
                     metadata["remote_state"] = remote_state
-        study = self._load_study_summary(record, transport)
+        study = self._load_study_summary(record, transport) if include_study else None
         if study is not None:
             remote_state = metadata.get("remote_state", {})
             remote_state = dict(remote_state) if isinstance(remote_state, Mapping) else {}
@@ -575,27 +581,90 @@ class JobService:
         record = self.get(job_id, refresh=False)
         _profile, transport, _scheduler = self._provider(record)
         path = PurePosixPath(record.work_dir).parent / "study" / "controller-history.jsonl"
-        text, truncated = self._read_bounded_file(transport, path, limit=16 * 1024 * 1024)
-        if truncated:
-            raise RuntimeError(
-                f"Controller history exceeds the 16 MiB interactive read limit: {path}"
-            )
         actions: list[dict[str, Any]] = []
-        for line_number, line in enumerate(text.splitlines(), 1):
-            if not line.strip():
-                continue
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise RuntimeError(
-                    f"Corrupt controller history for {job_id} at line {line_number}."
-                ) from error
-            if not isinstance(value, dict):
-                raise RuntimeError(
-                    f"Invalid controller history for {job_id} at line {line_number}."
-                )
-            actions.append(value)
+        page_size = 250
+        byte_offset = 0
+        line_offset = 0
+        while True:
+            page, next_offset, eof = self._read_jsonl_page(
+                transport, path, offset=byte_offset, limit=page_size
+            )
+            for line_number, raw_value in enumerate(page, line_offset + 1):
+                value: Any = raw_value
+                if not isinstance(value, dict):
+                    raise RuntimeError(
+                        f"Invalid controller history for {job_id} at line {line_number}."
+                    )
+                actions.append(value)
+            if eof:
+                break
+            if next_offset <= byte_offset:
+                raise RuntimeError("Controller-history pagination made no forward progress.")
+            byte_offset = next_offset
+            line_offset += len(page)
         return tuple(actions)
+
+    @staticmethod
+    def _read_jsonl_page(
+        transport: Any, path: PurePosixPath, *, offset: int, limit: int
+    ) -> tuple[Sequence[Any], int, bool]:
+        """Read one byte-bounded JSONL page without rescanning earlier remote records."""
+        script = r'''
+import json,os,sys
+p,start,count,max_bytes=sys.argv[1],int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4])
+rows=[]; used=0
+with open(p,"rb") as f:
+ f.seek(start)
+ while len(rows)<count:
+  before=f.tell(); raw=f.readline(max_bytes+1)
+  if not raw: break
+  if len(raw)>max_bytes: raise SystemExit("one controller-history record exceeds page limit")
+  if rows and used+len(raw)>max_bytes:
+   f.seek(before); break
+  if not raw.strip():
+   used+=len(raw); continue
+  try: rows.append(json.loads(raw.decode("utf-8")))
+  except (UnicodeDecodeError,json.JSONDecodeError) as e:
+   raise SystemExit(f"corrupt JSONL near byte {before}: {e}")
+  used+=len(raw)
+ next_offset=f.tell()
+ eof=next_offset>=os.fstat(f.fileno()).st_size
+json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separators=(",",":"))
+'''
+        result = transport.run(
+            (
+                "python3",
+                "-c",
+                script,
+                str(path),
+                str(offset),
+                str(limit),
+                str(512 * 1024),
+            ),
+            timeout=30.0,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            if "No such file" in detail:
+                return (), offset, True
+            raise RuntimeError(f"Could not read controller history page: {detail[-800:]}")
+        try:
+            value = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as error:
+            raise RuntimeError("Corrupt paged controller-history response.") from error
+        if not isinstance(value, Mapping):
+            raise RuntimeError("Invalid paged controller-history response.")
+        rows = value.get("rows")
+        next_offset = value.get("next_offset")
+        eof = value.get("eof")
+        if (
+            not isinstance(rows, list)
+            or not isinstance(next_offset, int)
+            or isinstance(next_offset, bool)
+            or not isinstance(eof, bool)
+        ):
+            raise RuntimeError("Invalid paged controller-history response.")
+        return rows, next_offset, eof
 
     def study_run(
         self,
@@ -631,6 +700,27 @@ class JobService:
                 break
         if selected is None:
             raise KeyError(f"Unknown study Run {run_key!r} in Job {job_id}.")
+        # The interactive Study index intentionally omits machine paths, failure tracebacks and
+        # other per-Run bulk.  Resolve those fields only for the Run the user opened.
+        run_record_path = (
+            PurePosixPath(record.work_dir).parent / "study" / "runs" / f"{run_key}.json"
+        )
+        run_record_text, run_record_truncated = self._read_bounded_file(
+            transport, run_record_path, limit=2 * 1024 * 1024
+        )
+        if run_record_truncated:
+            raise RuntimeError(
+                f"Study Run metadata exceeds the 2 MiB safety limit: {run_record_path}"
+            )
+        if run_record_text:
+            try:
+                run_record = json.loads(run_record_text)
+            except (json.JSONDecodeError, TypeError) as error:
+                raise RuntimeError(
+                    f"Corrupt Study Run metadata for {run_key!r}: {run_record_path}"
+                ) from error
+            if isinstance(run_record, Mapping):
+                selected.update(run_record)
         log_path = self._owned_study_path(record, selected.get("log_path"))
         run_dir = self._owned_study_path(record, selected.get("run_dir"))
         result_path = run_dir / "result.json" if run_dir is not None else None
@@ -837,22 +927,76 @@ class JobService:
 
     @staticmethod
     def _load_study_summary(record: JobRecord, transport: Any) -> dict[str, Any] | None:
-        path = str(PurePosixPath(record.work_dir).parent / "study" / "summary.json")
-        linked = transport.run(("test", "-L", path), timeout=10.0)
+        root = PurePosixPath(record.work_dir).parent / "study"
+        interactive_path = str(root / "interactive.json")
+        path = str(root / "summary.json")
+        # New workers persist a transport-safe index.  Keep the full summary as a legacy
+        # fallback, but never silently truncate JSON (a tail is not a valid document).
+        selected = interactive_path
+        exists = transport.run(("test", "-f", interactive_path), timeout=10.0)
+        if exists.returncode != 0:
+            selected = path
+        linked = transport.run(("test", "-L", selected), timeout=10.0)
         if linked.returncode == 0:
             return None
-        loaded = transport.run(("cat", path), timeout=15.0)
+        stat = transport.run(("stat", "-c", "%s", selected), timeout=10.0)
+        try:
+            size = int(stat.stdout.strip()) if stat.returncode == 0 else None
+        except ValueError:
+            size = None
+        if selected == path and size is not None and size > 8 * 1024 * 1024:
+            loaded = JobService._project_legacy_study(transport, path)
+        else:
+            loaded = transport.run(("cat", selected), timeout=15.0)
         if loaded.returncode != 0 or not loaded.stdout.strip():
             return None
-        if len(loaded.stdout.encode("utf-8")) > 8 * 1024 * 1024:
-            raise RuntimeError(f"Study telemetry exceeds the 8 MiB summary limit: {path}")
+        limit = 16 * 1024 * 1024 if selected == interactive_path else 8 * 1024 * 1024
+        if len(loaded.stdout.encode("utf-8")) > limit:
+            if selected == path:
+                raise RuntimeError(
+                    "Legacy Study telemetry is too large for an interactive read. Upgrade the "
+                    "remote LambdaForge worker so it publishes study/interactive.json."
+                )
+            raise RuntimeError("Compact Study telemetry exceeds its 16 MiB safety limit.")
         try:
             value = json.loads(loaded.stdout)
         except (json.JSONDecodeError, TypeError) as error:
-            raise RuntimeError(f"Corrupt study telemetry for {record.job_id}: {path}") from error
+            raise RuntimeError(
+                f"Corrupt study telemetry for {record.job_id}: {selected}"
+            ) from error
         if not isinstance(value, dict) or value.get("study_telemetry_version") != 1:
-            raise RuntimeError(f"Unsupported study telemetry for {record.job_id}: {path}")
+            raise RuntimeError(f"Unsupported study telemetry for {record.job_id}: {selected}")
         return value
+
+    @staticmethod
+    def _project_legacy_study(transport: Any, path: str) -> Any:
+        """Project an old oversized summary on its host instead of transferring it whole."""
+        script = r'''
+import json,sys
+p=sys.argv[1]
+with open(p,encoding="utf-8") as f: s=json.load(f)
+cf=("trial","parameters","state","selection_objective","selection_seed_count","selection_standard_error","current_objective","best_objective","partially_censored","pareto_optimal","latest_metrics","cost","feasibility","confirmation_status")
+rf=("key","seed","phase","purpose","target_questions","fidelity","state","current_observed_objective","best_observed_objective","final_objective","objective_status","objective_censoring","latest_metrics","latest_step","best_step","best_objective","duration_seconds","gpu_index","gpu_token","termination_type","prune_reason","scientific_continuation")
+cs=[]
+for c in s.get("candidates",[]):
+ if not isinstance(c,dict): continue
+ q={k:c[k] for k in cf if k in c}
+ q["runs"]=[{k:r[k] for k in rf if k in r} for r in c.get("runs",[]) if isinstance(r,dict)]
+ cs.append(q)
+base=("study_telemetry_version","name","execution_id","strategy","objective","planned_runs","planned_candidates","counts","cost","initial_design","coverage_state","hpo_analysis","surrogate_belief","finished","created_at_utc","updated_at_utc")
+o={k:s[k] for k in base if k in s}; ctl=s.get("controller",{}); adm=s.get("admission",{})
+o.update(
+ detail_level="interactive",candidates=cs,
+ controller={
+  k:ctl[k]
+  for k in ("last","recent","history_count","surrogate_belief","scheduler")
+  if k in ctl
+ },
+ admission={"current":adm.get("current"),"updated_at_utc":adm.get("updated_at_utc")},
+)
+json.dump(o,sys.stdout,separators=(",",":"))
+'''
+        return transport.run(("python3", "-c", script, path), timeout=30.0)
 
     @staticmethod
     def _owned_study_path(record: JobRecord, value: Any) -> PurePosixPath | None:
@@ -1151,10 +1295,16 @@ class JobService:
         """Resume only when the authoritative scheduler advertises support."""
         return self._lifecycle(job_id, "resume", JobState.RUNNING)
 
-    def delete(self, job_id: str) -> None:
-        """Delete local metadata only; results and remote job bytes remain untouched."""
+    def delete(self, job_id: str, *, allow_unknown: bool = False) -> None:
+        """Delete local metadata, optionally forgetting an unverifiable UNKNOWN record.
+
+        ``allow_unknown`` never touches a scheduler or remote workspace.  It exists
+        for the explicit preview/apply history operation in :class:`WorkService`.
+        """
         record = self.get(job_id, refresh=False)
-        if not record.state.terminal:
+        if not record.state.terminal and not (
+            allow_unknown and record.state is JobState.UNKNOWN
+        ):
             raise ValueError("Only terminal job metadata can be deleted.")
         self.store.delete(job_id)
 

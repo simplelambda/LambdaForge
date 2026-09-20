@@ -67,7 +67,10 @@ una transferencia automática al controlador.
 Para inputs remotos `{file: RUTA}`, hasta 10 MiB se incluye automáticamente en el bundle. Una ruta
 mayor debe pertenecer al proyecto local con `pyproject.toml` y tener una copia exacta bajo el
 `project_root` absoluto del clúster; LambdaForge verifica tipo/tamaño/SHA-256 antes del envío y en
-el worker, y nunca sincroniza ni elimina ese mirror del investigador. Configura con
+el worker, y nunca sincroniza ni elimina ese mirror del investigador. Las nuevas identidades de
+directorios usan el algoritmo canónico versionado, nunca `find | sort`: componentes NFC ordenados
+por bytes UTF-8, separador `/`, registros tipados/delimitados y directorios vacíos, sin metadata del
+host. Los marcadores históricos sin algoritmo usan el lector legacy. Configura con
 `lf clusters set NOMBRE project_root /proyecto/remoto/absoluto` y después
 `lf doctor --on NOMBRE`. Contenido ausente, viejo o con symlinks falla de forma segura. Para datos
 muy grandes reutilizables usa datasets gestionados: verificar un mirror lee todos los bytes en cada
@@ -118,12 +121,15 @@ mayor. El refill por eventos compara `START_NEW`, `DESIGNED_PROBE`, `ADD_SEED`,
 `PROMOTE_FIDELITY` y `RESUME_PREEMPTED` tras cada evento terminal. Equilibra automáticamente la
 oportunidad de mejora práctica posterior O con la entropía K de preguntas no resueltas por coste
 incremental observado; ninguna es ganancia de información calibrada ni confianza mostrada al
-usuario. Startup no es barrera, la cola no
-despachada es provisional y registra `CANCEL_QUEUED_ACTION` al replanificar; las identidades
-pendientes `(candidato, seed, fidelidad)` evitan duplicados. Se eliminan
+usuario. Startup no es barrera. Los anchors iniciales derivados de geometría son obligaciones
+científicas; el resto de la cola no despachada es provisional. Usa `DEFER_STARTUP_ANCHOR`,
+`CANCEL_PLANNED_DISPATCH` y `CANCEL_SCIENTIFIC_ACTION` con su significado exacto; las identidades
+pendientes `(candidato, seed, fase, fidelidad)` evitan duplicados. Se eliminan
 `search.reduction_factor` y `search.confidence` raíz en favor de controles separados.
-Si se omite, `startup_trials` resuelve a `min(trials, max(10, paralelismo seguro))`; un valor
-explícito manda. Intercala primeras seeds entre candidatos startup distintos antes de seeds extra.
+Si se omite, `startup_trials` deriva un `InitialDesignPlan` determinista de rank, cobertura,
+D-optimal y maximin desde `ParameterSpace`; un valor explícito manda como presupuesto de anchors.
+Nunca depende del paralelismo. Intercala primeras seeds entre candidatos distintos antes de seeds
+extra; la capacidad sobrante puede usar `OPPORTUNISTIC_COVERAGE` replanificable.
 `ScientificQuestionAnalyzer` es la única fuente compartida live/final de conclusiones de parámetros,
 interacciones por pares y región óptima práctica. `confidence` científica significa estabilidad de
 la conclusión exacta bajo remuestreo determinista por candidato/seeds compartidas, no cobertura,
@@ -140,12 +146,19 @@ pool por parámetro/pareja/remuestreo ni retrases la recogida de Futures, limpie
 análisis explicativo. El pool determinista completo sigue siendo la autoridad de optimización.
 `ParameterSpace` es la única geometría authored para Sobol, sampler adaptive/Bayesian, diseño
 científico, similitud de recursos y Study Analysis. Log usa coordenadas log; integer, categorical y
-actividad condicional no se reinfieren de candidatos observados. Mappings e IDs no cambian.
+actividad condicional no se reinfieren de candidatos observados. Mappings e IDs no cambian. El
+estado de cobertura distingue search coverage intentada/censurada de response coverage completa e
+incluye diversidad de contexto emparejado. Scientific design puede pedir `COVER_PARAMETER_VALUE` o
+`COVER_INTERACTION_CELL`; su valor debe caer al resolver la pregunta con evidencia diversa. Una Run
+podada con checkpoint puede usar después `SCIENTIFIC_CONTINUATION` para una pregunta valiosa:
+conserva Trial/seed, crea nuevo Attempt, evita pruning competitivo, consume Runs/tiempo pero no
+candidatos y mantiene el prune original como evidencia censurada válida.
 `objective.constraints.METRICA.min/max` declara guardas del mismo checkpoint. Entre seeds,
 `seed_aggregation` es `mean` legacy, `worst` o `lcb` con `confidence`; evidencia ausente o LCB
 insuficiente es no factible. Un componente de utilidad también puede ser constraint. Nunca infieras guardas o pesos
-multiobjetivo ocultos desde otras métricas. `runs_per_gpu` es solo el máximo duro por GPU dentro de
-la reserva fija y `max_parallel` el máximo global. `resources.gpu_memory` es opcional; si aparece es
+multiobjetivo ocultos desde otras métricas. Un `runs_per_gpu` entero es máximo duro por GPU y un
+`max_parallel` entero es máximo duro global. `auto`/null elimina el cap artificial, pero el techo
+interno sigue siendo finito y derivado de recursos host. `resources.gpu_memory` es opcional; si aparece es
 un suelo de seguridad del usuario por lanzamiento. La admisión efectiva usa el máximo entre ese
 suelo, una envolvente futura conservadora específica del candidato y cotas OOM conocidas. La VRAM
 física libre actual impone además el límite estricto. La VRAM física es la autoridad. Nunca
@@ -203,8 +216,12 @@ heterogéneas ni enfrentes rungs incompatibles. la Consola de investigación sep
 snapshot `.surrogate_belief` emitido por el sampler real.
 
 La telemetría de estudio es un modelo de lectura acotado, no otro almacén de resultados. Referencia
-logs y JSONL escalares por Run, nunca copia checkpoints/outputs, y expone claves exactas en
-`overview --json` → `work.items[].study`. `lf show WORK --run CLAVE --json` devuelve parámetros,
+logs y JSONL escalares por Run y nunca copia checkpoints/outputs. Las lecturas de colección son
+jerárquicas: `overview --json` solo expone contadores/objetivo/líder compactos; abrir un Study carga
+`study/interactive.json` transportable; Runs seleccionadas, análisis y logs son lazy y el historial
+completo se pagina solo al abrir Action history. Un resumen legacy rico se proyecta en su host, no
+se transfiere entero; y
+`lf show WORK --run CLAVE --json` devuelve parámetros,
 curvas reducidas, objective y época actual/óptima, tiempos/fallo/log y rutas/checksums/retención de
 artefactos finalizados; la pestaña Artifacts de la seed consume esos mismos metadatos sin copiar ni
 abrir contenido remoto. `lf logs WORK --run CLAVE`
@@ -215,7 +232,9 @@ región siguen visibles. Cualquier seed podada censura el candidato entero; nunc
 terminadas como evidencia solo de supervivientes. Un modelo conjunto de supervivencia por candidato con incertidumbre
 modifica suavemente adquisición; varias seeds no sobrecuentan y fallos operacionales/preemption son
 neutrales. Por defecto el pruning exige dos steps
-comunes desfavorables distintos mediante `early_stopping.confirmations`. Lightning publica
+comunes desfavorables distintos mediante `early_stopping.confirmations`. `min_step` habilita
+evidencia, no fija horizonte: usa frontera de fidelidad authored o una ventana local observada y
+nunca podes por pendiente a un candidato aún competitivo en el step común exacto. Lightning publica
 automáticamente escalares de callback y tiempos de época/validación. Un trainer propio registra
 curvas con `self.metrics.log(nombre, valor, step=epoch)`; `progress.update` es progreso grueso y
 `self.log`/print solo narración humana.
@@ -266,6 +285,10 @@ command exige `command_prefix` argv del centro, nunca shell; prefiere wrappers a
 no son válidos con SLURM. En command/scheduler, `CUDA_VISIBLE_DEVICES` heredado son grants opacos:
 nunca se sustituyen ni amplían. Una asignación ausente/duplicada falla cerrada; scheduler es exacto,
 mientras un Study adaptativo tras un launcher command puede reducirse a menos tokens heredados.
+`visibility_command` informa el grant opaco actual separado por comas; `[gpu, exec]` deriva
+`[gpu, env]`. Se cruza siempre con el grant inicial: al revocar un token termina solo su worker
+verificado y reencola esa Run desde checkpoint, sin tocar siblings; si falla el probe no admite
+nuevas Runs y jamás acepta un token físico nuevo.
 La Consola edita el mismo catálogo y servicio de credenciales que los comandos nativos y nunca
 invoca `lf` por subprocess. Direct frente a SLURM decide cómo se lanza el proceso; wrappers/claims
 GPU son la política `gpu_access` separada, por lo que `gpu exec` normalmente usa
@@ -412,7 +435,12 @@ mínima y scroll. Las confirmaciones de mutación y planes modales muestran secc
 acotadas, nunca JSON crudo. Las pantallas raíz ocultas no cargan.
 El indicador de carga raíz solo aparece hasta el primer snapshot correcto. Los refresh posteriores
 conservan el último read model, muestran su antigüedad y lo marcan obsoleto si fallan; filas y logs
-acotados de Work se actualizan en vivo con una sola petición activa por vista.
+acotados de Work se actualizan en vivo con una sola petición activa por vista. Overview debe hacer
+una lectura de inventario por proveedor directo —o solo estados de Jobs activos si el scheduler no
+tiene inventario—, usar contadores del registro local de datasets y
+proyecciones compactas de Job/Study. Las pantallas raíz Work/Studies no deben sondear recursos ni
+datasets. Un Work UNKNOWN no verificable solo puede olvidarse mediante borrado preview/apply del
+historial local; nunca elimina su proceso/workspace remoto no verificado ni lo llama terminal.
 El selector de Run Work filtra YAML; recientes combina el historial local de Jobs con un MRU acotado
 que solo persiste ruta/nombre/fecha locales. Explorar/elegir reciente solo rellena un selector. La
 única acción Submit debe volver a validar, explicar y solo después enviar asíncronamente al clúster

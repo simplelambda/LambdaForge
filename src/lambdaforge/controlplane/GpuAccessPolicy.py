@@ -16,19 +16,28 @@ class GpuAccessPolicy:
     command_prefix: tuple[str, ...] = ()
     claim_command: tuple[str, ...] = ()
     release_command: tuple[str, ...] = ()
+    visibility_command: tuple[str, ...] = ()
 
     MODES = frozenset({"auto", "exclusive", "shared", "command", "scheduler"})
 
     def __post_init__(self) -> None:
         if self.mode not in self.MODES:
             raise ValueError(f"GPU access mode must be one of {sorted(self.MODES)}.")
-        arguments = (*self.command_prefix, *self.claim_command, *self.release_command)
+        arguments = (
+            *self.command_prefix,
+            *self.claim_command,
+            *self.release_command,
+            *self.visibility_command,
+        )
         if any(not value or "\n" in value or "\x00" in value for value in arguments):
             raise ValueError("GPU command arguments must be non-empty and contain no NUL/newline.")
         if self.mode == "command" and not self.command_prefix:
             raise ValueError("GPU access mode 'command' requires command_prefix.")
         if self.mode != "command" and (
-            self.command_prefix or self.claim_command or self.release_command
+            self.command_prefix
+            or self.claim_command
+            or self.release_command
+            or self.visibility_command
         ):
             raise ValueError(
                 "GPU command_prefix/claim_command/release_command are valid only when "
@@ -63,6 +72,7 @@ class GpuAccessPolicy:
             "command_prefix",
             "claim_command",
             "release_command",
+            "visibility_command",
         }
         if unknown:
             raise ValueError(f"Unknown gpu_access field(s): {sorted(unknown)}.")
@@ -77,11 +87,17 @@ class GpuAccessPolicy:
             raw_release, (str, bytes, bytearray)
         ):
             raise TypeError("gpu_access.release_command must be an argv list.")
+        raw_visibility = value.get("visibility_command", ())
+        if not isinstance(raw_visibility, Sequence) or isinstance(
+            raw_visibility, (str, bytes, bytearray)
+        ):
+            raise TypeError("gpu_access.visibility_command must be an argv list.")
         return cls(
             str(value.get("mode", "auto")),
             tuple(str(item) for item in raw),
             tuple(str(item) for item in raw_claim),
             tuple(str(item) for item in raw_release),
+            tuple(str(item) for item in raw_visibility),
         )
 
     def effective_mode(self, scheduler: str) -> str:
@@ -106,12 +122,27 @@ class GpuAccessPolicy:
         """Return cleanup argv paired with an explicit claim."""
         return self.release_command
 
+    def visibility_probe(self) -> tuple[str, ...]:
+        """Return an argv command that reports the allocation's current opaque tokens.
+
+        The common ``gpu exec`` launcher contract has a sibling ``gpu env`` command.  Profiles
+        can state a different command explicitly; LambdaForge never falls back to nvidia-smi,
+        because physical visibility is not proof of ownership.
+        """
+        if self.visibility_command:
+            return self.visibility_command
+        if self.mode == "command" and len(self.command_prefix) >= 2:
+            if self.command_prefix[-1] == "exec":
+                return (*self.command_prefix[:-1], "env")
+        return ()
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
             "command_prefix": list(self.command_prefix),
             "claim_command": list(self.claim_command),
             "release_command": list(self.release_command),
+            "visibility_command": list(self.visibility_command),
         }
 
 

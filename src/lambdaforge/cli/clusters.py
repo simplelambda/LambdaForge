@@ -110,6 +110,7 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
                 tuple(arguments.gpu_command_prefix or ()),
                 tuple(arguments.gpu_claim_command or ()),
                 tuple(arguments.gpu_release_command or ()),
+                tuple(arguments.gpu_visibility_command or ()),
             ),
         )
         if arguments.store_password:

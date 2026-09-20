@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -236,6 +237,24 @@ def test_persistence_is_idempotent_for_the_same_evidence(tmp_path: Path) -> None
     assert first == second
     assert path.read_bytes() == original_bytes
     assert second["analysis_version"] == 3
+
+
+def test_analysis_serializes_paths_embedded_in_failure_diagnostics(tmp_path: Path) -> None:
+    source = _study([({"width": 64}, 0.8)])
+    source["candidates"][0]["runs"][0]["failure"] = {
+        "type": "RuntimeError",
+        "message": "consumer failure",
+        "diagnostic": {"context": {"run_dir": tmp_path / "attempt-0001"}},
+    }
+
+    path = tmp_path / "analysis.json"
+    analysis = StudyAnalysis.persist(source, path)
+
+    json.dumps(analysis, allow_nan=False)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["candidates"][0]["runs"][0]["failure"]["diagnostic"]["context"][
+        "run_dir"
+    ] == str(tmp_path / "attempt-0001")
 
 
 def test_analysis_preserves_resource_conditioning_without_biasing_objective() -> None:

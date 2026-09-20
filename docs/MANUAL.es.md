@@ -353,7 +353,10 @@ Un `file` o directorio se resuelve respecto al YAML, se comprueba/hashea y se pa
 remoto, hasta el límite inline por defecto de 10 MiB se copia al bundle inmutable. Una ruta mayor
 que pertenezca al proyecto sigue el contrato de mirror de la sección 10: se conserva su nombre
 relativo al proyecto, el worker recibe la ruta absoluta remota equivalente y se comprueban tipo,
-bytes y SHA-256 antes del scheduler y otra vez en el worker. No se transfiere nada grande
+bytes y SHA-256 antes del scheduler y otra vez en el worker. La identidad de directorio es un flujo
+canónico y versionado: componentes lógicos NFC ordenados por bytes UTF-8, separadores, tipos,
+longitudes y directorios vacíos explícitos, sin depender de enumeración, locale, fechas ni permisos.
+Los bundles históricos conservan el lector de su hash original. No se transfiere nada grande
 implícitamente. Una ruta grande externa al proyecto se rechaza: debe ser un dataset gestionado o
 formar parte de un layout de proyecto/datos explícito y revisable.
 
@@ -406,11 +409,22 @@ representativo acotado para contrafactuales/interacciones. La shortlist científ
 decisión e incluye siempre la propuesta del sampler de optimización; todo el pool continúa
 elegible sin escanearlo por pregunta/remuestreo ni bloquear la recogida de Runs. La evidencia
 persiste los tamaños de pool, referencia y soporte, mientras el análisis final puede usar un
-presupuesto más denso fuera del scheduler. Si se omite
-`startup_trials`, LambdaForge propone primero `min(trials, max(10, paralelismo_seguro))` candidatos
-distintos que cubren el espacio. Así conserva el mínimo estadístico histórico y llena la primera
-oleada disponible; la presión temporal de VRAM aún puede impedir admitirlos todos de inmediato. Un
-`startup_trials` positivo explícito sustituye ese ancho automático. Después, `sampler: auto` prefiere GP mixto qLogNEI de
+presupuesto más denso fuera del scheduler. Si se omite `startup_trials`, LambdaForge construye un
+`InitialDesignPlan` determinista. Su matriz incluye intercept, términos numéricos lineales y
+cuadráticos soportados, contrastes categóricos independientes y actividad/valor condicional. La
+selección greedy conserva primero el rank alcanzable del pool, después soporte discreto/numérico,
+geometría D-optimal y separación maximin. Los anchors protegidos dependen del `ParameterSpace` y
+`trials`, nunca de GPU o paralelismo. Un `startup_trials` positivo fija el presupuesto exacto de
+anchors pero conserva esa selección geométrica.
+
+Hay tres capas explícitas: planificación científica pregunta qué evidencia debe existir;
+planificación de recursos pregunta qué puede ejecutarse ahora; dispatch inicia el proceso aislado.
+Los anchors pueden esperar o reordenarse sin quedar cancelados. Slots sobrantes ejecutan candidatos
+replanificables `OPPORTUNISTIC_COVERAGE` sin agrandar el diseño protegido. Una imposibilidad física
+dura reemplaza el anchor conservando obligaciones y persiste `REPLACE_STARTUP_ANCHOR`. El estado
+versionado conserva además rutas de Attempts completados e identidades de acciones pendientes: un
+reinicio reconstruye la misma deuda de anchors sin repetir Runs ya terminadas. Después,
+`sampler: auto` prefiere GP mixto qLogNEI de
 BoTorch si está instalado `lambdaforge[adaptive-hpo]` y hay evidencia suficiente; ante dependencia
 ausente o inestabilidad numérica usa el surrogate mixto k-NN determinista. Es un modelo de decisión
 realmente conjunto: números, categorías e indicadores de activación condicional comparten un mismo
@@ -536,8 +550,9 @@ superar a un candidato algo mejor predicho si su contrafactual emparejado resuel
 material por coste; si vuelve a aumentar la mejora práctica, optimización recupera prioridad.
 Startup puede entrelazarse con decisiones del modelo. Identidades
 y fidelidades pendientes condicionan el surrogate. La cola no despachada es provisional: nueva
-evidencia puede sustituir una acción con coste científico cero y registrar
-`CANCEL_QUEUED_ACTION`, prioridades y motivo. Cada acción guarda valor, score, coste y alternativas.
+evidencia puede sustituir una acción no-anchor con coste científico cero y registrar
+`CANCEL_SCIENTIFIC_ACTION`. Un anchor protegido registra `CANCEL_PLANNED_DISPATCH` o
+`DEFER_STARTUP_ANCHOR` y sigue pendiente. Cada acción guarda valor, score, coste y alternativas.
 Una acción puntuada ya activa solo puede preemptarse tras 30 segundos, con un checkpoint propio no
 symlink, y si la siguiente alternativa útil supera en un 50 % tanto su prioridad original como el
 valor actual de continuar. Startup sin score comparable y toda confirmación quedan protegidos.
@@ -546,6 +561,16 @@ segura y después reanuda el mismo Run y target de fidelidad desde checkpoint; n
 por esta optimización. El diario distingue `PREEMPT`, `PAUSE`, `CONTINUE` y `RESUME_PREEMPTED` con
 prioridades antiguas/nuevas y el cambio de evidencia. `scheduler_preempted` es neutral, nunca
 pruning de rendimiento.
+
+El pruning de rendimiento y la continuación científica responden preguntas distintas.
+`PERFORMANCE_PRUNE` dice que gastar más en esa curva no compensa para encontrar el óptimo; su prefijo
+sigue siendo evidencia censurada de search coverage, nunca un objetivo final inventado. Si después
+el análisis de contextos emparejados determina que ese mismo Run es especialmente informativo para
+un valor o interacción, `SCIENTIFIC_CONTINUATION` reanuda su checkpoint durable con el mismo Trial y
+seed como un nuevo Attempt. Ese Attempt evita el pruning competitivo; fronteras de
+checkpoint/fidelidad, preemption, recursos y presupuestos globales de Runs/tiempo siguen activos.
+No consume otro candidato de `trials`. La Consola muestra juntos prune original, Attempt reanudado y
+pregunta objetivo.
 
 ### Preguntas científicas, confianza y regiones prácticas
 
@@ -602,7 +627,8 @@ seeds: [4, 7, 32, 54, 65, 94, 109, 124]
 search:
   strategy: adaptive
   trials: 40
-  runs_per_gpu: 4
+  runs_per_gpu: auto
+  max_parallel: auto
   startup_trials: 10
   min_seeds: 1
   failure_retries: 1
@@ -624,9 +650,10 @@ número momentáneo de Runs GPU activas. Así no se prometen recursos host sobra
 que después no podría redimensionarse. La reserva exterior nunca se sobreasigna y el contrato de
 `self.resources` permanece estable durante toda la admisión GPU dinámica.
 
-El máximo es \(2\times4=8\) entrenos concurrentes. Seis GPUs con `runs_per_gpu: 2` dan 12; dos con
-`runs_per_gpu: 1` dan 2. `runs_per_gpu` es un máximo duro, no una petición de slots idénticos.
-`gpu_memory` es un suelo de seguridad opcional. Si se declara, cada lanzamiento comprueba
+`auto` elimina topes artificiales globales/por dispositivo; ARI deriva un techo finito de acciones,
+presupuesto de candidatos/Runs, GPUs asignadas, CPU host y reglas del sitio. Un entero conserva un
+máximo duro: dos GPUs con `runs_per_gpu: 4` permiten como máximo ocho Runs y seis con valor 2,
+doce. `gpu_memory` es un suelo de seguridad opcional. Si se declara, cada lanzamiento comprueba
 
 $$
 \texttt{gpu\_memory}
@@ -817,7 +844,11 @@ acotada conserva incertidumbre residual y solicita parar solo cuando la probabil
 `early_stopping.probability_threshold`; no elimina una fracción
 fija. Por defecto la condición debe mantenerse en dos steps comunes distintos
 (`confirmations: 2`): sondear repetidamente la misma época no suma evidencia. Usa
-`confirmations: 1` solo para una política deliberadamente agresiva. `LightningRunner` enlaza
+`confirmations: 1` solo para una política deliberadamente agresiva. `min_step` solo marca el mínimo
+de evidencia: jamás se reutiliza como distancia de predicción. Si hay rung de fidelidad declarado,
+ese rung es el horizonte; en otro caso se proyecta una única ventana reciente ya observada, y un
+candidato aún competitivo en el checkpoint común exacto no se detiene solo por una pendiente local
+peor. Así se evitan extrapolaciones largas sin soporte. `LightningRunner` enlaza
 `callback_metrics[objective]` y para en límites de batch. Un trainer
 propio usa la API pública anterior. Si solo hay métrica final se adaptan las seeds, pero no puede
 detenerse de forma segura el entreno actual.
@@ -829,6 +860,11 @@ científico. LambdaForge mantiene junto al Job un índice compacto del estudio y
 por Run interno. Los `work.log`, `metrics.jsonl`, `training-metrics.jsonl` y `result.json` ya
 existentes siguen siendo la autoridad; el índice los referencia y resume solo estado y últimos
 escalares. Nunca copia checkpoints de modelos, directorios de output ni bytes de artefactos.
+El worker persiste el índice transportable como `study/interactive.json`, separado del resumen rico
+autoritativo. Los resúmenes antiguos sobredimensionados se proyectan en su host en vez de
+descargarse enteros; el historial append-only se pagina y solo se carga al abrir Action history.
+Entrar en una seed lee de forma lazy únicamente el registro, curvas acotadas y log de esa Run. Un
+Study grande válido no falla por superar el límite MiB de una respuesta SSH interactiva.
 
 la Consola de investigación presenta esta jerarquía:
 
@@ -1093,6 +1129,14 @@ paralelismo y probes usan exactamente ese conjunto reducido. El Python gestionad
 absoluta, sin depender de activación shell/Conda. `shared` sigue siendo una
 elección explícita de riesgo en hosts permisivos, no el default.
 
+Si el grant puede reducirse o ampliarse durante la ejecución, configura
+`gpu_access.visibility_command` como argv cuya primera línea no vacía contenga los tokens opacos
+actuales separados por comas. `[gpu, exec]` deriva `[gpu, env]` automáticamente. LambdaForge cruza
+cada lectura con el grant heredado inicial, por lo que nunca descubre ni usa una GPU física nueva.
+Un token revocado detiene solo su worker verificado y reencola la misma Run lógica como Attempt
+compatible con checkpoint; los demás continúan y un token original restaurado vuelve a ser
+elegible. Si el probe falla temporalmente, se conservan Runs sanas pero no se admiten nuevas.
+
 `workspace` y `project_root` tienen responsabilidades distintas. `workspace` es estado propiedad de
 LambdaForge: bundles, entornos, directorios de Job y logs se pueden limpiar según sus reglas.
 `project_root` es un mirror parcial persistente propiedad del investigador del directorio local que
@@ -1207,6 +1251,11 @@ raíces absolutas, por lo que envío detached, observación, logs y borrado no d
 actual; los registros relativos antiguos se resuelven desde la configuración fuente guardada. Un
 proveedor inaccesible es estado unknown/last-known, no un falso fallo científico; al recuperarse se
 restaura el estado real y desaparece el error de conexión obsoleto.
+
+Un registro `unknown` no se declara terminal. Aun así, `lf delete WORK` puede previsualizar y
+aplicar un olvido exclusivo del historial local si el estado sigue sin poder verificarse: no borra
+ningún proceso ni workspace remoto. Así se limpia historial obsoleto sin fingir una cancelación;
+si el cómputo puede seguir vivo hay que reconectar y cancelarlo primero.
 
 La cancelación respeta la jerarquía. `lf cancel WORK` cancela todos los Jobs no terminales agrupados
 en ese Work semántico; aunque falle un proveedor intenta los demás y después informa de operación
@@ -1471,7 +1520,15 @@ solicitados. Cada refresh reconstruye los read models sin cambiar el panel enfoc
 exacta. El estado de carga centrado solo se usa hasta obtener el primer snapshot correcto. Cada
 refresh posterior mantiene esa vista, indica su antigüedad abajo y marca como obsoleto cualquier
 fallo transitorio. El navegador Work y sus logs acotados se sondean en vivo con una sola petición
-activa por vista. El mismo dashboard aparece en el navegador Clusters y en el workspace del clúster. Los
+activa por vista. Los datos siguen la jerarquía de navegación. Overview hace una lectura de
+inventario por proveedor directo —o solo del estado de Jobs activos si el scheduler no ofrece
+inventario— y devuelve proyecciones compactas de Job y Study; no descubre manifiestos
+remotos de datasets ni incluye índices de candidatos/Runs. Las colecciones Work y Studies no
+sondean recursos ni datasets. Abrir un Study carga su índice acotado; análisis, historial completo
+del controlador y logs externos son lazy por pestaña, y curvas/artefactos/logs de seed solo se leen
+para la Run seleccionada. La progresión máquina equivalente es `overview --json`, `show WORK` y
+`show WORK --run CLAVE --json`. El mismo dashboard aparece en el navegador Clusters y en el
+workspace del clúster. Los
 Studies terminales siguen siendo Studies y conservan el Attempt que produjo su última telemetría;
 un read model terminal con `study: null` es válido, abre una vista degradada de Study/logs e intenta
 una recarga acotada. El botón Exit lateral y `q` en raíz son explícitos.

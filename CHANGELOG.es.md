@@ -11,6 +11,17 @@ metadata empaquetada.
 
 ### Añadido
 
+- Añadido `InitialDesignPlan` determinista con anchors protegidos derivados del rank del
+  `ParameterSpace`, cobertura discreta/condicional/numérica declarada, información D-optimal y
+  separación maximin, independiente del paralelismo físico. El estado acotado de cobertura de
+  búsqueda/respuesta, contextos emparejados, probes de valores/celdas y reemplazo de anchors
+  físicamente imposibles queda persistido para Consola y automatización. Tras reiniciar el
+  controlador se reconstruyen Attempts completados, deuda de anchors y acciones científicas
+  pendientes sin repetir Runs ya terminadas.
+- Añadido `SCIENTIFIC_CONTINUATION` desde checkpoint: una Run podada puede reanudarse como nuevo
+  Attempt del mismo Trial/seed para una pregunta científica posterior sin inventar objetivo final
+  ni consumir otro candidato. Añadidos `runs_per_gpu: auto` y `max_parallel: auto` con techo interno
+  finito derivado de recursos host.
 - Refinada Adaptive Resource Intelligence a v3.1 con estadísticas suficientes incrementales
   invariantes al sondeo, hazard de pico por fases aprendidas, persistencia segmentada exacta de
   WaitRegret, rollback/coste de checkpoint por Run residente y composición conjunta de P(fit) que
@@ -67,6 +78,48 @@ metadata empaquetada.
 
 ### Corregido
 
+- Corregida la comparación accidental de objetos de evidencia cuando dos observaciones vivas de
+  recursos tenían la misma distancia durante la predicción GPU adaptativa. Los empates de vecinos
+  y placement exploratorio usan ahora claves escalares deterministas, evitando que un Study válido
+  termine con un `TypeError` de `ActiveResourceEvidence`. Las rutas de fallos y el análisis final
+  también se normalizan a JSON estricto para que un `PosixPath` no rompa el cierre; ambas
+  condiciones se diagnostican como fallos internos y no como errores de configuración del usuario.
+- Sustituidas las transferencias monolíticas de Studies vivos por un índice compacto
+  `interactive.json`, lecturas lazy de la Run seleccionada e historial JSONL paginado. Los refresh
+  de la Consola conservan scroll de tablas/logs y pan/zoom explícito de gráficas.
+- Corregido un hueco event-driven por el que acciones diferidas visibles como en cola no estaban en
+  la cola ejecutable y una GPU concedida podía quedar ociosa hasta terminar otra Run. La capacidad
+  disponible pide ahora una frontera científica acotada inmediatamente; el planner existente de
+  memoria/throughput sigue decidiendo la admisión.
+- Corregido pruning falso por usar `early_stopping.min_step` como horizonte de predicción. Solo es
+  el umbral mínimo de evidencia; sin frontera de fidelidad declarada se proyecta una ventana local
+  observada y una pendiente ruidosa no puede podar a un candidato aún competitivo en el mismo step.
+- Añadida reconciliación viva de grants command para centros como CITIUS: `gpu exec` deriva
+  automáticamente `gpu env` (o usa `visibility_command`). Si el grant se reduce solo terminan los
+  workers verificados de tokens revocados y sus Runs se reencolan desde checkpoint; el resto sigue,
+  los tokens restaurados vuelven a ser elegibles y un fallo del probe bloquea nuevas admisiones sin
+  inventar ni ampliar propiedad de GPU.
+- Hecha jerárquica y acotada la carga de la Consola: Overview realiza una lectura de inventario por
+  proveedor directo —o de estados de Jobs activos si no hay inventario—, usa contadores locales de
+  datasets y emite proyecciones compactas de
+  Job/Study; Work/Studies evitan sondeos ajenos de recursos y datasets; análisis, historial completo
+  de acciones y logs se cargan solo en sus pestañas, y la evidencia por epoch sigue siendo por seed.
+  El historial de Work/Study UNKNOWN puede eliminarse mediante un olvido local con preview sin
+  borrar un proceso o workspace remoto no verificado.
+
+- Evitado que probes de recursos rechazados persistan el centinela no finito `-Infinity` en el JSON
+  estricto del Study y tumben el controlador adaptativo después de terminar correctamente una Run.
+  El cold start establece ahora una línea base exploratoria protegida en cada GPU asignada y ociosa
+  aunque el overhead inevitable de driver/contexto deje la VRAM libre algo por debajo de la nominal;
+  se conservan las cotas conocidas, el dominio de packings fallidos y la co-localización con evidencia.
+- La verificación de directorios grandes `{file: ...}` en mirrors ya no depende del locale del
+  shell, enumeración, orden de paths o metadata del host gracias a un fingerprint canónico
+  versionado. Las nuevas identidades normalizan paths Unicode, conservan directorios vacíos y
+  delimitan cada registro tipado; los bundles legacy siguen siendo legibles.
+- Desacoplada la evidencia startup de concurrencia GPU/procesos, protegidos los anchors pendientes
+  frente al replanning, diferenciada la invalidación de dispatch de la cancelación científica y
+  evitada la ejecución duplicada de identidades diferidas. Survival usa ahora la misma geometría
+  logarítmica/condicional de `ParameterSpace` que el resto del HPO.
 - Evitado que la cadencia de monitorización, el downsampling visual o los cambios de frontera
   fabriquen confianza o borren liveness. Corregida la semántica de tiempo hasta el próximo
   checkpoint y el rollback mixto checkpointable/no checkpointable; las colas raras subporcentuales

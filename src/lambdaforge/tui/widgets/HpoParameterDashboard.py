@@ -21,6 +21,10 @@ from lambdaforge.tui.widgets.InspectablePlotWidget import (
 class HpoParameterDashboard(Vertical):
     """Show surrogate response with uncertainty and observed support."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._parameter: str | None = None
+
     def compose(self) -> ComposeResult:
         with Grid(classes="hpo-plot-grid"):
             with Vertical(classes="hpo-plot-card"):
@@ -52,12 +56,14 @@ class HpoParameterDashboard(Vertical):
         live_observed = response.get("source") == "live-observed"
         response_plot: Any = self.query_one(".hpo-response-plot")
         coverage_plot: Any = self.query_one(".hpo-coverage-plot")
+        same_parameter = self._parameter == name
+        self._parameter = name
+        response_viewport = response_plot.user_viewport() if same_parameter else None
+        coverage_viewport = coverage_plot.user_viewport() if same_parameter else None
         response_plot.clear()
         coverage_plot.clear()
-        response_plot.set_xlimits(None, None)
-        response_plot.set_ylimits(None, None)
-        coverage_plot.set_xlimits(None, None)
-        coverage_plot.set_ylimits(None, None)
+        response_plot.restore_viewport(response_viewport)
+        coverage_plot.restore_viewport(coverage_viewport)
         self.query_one(".hpo-response-title", Label).update(
             "Observed response · live" if live_observed else "Predictive response"
         )

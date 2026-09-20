@@ -387,7 +387,11 @@ A file or directory is resolved relative to YAML, checked, hashed and passed as 
 execution, content up to the default 10 MiB inline limit is copied into the immutable control bundle.
 A larger project-owned path follows the mirror contract in section 10: the bundle preserves its
 project-relative name, the worker receives the matching absolute remote path, and exact kind, byte
-count and SHA-256 are checked before scheduler submission and again in the worker. Nothing is
+count and SHA-256 are checked before scheduler submission and again in the worker. Directory
+identity is a versioned canonical record stream: NFC logical path components are ordered by UTF-8
+bytes, separators/types/lengths and empty directories are explicit, while filesystem enumeration,
+locale, timestamps and permissions are irrelevant. Historical bundles retain their original hash
+reader. Nothing is
 silently transferred. A large path outside the installable project is refused; use a managed
 dataset or an explicit, reviewable project/data layout.
 
@@ -493,11 +497,22 @@ includes the optimization sampler's proposal. Consequently the full pool remains
 time without a full-pool scan per question/resample blocking completed-Run collection. The
 persisted evidence reports pool, reference and matching-support sizes; final post-hoc analysis may
 use a denser budget because it is outside the scheduling-critical path.
-If `startup_trials` is omitted, LambdaForge first proposes
-`min(trials, max(10, safe_parallelism))` distinct space-filling points. This preserves the
-historical statistical floor and fills the available first wave; it does not promise that temporary
-VRAM pressure can admit every point immediately. An explicit positive `startup_trials` overrides
-the automatic width.
+If `startup_trials` is omitted, LambdaForge builds a deterministic `InitialDesignPlan`. Its design
+matrix contains an intercept, numeric linear terms and supported quadratic terms, independent
+categorical contrasts, and conditional activity/value terms. Greedy selection first preserves the
+full pool's attainable rank, then authored discrete/numeric support, D-optimal information geometry
+and maximin separation. The resulting protected anchors depend on the authored `ParameterSpace`
+and `trials`, never on GPU count or execution parallelism. An explicit positive `startup_trials`
+sets the exact anchor budget but retains that geometric selection.
+
+This makes three control layers explicit: scientific planning asks what evidence should exist;
+resource planning asks what can safely run now; dispatch starts the isolated process. Protected
+anchors may wait or reorder without becoming cancelled. Physically spare slots can run
+replannable `OPPORTUNISTIC_COVERAGE` candidates without changing the protected design. A hard
+device-type impossibility replaces an anchor with a candidate preserving the same obligations and
+persists `REPLACE_STARTUP_ANCHOR`.
+The versioned controller state also retains completed Attempt paths and pending action identities,
+so a controller restart reconstructs the same anchor debt without executing finished Runs again.
 After their objective values arrive, `sampler: auto` prefers optional BoTorch mixed-GP qLogNEI and
 falls back to a dependency-light mixed k-NN acquisition if the extra is absent, observations are
 still insufficient or GP fitting is numerically unsafe. `sampler: knn` forces the base backend;
@@ -641,9 +656,10 @@ counterfactual resolves materially more uncertainty per unit cost; a later incre
 improvement makes optimization dominant again.
 Startup work is submitted gradually and can interleave with model-directed decisions. Pending
 identities and exact target fidelities condition the surrogate and prevent duplicate queued seeds.
-Undispatched actions form a mutable dispatch buffer. After new evidence, a stale queued action may
-be replaced at zero scientific compute cost; `CANCEL_QUEUED_ACTION` records old/new priority,
-replacement and reason. Each action records value, score, cost, reason and compact alternatives;
+Undispatched actions form a mutable dispatch buffer. After new evidence, a stale non-anchor action
+may be replaced at zero scientific compute cost; `CANCEL_SCIENTIFIC_ACTION` records why. A protected
+anchor instead records `CANCEL_PLANNED_DISPATCH`/`DEFER_STARTUP_ANCHOR` and remains owed. Each action
+records value, score, cost, reason and compact alternatives;
 waiting is valid only when no useful in-budget action exists. A running scored action may be
 preempted only after 30 seconds,
 with an owned non-symlink checkpoint, and when the next useful alternative exceeds the greater of
@@ -654,6 +670,16 @@ fidelity target from its checkpoint. It never kills the worker for this optimiza
 log distinguishes `PREEMPT`, terminal `PAUSE`, `CONTINUE` and `RESUME_PREEMPTED`, including old/new
 priorities and the evidence change. `scheduler_preempted` remains neutral evidence, never a
 performance prune.
+
+Performance pruning and scientific continuation answer different questions. A
+`PERFORMANCE_PRUNE` says that spending more on this curve is not justified for finding the optimum;
+its prefix remains censored search-coverage evidence, never a fabricated final objective. If later
+matched-context analysis finds that the same logical Run is especially informative for a parameter
+value or interaction, `SCIENTIFIC_CONTINUATION` resumes its durable checkpoint with the same Trial
+and seed as a new Attempt. Competitive pruning is disabled for that Attempt; checkpoint/fidelity
+boundaries, scheduler preemption, resources and global Run/time budgets still apply. It consumes no
+new `trials` candidate slot. The Research Console displays the original prune epoch, continuation
+Attempt and target question together.
 
 ### Scientific questions, confidence and practical regions
 
@@ -713,7 +739,8 @@ seeds: [4, 7, 32, 54, 65, 94, 109, 124]
 search:
   strategy: adaptive
   trials: 40
-  runs_per_gpu: 4
+  runs_per_gpu: auto
+  max_parallel: auto
   min_seeds: 1
   early_stopping: {enabled: true, min_step: 5, confirmations: 2,
                    probability_threshold: 0.05, equivalence_margin: 0.0}
@@ -733,9 +760,11 @@ number of active GPU Runs. This avoids promising excess host resources to an ear
 later be resized. The outer reservation remains non-oversubscribed and `self.resources` stays a
 stable contract throughout dynamic GPU admission.
 
-The maximum is \(2\times4=8\) concurrent trainings. Six GPUs with `runs_per_gpu: 2` gives 12;
-two GPUs with `runs_per_gpu: 1` gives 2. `runs_per_gpu` is a hard ceiling, not a request for fixed
-identical slots. `gpu_memory` is an optional user safety floor. When present, each launch requires
+`auto` removes the artificial per-device/global process-count caps; ARI still derives a finite
+ceiling from runnable work, candidate/Run budget, allocated GPUs, host CPU and site constraints.
+An integer remains a hard ceiling: two GPUs with `runs_per_gpu: 4` permit at most eight Runs, while
+six GPUs with `runs_per_gpu: 2` permit at most twelve. `gpu_memory` is an optional user safety floor.
+When present, each launch requires
 
 $$
 \texttt{gpu\_memory}
@@ -949,6 +978,11 @@ more conservative with noisy or still-improving curves than dropping a fixed fra
 the condition must remain true at two distinct common steps (`confirmations: 2`); repeated polling
 of the same epoch cannot satisfy it. Set `confirmations: 1` only when an intentionally aggressive
 policy is worth the increased risk of reacting to one noisy validation point.
+`min_step` is only the minimum evidence boundary; it is never reused as a forecast distance. If an
+authored fidelity rung exists, that rung is the decision horizon. Otherwise the projection spans
+one recent observed window, and a candidate still competitive at the exact common checkpoint
+cannot be stopped solely because its fitted local slope is worse. This prevents long, unsupported
+extrapolations while retaining conservative early termination of repeatedly inferior curves.
 `LightningRunner` forwards its validation metric and honors requests at batch boundaries. A
 final-only metric still enables adaptive seeds but cannot stop the current training early.
 
@@ -959,6 +993,12 @@ meaning. LambdaForge therefore keeps one compact study index next to that Job an
 record per internal Run. A Run's existing `work.log`, `metrics.jsonl`, `training-metrics.jsonl` and
 `result.json` remain authoritative; the index references them and folds only latest scalars and
 state. It never copies model checkpoints, output directories or artifact bytes.
+The worker persists the transport-safe index as `study/interactive.json`, separately from the rich
+authoritative summary. Older oversized summaries are projected on their execution host rather than
+downloaded whole; the append-only controller history is paged and loaded only after an explicit
+Action history drill-down. Opening one seed lazily reads only that Run's record, bounded curves and
+log. Consequently a valid large Study does not fail merely because one SSH response exceeds an
+interactive MiB limit.
 
 the Research Console uses this hierarchy:
 
@@ -1258,6 +1298,15 @@ their parallelism and memory probes use that exact reduced set. The managed Pyth
 absolute, so no shell/Conda activation must survive the wrapper. `shared` is
 an explicit risk choice for permissive hosts, not a hidden default.
 
+For allocations that may shrink or grow during execution, configure
+`gpu_access.visibility_command` as an argv command whose first non-empty output line is the current
+comma-separated opaque token set. `[gpu, exec]` derives `[gpu, env]` automatically. LambdaForge
+intersects every observation with the original inherited grant, so it can never discover or use a
+new physical GPU. A revoked token stops only its verified one-Run worker; that logical Run is
+requeued as a checkpoint-compatible Attempt while unaffected tokens continue. Restored original
+tokens become eligible again. A temporarily unavailable visibility probe preserves healthy Runs
+but fails closed for new admission.
+
 `workspace` and `project_root` are deliberately different. `workspace` is LambdaForge-owned state:
 bundle cache, environments, Job directories and logs may be garbage-collected according to their
 ownership. `project_root` is a researcher-owned persistent partial mirror of the local directory
@@ -1418,6 +1467,11 @@ submission, later observation, logs and deletion remain independent of the calle
 directory. Old relative records are resolved from their recorded source configuration. Provider
 outage yields unknown/last-known state, not fake failure; once the provider is reachable the real
 state replaces unknown and the stale reachability error is removed.
+
+An `unknown` record is not declared terminal. `lf delete WORK` may nevertheless preview and apply a
+history-only forget operation when the state remains unverifiable: no remote process or workspace is
+deleted. This resolves stale history safely without pretending cancellation; reconnect and cancel
+first if the computation may still be alive.
 
 Cancellation follows the hierarchy. `lf cancel WORK` cancels every non-terminal Job grouped into
 that semantic Work, attempting the remaining Jobs even if one provider call fails and then reporting
@@ -1717,6 +1771,14 @@ measured use. Refresh reconstructs read models without changing the focused pane
 The centered loading state is used only until the first successful snapshot. Every later refresh
 keeps that snapshot on screen, reports its age in a compact footer and marks a transient failure as
 stale. The Work browser and bounded Work logs poll live with one in-flight request per view.
+Data loading follows the navigation hierarchy. Overview makes one inventory pass per direct
+provider, or reads only active-job status for schedulers without inventory, and returns compact Job
+and Study projections; it neither discovers remote Dataset manifests nor embeds
+candidate/Run indexes. Work and Studies collection screens use the same research-only snapshot and
+do not probe resources or Datasets. Opening a Study loads its bounded candidate/Run index. Analysis,
+the complete controller history and outer logs remain lazy per tab, and seed curves/artifacts/logs
+are read only for the selected Run. Machine clients follow the same progression: `overview --json`,
+then `show WORK`, then `show WORK --run KEY --json`.
 The same dashboard appears in the Clusters browser and cluster workspace. Terminal Studies remain
 Studies and retain their last telemetry-producing Attempt; a terminal `study: null` read model is
 valid and opens a degraded Study/log view while the service attempts one bounded telemetry reload.

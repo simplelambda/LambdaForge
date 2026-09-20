@@ -365,17 +365,23 @@ class OverviewScreen(DataScreen):
         counts = self._mapping(study.get("counts"))
         objective = self._mapping(study.get("objective"))
         candidates = [self._mapping(item) for item in self._sequence(study.get("candidates"))]
-        comparable = [
-            item for item in candidates if self._number(item.get("selection_objective")) is not None
-        ]
-        reverse = str(objective.get("mode", "max")) == "max"
-        leader = (
-            sorted(
-                comparable, key=lambda item: float(item["selection_objective"]), reverse=reverse
-            )[0]
-            if comparable
-            else None
-        )
+        leader = self._mapping(study.get("leader"))
+        if not leader:
+            comparable = [
+                item
+                for item in candidates
+                if self._number(item.get("selection_objective")) is not None
+            ]
+            reverse = str(objective.get("mode", "max")) == "max"
+            leader = (
+                sorted(
+                    comparable,
+                    key=lambda item: float(item["selection_objective"]),
+                    reverse=reverse,
+                )[0]
+                if comparable
+                else {}
+            )
         total = int(counts.get("planned_runs", study.get("planned_runs", 0)) or 0)
         completed = int(counts.get("completed_runs", 0) or 0) + int(
             counts.get("pruned_runs", 0) or 0
@@ -386,8 +392,8 @@ class OverviewScreen(DataScreen):
             f"Run progress  {self._bar(completed, total)}  {completed}/{total or '?'} terminal",
             f"Candidates    {counts.get('candidates', len(candidates))} total  ·  {counts.get('active_runs', 0)} active  ·  {counts.get('queued_runs', 0)} waiting  ·  {counts.get('pruned_runs', 0)} pruned",
             f"GPU time      {format_duration(self._mapping(study.get('cost')).get('gpu_seconds'))}",
-            f"Current lead  Trial {leader.get('trial')} · {objective_display_name(objective)}={format_value(leader.get('selection_objective'))}"
-            if leader is not None
+            f"Current lead  Trial {leader.get('trial')} · {objective_display_name(objective)}={format_value(leader.get('selection_objective', leader.get('value')))}"
+            if leader
             else "Current lead  not comparable yet",
             "",
             "Enter opens Trials, seeds, HPO diagnostics, analysis, resources and logs.",

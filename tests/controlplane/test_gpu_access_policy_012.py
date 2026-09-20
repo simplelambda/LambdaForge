@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from lambdaforge.controlplane.ManagedEnvironmentProvider import ManagedEnvironme
 from lambdaforge.controlplane.ProcessIdentity import ProcessIdentity
 from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor
 from lambdaforge.controlplane.TorchInstallationPlan import TorchInstallationPlan
-from lambdaforge.work.runner import _visible_gpu_tokens
+from lambdaforge.work.runner import _current_gpu_grant, _visible_gpu_tokens
 
 
 def test_gpu_access_auto_follows_the_scheduler_boundary() -> None:
@@ -47,12 +48,27 @@ def test_shared_direct_access_and_external_claim_prefix_round_trip() -> None:
     assert restored.gpu_access.command_prefix == ("gpu", "exec")
     assert restored.gpu_access.claim(2) == ("gpu", "claim", "--numgpus", "2")
     assert restored.gpu_access.release() == ("gpu", "release")
+    assert restored.gpu_access.visibility_probe() == ("gpu", "env")
     assert restored.gpu_access.wrap(("/managed/bin/python", "train.py")) == (
         "gpu",
         "exec",
         "/managed/bin/python",
         "train.py",
     )
+
+
+def test_live_gpu_grant_probe_can_only_shrink_or_restore_inherited_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "LAMBDAFORGE_GPU_VISIBILITY_COMMAND", json.dumps(["gpu", "env"])
+    )
+    monkeypatch.setattr(
+        "lambdaforge.work.runner.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="0,2,9\n", stderr=""),
+    )
+
+    assert _current_gpu_grant(("0", "1", "2")) == frozenset({"0", "2"})
 
 
 def test_gpu_access_rejects_ambiguous_or_incompatible_policies() -> None:

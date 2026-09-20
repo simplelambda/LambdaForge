@@ -33,7 +33,9 @@ class OverviewService:
         with ThreadPoolExecutor(max_workers=3) as executor:
             job_future = executor.submit(self._jobs, jobs)
             resource_future = executor.submit(resources.all)
-            dataset_future = executor.submit(datasets.list, all_clusters=True)
+            # The overview needs registry counts, not remote manifests or member
+            # inventories. Dataset details have their own explicit screen.
+            dataset_future = executor.submit(datasets.list)
             job_values = job_future.result()
             resource_values = resource_future.result()
             dataset_values = dataset_future.result()
@@ -52,12 +54,13 @@ class OverviewService:
                     state: sum(value.state.value == state for value in job_values)
                     for state in sorted({value.state.value for value in job_values})
                 },
-                "items": [
-                    {**value.to_dict(), **JobObservation.describe(value)} for value in job_values
-                ],
+                "items": [self._job_overview(value) for value in job_values],
             },
             "work": {
-                "items": [value.to_dict() for value in aggregate_research_work(job_values)],
+                "items": [
+                    value.to_dict(study_detail="overview")
+                    for value in aggregate_research_work(job_values)
+                ],
             },
             "datasets": {
                 "versions": len(dataset_values),
@@ -68,6 +71,79 @@ class OverviewService:
 
     @staticmethod
     def _jobs(service: JobService) -> tuple[Any, ...]:
-        """Reconcile every reachable provider before composing the global view."""
+        """Use provider inventory once; refresh only schedulers without inventory."""
         service.reconcile(all_clusters=True)
-        return service.list(refresh=True)
+        records = service.list(refresh=False)
+        refreshable = tuple(
+            value for value in records if value.scheduler == "slurm" and not value.state.terminal
+        )
+        if not refreshable:
+            return records
+        refreshed: dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=min(8, len(refreshable))) as executor:
+            futures = {
+                executor.submit(service.get, value.job_id, include_study=False): value
+                for value in refreshable
+            }
+            for future, original in futures.items():
+                try:
+                    refreshed[original.job_id] = future.result()
+                except Exception:
+                    refreshed[original.job_id] = original
+        return tuple(refreshed.get(value.job_id, value) for value in records)
+
+    def research_snapshot(self) -> dict[str, Any]:
+        """Return the lightweight Work/Study collection without unrelated probes."""
+        jobs = JobService(self.catalog, factory=self.factory)
+        job_values = self._jobs(jobs)
+        return {
+            "snapshot_version": 1,
+            "project": self.catalog.project.to_dict() if self.catalog.project else None,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "jobs": {
+                "active": sum(not value.state.terminal for value in job_values),
+                "total": len(job_values),
+                "by_state": {
+                    state: sum(value.state.value == state for value in job_values)
+                    for state in sorted({value.state.value for value in job_values})
+                },
+            },
+            "work": {
+                "items": [
+                    value.to_dict(study_detail="overview")
+                    for value in aggregate_research_work(job_values)
+                ]
+            },
+        }
+
+    @staticmethod
+    def _job_overview(value: Any) -> dict[str, Any]:
+        """Project durable Job records without logs, commands or Study telemetry."""
+        metadata = value.metadata
+        return {
+            "job_record_version": 2,
+            "detail_level": "overview",
+            "job_id": value.job_id,
+            "cluster": value.cluster,
+            "scheduler": value.scheduler,
+            "scheduler_id": value.scheduler_id,
+            "state": value.state.value,
+            "resources": dict(value.resources),
+            "created_at_utc": value.created_at_utc,
+            "updated_at_utc": value.updated_at_utc,
+            "retry_of": value.retry_of,
+            "job_type": value.job_type,
+            "group_id": value.group_id,
+            "metadata": {
+                key: metadata[key]
+                for key in (
+                    "name",
+                    "scientific_identity",
+                    "scientific_revision",
+                    "study_expected",
+                    "submission_phase",
+                )
+                if key in metadata
+            },
+            **JobObservation.describe(value),
+        }

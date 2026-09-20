@@ -75,6 +75,40 @@ def test_submit_returns_and_reconnects_to_durable_state(tmp_path: Path) -> None:
     assert request["cache_root"] == str(tmp_path / "cache")
 
 
+def test_inventory_projects_study_without_transferring_candidates_or_runs(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "job-study-inventory"
+    study_dir = job_dir / "study"
+    study_dir.mkdir(parents=True)
+    (job_dir / "state.json").write_text(
+        json.dumps({"job_id": job_dir.name, "state": "running"}), encoding="utf-8"
+    )
+    (job_dir / "request.json").write_text(
+        json.dumps({"job_id": job_dir.name, "command": ["python"], "resources": {}}),
+        encoding="utf-8",
+    )
+    (study_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "study_telemetry_version": 1,
+                "objective": {"metric": "score", "mode": "max"},
+                "counts": {"candidates": 2, "active_runs": 1},
+                "candidates": [
+                    {"trial": 1, "selection_objective": 0.6, "runs": [{"seed": 1}]},
+                    {"trial": 2, "selection_objective": 0.8, "runs": [{"seed": 2}]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = ProcessSupervisor.inventory(tmp_path / "jobs")[0]["state"]
+
+    assert state["study"]["detail_level"] == "overview"
+    assert state["study"]["counts"]["candidates"] == 2
+    assert state["study"]["leader"]["trial"] == 2
+    assert "candidates" not in state["study"]
+
+
 def test_supervisor_does_not_copy_an_already_staged_workspace_onto_itself(
     tmp_path: Path,
 ) -> None:
@@ -150,13 +184,18 @@ def test_external_gpu_wrapper_environment_is_preserved_without_local_leases(
                     sys.executable,
                     "-c",
                     "import os; print(os.environ['CUDA_VISIBLE_DEVICES']); "
-                    "print(os.environ['LAMBDAFORGE_GPU_ACCESS_MODE'])",
+                    "print(os.environ['LAMBDAFORGE_GPU_ACCESS_MODE']); "
+                    "print(os.environ['LAMBDAFORGE_GPU_VISIBILITY_COMMAND'])",
                 ],
                 "cluster": "remote",
                 "source_work_dir": str(work_dir),
                 "stage_source": False,
                 "resources": {"gpu_count": 2},
-                "gpu_access": {"mode": "command", "command_prefix": ["gpu"]},
+                "gpu_access": {
+                    "mode": "command",
+                    "command_prefix": ["gpu"],
+                    "visibility_command": ["gpu", "env"],
+                },
                 "lease_root": str(tmp_path / "gpu-leases"),
                 "resource_lease_root": str(tmp_path / "process-leases"),
             }
@@ -166,7 +205,11 @@ def test_external_gpu_wrapper_environment_is_preserved_without_local_leases(
 
     assert ProcessSupervisor.serve(request) == 0
     output = (job_dir / "stdout.log").read_text(encoding="utf-8")
-    assert output.splitlines() == ["GPU-granted-7,GPU-granted-9", "command"]
+    assert output.splitlines() == [
+        "GPU-granted-7,GPU-granted-9",
+        "command",
+        '["gpu", "env"]',
+    ]
     state = json.loads((job_dir / "state.json").read_text(encoding="utf-8"))
     assert state["allocated_gpus"] == []
 

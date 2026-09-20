@@ -23,6 +23,10 @@ class MetricDashboard(Vertical):
 
     PAGE_SIZE = 4
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._page_signature: tuple[str, ...] = ()
+
     def compose(self) -> ComposeResult:
         with Grid(classes="metric-plot-grid"):
             for index in range(self.PAGE_SIZE):
@@ -43,6 +47,9 @@ class MetricDashboard(Vertical):
         display_names: Mapping[str, Any] | None = None,
     ) -> None:
         """Replace the current page while retaining truthful selected/best markers."""
+        signature = tuple(names)
+        same_page = signature == self._page_signature
+        self._page_signature = signature
         for index in range(self.PAGE_SIZE):
             card = self.query_one(f".metric-plot-card-{index}", Vertical)
             if index >= len(names):
@@ -55,8 +62,9 @@ class MetricDashboard(Vertical):
                 metric_display_name(name, display_names)
             )
             plot: Any = self.query_one(f".metric-plot-{index}")
+            viewport = plot.user_viewport() if same_page else None
             plot.clear()
-            self._reset_viewport(plot)
+            plot.restore_viewport(viewport)
             if not points:
                 continue
             x = [point[0] for point in points]

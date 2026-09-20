@@ -171,7 +171,11 @@ The same `../data/dna/design` marker then means `PROJECT/data/dna/design` locall
 `/scratch/USER/WISDOM/data/dna/design` remotely. Inputs up to the 10 MiB bundle limit remain
 automatic immutable snapshots. A larger input is never copied implicitly: it must be inside the
 local project, the matching remote path must already exist, and LambdaForge compares kind, byte
-count and SHA-256 before submission and again in the worker. Missing or stale content fails safely.
+count and SHA-256 before submission and again in the worker. Directory SHA-256 uses a versioned
+canonical tree identity: path components are Unicode-normalized and byte-sorted, `/` is the
+logical separator, record boundaries and empty directories are explicit, and host timestamps or
+permissions are excluded. It therefore does not depend on `find`, shell `sort`, locale or directory
+creation order. Missing, changing or stale content fails safely.
 Synchronizing the mirror with the site's recommended transfer service remains an explicit
 researcher operation.
 For hundreds of GB/TB, prefer a managed dataset: exact mirror verification also reads all bytes,
@@ -397,10 +401,13 @@ expands finite values or reproducible numeric ranges; `objective` defines either
 or an explicit fixed-range composite utility. Whenever `search` has an `objective`, omitting `strategy`
 enables the complete safe adaptive policy: Sobol startup, result-dependent proposals, probabilistic
 seed racing, curve pruning, convergence detection and fresh-seed confirmation. A scrambled Sobol
-pool supplies reproducible, space-filling candidates. When `startup_trials` is omitted, the first
-wave grows from the historical ten-point floor to the safe execution parallelism (bounded by
-`trials`), so each initially available slot receives a distinct candidate. An explicit
-`startup_trials` remains authoritative. After that wave, observed results choose later candidates.
+pool supplies reproducible candidates. When `startup_trials` is omitted, LambdaForge derives an
+`InitialDesignPlan` from the authored `ParameterSpace`: it greedily preserves the pool's useful
+main-effect/curvature rank, covers available categorical levels, conditional active/inactive
+states and numeric low/interior/high support, then uses deterministic D-optimal/maximin
+tie-breaking. Its anchor count never depends on GPUs, `runs_per_gpu` or `max_parallel`. An explicit
+`startup_trials` remains an authoritative anchor budget, while retaining the same geometric
+selection. After that evidence starts arriving, observed results choose later candidates.
 `sampler: auto` uses optional
 BoTorch mixed-GP qLogNEI when `lambdaforge[adaptive-hpo]` is installed and enough evidence exists,
 with a deterministic k-NN fallback for missing dependencies or numerical failures. Only proposed
@@ -497,7 +504,7 @@ search:
   trials: 40
   proposal_pool_size: 640
   min_seeds: 1
-  # Optional exact override; omitted means max(10, safe parallel slots), bounded by trials.
+  # Optional exact scientific-anchor budget; omitted means geometry-derived, never hardware-derived.
   startup_trials: 10
   seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.002}
   confirmation_top_k: 2
@@ -509,7 +516,8 @@ search:
   # Omit both fields to consume the complete 40-candidate budget (the safe default).
   convergence_patience: 8
   min_improvement: 0.0005
-  runs_per_gpu: 4
+  runs_per_gpu: auto  # or a positive integer hard cap per GPU
+  max_parallel: auto  # or a positive integer hard global cap
   failure_retries: 1
   early_stopping: {enabled: true, min_step: 5, confirmations: 2,
                    probability_threshold: 0.05, equivalence_margin: 0.002}
@@ -522,6 +530,15 @@ resources:
   cpu: 16            # total reservation; stable share per possible concurrent Run
   memory: 32GiB      # total reservation; Run shares never exceed this outer limit
 ```
+
+Execution has three deliberately separate layers. **Scientific planning** decides which evidence
+should exist, including protected startup anchors, optimization candidates, matched coverage probes
+and seed/fidelity actions. **Resource planning** decides which of those actions safely fits now.
+**Dispatch** creates the isolated process. A scientifically required anchor may therefore wait for
+resources without being cancelled. If a hard learned lower bound proves it impossible on every
+allocated device, LambdaForge replaces it with the closest candidate preserving its coverage
+obligations and records `REPLACE_STARTUP_ANCHOR`. Extra physical capacity does not enlarge the
+protected design: before enough outcomes exist it runs replannable `OPPORTUNISTIC_COVERAGE` points.
 
 The deterministic `proposal_pool_size` is stored once; lightweight candidate/seed specifications
 refer only to their own values. Planning memory therefore grows linearly with the internal pool and
@@ -540,10 +557,23 @@ positive value stops proposing only after that many completed full-fidelity resu
 the incumbent by more than `min_improvement`; it is not a multidimensional coverage test. The final
 controller event records whether execution ended because of candidate, Run or time budget,
 exhausted proposal pool, or this explicit convergence policy. Pruning and seed racing still save
-compute without reducing the authored candidate budget.
+compute without reducing the authored candidate budget. Coverage records distinguish **search
+coverage** (a region was attempted or scientifically pruned) from **response coverage** (a
+comparable completed response exists), including matched-context diversity. The controller can
+request `COVER_PARAMETER_VALUE` or `COVER_INTERACTION_CELL` when a conclusion is confounded by
+narrow context support. It does not enforce per-value quotas; the value of another probe falls as
+diverse evidence resolves the question.
 
-This permits **at most** eight simultaneous trainings, four on each of two GPUs. It does not ask
-LambdaForge to manufacture eight fixed slots. Each candidate receives a learned future-memory
+`PERFORMANCE_PRUNE` means that continuing a Run is not worthwhile for finding the optimum; it does
+not mean the partial curve contains no evidence. If that same censored Run later becomes the most
+cost-effective way to answer an unresolved parameter or interaction question, LambdaForge may
+record `SCIENTIFIC_CONTINUATION` and resume the same Trial and seed from its durable checkpoint as a
+new Attempt. It does not consume another `trials` slot, bypasses competitive-performance pruning,
+and still consumes Run/time budget. The original prune remains visible and valid.
+
+With `auto`, ARI may grow packing independently on each GPU until physical VRAM, host resources,
+throughput or site policy says to wait. Replacing it with `runs_per_gpu: 4` would impose **at most**
+four Runs per device; it would not demand four fixed slots. Each candidate receives a learned future-memory
 distribution from compatible terminal and live right-censored Runs. Admission uses physical device
 memory as authority and approximates future headroom as
 
@@ -634,6 +664,10 @@ hazard, rollback, wait regret and an explicit rejection reason, without emitting
 When several GPUs can accept one globally available Run, the resource planner uses the current
 ranked scientific frontier and device state instead of preferring GPU index zero. While eligible
 scientific actions and candidate/Run budget remain, every terminal event triggers replanning.
+Physical readiness is also an event: if the executable dispatch queue becomes empty while a granted
+GPU has admissible capacity, the dispatcher requests one bounded action frontier immediately
+instead of waiting for an unrelated Run to finish. The scientific controller still chooses the
+action and the resource planner still decides whether it is safe or worth one exploration step.
 Each packed Run owns a fresh spawned process which exits as
 soon as the Run finishes; LambdaForge does not reuse an idle CUDA worker because its surviving
 device context could retain VRAM and deadlock queued Runs. One full GPU therefore never fails the complete study, and a
@@ -681,10 +715,12 @@ Scheduling is event-driven. Every terminal Run causes the free slot to reconside
 `hpo-control/decisions.jsonl`. This value is an auditable common-scale heuristic, not Shannon
 information gain or a calibrated probability. Seed actions use relative standard-error reduction,
 new-region actions use bounded coverage/sparsity terms, and promotions use remaining-fidelity
-uncertainty, divided by observed incremental wall time. Undispatched queued actions form a
-provisional dispatch buffer: new evidence may replace one at zero scientific compute cost, with a
-`CANCEL_QUEUED_ACTION` record containing old/new priority and reason.
-Startup is a space-filling queue, not a barrier:
+uncertainty, divided by observed incremental wall time. Undispatched non-anchor actions form a
+provisional dispatch buffer: new evidence may replace one at zero scientific compute cost and
+records `CANCEL_PLANNED_DISPATCH` or `CANCEL_SCIENTIFIC_ACTION` according to whether only the
+dispatch plan or the scientific action was abandoned. A protected initial anchor instead records
+`DEFER_STARTUP_ANCHOR` and remains scientific debt.
+Startup is a protected space-filling design, not a barrier:
 model-directed work may begin while slower startup Runs remain active. Pending candidates condition
 the surrogate at their actual target fidelity, queued identities prevent duplicate seeds, and the
 controller may legitimately wait when no action has positive scientific value. Fidelity is an explicit model input, so partial and
@@ -847,6 +883,15 @@ reports the reduction. Thus one granted GPU is used as one, two are used as two,
 ignored, and a broken wrapper can never silently expose an ungranted physical GPU. A GPU-requesting
 Work also forces CUDA environment resolution: launcher failure cannot silently create a CPU-only
 managed environment.
+
+Command allocations may change while a long Study is running. LambdaForge obtains current opaque
+tokens from `gpu_access.visibility_command`; for the usual `[gpu, exec]` prefix it derives
+`[gpu, env]` automatically. A token can only disappear or be restored from the original inherited
+grant—new physical identifiers are never accepted. On shrink, only the verified child Run on each
+revoked token is stopped and requeued with its logical identity/checkpoint; unaffected Runs keep
+going. If the ownership probe is temporarily unavailable, existing Runs are left intact but no new
+Run is admitted. A custom visibility command must print its current comma-separated tokens on its
+first non-empty line.
 
 The shared mode admits external occupancy while LambdaForge Jobs still coordinate with each other.
 Admission messages in the Run log show launches and periodic waits with current free memory. Since
@@ -1013,6 +1058,18 @@ and Results. Enter/right opens the selected entity; Esc/left or the visible **Ba
 returns exactly one level; Home returns to the root; and every non-current breadcrumb segment is
 clickable. Remote Study and Seed views show a centered loading state until their persisted snapshot
 arrives, and show an explicit retrieval error rather than pretending an empty table is evidence.
+Collection screens use deliberately shallow read models. Overview performs one inventory pass per
+direct provider (or only active-job status reads for schedulers without inventory), reads only local
+Dataset registry counts and never transfers every Study candidate/Run index;
+Work and Studies omit resource and Dataset probes altogether. Opening one Study fetches its bounded
+candidate/Run index, while HPO analysis, complete controller history and logs are loaded only when
+their tabs are opened. Epoch curves, artifacts and isolated logs are requested only after opening
+one seed. `lf overview --json` follows the same compact contract; use `lf show WORK` and
+`lf show WORK --run KEY --json` for successive detail levels.
+The worker writes a compact `study/interactive.json` separately from its authoritative rich
+summary; legacy oversized summaries are projected on the execution host, and the complete action
+history is transferred in bounded JSONL pages only after opening Action history. Live redraws retain
+the selected row, table/log offsets and any manual chart viewport.
 The central scientific route is:
 
 ```text
@@ -1094,6 +1151,9 @@ first Study snapshot. Periodic provider failures stay in the view as stale/error
 produce a repeating notification stream. **Delete Study History…** previews and then removes the
 exact terminal Study/Attempt state using its `work_id`; active Studies must first be cancelled, and
 published datasets, shared environments and unrelated same-name executions remain untouched.
+If a provider cannot confirm a Job beyond `unknown`, deletion is still available as an explicit
+history-only operation: it forgets the local record but preserves the unverified remote process and
+workspace. Reconnect and cancel first when remote computation may still be active.
 
 Dataset Summary loads exact split and primary-target counts from the logical index without walking
 large asset trees. Opening Members automatically fetches one bounded page. Physical Stats and

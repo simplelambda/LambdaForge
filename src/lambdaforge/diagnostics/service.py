@@ -686,6 +686,8 @@ class DiagnosticClassifier:
         internal_model_transport = isinstance(error, TypeError) and (
             "cannot pickle 'mappingproxy' object" in lowered
             or "cannot pickle 'frozenjson" in lowered
+            or "'activeresourceevidence' and 'activeresourceevidence'" in lowered
+            or "object of type posixpath is not json serializable" in lowered
         )
         if (
             isinstance(error, (FileExistsError, FileNotFoundError, KeyError, ValueError, TypeError))
@@ -912,7 +914,12 @@ def work_failure_diagnostic(
     run_dir: str | Path | None = None,
 ) -> ErrorDiagnostic:
     """Explain an exception raised by the single current Work execution contract."""
-    context = {"kind": "work", "name": name, "config": str(source), "run_dir": run_dir}
+    context = {
+        "kind": "work",
+        "name": name,
+        "config": str(source),
+        "run_dir": str(run_dir) if run_dir is not None else None,
+    }
     summary = "Work code returned an unsuccessful result."
     if isinstance(error, Mapping):
         summary = f"{error.get('type', 'Error')}: {error.get('message', 'execution failed')}"

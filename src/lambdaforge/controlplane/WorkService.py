@@ -109,7 +109,12 @@ class WorkService:
                 "already_deleted": True,
             }
         records = tuple(self.jobs.get(job_id) for job_id in work.job_ids)
-        active = tuple(record.job_id for record in records if not record.state.terminal)
+        unknown = tuple(record for record in records if record.state.value == "unknown")
+        active = tuple(
+            record.job_id
+            for record in records
+            if not record.state.terminal and record.state.value != "unknown"
+        )
         if active:
             raise ValueError(f"Cannot delete active work; cancel it first: {active}.")
         workspace_plans = [
@@ -124,50 +129,96 @@ class WorkService:
                 ),
             )
             for record in records
+            if record.state.terminal
         ]
         if apply:
             self._write_deletion_receipt(work.to_dict(), tuple(record.job_id for record in records))
             for record in records:
-                self.jobs.delete(record.job_id)
+                if record.state.value == "unknown":
+                    self.jobs.delete(record.job_id, allow_unknown=True)
+                else:
+                    self.jobs.delete(record.job_id)
+        unknown_ids = [record.job_id for record in unknown]
         return {
             "work": work.to_dict(),
             "job_records": [record.job_id for record in records],
             "workspaces": workspace_plans,
+            "unknown_history_only": unknown_ids,
             "applied": apply,
             "already_deleted": False,
             "preserved": [
                 "published datasets",
                 "shared caches and environments",
                 "other Work and job records",
+                *(
+                    ["unverified remote processes and workspaces for UNKNOWN Jobs"]
+                    if unknown_ids
+                    else []
+                ),
             ],
+            "will_remove": [
+                "local Work/Job history",
+                *(["verified terminal Job workspaces"] if workspace_plans else []),
+            ],
+            "will_preserve": [
+                "published datasets, shared caches and environments",
+                *(
+                    [
+                        "UNKNOWN Job remote processes/workspaces because their terminal state "
+                        "cannot be verified"
+                    ]
+                    if unknown_ids
+                    else []
+                ),
+            ],
+            "reasons": (
+                [
+                    "UNKNOWN is not treated as terminal. This operation only forgets its local "
+                    "history; cancel it first if the provider becomes reachable and it is active."
+                ]
+                if unknown_ids
+                else []
+            ),
         }
 
     def delete_job(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
         """Delete one terminal Job's exact workspace and local history record."""
         job_id = self.jobs.resolve_selector(selector)
         record = self.jobs.get(job_id)
-        if not record.state.terminal:
+        unknown = record.state.value == "unknown"
+        if not record.state.terminal and not unknown:
             raise ValueError(f"Cannot delete active job {job_id}; cancel it first.")
-        local_root = (
-            self.jobs.job_root(record)
-            if self.catalog.get(record.cluster).transport == "local"
-            else None
-        )
-        workspace = self.storage.delete_job(
-            record.cluster,
-            record.job_id,
-            apply=apply,
-            local_run_root=local_root,
-        )
+        workspace = None
+        if not unknown:
+            local_root = (
+                self.jobs.job_root(record)
+                if self.catalog.get(record.cluster).transport == "local"
+                else None
+            )
+            workspace = self.storage.delete_job(
+                record.cluster,
+                record.job_id,
+                apply=apply,
+                local_run_root=local_root,
+            )
         if apply:
-            self.jobs.delete(record.job_id)
+            if unknown:
+                self.jobs.delete(record.job_id, allow_unknown=True)
+            else:
+                self.jobs.delete(record.job_id)
         return {
             "job_id": record.job_id,
             "cluster": record.cluster,
             "state": record.state.value,
             "workspace": workspace,
+            "unknown_history_only": unknown,
             "applied": apply,
-            "preserved": ["published datasets", "shared caches and environments", "other Jobs"],
+            "preserved": [
+                "published datasets",
+                "shared caches and environments",
+                "other Jobs",
+                *(["unverified remote process and workspace"] if unknown else []),
+            ],
         }
 
     def clear_history(self, *, apply: bool = False) -> dict[str, Any]:

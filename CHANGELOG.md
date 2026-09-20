@@ -12,6 +12,16 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Added a deterministic `InitialDesignPlan` whose protected anchors follow canonical
+  `ParameterSpace` rank, authored discrete/conditional/numeric coverage, D-optimal information and
+  maximin separation—independent of physical parallelism. Bounded search/response coverage state,
+  matched-context pair summaries, explicit value/cell probes and hard-infeasible anchor replacement
+  are persisted for the Research Console and automation. Controller restart reconstructs completed
+  Attempts, protected anchor debt and pending scientific actions without replaying finished Runs.
+- Added checkpoint-backed `SCIENTIFIC_CONTINUATION`: a performance-pruned logical Run can resume as
+  a new Attempt with the same Trial/seed to answer a later high-value scientific question, without
+  fabricating a final objective or consuming another candidate slot. Added `runs_per_gpu: auto` and
+  explicit `max_parallel: auto` while retaining finite host/resource-derived dispatch ceilings.
 - Refined Adaptive Resource Intelligence to v3.1 with polling-invariant incremental sufficient
   statistics, learned phase-specific peak hazard, exact segmented WaitRegret persistence,
   per-resident checkpoint rollback/cost and tail-aware joint P(fit) composition. Scheduling now
@@ -68,6 +78,49 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Fixed equal-distance live resource evidence attempting to compare immutable evidence objects
+  during adaptive GPU prediction. Resource-neighbour and exploratory-placement ties now have
+  explicit deterministic scalar keys, so a valid Study cannot terminate with an
+  `ActiveResourceEvidence` ordering `TypeError`. Work failure paths and final Study Analysis are
+  also normalized to strict JSON instead of allowing a `PosixPath` to break terminal analysis;
+  both conditions are classified as internal framework errors rather than user configuration.
+- Replaced monolithic live-Study transfers with a compact `interactive.json` index, lazy selected-
+  Run reads and paged controller-history JSONL. Research Console refreshes now preserve table/log
+  scroll and explicit plot pan/zoom instead of rebuilding the user's viewport on every poll.
+- Fixed an event-driven scheduling hole where controller-deferred actions could remain visible as
+  queued while the dispatch queue was empty, leaving a granted GPU idle until another Run ended.
+  Resource readiness now requests one bounded scientific frontier immediately and the existing
+  memory/throughput planner remains authoritative for admission.
+- Fixed false curve pruning caused by treating `early_stopping.min_step` as a forecast horizon.
+  It is now only the evidence threshold; absent an authored fidelity boundary, pruning uses one
+  observed local window and cannot stop a candidate that is still competitive at the exact common
+  checkpoint solely because of a noisy fitted slope.
+- Added live command-allocation reconciliation for sites such as CITIUS: `gpu exec` automatically
+  pairs with `gpu env` (or an explicit `visibility_command`). A shrinking grant terminates only the
+  verified workers on revoked opaque tokens and requeues their logical Runs from checkpoints;
+  unaffected devices continue, restored tokens become eligible again, and probe failure blocks new
+  admission without inventing or broadening GPU ownership.
+- Made Research Console loading hierarchical and bounded: Overview now performs one inventory pass
+  per direct provider (or active-job status reads for schedulers without inventory), uses local
+  Dataset registry counts and emits compact Job/Study projections;
+  Work/Studies avoid unrelated resource and Dataset probes; Study analysis, full action history and
+  logs load only on their tabs, while per-epoch evidence remains per-seed. UNKNOWN Work/Study
+  history can now be removed through an explicit previewed local-forget operation without deleting
+  an unverified remote process or workspace.
+
+- Prevented rejected resource probes from persisting non-finite `-Infinity` sentinels into strict
+  Study JSON and crashing the adaptive controller after a healthy Run completed. Cold start now
+  establishes one protected exploratory baseline on every otherwise idle allocated GPU even when
+  unavoidable driver/context overhead makes physical free VRAM slightly lower than nominal VRAM;
+  known lower bounds, failed-placement dominance and evidence-gated co-location remain enforced.
+- Made large mirrored `{file: ...}` directory verification independent of shell locale, filesystem
+  enumeration, host path ordering and metadata through a versioned canonical tree fingerprint.
+  New identities normalize logical Unicode paths, preserve empty directories and delimit every
+  typed record; legacy bundle identities remain readable.
+- Decoupled startup evidence from GPU/process concurrency, protected pending anchors from queue
+  replanning, distinguished dispatch invalidation from scientific cancellation and prevented
+  duplicate deferred candidate/seed/fidelity execution. Survival propagation now uses the same
+  logarithmic and conditional `ParameterSpace` geometry as every other HPO subsystem.
 - Prevented monitor cadence, bounded display downsampling and changing candidate frontiers from
   manufacturing confidence or erasing resource-scheduling liveness. Fixed time-to-next-checkpoint
   semantics and mixed checkpointable/non-checkpointable rollback accounting; rare sub-percent

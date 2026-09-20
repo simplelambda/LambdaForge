@@ -83,9 +83,16 @@ class CandidateDesignValue:
     reason: str
 
     def to_dict(self) -> dict[str, Any]:
+        action = (
+            self.purpose
+            if self.purpose in {"COVER_PARAMETER_VALUE", "COVER_INTERACTION_CELL"}
+            else "START_NEW"
+            if self.purpose == "OPTIMIZE"
+            else "DESIGNED_PROBE"
+        )
         return {
             "trial": self.trial,
-            "action": "START_NEW" if self.purpose == "OPTIMIZE" else "DESIGNED_PROBE",
+            "action": action,
             "purpose": self.purpose,
             "target_questions": list(self.target_questions),
             "optimization_value": self.optimization_value,
@@ -630,6 +637,11 @@ class ScientificQuestionAnalyzer:
             elif trial not in outcomes and _finite(candidate.get("selection_objective")):
                 direction = 1.0 if mode == "max" else -1.0
                 outcomes[trial] = {None: direction * float(candidate["selection_objective"])}
+        # One performance-pruned seed censors the candidate-level response. Earlier completed
+        # siblings remain useful operational history, but averaging them would create a
+        # survivor-only final objective and overstate response coverage.
+        for trial in pruned:
+            outcomes.pop(trial, None)
         rows = {
             trial: statistics.fmean(values.values()) for trial, values in outcomes.items() if values
         }
@@ -1396,6 +1408,7 @@ class ExperimentalDesignPolicy:
         scientific_state: Mapping[str, Any],
         costs: Mapping[int, float] | None = None,
         required_candidates: Sequence[int] = (),
+        search_covered: Sequence[int] = (),
         decision_key: str = "",
     ) -> tuple[CandidateDesignValue, ...]:
         rows = {
@@ -1467,6 +1480,13 @@ class ExperimentalDesignPolicy:
                         eig,
                     )
                 )
+            targeted.extend(
+                self._coverage_targets(
+                    parameters,
+                    questions=questions,
+                    observed=set(rows) | set(search_covered),
+                )
+            )
             targeted.sort(reverse=True)
             information_value = min(
                 1.0,
@@ -1487,19 +1507,21 @@ class ExperimentalDesignPolicy:
             targets: tuple[str, ...]
             if w_info * information_value > w_opt * optimization_value and top_value > 0:
                 purpose = (
-                    "RESOLVE_INTERACTION" if top_kind == "interaction" else "RESOLVE_PARAMETER"
+                    "COVER_PARAMETER_VALUE"
+                    if top_kind == "coverage_parameter"
+                    else "COVER_INTERACTION_CELL"
+                    if top_kind == "coverage_interaction"
+                    else "RESOLVE_INTERACTION"
+                    if top_kind == "interaction"
+                    else "RESOLVE_PARAMETER"
                 )
                 targets = (top_target,)
                 reason = (
-                    f"{top_target} currently offers the largest expected question-entropy "
+                    f"{top_target} has insufficient matched-context evidence and currently "
+                    "offers the largest expected question-uncertainty reduction per cost"
+                    if top_kind.startswith("coverage_")
+                    else f"{top_target} currently offers the largest expected question-entropy "
                     "reduction per comparable cost"
-                )
-            elif information_value > optimization_value and top_value > 0:
-                purpose = "EXPLORE_COVERAGE"
-                targets = (top_target,)
-                reason = (
-                    "coverage and model clarification add more value than another "
-                    "near-duplicate optimization proposal"
                 )
             else:
                 purpose = "OPTIMIZE"
@@ -1524,6 +1546,87 @@ class ExperimentalDesignPolicy:
                 )
             )
         return tuple(sorted(output, key=lambda value: (-value.score, value.trial)))
+
+    def _coverage_targets(
+        self,
+        parameters: Mapping[str, Any],
+        *,
+        questions: Sequence[Mapping[str, Any]],
+        observed: set[int],
+    ) -> list[tuple[float, str, str, float, float]]:
+        """Value authored levels/cells by missing matched-context support, never quotas."""
+        targets: list[tuple[float, str, str, float, float]] = []
+        for question in questions:
+            entropy = min(1.0, max(0.0, float(question.get("entropy", 0.0) or 0.0)))
+            if entropy <= 0:
+                continue
+            raw_parameter = question.get("parameter")
+            if raw_parameter is not None:
+                name = str(raw_parameter)
+                if name not in self.parameter_space.names:
+                    continue
+                value = parameters.get(name, _INACTIVE)
+                authored = tuple(question.get("authored_values", ()))
+                if value == _INACTIVE and _INACTIVE not in authored:
+                    continue
+                observed_same = [
+                    self.candidates[trial]
+                    for trial in observed
+                    if self.candidates[trial].get(name, _INACTIVE) == value
+                ]
+                diversity = min(
+                    (
+                        self.parameter_space.distance(parameters, observed, ignore=(name,))
+                        for observed in observed_same
+                    ),
+                    default=1.0,
+                )
+                support = len(observed_same)
+                information = entropy * (0.5 + 0.5 * diversity) / math.sqrt(1 + support)
+                targets.append(
+                    (
+                        information,
+                        "coverage_parameter",
+                        f"{name} = {_display_label(value)}",
+                        diversity,
+                        entropy,
+                    )
+                )
+                continue
+            raw_names = question.get("parameters", ())
+            if not isinstance(raw_names, Sequence) or isinstance(raw_names, str | bytes):
+                continue
+            names = tuple(str(value) for value in raw_names[:2])
+            if len(names) != 2 or any(name not in self.parameter_space.names for name in names):
+                continue
+            cell = tuple(parameters.get(name, _INACTIVE) for name in names)
+            observed_same = [
+                self.candidates[trial]
+                for trial in observed
+                if tuple(self.candidates[trial].get(name, _INACTIVE) for name in names) == cell
+            ]
+            diversity = min(
+                (
+                    self.parameter_space.distance(parameters, observed, ignore=names)
+                    for observed in observed_same
+                ),
+                default=1.0,
+            )
+            support = len(observed_same)
+            information = entropy * (0.5 + 0.5 * diversity) / math.sqrt(1 + support)
+            targets.append(
+                (
+                    information,
+                    "coverage_interaction",
+                    " × ".join(
+                        f"{name} = {_display_label(value)}"
+                        for name, value in zip(names, cell, strict=True)
+                    ),
+                    diversity,
+                    entropy,
+                )
+            )
+        return targets
 
     def _decision_shortlist(
         self,
@@ -1619,9 +1722,7 @@ class ExperimentalDesignPolicy:
         neighbours = sorted(
             (
                 (
-                    self.parameter_space.distance(
-                        self.candidates[trial], self.candidates[other]
-                    ),
+                    self.parameter_space.distance(self.candidates[trial], self.candidates[other]),
                     float(cost),
                 )
                 for other, cost in costs.items()

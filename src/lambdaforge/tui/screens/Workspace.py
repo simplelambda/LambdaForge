@@ -74,6 +74,29 @@ def _artifact_size(value: Any) -> str:
     return f"{value} bytes"
 
 
+def _scroll_snapshot(screen: Screen[Any]) -> dict[str, tuple[float, float]]:
+    """Capture stable scroll offsets before a live read model is redrawn."""
+    snapshot: dict[str, tuple[float, float]] = {}
+    for widget_type in (DataTable, VerticalScroll, RichLog):
+        for widget in screen.query(widget_type):
+            if widget.id:
+                snapshot[widget.id] = (float(widget.scroll_x), float(widget.scroll_y))
+    return snapshot
+
+
+def _restore_scroll_snapshot(
+    screen: Screen[Any], snapshot: Mapping[str, tuple[float, float]]
+) -> None:
+    """Restore offsets after the replacement rows have been laid out."""
+    for identifier, (x, y) in snapshot.items():
+        try:
+            widget = screen.query_one(f"#{identifier}")
+        except Exception:
+            continue
+        if hasattr(widget, "scroll_to"):
+            widget.scroll_to(x=x, y=y, animate=False)
+
+
 class ResearchWorkspace(Screen[None]):
     """Base screen with real stack navigation and human-readable breadcrumbs."""
 
@@ -215,7 +238,11 @@ class StudyWorkspace(ResearchWorkspace):
 
     def __init__(self, work: Mapping[str, Any], services: Any) -> None:
         self.work = dict(work)
-        self.study = dict(work.get("study") or {})
+        initial_study = dict(work.get("study") or {})
+        # Root collection views intentionally carry only a tiny Study projection.
+        # Do not mistake it for an empty full candidate index: fetch that index once
+        # the user actually opens this workspace.
+        self.study = {} if initial_study.get("detail_level") == "overview" else initial_study
         self.services = services
         self.selected_trial: int | None = None
         self.analysis: dict[str, Any] | None = None
@@ -227,6 +254,9 @@ class StudyWorkspace(ResearchWorkspace):
         self._refreshing = False
         self._analysis_loading = False
         self._analysis_loaded_at = 0.0
+        self._actions_loading = False
+        self._logs_loading = False
+        self._logs_loaded_at = 0.0
         self._cancel_running = False
         self._delete_running = False
         self._last_refresh_error: str | None = None
@@ -400,8 +430,18 @@ class StudyWorkspace(ResearchWorkspace):
         self.set_interval(2.0, self._refresh_if_active)
         if not self.study:
             self._refresh_study(force=True)
-        self._load_analysis(force=True)
-        self._load_study_logs()
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Fetch expensive evidence only when the pane that consumes it is opened."""
+        if event.pane is None:
+            return
+        if event.tabbed_content.id == "study-tabs":
+            if event.pane.id in {"study-hpo", "study-analysis"}:
+                self._load_analysis(force=self.analysis is None)
+            elif event.pane.id == "study-logs":
+                self._load_study_logs(force=True)
+        elif event.tabbed_content.id == "hpo-tabs" and event.pane.id == "hpo-actions-pane":
+            self._load_action_history()
 
     def _render_workspace(self) -> None:
         if not self.study:
@@ -625,7 +665,30 @@ class StudyWorkspace(ResearchWorkspace):
             and isinstance(unresolved[0], Mapping)
             else "No unresolved question is currently prioritized."
         )
+        initial = self.study.get("initial_design", {})
+        initial = initial if isinstance(initial, Mapping) else {}
+        coverage = self.study.get("coverage_state", {})
+        coverage = coverage if isinstance(coverage, Mapping) else {}
+        uncovered = initial.get("uncovered_obligations", ())
+        uncovered_count = (
+            len(uncovered)
+            if isinstance(uncovered, Sequence) and not isinstance(uncovered, str | bytes)
+            else 0
+        )
         return (
+            "INITIAL SCIENTIFIC DESIGN\n"
+            f"Mode                 {initial.get('mode', 'unavailable')}\n"
+            f"Authored dimensions  {initial.get('authored_dimensions', 'unavailable')}\n"
+            f"Design rank          {initial.get('effective_rank', '—')} / "
+            f"{initial.get('full_rank', '—')}\n"
+            f"Protected anchors    {initial.get('required_anchors', '—')} · "
+            f"{initial.get('anchors_observed', 0)} observed · "
+            f"{initial.get('anchors_pending', 0)} waiting · "
+            f"{initial.get('anchors_censored', 0)} censored\n"
+            f"Coverage             search {coverage.get('search_coverage', '—')} / "
+            f"response {coverage.get('response_coverage', '—')} of "
+            f"{coverage.get('obligation_count', '—')} obligations · "
+            f"{uncovered_count} initial obligations uncovered\n\n"
             "CONTROLLER\n"
             f"Last action          {latest.get('action', 'unavailable')}\n"
             f"Reason               {latest.get('reason', latest.get('why', 'unavailable'))}\n"
@@ -657,6 +720,8 @@ class StudyWorkspace(ResearchWorkspace):
         counts = self.study.get("counts", {})
         objective = self.study.get("objective", {})
         understanding = self._scientific_understanding()
+        initial = self.study.get("initial_design", {})
+        initial = initial if isinstance(initial, Mapping) else {}
         stop_summary = self._controller_stop_summary(controller)
         controller_status = stop_summary or f"Last: {latest.get('action', 'No decision yet')}"
         self.query_one("#hpo-strategy-card", Static).update(
@@ -670,6 +735,8 @@ class StudyWorkspace(ResearchWorkspace):
         self.query_one("#hpo-evidence-card", Static).update(
             "[b]EVIDENCE[/b]\n"
             f"{counts.get('candidates', 0)} candidates · {counts.get('completed_runs', 0)} complete\n"
+            f"anchors {initial.get('anchors_observed', 0)} observed / "
+            f"{initial.get('anchors_pending', 0)} waiting · "
             f"O={format_value(understanding.get('optimization_opportunity'))} · "
             f"K={format_value(understanding.get('scientific_uncertainty'))} · "
             f"{str(understanding.get('phase', 'learning')).replace('-', ' ')}"
@@ -958,13 +1025,11 @@ class StudyWorkspace(ResearchWorkspace):
                         and not isinstance(next_seconds, bool)
                         else "unknown"
                     )
-                    if (
-                        isinstance(next_uncertainty, int | float)
-                        and not isinstance(next_uncertainty, bool)
+                    if isinstance(next_uncertainty, int | float) and not isinstance(
+                        next_uncertainty, bool
                     ):
                         next_event = (
-                            f"{format_value(next_seconds)} ± "
-                            f"{format_value(next_uncertainty)}s"
+                            f"{format_value(next_seconds)} ± {format_value(next_uncertainty)}s"
                         )
                     lines.append(
                         f"    {identity} · current "
@@ -1012,10 +1077,13 @@ class StudyWorkspace(ResearchWorkspace):
                     wait = wait if isinstance(wait, Mapping) else {}
                     hazards = value.get("phase_hazards", {})
                     hazards = hazards if isinstance(hazards, Mapping) else {}
-                    hazard_summary = ", ".join(
-                        f"{name}={format_value(amount)}"
-                        for name, amount in list(hazards.items())[:3]
-                    ) or "unavailable"
+                    hazard_summary = (
+                        ", ".join(
+                            f"{name}={format_value(amount)}"
+                            for name, amount in list(hazards.items())[:3]
+                        )
+                        or "unavailable"
+                    )
                     sources = value.get("fit_uncertainty_sources", ())
                     uncertainty = ", ".join(map(str, sources)) if sources else "none identified"
                     lines.extend(
@@ -1116,18 +1184,40 @@ class StudyWorkspace(ResearchWorkspace):
                 )
                 self.app.call_from_thread(self._show_analysis_error, reason)
                 return
-            actions = None
+            self.app.call_from_thread(self._apply_analysis, value)
+
+        Thread(target=load, daemon=True, name="lambdaforge-tui-study-analysis").start()
+
+    def _load_action_history(self) -> None:
+        """Load the complete paged controller history only on explicit drill-down."""
+        if self._actions_loading or self._persisted_hpo_actions is not None or not self.job_id:
+            return
+        self._actions_loading = True
+        self.query_one("#hpo-action-preview", Static).update(
+            "Loading the complete paged controller history…"
+        )
+
+        def load() -> None:
+            actions: Sequence[Mapping[str, Any]] | None = None
             action_loader = getattr(self.services, "study_actions", None)
-            if callable(action_loader) and self.job_id:
+            if callable(action_loader):
                 try:
                     actions = action_loader(self.job_id)
                 except Exception:
-                    # The bounded controller tail is already a truthful fallback. A provider
-                    # outage during periodic refresh must not create recurring notifications.
+                    # Keep the bounded recent tail. Provider failures remain visible through the
+                    # existing Study freshness state instead of notification spam.
                     actions = None
-            self.app.call_from_thread(self._apply_analysis, value, actions)
+            self.app.call_from_thread(self._apply_action_history, actions)
 
-        Thread(target=load, daemon=True, name="lambdaforge-tui-study-analysis").start()
+        Thread(target=load, daemon=True, name="lambdaforge-tui-study-actions").start()
+
+    def _apply_action_history(
+        self, actions: Sequence[Mapping[str, Any]] | None
+    ) -> None:
+        self._actions_loading = False
+        if actions is not None:
+            self._persisted_hpo_actions = [dict(action) for action in actions]
+        self._populate_hpo_actions()
 
     def _show_analysis_error(self, message: str) -> None:
         self._analysis_loading = False
@@ -1142,18 +1232,10 @@ class StudyWorkspace(ResearchWorkspace):
     def _apply_analysis(
         self,
         value: Mapping[str, Any],
-        actions: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         self._analysis_loading = False
         self._analysis_loaded_at = time.monotonic()
         self.analysis = dict(value)
-        current_controller = self.study.get("controller", {})
-        current_tail = (
-            current_controller.get("recent", ()) if isinstance(current_controller, Mapping) else ()
-        )
-        if actions is not None and (actions or not current_tail):
-            self._persisted_hpo_actions = [dict(action) for action in actions]
-            self._populate_hpo_actions()
         self._populate_hpo_parameters()
         winner = value.get("winner", {})
         seeds = value.get("seed_analysis", {})
@@ -1518,8 +1600,10 @@ class StudyWorkspace(ResearchWorkspace):
             "No Run telemetry was produced. The Logs tab contains the durable "
             "preparation/runtime diagnosis."
         )
+        self._load_study_logs(force=True)
 
     def _apply_refresh(self, value: Mapping[str, Any]) -> None:
+        scrolls = _scroll_snapshot(self)
         self.study = dict(value)
         self._last_refresh_error = None
         if not self._cancel_running:
@@ -1527,12 +1611,21 @@ class StudyWorkspace(ResearchWorkspace):
         self.query_one("#study-loading").display = False
         self.query_one("#study-tabs").display = True
         self._render_workspace()
-        self._load_study_logs()
-        self._load_analysis()
+        self.call_after_refresh(_restore_scroll_snapshot, self, scrolls)
+        active = self.query_one("#study-tabs", TabbedContent).active
+        if active == "study-logs":
+            self._load_study_logs()
+        elif active in {"study-hpo", "study-analysis"}:
+            self._load_analysis()
 
-    def _load_study_logs(self) -> None:
-        if not self.job_id:
+    def _load_study_logs(self, *, force: bool = False) -> None:
+        if (
+            not self.job_id
+            or self._logs_loading
+            or (not force and time.monotonic() - self._logs_loaded_at < 2.0)
+        ):
             return
+        self._logs_loading = True
 
         def load() -> None:
             try:
@@ -1545,6 +1638,8 @@ class StudyWorkspace(ResearchWorkspace):
         Thread(target=load, daemon=True, name="lambdaforge-tui-study-logs").start()
 
     def _replace_study_log(self, text: str) -> None:
+        self._logs_loading = False
+        self._logs_loaded_at = time.monotonic()
         log = self.query_one("#study-log-content", RichLog)
         at_end = log.is_vertical_scroll_end
         y = log.scroll_y
@@ -2411,6 +2506,7 @@ class SeedWorkspace(ResearchWorkspace):
             self._load()
 
     def _apply_detail(self, detail: Mapping[str, Any]) -> None:
+        scrolls = _scroll_snapshot(self)
         self.detail = dict(detail)
         self.query_one("#seed-loading").display = False
         self.query_one("#seed-tabs").display = True
@@ -2483,6 +2579,7 @@ class SeedWorkspace(ResearchWorkspace):
                 default=str,
             )
         )
+        self.call_after_refresh(_restore_scroll_snapshot, self, scrolls)
 
     def _populate_artifacts(self, raw_artifacts: Any) -> None:
         artifacts = (
@@ -2643,6 +2740,24 @@ class SeedWorkspace(ResearchWorkspace):
         state = str(detail.get("state", self.run.get("state", "unknown")))
         censored = "  † CENSORED" if state == "pruned" else ""
         objective_name = objective_display_name(self.objective)
+        continuation = ""
+        if detail.get("scientific_continuation"):
+            original = detail.get("original_prune", {})
+            original = original if isinstance(original, Mapping) else {}
+            questions = detail.get("target_questions", ())
+            question = (
+                str(questions[0])
+                if isinstance(questions, Sequence)
+                and not isinstance(questions, str | bytes)
+                and questions
+                else "an unresolved scientific question"
+            )
+            continuation = (
+                "\nScientific continuation: optimization pruning at epoch "
+                f"{original.get('common_step', original.get('observed_step', '—'))}; "
+                f"resumed from {detail.get('continued_from_attempt', 'checkpoint')} to answer "
+                f"{question}."
+            )
         self.query_one("#seed-header", Static).update(
             f"Seed {detail.get('seed', self.run.get('seed', 'none'))}  ·  "
             f"{state.upper()}{censored}\n"
@@ -2651,6 +2766,7 @@ class SeedWorkspace(ResearchWorkspace):
             f"final {TrialWorkspace._run_value(detail.get('final_objective'), state, 'final')}   "
             f"best epoch {detail.get('best_step', '-')}   latest {detail.get('current_step', detail.get('latest_step', '-'))}   "
             f"GPU {detail.get('gpu_index', '-')}   elapsed {format_duration(detail.get('duration_seconds'))}"
+            f"{continuation}"
         )
 
     def _populate_epochs(self, rows: Sequence[tuple[int, Mapping[str, float]]]) -> None:

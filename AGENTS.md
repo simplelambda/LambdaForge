@@ -109,7 +109,10 @@ describe publication as an automatic transfer back to the controller.
 For remote `{file: PATH}` inputs, content up to 10 MiB is bundled automatically. A larger path must
 belong to the local `pyproject.toml` project and have an exact counterpart below the cluster's
 absolute `project_root`; LambdaForge verifies kind/size/SHA-256 before submission and in the worker,
-and never syncs or deletes that researcher-owned mirror. Configure with
+and never syncs or deletes that researcher-owned mirror. New directory identities use the
+versioned canonical tree algorithm, never shell `find | sort`: NFC path components, UTF-8 byte
+component ordering, `/` separators, typed length-delimited records and empty directories; ignore
+host metadata. Historical markers without an algorithm use the legacy reader. Configure with
 `lf clusters set NAME project_root /absolute/remote/project`, then run `lf doctor --on NAME`.
 Missing/stale/symlinked content fails closed. Use managed datasets for reusable very large data,
 because exact mirror verification reads every byte on each submission.
@@ -158,7 +161,12 @@ with a protected minimum height. Mutation confirmations and modal plans render b
 sections, never raw JSON. Hidden root screens must not load.
 Root loading indicators are first-snapshot-only. Later probes retain the last good read model,
 display its age and mark it stale on failure; Work rows and bounded Work logs refresh live with at
-most one request in flight per view.
+most one request in flight per view. Overview must use one inventory pass per direct provider (or
+active-job status only for schedulers without inventory), local Dataset registry counts and compact
+Job/Study projections. Work/Studies root screens must not trigger
+resource or Dataset probes. An unverifiable UNKNOWN Work may be forgotten only through
+preview/apply local-history deletion; never delete its unverified remote workspace/process or call
+it terminal.
 Run Work's picker filters to YAML; recents merge existing local Job history with a bounded MRU that
 persists only local path/name/time metadata.
 Browse/recent selection only populates one selector. The single Submit action must revalidate,
@@ -204,11 +212,15 @@ survivor-only mean. `trials` is the executed-candidate budget and
 It automatically balances posterior practical-improvement opportunity O with unresolved-question
 entropy K per observed incremental cost; neither is a calibrated information gain or a user-facing
 confidence value.
-Startup is not a barrier, undispatched queue entries are provisional/replanned with explicit
-`CANCEL_QUEUED_ACTION`, and pending `(candidate, seed, fidelity)` identities prevent duplicates. Root `search.reduction_factor` and
+Startup is not a barrier. Geometry-derived initial anchors are protected scientific obligations;
+other undispatched entries remain provisional. Use `DEFER_STARTUP_ANCHOR`,
+`CANCEL_PLANNED_DISPATCH` and `CANCEL_SCIENTIFIC_ACTION` with their exact meanings, and keep pending
+`(candidate, seed, phase, fidelity)` identities unique. Root `search.reduction_factor` and
 `search.confidence` are removed in favour of separately owned fidelity/seed/pruning controls.
-Omitted `startup_trials` resolves to `min(trials, max(10, safe parallelism))`; an explicit value is
-authoritative. Interleave first seeds across distinct startup candidates before extra seeds.
+Omitted `startup_trials` derives a deterministic rank/coverage/D-optimal/maximin
+`InitialDesignPlan` from `ParameterSpace`; an explicit value is its authoritative anchor budget.
+It must never depend on parallelism. Interleave first seeds across distinct startup candidates
+before extra seeds; spare capacity may use replannable `OPPORTUNISTIC_COVERAGE`.
 `ScientificQuestionAnalyzer` is the one shared live/final source for parameter conclusions,
 pairwise interactions and the practical optimal region. Scientific `confidence` means stability of
 the exact displayed conclusion under deterministic candidate-level/shared-seed resampling—not
@@ -226,12 +238,19 @@ cleanup or admission. The full deterministic pool remains authoritative for opti
 `ParameterSpace` is the single authored geometry for Sobol, adaptive/Bayesian sampling, scientific
 design, resource similarity and Study Analysis. Log scales use log coordinates; integer,
 categorical and conditional activity semantics must not be re-inferred from observed candidates.
-Candidate mappings and IDs remain unchanged.
+Candidate mappings and IDs remain unchanged. Coverage state distinguishes attempted/censored
+search coverage from completed response coverage and includes matched-context diversity.
+Scientific design may request `COVER_PARAMETER_VALUE` or `COVER_INTERACTION_CELL`; their value
+must decay as diverse evidence resolves the question. A checkpointed performance-pruned Run may
+later use `SCIENTIFIC_CONTINUATION` for a high-value question: preserve Trial/seed identity, create
+a new Attempt, bypass competitive pruning, consume Run/time but not candidate budget, and retain
+the original prune as valid censored evidence.
 `objective.constraints.METRIC.min/max` are explicit same-checkpoint guardrails. Across seeds,
 `seed_aggregation` is legacy `mean`, `worst` or `lcb` with optional `confidence`; missing/insufficient
 LCB evidence is infeasible. A utility component may also be constrained. Never
-infer guardrails or hidden multi-objective weights from other metrics. `runs_per_gpu` is only a hard
-per-device maximum inside the fixed outer reservation; `max_parallel` remains the global maximum.
+infer guardrails or hidden multi-objective weights from other metrics. Integer `runs_per_gpu` is a
+hard per-device maximum and integer `max_parallel` a hard global maximum. `auto`/null removes the
+artificial cap but still requires a finite host/resource-derived internal dispatch ceiling.
 `resources.gpu_memory` is optional and, when present, is a user safety floor per new Run. Effective
 admission uses the maximum of that floor, a candidate-specific conservative future envelope and
 known OOM lower bounds, bounded again by live physical free VRAM. Physical VRAM is authoritative.
@@ -286,8 +305,12 @@ honestly failed but must not cancel unrelated active/queued Runs. Telemetry reco
 index and exact inherited token; never infer or broaden physical devices from that display field.
 
 Study telemetry is a bounded read model, not another result store. It references per-Run logs and
-scalar JSONL, never copies checkpoints/outputs, and exposes exact keys under
-`overview --json` → `work.items[].study`. `lf show WORK --run KEY --json` returns parameters,
+scalar JSONL and never copies checkpoints/outputs. Collection reads are hierarchical:
+`overview --json` exposes only compact Study counts/objective/leader metadata; opening one Study
+loads transport-safe `study/interactive.json`; selected Runs are lazy, analysis/logs are tab-lazy,
+and complete controller history is paged only on explicit Action-history drill-down. Legacy rich
+summaries must be projected on their execution host rather than transferred whole; and
+`lf show WORK --run KEY --json` returns parameters,
 down-sampled curves, current/best objective and epoch, timing/failure/log plus finalized artifact
 paths/checksums/retention; the seed Artifacts tab consumes the same metadata without copying or
 opening remote content. `lf logs WORK --run KEY`
@@ -300,7 +323,9 @@ its earlier completed seeds as survivor-only evidence. Group completed evidence 
 A candidate-level joint survival model with uncertainty softly
 modifies acquisition; multiple seeds do not overcount one candidate and operational failures or
 scheduler preemption remain neutral. Default pruning requires two distinct
-uncompetitive common steps through `early_stopping.confirmations`. Lightning scalar
+uncompetitive common steps through `early_stopping.confirmations`. `min_step` is eligibility, not
+a forecast horizon: use an authored fidelity boundary or one observed local window, and never stop
+a candidate still competitive at the exact common step solely from its fitted slope. Lightning scalar
 callback metrics plus epoch/validation time are automatic. Custom trainers log curves with
 `self.metrics.log(name, value, step=epoch)`; use `progress.update` for coarse progress and
 `self.log`/print only for human narration.
@@ -480,6 +505,10 @@ supervisor releases on every terminal path, and persistent claims are invalid wi
 command/scheduler modes inherited `CUDA_VISIBLE_DEVICES` tokens are opaque grants: never replace or
 broaden them. Missing/duplicate grants fail closed; scheduler grants are exact, while an adaptive
 Study behind a command launcher may safely scale down to fewer non-empty inherited tokens. The
+optional `visibility_command` reports the current comma-separated opaque grant; `[gpu, exec]`
+derives `[gpu, env]`. Intersect it with the original grant, stop only verified workers on revoked
+tokens and checkpoint-requeue those logical Runs; keep siblings running and block new admission
+when the ownership probe is unavailable. Never accept a newly reported physical token. The
 Research Console edits the
 same catalog and credential services as native commands and never shells out to `lf`. Direct versus
 SLURM selects process launch; GPU wrappers/claims are the separate `gpu_access` policy, so

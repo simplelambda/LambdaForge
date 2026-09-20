@@ -56,9 +56,9 @@ class StudyOverviewDashboard(Vertical):
             f"{objective_display_name(objective)} by trial"
         )
         objective_plot: Any = self.query_one(".study-objective-plot")
+        viewport = objective_plot.user_viewport()
         objective_plot.clear()
-        objective_plot.set_xlimits(None, None)
-        objective_plot.set_ylimits(None, None)
+        objective_plot.restore_viewport(viewport)
         points = [
             (int(item.get("trial", index)), float(item["selection_objective"]))
             for index, item in enumerate(candidates)
@@ -119,7 +119,9 @@ class StudyOverviewDashboard(Vertical):
         objective_plot.set_ylabel("selection")
 
         state_plot: Any = self.query_one(".study-state-plot")
+        state_viewport = state_plot.user_viewport()
         state_plot.clear()
+        state_plot.restore_viewport(state_viewport)
         if states:
             labels = list(states)
             state_plot.bar(

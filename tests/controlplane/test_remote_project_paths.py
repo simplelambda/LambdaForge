@@ -11,7 +11,11 @@ import pytest
 from lambdaforge.controlplane import ClusterProfile, ControlPlane, LocalTransport
 from lambdaforge.controlplane.ExecutionBundleBuilder import ExecutionBundleBuilder
 from lambdaforge.work import WorkConfig, WorkRunner
-from lambdaforge.work.managed import fingerprint
+from lambdaforge.work.managed import (
+    CANONICAL_FINGERPRINT_ALGORITHM,
+    canonical_fingerprint,
+    fingerprint,
+)
 
 
 def test_cluster_project_root_is_explicit_absolute_and_round_trips() -> None:
@@ -62,7 +66,8 @@ def test_large_project_input_maps_to_exact_remote_relative_path(tmp_path: Path) 
     assert values["with"]["design"] == {"file": "/scratch/research/project/data/design"}
     assert staged == []
     assert shared[0]["project_relative"] == "data/design"
-    assert shared[0]["sha256"] == fingerprint(data)[0]
+    assert shared[0]["fingerprint_algorithm"] == CANONICAL_FINGERPRINT_ALGORITHM
+    assert shared[0]["sha256"] == canonical_fingerprint(data)[0]
 
 
 def test_bundle_persists_remote_path_and_worker_identity_contract(tmp_path: Path) -> None:
@@ -159,6 +164,37 @@ def test_shared_input_probe_accepts_exact_content_and_rejects_stale_content(
     item.write_text('{"value": 2}', encoding="utf-8")
     with pytest.raises(ValueError, match="differs.*stale or partial"):
         ControlPlane._verify_shared_inputs(LocalTransport(), profile, expected)
+
+
+def test_shared_input_probe_uses_portable_versioned_directory_identity(tmp_path: Path) -> None:
+    data = tmp_path / "design"
+    (data / "nested").mkdir(parents=True)
+    (data / "empty").mkdir()
+    (data / "z.txt").write_bytes(b"last")
+    (data / "nested" / "first.txt").write_bytes(b"first")
+    digest, size = canonical_fingerprint(data)
+    expected = (
+        {
+            "configured": "../data/design",
+            "remote_path": str(data),
+            "kind": "directory",
+            "fingerprint_algorithm": CANONICAL_FINGERPRINT_ALGORITHM,
+            "sha256": digest,
+            "size_bytes": size,
+        },
+    )
+    profile = ClusterProfile.from_mapping(
+        "probe",
+        {
+            "transport": "ssh",
+            "host": "localhost",
+            "workspace": str(tmp_path / ".lambdaforge"),
+            "python": sys.executable,
+            "project_root": str(tmp_path),
+        },
+    )
+
+    ControlPlane._verify_shared_inputs(LocalTransport(), profile, expected)
 
 
 def test_worker_rechecks_shared_input_against_bundle_identity(tmp_path: Path) -> None:

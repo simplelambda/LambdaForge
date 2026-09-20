@@ -23,7 +23,7 @@ from lambdaforge.controlplane.ProjectWheelBuilder import ProjectWheelBuilder
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.work import WorkConfig
-from lambdaforge.work.managed import fingerprint
+from lambdaforge.work.managed import CANONICAL_FINGERPRINT_ALGORITHM, canonical_fingerprint
 
 
 class ExecutionBundleBuilder:
@@ -182,13 +182,14 @@ class ExecutionBundleBuilder:
                             PurePosixPath(remote_project_root)
                             / PurePosixPath(relative_to_project.as_posix())
                         )
-                        digest, verified_size = fingerprint(local)
+                        digest, verified_size = canonical_fingerprint(local)
                         shared_inputs.append(
                             {
                                 "configured": str(item["file"]),
                                 "project_relative": relative_to_project.as_posix(),
                                 "remote_path": remote,
                                 "kind": "directory" if local.is_dir() else "file",
+                                "fingerprint_algorithm": CANONICAL_FINGERPRINT_ALGORITHM,
                                 "sha256": digest,
                                 "size_bytes": verified_size,
                             }
