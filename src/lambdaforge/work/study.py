@@ -44,6 +44,7 @@ class StudyTelemetry:
         specifications: Sequence[Mapping[str, Any]],
         planned_runs: int | None = None,
         planned_candidates: int | None = None,
+        design: Mapping[str, Any] | None = None,
     ) -> None:
         """Create a bounded candidate catalogue before launching any child process."""
         candidates: dict[int, dict[str, Any]] = {}
@@ -71,6 +72,7 @@ class StudyTelemetry:
                 "planned_candidates": (
                     len(candidates) if planned_candidates is None else planned_candidates
                 ),
+                "design": dict(design) if isinstance(design, Mapping) else None,
                 "candidates": [candidates[key] for key in sorted(candidates)],
                 "created_at_utc": _now(),
                 "updated_at_utc": _now(),
@@ -105,11 +107,21 @@ class StudyTelemetry:
                         {
                             "key": key,
                             "seed": specification.get("seed"),
+                            "seed_metadata": (
+                                dict(specification["seed_metadata"])
+                                if isinstance(specification.get("seed_metadata"), Mapping)
+                                else None
+                            ),
                             "phase": specification.get("hpo_phase", "search"),
                             "purpose": specification.get("hpo_probe_purpose", "OPTIMIZE"),
                             "target_questions": list(specification.get("hpo_target_questions", ())),
                             "fidelity": dict(specification.get("hpo_fidelity", {})),
                             "state": "scheduled",
+                            "evidence_requirement": (
+                                dict(specification["evidence_requirement"])
+                                if isinstance(specification.get("evidence_requirement"), Mapping)
+                                else None
+                            ),
                         }
                     )
                 candidate["state"] = "running"
@@ -124,6 +136,7 @@ class StudyTelemetry:
         active: Sequence[int],
         ranked: Sequence[int],
         finished: bool,
+        finish_reason: str | None = None,
     ) -> None:
         """Persist controller decisions without letting workers mutate shared JSON."""
         active_set, ranked_set = set(active), set(ranked)
@@ -148,26 +161,176 @@ class StudyTelemetry:
                     candidate["state"] = "promoted" if terminal else "running"
                 elif trial in ranked_set:
                     candidate["state"] = "eliminated"
+            if finished:
+                # A terminal snapshot must not retain planned/queued identities. Required debt is
+                # kept explicit as missing evidence; optional work is cancelled as no longer
+                # selected. This is reconciliation, not a claim that the missing Run executed.
+                for candidate in index.get("candidates", ()):
+                    if not isinstance(candidate, dict):
+                        continue
+                    for descriptor in candidate.get("runs", ()):
+                        if not isinstance(descriptor, dict):
+                            continue
+                        state = self._run_state(str(descriptor["key"]))
+                        if state.get("state", descriptor.get("state")) != "scheduled":
+                            continue
+                        requirement = descriptor.get("evidence_requirement")
+                        required = isinstance(requirement, Mapping) and bool(
+                            requirement.get("required")
+                        )
+                        self._write_run(
+                            str(descriptor["key"]),
+                            {
+                                "state": "cancelled",
+                                "termination_type": "not_started_cancelled",
+                                "termination": {
+                                    "type": "not_started_cancelled",
+                                    "reason": (
+                                        "required evidence remained missing at Study termination"
+                                        if required
+                                        else "optional evidence was not selected before termination"
+                                    ),
+                                },
+                                "finished_at_utc": _now(),
+                                "updated_at_utc": _now(),
+                            },
+                        )
             index["finished"] = finished
+            if finished and finish_reason is not None:
+                index["finish_reason_hint"] = finish_reason
             index["updated_at_utc"] = _now()
             atomic_json(self.root / "index.json", index)
         snapshot = self.refresh()
         if finished:
+            snapshot = self._persist_terminal_semantics(snapshot)
             # Analysis cannot alter the controller decision or scientific outcome.
             try:
                 from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
 
-                StudyAnalysis.persist(
+                analysis = StudyAnalysis.persist(
                     snapshot,
                     self.root / "analysis.json",
                     objective=snapshot.get("objective"),
                     status="final",
                 )
+                final_scientific_status = analysis.get("scientific_status")
+                if final_scientific_status in {
+                    "resolved",
+                    "partially_resolved",
+                    "unresolved",
+                }:
+                    index = self._index()
+                    index["scientific_status"] = final_scientific_status
+                    index["updated_at_utc"] = _now()
+                    atomic_json(self.root / "index.json", index)
             except Exception as error:
                 atomic_json(
                     self.root / "analysis-error.json",
                     {"type": type(error).__name__, "message": str(error), "at_utc": _now()},
                 )
+
+    def _persist_terminal_semantics(self, snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        """Persist execution, design and scientific completion as separate truths."""
+        index = self._index()
+        requirements = {
+            str(value.get("key")): value
+            for value in (index.get("design") or {}).get("evidence", {}).get("requirements", ())
+            if isinstance(value, Mapping) and value.get("required") is True
+        }
+        if (index.get("design") or {}).get("type") == "adaptive":
+            # Adaptive minimum replication becomes debt only when the candidate is proposed.
+            # The normalized plan can describe every possible public trial up to the candidate
+            # budget, but an explicit early Run/time/convergence boundary must not turn never-
+            # proposed candidates into fictitious missing experiments.
+            proposed_candidates = {
+                int(candidate["trial"])
+                for candidate in snapshot.get("candidates", ())
+                if isinstance(candidate, Mapping) and candidate.get("trial") is not None
+            }
+            requirements = {
+                key: value
+                for key, value in requirements.items()
+                if value.get("candidate") in proposed_candidates
+            }
+        states: dict[str, str] = {}
+        for candidate in snapshot.get("candidates", ()):
+            if not isinstance(candidate, Mapping):
+                continue
+            for run in candidate.get("runs", ()):
+                if not isinstance(run, Mapping):
+                    continue
+                requirement = run.get("evidence_requirement")
+                if isinstance(requirement, Mapping) and requirement.get("key"):
+                    if requirement.get("required") is True:
+                        requirements.setdefault(str(requirement["key"]), dict(requirement))
+                    states[str(requirement["key"])] = str(run.get("state", "scheduled"))
+        succeeded = sum(states.get(key) == "succeeded" for key in requirements)
+        pruned = sum(states.get(key) == "pruned" for key in requirements)
+        failed = sum(states.get(key) in {"failed", "infeasible"} for key in requirements)
+        missing_keys = sorted(
+            key
+            for key in requirements
+            if states.get(key) not in {"succeeded", "pruned"}
+        )
+        required = len(requirements)
+        design_status = "complete" if not missing_keys else "incomplete"
+        scientific = snapshot.get("hpo_analysis")
+        scientific_status = "unresolved"
+        if isinstance(scientific, Mapping):
+            questions = scientific.get("parameter_questions", ())
+            comparable = [value for value in questions if isinstance(value, Mapping)]
+            unresolved = [
+                value
+                for value in comparable
+                if value.get("conclusion_kind") in {"UNRESOLVED", "NO_CLEAR_PREFERENCE"}
+            ]
+            if comparable and not unresolved:
+                scientific_status = "resolved"
+            elif comparable and len(unresolved) < len(comparable):
+                scientific_status = "partially_resolved"
+        counts = snapshot.get("counts", {})
+        terminal_status = (
+            "incomplete"
+            if missing_keys and not failed
+            else "completed_with_failures"
+            if failed
+            else "completed"
+        )
+        finish_reason = (
+            "fixed-design-complete"
+            if design_status == "complete" and str(index.get("strategy")) in {"sweep", "repeated"}
+            else str(index["finish_reason_hint"])
+            if index.get("finish_reason_hint")
+            else "required-evidence-incomplete"
+            if missing_keys
+            else str(
+                ((snapshot.get("controller") or {}).get("last") or {}).get(
+                    "reason", "no-scientifically-useful-action"
+                )
+            )
+        )
+        completion = {
+            "status": terminal_status,
+            "design_status": design_status,
+            "scientific_status": scientific_status,
+            "finish_reason": finish_reason,
+            "required_runs": required,
+            "required_completed": succeeded,
+            "required_pruned": pruned,
+            "required_failed": failed,
+            "required_missing": len(missing_keys),
+            "evidence_completion_fraction": (succeeded / required if required else 1.0),
+            "attempted_completion_fraction": (
+                (succeeded + pruned) / required if required else 1.0
+            ),
+            "missing_requirement_keys": missing_keys[:100],
+            "active_runs": int(counts.get("active_runs", 0) or 0),
+            "queued_runs": 0,
+        }
+        index.update(completion)
+        index["finished"] = True
+        atomic_json(self.root / "index.json", index)
+        return self.refresh()
 
     def candidates_observed(self, trials: Sequence[int]) -> None:
         """Mark proposed candidates whose initial evidence is now terminal."""
@@ -225,6 +388,11 @@ class StudyTelemetry:
                 "state": "running",
                 "trial": int(specification["trial_index"]),
                 "seed": specification.get("seed"),
+                "seed_metadata": (
+                    dict(specification["seed_metadata"])
+                    if isinstance(specification.get("seed_metadata"), Mapping)
+                    else None
+                ),
                 "phase": specification.get("hpo_phase", "search"),
                 "purpose": specification.get("hpo_probe_purpose", "OPTIMIZE"),
                 "target_questions": list(specification.get("hpo_target_questions", ())),
@@ -273,6 +441,7 @@ class StudyTelemetry:
                 "state": state,
                 "trial": int(specification["trial_index"]),
                 "seed": result.seed,
+                "seed_metadata": dict(result.seed_metadata),
                 "phase": result.study_phase or specification.get("hpo_phase", "search"),
                 "purpose": specification.get("hpo_probe_purpose", "OPTIMIZE"),
                 "target_questions": list(specification.get("hpo_target_questions", ())),

@@ -61,6 +61,7 @@ from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservatio
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
 from lambdaforge.hpo.BayesianSampler import BayesianSampler
+from lambdaforge.hpo.CandidateGenerator import DeterministicCandidateGenerator
 from lambdaforge.hpo.CurveEvidence import CompletedCurve, audit_pruner, predict_curve
 from lambdaforge.hpo.InitialDesign import AnchorState, CoverageState, InitialDesignPlanner
 from lambdaforge.hpo.ObjectiveUtility import (
@@ -75,6 +76,7 @@ from lambdaforge.hpo.ScientificDesign import (
     ScientificQuestionAnalyzer,
     SeedNoiseModel,
 )
+from lambdaforge.hpo.SequentialSweep import PairedSweepSequentialAnalyzer
 from lambdaforge.hpo.SurvivalModel import (
     SurvivalAcquisitionPolicy,
     SurvivalModel,
@@ -82,9 +84,11 @@ from lambdaforge.hpo.SurvivalModel import (
 )
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
+from lambdaforge.reproducibility.SeedProvider import ProjectSeedStream
 from lambdaforge.work.cache import WorkCache
 from lambdaforge.work.checkpoints import CheckpointCollection
 from lambdaforge.work.config import RunDefinition, WorkConfig, import_work_class
+from lambdaforge.work.design import ExecutionPolicy, StudyConvergenceState
 from lambdaforge.work.managed import (
     CANONICAL_FINGERPRINT_ALGORITHM,
     LEGACY_FINGERPRINT_ALGORITHM,
@@ -188,14 +192,23 @@ class WorkRunner:
                             "name": definition.name,
                             "class": definition.work_class,
                             "seed": seed,
+                            "seed_metadata": self._seed_metadata(definition, seed),
                             "trial": index,
                             "parameters": {**dict(definition.parameters), **dict(variant)},
                             "resources": definition.resources.to_dict(),
                             "search": (
                                 definition.search_policy.to_dict()
                                 if definition.search_policy is not None
-                                else {"strategy": "exhaustive"}
+                                else (
+                                    {
+                                        "strategy": "fixed",
+                                        "design": definition.study_design.to_dict(),
+                                    }
+                                    if definition.study_design is not None
+                                    else None
+                                )
                             ),
+                            "execution": definition.execution_policy.to_dict(),
                         }
                     )
             levels.append(tuple(planned))
@@ -306,6 +319,13 @@ class WorkRunner:
                 "source": str(plan.source),
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "planned_runs": config.planned_runs,
+                "study_designs": [
+                    definition.study_design.to_dict()
+                    for level in config.levels
+                    for definition in level.runs
+                    if definition.study_design is not None
+                ],
+                "resolved_configuration": config.resolved_configuration(),
                 "resources": config.resources.to_dict(),
                 "ownership": {
                     "execution_dir": "owned",
@@ -318,6 +338,13 @@ class WorkRunner:
         # Retry must use the exact materialized authoring document that created this
         # Execution, even when the researcher later edits or removes the source YAML.
         atomic_json(execution_dir / "configuration.json", config.raw)
+        atomic_json(execution_dir / "resolved-configuration.json", config.resolved_configuration())
+        try:
+            (execution_dir / "authored.yaml").write_text(
+                plan.source.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        except OSError:
+            pass
         outcomes: list[WorkResult] = []
         named_outputs: dict[str, Mapping[str, Any]] = {}
         for level in config.levels:
@@ -340,6 +367,12 @@ class WorkRunner:
                         if definition.search_policy is not None
                         else None
                     ),
+                    "execution_policy": definition.execution_policy.to_dict(),
+                    "study_design": (
+                        definition.study_design.to_dict()
+                        if definition.study_design is not None
+                        else None
+                    ),
                     "study_expected": definition.study_expected,
                 }
                 specifications: list[dict[str, Any]] = []
@@ -350,6 +383,7 @@ class WorkRunner:
                             "parameters": {**parameters, **dict(variant)},
                             "trial_parameters": dict(variant),
                             "seed": seed,
+                            "seed_metadata": self._seed_metadata(definition, seed),
                             "trial_index": trial_index,
                             "execution_id": plan.execution_id,
                             "execution_dir": execution_dir,
@@ -443,6 +477,17 @@ class WorkRunner:
         return execution_result
 
     @staticmethod
+    def _seed_metadata(definition: RunDefinition, seed: int | None) -> dict[str, Any] | None:
+        return next(
+            (
+                dict(value)
+                for value in definition.seed_metadata
+                if value.get("value") == seed
+            ),
+            None,
+        )
+
+    @staticmethod
     def _compact_outcomes(outcomes: Sequence[WorkResult]) -> None:
         """Compact only content proven redundant after its result is durable."""
         for outcome in outcomes:
@@ -477,6 +522,54 @@ class WorkRunner:
             "failed_runs": sum(not result.ok for result in outcomes),
             "pruned_runs": sum(result.pruned for result in outcomes),
         }
+        study_designs = [
+            definition.study_design
+            for level in config.levels
+            for definition in level.runs
+            if definition.study_design is not None
+        ]
+        if study_designs:
+            design = study_designs[0]
+            summary["study_design"] = design.to_dict()
+            observed = {
+                (
+                    int((result.trial or {"index": 0})["index"]),
+                    result.seed,
+                ): result
+                for result in outcomes
+            }
+            observed_candidates = {
+                int((result.trial or {"index": 0})["index"]) for result in outcomes
+            }
+            required = tuple(
+                requirement
+                for requirement in design.evidence.required
+                if design.kind != "adaptive" or requirement.candidate in observed_candidates
+            )
+            completed = sum(
+                (requirement.candidate, requirement.seed) in observed
+                and observed[(requirement.candidate, requirement.seed)].termination_type
+                == "completed"
+                for requirement in required
+            )
+            attempted = sum(
+                (requirement.candidate, requirement.seed) in observed
+                and (
+                    observed[(requirement.candidate, requirement.seed)].termination_type
+                    in {"completed", "performance_pruned"}
+                )
+                for requirement in required
+            )
+            summary["evidence"] = {
+                "required_runs": len(required),
+                "required_completed": completed,
+                "required_attempted": attempted,
+                "required_missing": max(0, len(required) - attempted),
+                "evidence_completion_fraction": (
+                    completed / len(required) if required else 1.0
+                ),
+                "design_status": "complete" if attempted == len(required) else "incomplete",
+            }
         adaptive_definitions = [
             definition
             for level in config.levels
@@ -552,6 +645,10 @@ class WorkRunner:
         confirmation_attempts = [
             result for result in objective_runs if result.study_phase == "confirmation"
         ]
+        if not expected_confirmation_seeds:
+            expected_confirmation_seeds = {
+                result.seed for result in confirmation_attempts if result.seed is not None
+            }
         confirmation_trial_ids = {
             int((result.trial or {"index": -1})["index"]) for result in confirmation_attempts
         }
@@ -688,13 +785,10 @@ class WorkRunner:
             complete_candidates = sum(
                 bool(candidate.get("confirmation_complete")) for candidate in candidates
             )
-            expected_candidates = min(
-                max(
-                    (policy.confirmation_top_k for policy in confirmation_policies),
-                    default=0,
-                ),
-                len(candidates),
-            )
+            # Automatic confirmation freezes the full practically competitive set; it is not
+            # constrained by the legacy ``confirmation_top_k`` override.  Derive the expected
+            # cardinality from the persisted confirmation Runs themselves.
+            expected_candidates = len(confirmation_trial_ids)
             confirmation_incomplete = complete_candidates < expected_candidates
             summary["confirmation"] = {
                 "status": "incomplete" if confirmation_incomplete else "complete",
@@ -733,11 +827,21 @@ class WorkRunner:
 
     @staticmethod
     def _expanded(definition: RunDefinition) -> Sequence[tuple[int, Mapping[str, Any], int | None]]:
-        return tuple(
-            (trial_index, variant, seed)
-            for trial_index, variant in enumerate(definition.variants, 1)
-            for seed in definition.seeds
-        )
+        if definition.study_design is None or definition.study_design.kind == "adaptive":
+            return tuple(
+                (trial_index, variant, seed)
+                for trial_index, variant in enumerate(definition.variants, 1)
+                for seed in definition.seeds
+            )
+        # Rotate treatments within deterministic seed blocks. ARI may still reorder for physical
+        # feasibility, but the scientific priority no longer confounds one treatment with time.
+        candidates = tuple(enumerate(definition.variants, 1))
+        output: list[tuple[int, Mapping[str, Any], int | None]] = []
+        for seed_index, seed in enumerate(definition.seeds):
+            rotation = seed_index % max(1, len(candidates))
+            ordered = candidates[rotation:] + candidates[:rotation]
+            output.extend((trial, variant, seed) for trial, variant in ordered)
+        return tuple(output)
 
     @staticmethod
     def _study_identity(config: WorkConfig) -> str:
@@ -759,6 +863,12 @@ class WorkRunner:
                         "search_policy": (
                             definition.search_policy.to_dict()
                             if definition.search_policy is not None
+                            else None
+                        ),
+                        "execution_policy": definition.execution_policy.to_dict(),
+                        "study_design": (
+                            definition.study_design.to_dict()
+                            if definition.study_design is not None
                             else None
                         ),
                     }
@@ -823,6 +933,9 @@ def _execute_group(specifications: Sequence[Mapping[str, Any]]) -> tuple[WorkRes
         raw = specifications[0]["definition"].get("search_policy")
         if isinstance(raw, Mapping):
             return _execute_adaptive_group(specifications, AdaptiveSearchPolicy.from_search(raw))
+        design = specifications[0]["definition"].get("study_design")
+        if isinstance(design, Mapping) and design.get("type") in {"sweep", "repeated"}:
+            return _execute_fixed_evidence_group(specifications)
     definition = specifications[0]["definition"] if specifications else {}
     telemetry = (
         StudyTelemetry.from_environment() if definition.get("study_expected") is True else None
@@ -852,6 +965,256 @@ def _execute_group(specifications: Sequence[Mapping[str, Any]]) -> tuple[WorkRes
             finished=True,
         )
     return tuple(outcomes)
+
+
+def _execute_fixed_evidence_group(
+    specifications: Sequence[Mapping[str, Any]],
+) -> tuple[WorkResult, ...]:
+    """Execute every fixed evidence identity through the common ARI dispatcher."""
+    if not specifications:
+        return ()
+    definition = specifications[0]["definition"]
+    raw_execution = definition.get("execution_policy")
+    execution = ExecutionPolicy.from_mapping(
+        raw_execution if isinstance(raw_execution, Mapping) else None
+    )
+    raw_design = definition.get("study_design")
+    design = raw_design if isinstance(raw_design, Mapping) else {}
+    raw_space = design.get("space")
+    space: Mapping[str, Any] = raw_space if isinstance(raw_space, Mapping) else {}
+    candidate_count = len({int(value["trial_index"]) for value in specifications})
+    policy = AdaptiveSearchPolicy(
+        runs_per_gpu=execution.runs_per_gpu,
+        max_parallel=execution.max_parallel,
+        min_seeds=1,
+        candidate_budget=max(1, candidate_count),
+        proposal_pool_size=max(1, candidate_count),
+        early_stopping=False,
+        failure_retries=execution.failure_retries,
+        confirmation_seeds=(),
+        max_runs=execution.max_runs,
+        max_time_seconds=execution.max_time_seconds,
+        parameter_space={
+            str(name): dict(value)
+            for name, value in space.items()
+            if isinstance(value, Mapping)
+        },
+    )
+    resources = ResourceRequest.from_mapping(definition["resources"])
+    objective = definition.get("objective")
+    objective = objective if isinstance(objective, Mapping) else {}
+    metric = str(objective.get("metric", ""))
+    mode = str(objective.get("mode", "max"))
+    automatic_blocks = design.get("replication") == "auto-blocks"
+    sequential_analyzer: PairedSweepSequentialAnalyzer | None = None
+    replicate_stream: ProjectSeedStream | None = None
+    if automatic_blocks:
+        bounds = _bounded_objective_range(objective)
+        if bounds is None:
+            raise ValueError(
+                "Automatic sweep replication requires a bounded objective. Use a registered "
+                "metric shorthand or declare objective.range: [low, high]."
+            )
+        raw_seed_source = design.get("seed_source")
+        if (
+            not isinstance(raw_seed_source, Mapping)
+            or raw_seed_source.get("kind") != "project-stream"
+        ):
+            raise ValueError("Automatic sweep replication requires the project replicate stream.")
+        replicate_stream = ProjectSeedStream.from_mapping(
+            {**raw_seed_source, "role": "replicate"}
+        )
+        sequential_analyzer = PairedSweepSequentialAnalyzer(
+            mode=mode,
+            bounds=bounds,
+            practical_margin=(
+                float(objective["practical_margin"])
+                if isinstance(objective.get("practical_margin"), int | float)
+                and not isinstance(objective.get("practical_margin"), bool)
+                else None
+            ),
+        )
+    telemetry = StudyTelemetry.from_environment()
+    prepared = [dict(value) for value in specifications]
+    requirement_by_identity = {
+        (int(value.get("candidate", 0)), value.get("seed")): value
+        for value in design.get("evidence", {}).get("requirements", ())
+        if isinstance(value, Mapping)
+    }
+    for value in prepared:
+        requirement = requirement_by_identity.get(
+            (int(value["trial_index"]), value.get("seed"))
+        )
+        if requirement is not None:
+            value["evidence_requirement"] = dict(requirement)
+            value["evidence_required"] = bool(requirement.get("required", False))
+    if telemetry is not None:
+        telemetry.initialize(
+            name=str(definition["name"]),
+            execution_id=str(specifications[0]["execution_id"]),
+            strategy="sweep" if design.get("type") == "sweep" else "repeated",
+            objective=objective,
+            specifications=prepared,
+            planned_runs=len(prepared),
+            planned_candidates=candidate_count,
+            design=design,
+        )
+        telemetry.schedule(prepared)
+    parallelism = _adaptive_parallelism(resources, policy)
+    started = time.monotonic()
+    terminal_results: list[WorkResult] = []
+    sequential_finish_reason: str | None = None
+    sequential_path = (
+        Path(str(specifications[0]["execution_dir"]))
+        / "hpo-control"
+        / "sweep-sequential.json"
+    )
+    templates = {
+        int(value["trial_index"]): dict(value)
+        for value in prepared
+    }
+
+    def retain_required_queue(
+        result: WorkResult,
+        queued: Sequence[Mapping[str, Any]],
+        pending: Sequence[Mapping[str, Any]],
+    ) -> Sequence[dict[str, Any]]:
+        nonlocal sequential_finish_reason
+        terminal_results.append(result)
+        if (
+            execution.max_time_seconds is None
+            or time.monotonic() - started < execution.max_time_seconds
+        ):
+            retained = [dict(value) for value in queued]
+        else:
+            retained = []
+            sequential_finish_reason = "TIME_BUDGET"
+        for value in queued:
+            if not retained and telemetry is not None:
+                telemetry.queued_action_cancelled(
+                    value,
+                    reason="execution time budget exhausted before required evidence ran",
+                )
+        if retained or pending or not automatic_blocks:
+            return retained
+        assert sequential_analyzer is not None
+        assert replicate_stream is not None
+        by_candidate: dict[int, dict[int, float]] = {
+            trial: {} for trial in templates
+        }
+        completed_ordinals: set[int] = set()
+        permanent_failure = False
+        for observed in terminal_results:
+            public_trial = int((observed.trial or {"index": 0})["index"])
+            metadata = observed.seed_metadata
+            ordinal = metadata.get("ordinal") if isinstance(metadata, Mapping) else None
+            if not isinstance(ordinal, int) or isinstance(ordinal, bool):
+                continue
+            completed_ordinals.add(ordinal)
+            objective_value = _result_objective(observed, metric)
+            if (
+                observed.termination_type == "completed"
+                and objective_value is not None
+                and observed.seed is not None
+            ):
+                by_candidate.setdefault(public_trial, {})[int(observed.seed)] = objective_value
+            else:
+                permanent_failure = True
+        if permanent_failure:
+            sequential_finish_reason = "INCOMPLETE_SHARED_SEED_BLOCK"
+            atomic_json(
+                sequential_path,
+                {
+                    "policy_version": "paired-hoeffding-cs-v1",
+                    "stop": True,
+                    "conclusion": "INCOMPLETE",
+                    "reason": "A shared-seed cell remained failed after configured recovery.",
+                },
+            )
+            return ()
+        decision = sequential_analyzer.evaluate(by_candidate)
+        atomic_json(sequential_path, decision.to_dict())
+        if decision.stop:
+            sequential_finish_reason = decision.conclusion
+            return ()
+        if (
+            execution.max_runs is not None
+            and len(terminal_results) + candidate_count > execution.max_runs
+        ):
+            sequential_finish_reason = "RUN_BUDGET"
+            return ()
+        next_ordinal = max(completed_ordinals, default=-1) + 1
+        identity = replicate_stream.at(next_ordinal)
+        next_block: list[dict[str, Any]] = []
+        for trial in sorted(templates):
+            value = dict(templates[trial])
+            value["seed"] = identity.value
+            value["seed_metadata"] = identity.to_dict()
+            value["hpo_phase"] = "sweep"
+            value["evidence_required"] = True
+            value["evidence_requirement"] = _evidence_requirement_record(
+                value, kind="SHARED_SEED", required=True
+            )
+            next_block.append(value)
+        if telemetry is not None:
+            telemetry.schedule(next_block)
+            telemetry.controller_decision(
+                {
+                    "event_version": 2,
+                    "action": "ADD_SHARED_SEED_BLOCK",
+                    "seed": identity.value,
+                    "seed_ordinal": identity.ordinal,
+                    "reason": decision.reason,
+                    "sequential_inference": decision.to_dict(),
+                }
+            )
+        return next_block
+
+    outcomes = _execute_adaptive_dispatch(
+        prepared,
+        resources=resources,
+        policy=policy,
+        objective_metric=metric,
+        objective_mode=mode,
+        objective=objective,
+        historical_results=(),
+        parallelism=parallelism,
+        telemetry=telemetry,
+        on_result=retain_required_queue,
+    )
+    if telemetry is not None:
+        trials = tuple(sorted({int(value["trial_index"]) for value in specifications}))
+        time_exhausted = (
+            execution.max_time_seconds is not None
+            and time.monotonic() - started >= execution.max_time_seconds
+        )
+        telemetry.candidate_states(
+            active=trials,
+            ranked=trials,
+            finished=True,
+            finish_reason=(
+                sequential_finish_reason
+                or ("TIME_BUDGET" if time_exhausted else "FIXED_DESIGN_COMPLETE")
+            ),
+        )
+    return outcomes
+
+
+def _bounded_objective_range(objective: Mapping[str, Any]) -> tuple[float, float] | None:
+    """Return the fixed utility range used by sequential sweep inference."""
+    if isinstance(objective.get("metrics"), Mapping):
+        return (0.0, 1.0)
+    raw = objective.get("range")
+    if (
+        isinstance(raw, Sequence)
+        and not isinstance(raw, str | bytes)
+        and len(raw) == 2
+        and all(isinstance(value, int | float) and not isinstance(value, bool) for value in raw)
+    ):
+        low, high = float(raw[0]), float(raw[1])
+        if math.isfinite(low) and math.isfinite(high) and low < high:
+            return (low, high)
+    return None
 
 
 def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
@@ -904,6 +1267,33 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
             _release_unused_cuda_cache()
         if semaphore is not None:
             semaphore.release()
+
+
+def _evidence_requirement_record(
+    specification: Mapping[str, Any], *, kind: str, required: bool
+) -> dict[str, Any]:
+    """Return one transport-safe evidence identity for telemetry and restart."""
+    raw_fidelity = specification.get("hpo_fidelity")
+    fidelity = (
+        int(raw_fidelity.get("target", 0)) if isinstance(raw_fidelity, Mapping) else None
+    )
+    candidate = int(specification["trial_index"])
+    seed = specification.get("seed")
+    phase = str(specification.get("hpo_phase", "search"))
+    seed_token = "none" if seed is None else str(seed)
+    fidelity_token = "none" if fidelity is None else str(fidelity)
+    return {
+        "key": (
+            f"candidate-{candidate}:seed-{seed_token}:{phase}:fidelity-{fidelity_token}"
+        ),
+        "candidate": candidate,
+        "seed": seed,
+        "phase": phase,
+        "fidelity": fidelity,
+        "kind": kind,
+        "required": required,
+        "state": "PLANNED",
+    }
 
 
 def _release_unused_cuda_cache() -> None:
@@ -1170,6 +1560,12 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
             **dict(termination),
             "scientific_continuation": True,
             "original_prune": dict(specification.get("hpo_original_prune", {})),
+            "evidence_required": bool(specification.get("evidence_required")),
+            "evidence_requirement": (
+                dict(specification["evidence_requirement"])
+                if isinstance(specification.get("evidence_requirement"), Mapping)
+                else None
+            ),
             "target_questions": list(specification.get("hpo_target_questions", ())),
             "checkpoint_used": resuming,
         }
@@ -1235,6 +1631,11 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         objective_observation=objective_observation,
         termination_type=termination_type,
         termination=termination,
+        seed_metadata=(
+            dict(specification["seed_metadata"])
+            if isinstance(specification.get("seed_metadata"), Mapping)
+            else {}
+        ),
     )
     result.write(run_dir / "result.json")
     atomic_json(run_root / "result.json", result.to_dict())
@@ -1261,7 +1662,24 @@ def _execute_adaptive_group(
     for specification in specifications:
         by_trial.setdefault(int(specification["trial_index"]), []).append(specification)
     all_trials = sorted(by_trial)
-    candidate_budget = min(policy.candidate_budget, len(all_trials))
+    raw_design = definition.get("study_design")
+    design_mapping = raw_design if isinstance(raw_design, Mapping) else {}
+    raw_seed_source = design_mapping.get("seed_source")
+    seed_source = raw_seed_source if isinstance(raw_seed_source, Mapping) else {}
+    replicate_stream = (
+        ProjectSeedStream.from_mapping({**seed_source, "role": "replicate"})
+        if seed_source.get("kind") == "project-stream"
+        else None
+    )
+    confirmation_stream = (
+        ProjectSeedStream(
+            str(seed_source["namespace"]),
+            role="confirmation",
+        )
+        if policy.confirmation_auto and seed_source.get("namespace")
+        else None
+    )
+    candidate_budget = min(policy.candidate_budget or len(all_trials), len(all_trials))
     candidate_parameters = {
         trial: dict(by_trial[trial][0].get("trial_parameters", {})) for trial in all_trials
     }
@@ -1339,6 +1757,20 @@ def _execute_adaptive_group(
             planned_runs=candidate_budget * seed_count
             + min(policy.confirmation_top_k, candidate_budget) * len(policy.confirmation_seeds),
             planned_candidates=candidate_budget,
+            design=(
+                {
+                    **dict(definition.get("study_design", {})),
+                    "evidence": {
+                        "evidence_plan_version": 1,
+                        "required_run_count": 0,
+                        "optional_run_count": 0,
+                        "requirements": [],
+                        "dynamic": True,
+                    },
+                }
+                if isinstance(definition.get("study_design"), Mapping)
+                else None
+            ),
         )
     print(
         f"[hpo] action-adaptive search: candidate_budget={candidate_budget} "
@@ -1375,6 +1807,65 @@ def _execute_adaptive_group(
         margin=policy.equivalence_margin,
         probability_threshold=policy.seed_probability_threshold,
     )
+    candidate_generator = (
+        DeterministicCandidateGenerator(policy.parameter_space)
+        if policy.candidate_budget is None
+        and any(
+            isinstance(rule, Mapping) and ("range" in rule or "when" in rule)
+            for rule in policy.parameter_space.values()
+        )
+        else None
+    )
+    seed_templates = tuple(dict(value) for value in by_trial[all_trials[0]])
+    first_trial_keys = set(candidate_parameters[all_trials[0]])
+    fixed_parameters = {
+        key: value
+        for key, value in seed_templates[0]["parameters"].items()
+        if key not in first_trial_keys
+    }
+
+    def extend_candidate_window() -> bool:
+        """Materialize the next deterministic prefix only when planning needs it."""
+        nonlocal candidate_budget, selector, bayesian, survival_model
+        if candidate_generator is None:
+            return False
+        current = len(all_trials)
+        batch = max(32, min(256, policy.proposal_pool_size))
+        try:
+            generated = candidate_generator.extend(current, batch)
+        except ValueError:
+            return False
+        if not generated:
+            return False
+        for offset, parameters in enumerate(generated, current + 1):
+            trial = offset
+            templates_for_trial: list[Mapping[str, Any]] = []
+            for raw_template in seed_templates:
+                value = dict(raw_template)
+                value["trial_index"] = trial
+                value["trial_parameters"] = dict(parameters)
+                value["parameters"] = {**fixed_parameters, **dict(parameters)}
+                templates_for_trial.append(value)
+            all_trials.append(trial)
+            by_trial[trial] = templates_for_trial
+            completed[trial] = []
+            candidate_parameters[trial] = dict(parameters)
+        candidate_budget = len(all_trials)
+        selector = AdaptiveSampler(
+            candidate_parameters, mode=mode, parameter_space=policy.parameter_space
+        )
+        bayesian = BayesianSampler(
+            candidate_parameters, mode=mode, parameter_space=policy.parameter_space
+        )
+        survival_model = SurvivalModel(candidate_parameters, parameter_space=parameter_space)
+        record_decision(
+            "EXPAND_CANDIDATE_GENERATOR",
+            generator_version=candidate_generator.version,
+            previous_prefix=current,
+            expanded_prefix=len(all_trials),
+            reason="scientific planning requested candidates beyond the materialized prefix",
+        )
+        return True
     proposed: list[int] = []
     proposal_numbers: dict[int, int] = {}
     pool_trials_by_proposal: dict[int, int] = {}
@@ -1491,6 +1982,18 @@ def _execute_adaptive_group(
         value["candidate_pool_index"] = pool_trial
         value["trial_index"] = public_trial(pool_trial)
         value["hpo_phase"] = phase
+        value["evidence_required"] = phase in {"confirmation", "scientific_continuation"}
+        value["evidence_requirement"] = _evidence_requirement_record(
+            value,
+            kind=(
+                "CONFIRMATION"
+                if phase == "confirmation"
+                else "SCIENTIFIC_CONTINUATION"
+                if phase == "scientific_continuation"
+                else "ADAPTIVE_OPTIONAL"
+            ),
+            required=bool(value["evidence_required"]),
+        )
         if policy.fidelity is not None:
             value["hpo_fidelity"] = {
                 "current": 0,
@@ -1499,13 +2002,41 @@ def _execute_adaptive_group(
             }
         return value
 
+    def mark_startup_anchor(value: dict[str, Any]) -> None:
+        """Promote one minimum seed identity to the protected coverage obligation."""
+        value["hpo_startup_anchor"] = True
+        value["evidence_required"] = True
+        value["evidence_requirement"] = _evidence_requirement_record(
+            value,
+            kind="STARTUP_COVERAGE",
+            required=True,
+        )
+
     def initial_specifications(pool_trial: int) -> list[dict[str, Any]]:
         values: list[dict[str, Any]] = []
-        for raw in by_trial[pool_trial][: policy.min_seeds]:
+        available = list(by_trial[pool_trial])
+        if replicate_stream is not None:
+            template = dict(available[0])
+            known = {value.get("seed") for value in available}
+            for identity in replicate_stream.take(policy.min_seeds):
+                if identity.value in known:
+                    continue
+                generated = dict(template)
+                generated["seed"] = identity.value
+                generated["seed_metadata"] = identity.to_dict()
+                available.append(generated)
+                known.add(identity.value)
+        for raw in available[: policy.min_seeds]:
             value = dict(raw)
             value["candidate_pool_index"] = pool_trial
             value["trial_index"] = public_trial(pool_trial)
             value["hpo_phase"] = "search"
+            value["evidence_required"] = True
+            value["evidence_requirement"] = _evidence_requirement_record(
+                value,
+                kind="MINIMUM_REPLICATION",
+                required=True,
+            )
             if policy.fidelity is not None:
                 value["hpo_fidelity"] = {
                     "current": 0,
@@ -1526,6 +2057,21 @@ def _execute_adaptive_group(
             value = prepared(pool_trial, raw)
             if raw.get("seed") not in attempted and scheduling_key(value) not in scheduled_run_keys:
                 return value
+        if replicate_stream is not None:
+            used = {
+                value.get("seed")
+                for value in by_trial[pool_trial]
+            } | attempted
+            ordinal = 0
+            while True:
+                identity = replicate_stream.at(ordinal)
+                ordinal += 1
+                if identity.value in used:
+                    continue
+                raw = dict(by_trial[pool_trial][0])
+                raw["seed"] = identity.value
+                raw["seed_metadata"] = identity.to_dict()
+                return prepared(pool_trial, raw)
         return None
 
     def resume_specification(result: WorkResult) -> dict[str, Any] | None:
@@ -1846,6 +2392,78 @@ def _execute_adaptive_group(
     )
     stale_events = int(restored_controller.get("stale_events", 0) or 0)
     search_converged = bool(restored_controller.get("search_converged", False))
+    convergence_state: dict[str, Any] = dict(
+        restored_controller.get("convergence_state", {})
+        if isinstance(restored_controller.get("convergence_state"), Mapping)
+        else {}
+    )
+
+    def evaluate_automatic_convergence() -> StudyConvergenceState:
+        scientific = scientific_snapshot()
+        estimates = racer.estimates(values_by_trial())
+        finite_errors = [
+            value.standard_error
+            for value in estimates.values()
+            if math.isfinite(value.standard_error)
+        ]
+        noise_resolution = statistics.median(finite_errors) if finite_errors else 0.0
+        opportunity = float(scientific.get("optimization_opportunity", math.inf))
+        questions = [
+            value
+            for key in ("parameter_questions", "interaction_questions")
+            for value in scientific.get(key, ())
+            if isinstance(value, Mapping)
+        ]
+        stable_kinds = {
+            "PREFERRED",
+            "PREFERRED_REGION",
+            "PRACTICALLY_EQUIVALENT",
+            "FLAT",
+            "CONTEXT_DEPENDENT",
+            "NO_CLEAR_PREFERENCE",
+        }
+        questions_resolved = bool(questions) and all(
+            value.get("conclusion_kind") in stable_kinds
+            and float(value.get("confidence", 0.0)) >= policy.conclusion_stability
+            for value in questions
+        )
+        best = (
+            (max if mode == "max" else min)(
+                estimates, key=lambda trial: estimates[trial].mean
+            )
+            if estimates
+            else None
+        )
+        contenders_stable = False
+        if best is not None:
+            incumbent = estimates[best]
+            sign = 1.0 if mode == "max" else -1.0
+            contenders_stable = all(
+                trial == best
+                or sign * (incumbent.mean - estimate.mean)
+                >= (
+                    (incumbent.standard_error if math.isfinite(incumbent.standard_error) else 0.0)
+                    + (estimate.standard_error if math.isfinite(estimate.standard_error) else 0.0)
+                    + (policy.scientific_margin or 0.0)
+                )
+                for trial, estimate in estimates.items()
+            )
+        resolution = max(policy.scientific_margin or 0.0, noise_resolution)
+        optimization_stable = bool(estimates) and opportunity <= resolution
+        uncertainty = float(scientific.get("scientific_uncertainty", math.inf))
+        useful = not optimization_stable or (
+            policy.goal != "optimize"
+            and (not questions_resolved or uncertainty > 1.0 - policy.conclusion_stability)
+        )
+        return StudyConvergenceState(
+            policy.goal,
+            optimization_stable,
+            contenders_stable,
+            questions_resolved,
+            useful,
+            True,
+            len(outcomes),
+        )
 
     def allowance() -> int:
         if policy.max_runs is None:
@@ -1939,6 +2557,7 @@ def _execute_adaptive_group(
                     "best_value": best_value,
                     "stale_events": stale_events,
                     "search_converged": search_converged,
+                    "convergence_state": convergence_state,
                     "elapsed_seconds": max(0.0, time.monotonic() - started),
                 },
                 "pruner_calibration": (
@@ -2016,6 +2635,65 @@ def _execute_adaptive_group(
         """Choose one action for a newly free slot from all currently useful action types."""
         if capacity < 1 or not within_time():
             return "WAIT", [], {"reason": "budget-or-time-exhausted"}
+        if (
+            policy.candidate_budget is None
+            and not search_converged
+            and len(proposed) >= candidate_budget
+        ):
+            extend_candidate_window()
+        # ``min_seeds`` is evidence debt, not a hint. Once a candidate is public, each of its
+        # first distinct seed identities must at least be attempted. Candidate acquisition may
+        # stop at its budget, but that cannot silently cancel minimum replication.
+        required_debt: list[dict[str, Any]] = []
+        for pool_trial in proposed:
+            terminal_seeds = {result.seed for result in completed[pool_trial]}
+            for raw in by_trial[pool_trial][: policy.min_seeds]:
+                seed = raw.get("seed")
+                value = prepared(pool_trial, raw)
+                value["evidence_required"] = True
+                value["evidence_requirement"] = _evidence_requirement_record(
+                    value,
+                    kind="MINIMUM_REPLICATION",
+                    required=True,
+                )
+                if (
+                    pool_trial in anchor_trials
+                    and anchor_states.get(pool_trial) not in {"OBSERVED", "CENSORED"}
+                ):
+                    mark_startup_anchor(value)
+                if seed in terminal_seeds or scheduling_key(value) in scheduled_run_keys:
+                    continue
+                required_debt.append(value)
+        if required_debt:
+            required_debt.sort(
+                key=lambda value: (
+                    not bool(value.get("hpo_startup_anchor")),
+                    int(value["trial_index"]),
+                    str(value.get("seed")),
+                )
+            )
+            selected = required_debt[:capacity]
+            action = (
+                "STARTUP_ANCHOR"
+                if selected and all(value.get("hpo_startup_anchor") for value in selected)
+                else "MINIMUM_REPLICATION"
+            )
+            return (
+                action,
+                selected,
+                {
+                    "reason": (
+                        "protected initial-design coverage remains required"
+                        if action == "STARTUP_ANCHOR"
+                        else "authored replication.minimum evidence remains required after "
+                        "candidate proposal"
+                    ),
+                    "score": None,
+                    "required": True,
+                    "remaining_required_identities": len(required_debt),
+                    "alternatives": [],
+                },
+            )
         durations = [
             result.duration_seconds
             for result in outcomes
@@ -2451,7 +3129,7 @@ def _execute_adaptive_group(
         ) in ranked_options:
             if len(specifications) >= min(8, max(1, capacity)):
                 break
-            selected = dict(option_specification)
+            selected_specification = dict(option_specification)
             if option_action in {
                 "START_NEW",
                 "DESIGNED_PROBE",
@@ -2462,18 +3140,18 @@ def _execute_adaptive_group(
                 if pool_trial not in proposed:
                     if len(proposed) + len(selected_new_trials) >= candidate_budget:
                         continue
-                selected = initial_specifications(pool_trial)[0]
+                selected_specification = initial_specifications(pool_trial)[0]
                 if option_action != "START_NEW":
-                    selected["hpo_probe_purpose"] = option_evidence.get("purpose")
-                    selected["hpo_target_questions"] = list(
+                    selected_specification["hpo_probe_purpose"] = option_evidence.get("purpose")
+                    selected_specification["hpo_target_questions"] = list(
                         option_evidence.get("target_questions", ())
                     )
-            selected_key = scheduling_key(selected)
+            selected_key = scheduling_key(selected_specification)
             if selected_key in seen or selected_key in scheduled_run_keys:
                 continue
             seen.add(selected_key)
-            selected["hpo_scheduler_action"] = option_action
-            selected["hpo_scheduler_priority"] = float(option_score)
+            selected_specification["hpo_scheduler_action"] = option_action
+            selected_specification["hpo_scheduler_priority"] = float(option_score)
             raw_optimization_value = option_evidence.get("optimization_value")
             raw_information_value = option_evidence.get("information_value")
             normalized_value = (
@@ -2485,7 +3163,7 @@ def _execute_adaptive_group(
                 and not isinstance(raw_information_value, bool)
                 else None
             )
-            selected["hpo_scientific_value"] = {
+            selected_specification["hpo_scientific_value"] = {
                 "score": float(option_score),
                 "normalized_value": normalized_value,
                 "rank": len(specifications) + 1,
@@ -2503,14 +3181,18 @@ def _execute_adaptive_group(
                     ),
                 ),
             }
-            specifications.append(selected)
-            pool_trial = int(selected.get("candidate_pool_index", selected["trial_index"]))
+            specifications.append(selected_specification)
+            pool_trial = int(
+                selected_specification.get(
+                    "candidate_pool_index", selected_specification["trial_index"]
+                )
+            )
             if pool_trial not in proposed:
                 selected_new_trials.add(pool_trial)
             frontier_records.append(
                 {
                     "action": option_action,
-                    "trial": int(selected["trial_index"]),
+                    "trial": int(selected_specification["trial_index"]),
                     "score": option_score,
                     "purpose": option_evidence.get("purpose"),
                 }
@@ -2587,22 +3269,46 @@ def _execute_adaptive_group(
                 if scheduling_key(value) in scheduled_run_keys:
                     continue
                 if any(
-                    result.seed == value.get("seed") or result.pruned
+                    result.seed == value.get("seed")
+                    or (result.pruned and not value.get("evidence_required"))
                     for result in completed[trial]
                 ):
                     continue
                 retained.append(value)
             deferred_queue.clear()
             deferred_queue.extend(retained)
+            # Finish the breadth-first initial design before spending a newly free lane on
+            # replication.  Both are protected evidence, but an unobserved anchor covers a new
+            # part of the authored space whereas another seed only deepens an already observed
+            # candidate.  This priority is independent of queue insertion order.
             protected_index = next(
-                (i for i, value in enumerate(deferred_queue) if value.get("hpo_startup_anchor")),
+                (
+                    i
+                    for i, value in enumerate(deferred_queue)
+                    if value.get("hpo_startup_anchor")
+                ),
                 None,
             )
+            if protected_index is None:
+                protected_index = next(
+                    (
+                        i
+                        for i, value in enumerate(deferred_queue)
+                        if value.get("evidence_required")
+                    ),
+                    None,
+                )
             if protected_index is not None:
                 protected = deferred_queue[protected_index]
                 del deferred_queue[protected_index]
-                return "STARTUP_ANCHOR", [protected], {
-                    "reason": "protected initial-design coverage obligation remains unresolved",
+                is_anchor = bool(protected.get("hpo_startup_anchor"))
+                action = "STARTUP_ANCHOR" if is_anchor else "MINIMUM_REPLICATION"
+                return action, [protected], {
+                    "reason": (
+                        "protected initial-design coverage obligation remains unresolved"
+                        if is_anchor
+                        else "required minimum-replication evidence remains unresolved"
+                    ),
                     "controller_value": None,
                     "value_basis": "protected-initial-design-debt",
                     "expected_cost_seconds": None,
@@ -2616,6 +3322,12 @@ def _execute_adaptive_group(
                         ),
                         [],
                     ),
+                }
+            if search_converged:
+                return "AUTO_CONVERGED", [], {
+                    "reason": "versioned scientific convergence policy found no useful action",
+                    "convergence_state": convergence_state,
+                    "alternatives": [],
                 }
             action, specifications, evidence = next_event_action(capacity)
             if not specifications and deferred_queue:
@@ -2638,7 +3350,7 @@ def _execute_adaptive_group(
             queued_specifications: Sequence[Mapping[str, Any]],
             pending_specifications: Sequence[Mapping[str, Any]],
         ) -> Sequence[dict[str, Any]]:
-            nonlocal best_value, search_converged, stale_events
+            nonlocal best_value, search_converged, stale_events, convergence_state
             pending_runs = len(pending_specifications)
             pending_fidelity_by_trial.clear()
             pending_observations.clear()
@@ -2715,6 +3427,16 @@ def _execute_adaptive_group(
                             best_objective=best_value,
                             minimum_improvement=policy.min_improvement,
                         )
+            if policy.candidate_budget is None and policy.automatic_stop and not search_converged:
+                evaluated = evaluate_automatic_convergence()
+                convergence_state = evaluated.to_dict()
+                if evaluated.converged:
+                    search_converged = True
+                    record_decision(
+                        "STOP_PROPOSING",
+                        reason=f"CONVERGED_{policy.goal.upper()}",
+                        convergence_state=convergence_state,
+                    )
             persist_state()
             if result.termination_type == "scheduler_preempted":
                 record_decision(
@@ -2765,6 +3487,9 @@ def _execute_adaptive_group(
                     if deferred_trial != trial:
                         retained.append(deferred_value)
                         continue
+                    if deferred_value.get("evidence_required"):
+                        retained.append(deferred_value)
+                        continue
                     if telemetry is not None:
                         telemetry.queued_action_cancelled(
                             deferred_value,
@@ -2786,7 +3511,7 @@ def _execute_adaptive_group(
                 stale_trial = int(stale.get("candidate_pool_index", stale["trial_index"]))
                 key = scheduling_key(stale)
                 if (
-                    not completed[stale_trial]
+                    (not completed[stale_trial] or stale.get("evidence_required"))
                     and stale.get("hpo_phase", "search") == "search"
                     and key not in deferred_keys
                 ):
@@ -2817,12 +3542,12 @@ def _execute_adaptive_group(
             specifications = list(specifications[:remaining_capacity])
             if not specifications:
                 for stale in stale_queue:
-                    if stale.get("hpo_startup_anchor"):
+                    if stale.get("hpo_startup_anchor") or stale.get("evidence_required"):
                         key = scheduling_key(stale)
                         if key not in {scheduling_key(value) for value in deferred_queue}:
                             deferred_queue.append(stale)
                         record_decision(
-                            "DEFER_STARTUP_ANCHOR",
+                            "DEFER_REQUIRED_EVIDENCE",
                             reason="dispatch plan changed; scientific obligation remains reserved",
                             trial=int(stale["trial_index"]),
                             seed=stale.get("seed"),
@@ -2855,7 +3580,10 @@ def _execute_adaptive_group(
             deferred_queue.extend(retained_deferred)
             action_priority = evidence.get("score")
             for specification in specifications:
-                specification.setdefault("hpo_scheduler_action", action)
+                # A deferred identity may have been provisionally labelled as minimum
+                # replication before the initial-design controller classified it as a protected
+                # anchor.  Persist the action that actually caused this dispatch.
+                specification["hpo_scheduler_action"] = action
                 if (
                     "hpo_scheduler_priority" not in specification
                     and isinstance(action_priority, int | float)
@@ -2865,7 +3593,7 @@ def _execute_adaptive_group(
             for stale in stale_queue:
                 if scheduling_key(stale) in selected_keys:
                     continue
-                if stale.get("hpo_startup_anchor"):
+                if stale.get("hpo_startup_anchor") or stale.get("evidence_required"):
                     key = scheduling_key(stale)
                     if key not in {scheduling_key(value) for value in deferred_queue}:
                         deferred_queue.append(stale)
@@ -2972,7 +3700,7 @@ def _execute_adaptive_group(
             if not specifications:
                 return ()
             for specification in specifications:
-                specification.setdefault("hpo_scheduler_action", action)
+                specification["hpo_scheduler_action"] = action
                 specification["hpo_resource_frontier_extension"] = True
             register(specifications)
             record_decision(
@@ -3027,7 +3755,7 @@ def _execute_adaptive_group(
                 obligations = anchor_obligations[old_trial]
                 anchor_obligations[new_trial] = obligations
                 value = prepared(new_trial, by_trial[new_trial][0])
-                value["hpo_startup_anchor"] = True
+                mark_startup_anchor(value)
                 value["hpo_probe_purpose"] = "EXPLORE_COVERAGE"
                 value["hpo_target_questions"] = [
                     "Preserve the initial design obligations of a physically infeasible anchor"
@@ -3130,6 +3858,8 @@ def _execute_adaptive_group(
                 ("scheduler_action", "hpo_scheduler_action"),
                 ("scheduler_priority", "hpo_scheduler_priority"),
                 ("original_prune", "hpo_original_prune"),
+                ("evidence_required", "evidence_required"),
+                ("evidence_requirement", "evidence_requirement"),
             ):
                 if persisted in raw_action and raw_action[persisted] is not None:
                     value[runtime] = raw_action[persisted]
@@ -3155,7 +3885,7 @@ def _execute_adaptive_group(
             if raw is None:
                 continue
             value = prepared(anchor_trial, raw)
-            value["hpo_startup_anchor"] = True
+            mark_startup_anchor(value)
             value["hpo_probe_purpose"] = "EXPLORE_COVERAGE"
             value["hpo_target_questions"] = ["Restore protected initial-design evidence debt"]
             value["hpo_controller_restart"] = True
@@ -3205,7 +3935,7 @@ def _execute_adaptive_group(
             first_for_anchor = pool_trial not in first_anchor_trials
             if first_for_anchor:
                 first_anchor_trials.add(pool_trial)
-                value["hpo_startup_anchor"] = True
+                mark_startup_anchor(value)
             value["hpo_probe_purpose"] = "EXPLORE_COVERAGE"
             value["hpo_target_questions"] = ["Establish broad initial search-space evidence"]
         first_anchor_specs = [value for value in startup_specs if value.get("hpo_startup_anchor")]
@@ -3252,11 +3982,148 @@ def _execute_adaptive_group(
         key=lambda trial: estimates[trial].mean,
         reverse=mode == "max",
     )
-    active = ranked[: max(1, min(len(ranked), policy.confirmation_top_k))]
-    if policy.confirmation_seeds and active and within_time() and allowance() > 0:
-        confirmation: list[dict[str, Any]] = []
+    if policy.confirmation_auto and ranked:
+        incumbent = estimates[ranked[0]]
+        sign = 1.0 if mode == "max" else -1.0
+        active = [
+            trial
+            for trial in ranked
+            if sign * (incumbent.mean - estimates[trial].mean)
+            <= (
+                (incumbent.standard_error if math.isfinite(incumbent.standard_error) else 0.0)
+                + (
+                    estimates[trial].standard_error
+                    if math.isfinite(estimates[trial].standard_error)
+                    else 0.0
+                )
+                + (policy.scientific_margin or 0.0)
+            )
+        ]
+        if len(active) == 1 and len(ranked) > 1:
+            active.append(ranked[1])
+    else:
+        active = ranked[: max(1, min(len(ranked), policy.confirmation_top_k))]
+    if policy.confirmation_auto and confirmation_stream is not None and active:
+        used_seeds = {
+            int(value["seed"])
+            for values in by_trial.values()
+            for value in values
+            if value.get("seed") is not None
+        }
+        confirmation_values: dict[int, dict[int | None, float]] = {
+            trial: {} for trial in active
+        }
+        confirmation_racer = AdaptiveSeedRacer(
+            mode=mode,
+            margin=policy.scientific_margin or 0.0,
+            probability_threshold=policy.seed_probability_threshold,
+        )
+        ordinal = 0
+        blocks = 0
+        confirmation_reason = "Fresh confirmation evidence has not yet been calibrated."
+        while within_time() and allowance() >= len(active):
+            identity = confirmation_stream.at(ordinal)
+            ordinal += 1
+            if identity.value in used_seeds:
+                continue
+            used_seeds.add(identity.value)
+            confirmation: list[dict[str, Any]] = []
+            for trial in active:
+                raw = dict(by_trial[trial][0])
+                raw["seed"] = identity.value
+                raw["seed_metadata"] = identity.to_dict()
+                value = prepared(trial, raw, phase="confirmation")
+                if policy.fidelity is not None:
+                    value["hpo_fidelity"] = {
+                        "current": 0,
+                        "target": policy.fidelity.maximum,
+                        "maximum": policy.fidelity.maximum,
+                    }
+                confirmation.append(value)
+            record_decision(
+                "CONFIRM",
+                pool_trials=list(active),
+                public_trials=[public_trial(trial) for trial in active],
+                seed=identity.value,
+                seed_identity=identity.to_dict(),
+                block=blocks + 1,
+                contender_reason="posterior/practically competitive uncertainty set",
+                full_fidelity=(policy.fidelity.maximum if policy.fidelity is not None else None),
+            )
+            before = len(outcomes)
+            execute(confirmation, active)
+            block_results = [
+                result
+                for result in outcomes[before:]
+                if result.study_phase == "confirmation" and result.seed == identity.value
+            ]
+            completed_block = 0
+            for result in block_results:
+                pool_trial = pool_trial_for(result)
+                observed = _result_objective(result, metric)
+                if result.termination_type == "completed" and observed is not None:
+                    confirmation_values[pool_trial][identity.value] = observed
+                    completed_block += 1
+            if completed_block != len(active):
+                confirmation_reason = (
+                    "A fresh shared-seed confirmation block remained incomplete after "
+                    "configured recovery."
+                )
+                record_decision(
+                    "STOP_CONFIRMATION",
+                    reason=confirmation_reason,
+                    conclusion="CONFIRMATION_INCOMPLETE",
+                    complete_blocks=blocks,
+                )
+                break
+            blocks += 1
+            decisions = confirmation_racer.decisions(
+                confirmation_values,
+                eligible=active,
+            )
+            information = max((value.information_value for value in decisions), default=0.0)
+            calibrated = blocks >= 2
+            stable = calibrated and (
+                not decisions or information <= 1.0 - policy.conclusion_stability
+            )
+            confirmation_reason = (
+                "Fresh shared-seed contender comparisons are stable under the versioned "
+                "seed-information policy."
+                if stable
+                else "Another complete fresh shared-seed block can materially reduce uncertainty."
+            )
+            record_decision(
+                "EVALUATE_CONFIRMATION",
+                complete_blocks=blocks,
+                contenders=[public_trial(trial) for trial in active],
+                maximum_information_value=information,
+                stability_target=policy.conclusion_stability,
+                stable=stable,
+                reason=confirmation_reason,
+            )
+            if stable:
+                record_decision(
+                    "STOP_CONFIRMATION",
+                    reason=confirmation_reason,
+                    conclusion="STABLE_FRESH_CONFIRMATION",
+                    complete_blocks=blocks,
+                )
+                break
+        else:
+            record_decision(
+                "STOP_CONFIRMATION",
+                reason=(
+                    "A hard Run/time budget stopped fresh confirmation before another complete "
+                    "shared-seed block could start."
+                ),
+                conclusion="CONFIRMATION_BUDGET_EXHAUSTED",
+                complete_blocks=blocks,
+            )
+    elif policy.confirmation_seeds and active and within_time() and allowance() > 0:
+        confirmation_seeds = policy.confirmation_seeds
+        explicit_confirmation: list[dict[str, Any]] = []
         for trial in active:
-            for seed in policy.confirmation_seeds:
+            for seed in confirmation_seeds:
                 raw = dict(by_trial[trial][0])
                 raw["seed"] = seed
                 value = prepared(trial, raw, phase="confirmation")
@@ -3266,19 +4133,21 @@ def _execute_adaptive_group(
                         "target": policy.fidelity.maximum,
                         "maximum": policy.fidelity.maximum,
                     }
-                confirmation.append(value)
+                explicit_confirmation.append(value)
         print(
-            f"[hpo] CONFIRM top={len(active)} with {len(policy.confirmation_seeds)} fresh seed(s)",
+            f"[hpo] CONFIRM contenders={len(active)} with {len(confirmation_seeds)} fresh seed(s)",
             flush=True,
         )
         record_decision(
             "CONFIRM",
             pool_trials=list(active),
             public_trials=[public_trial(trial) for trial in active],
-            seeds=list(policy.confirmation_seeds),
+            seeds=list(confirmation_seeds),
+            seed_stream=None,
+            contender_reason="posterior/practically competitive uncertainty set",
             full_fidelity=(policy.fidelity.maximum if policy.fidelity is not None else None),
         )
-        execute(confirmation, active)
+        execute(explicit_confirmation, active)
 
     final_pruning_audit = (
         _pruner_calibration(
@@ -3296,24 +4165,37 @@ def _execute_adaptive_group(
     time_exhausted = not within_time()
     candidate_budget_reached = len(proposed) >= candidate_budget
     candidate_pool_exhausted = len(proposed) >= len(all_trials)
-    finish_reason = (
-        "run-budget-exhausted"
+    finish_code = (
+        "RUN_BUDGET"
         if budget_exhausted
-        else "time-budget-exhausted"
+        else "TIME_BUDGET"
         if time_exhausted
-        else "candidate-budget-reached"
-        if candidate_budget_reached
-        else "candidate-pool-exhausted"
-        if candidate_pool_exhausted
-        else "explicit-record-convergence"
+        else (
+            f"CONVERGED_{policy.goal.upper()}"
+            if bool(convergence_state.get("converged"))
+            else "EXPLICIT_RECORD_CONVERGENCE"
+        )
         if search_converged
-        else "no-scientifically-useful-action"
+        else "CANDIDATE_BUDGET"
+        if policy.candidate_budget is not None and candidate_budget_reached
+        else "SEARCH_SPACE_EXHAUSTED"
+        if candidate_pool_exhausted and candidate_generator is None
+        else "NO_POSITIVE_VALUE_ACTION"
     )
+    finish_reason = {
+        "RUN_BUDGET": "run-budget-exhausted",
+        "TIME_BUDGET": "time-budget-exhausted",
+        "EXPLICIT_RECORD_CONVERGENCE": "explicit-record-convergence",
+        "CANDIDATE_BUDGET": "candidate-budget-reached",
+        "SEARCH_SPACE_EXHAUSTED": "candidate-pool-exhausted",
+        "NO_POSITIVE_VALUE_ACTION": "no-positive-value-action",
+    }.get(finish_code, finish_code.lower().replace("_", "-"))
     # Persist FINISH before producing the terminal Study snapshot.  Consumers must be able to
     # distinguish budget exhaustion from an explicitly requested early convergence policy.
     record_decision(
         "FINISH",
         reason=finish_reason,
+        stop_code=finish_code,
         completed_runs=len(outcomes),
         proposed_candidates=len(proposed),
         candidate_budget=candidate_budget,
@@ -3331,6 +4213,7 @@ def _execute_adaptive_group(
             active=tuple(proposal_numbers[trial] for trial in active),
             ranked=tuple(proposal_numbers[trial] for trial in ranked),
             finished=True,
+            finish_reason=finish_reason,
         )
     return tuple(outcomes)
 
@@ -3418,10 +4301,14 @@ def _execute_adaptive_dispatch(
                 "hpo_checkpoint_manifest_path": checkpoint_manifest,
                 "hpo_checkpoint_request_path": checkpoint_request,
                 "hpo_worker_identity_path": worker_identity,
-                "hpo_objective": objective_metric,
-                "hpo_objective_config": dict(specification["definition"].get("objective", {})),
             }
         )
+        raw_objective = specification["definition"].get("objective")
+        if isinstance(raw_objective, Mapping) and (
+            "metric" in raw_objective or "metrics" in raw_objective
+        ):
+            value["hpo_objective"] = objective_metric
+            value["hpo_objective_config"] = dict(raw_objective)
         return value
 
     prepared.extend(prepare_specification(value) for value in specifications)
@@ -3830,6 +4717,11 @@ def _controller_failure_result(
             "failure_type": type(error).__name__,
             "reason": str(error),
         },
+        seed_metadata=(
+            dict(specification["seed_metadata"])
+            if isinstance(specification.get("seed_metadata"), Mapping)
+            else {}
+        ),
     )
     result.write(run_dir / "result.json")
     atomic_json(run_root / "result.json", result.to_dict())
@@ -6169,7 +7061,7 @@ def _memory_text(value: int) -> str:
 
 def _adaptive_parallelism(resources: ResourceRequest, policy: AdaptiveSearchPolicy) -> int:
     run_budget = policy.max_runs or (
-        policy.candidate_budget * max(1, policy.min_seeds)
+        (policy.candidate_budget or policy.proposal_pool_size) * max(1, policy.min_seeds)
         + policy.confirmation_top_k * len(policy.confirmation_seeds)
     )
     host_ceiling = max(1, min(resources.cpu_cores, run_budget))
@@ -6864,7 +7756,11 @@ def _cancel_queued_pruned_candidates(
     while queued:
         specification = queued.popleft()
         trial = int(specification["trial_index"])
-        if trial not in pruned_trials or specification.get("hpo_phase") == "confirmation":
+        if (
+            trial not in pruned_trials
+            or specification.get("hpo_phase") == "confirmation"
+            or specification.get("evidence_required")
+        ):
             retained.append(specification)
             continue
         if telemetry is not None:
@@ -7515,6 +8411,7 @@ def _work_result_from_mapping(value: Mapping[str, Any]) -> WorkResult:
             )
         ),
         value.get("termination", {}),
+        value.get("seed_metadata", {}),
     )
 
 

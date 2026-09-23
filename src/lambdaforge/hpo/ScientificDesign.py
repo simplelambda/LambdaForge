@@ -36,6 +36,24 @@ _INTERACTION_STATES = ("MATERIAL_INTERACTION", "WEAK_INTERACTION", "ADDITIVE", "
 
 
 @dataclass(frozen=True, slots=True)
+class ExactScientificConclusion:
+    """One exact qualitative statement and the stability that belongs to it."""
+
+    kind: str
+    values: tuple[Any, ...]
+    token: str
+    confidence: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "values": [_json_value(value) for value in self.values],
+            "token": self.token,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SeedNoiseEstimate:
     """Hierarchical seed-noise estimate that never uses between-candidate spread as noise."""
 
@@ -677,7 +695,12 @@ class ScientificQuestionAnalyzer:
                 included = list(rng.sample(trials, k=min(2, len(trials))))
             for trial in included:
                 values = outcomes[trial]
-                if selected_seed is not None and selected_seed in values:
+                if selected_seed is not None:
+                    # Shared-seed resampling is a block design. A missing cell reduces paired
+                    # support; replacing it with another seed would silently destroy pairing and
+                    # attribute seed variation to the candidate.
+                    if selected_seed not in values:
+                        continue
                     sampled = values[selected_seed]
                 elif len(values) > 1:
                     sampled = rng.choice(tuple(values.values()))
@@ -848,9 +871,64 @@ class ScientificQuestionAnalyzer:
             _display_label(json.loads(label)): count / max(1, len(best_labels))
             for label, count in sorted(best_distribution.items())
         }
-        result["conclusion_kind"] = dominant
+        point_leader = max(
+            response_summary,
+            key=lambda value: float(value.get("mean", -math.inf)),
+            default=None,
+        )
+        result["point_estimate_leader"] = (
+            point_leader.get("value") if isinstance(point_leader, Mapping) else None
+        )
+        exact = cls._exact_conclusion(
+            token_distribution,
+            levels=levels,
+            practical_margin=practical_margin,
+        )
+        result["modal_hypothesis"] = {
+            "token": max(token_distribution, key=lambda value: token_distribution[value]),
+            "probability": max(token_distribution.values()),
+        } if token_distribution else {"token": "UNRESOLVED", "probability": 1.0}
+        result["exact_conclusion"] = exact.to_dict()
+        result["conclusion_kind"] = exact.kind
+        result["confidence"] = exact.confidence
+        result["confidence_label"] = _confidence_label(exact.confidence)
         result["summary"] = cls._parameter_summary(result)
         return result
+
+    @staticmethod
+    def _exact_conclusion(
+        distribution: Mapping[str, float],
+        *,
+        levels: Sequence[Any],
+        practical_margin: float | None,
+    ) -> ExactScientificConclusion:
+        if not distribution:
+            return ExactScientificConclusion("UNRESOLVED", (), "UNRESOLVED", 1.0)
+        token = max(distribution, key=lambda value: distribution[value])
+        probability = float(distribution[token])
+        kind, separator, encoded = token.partition(":")
+        # A categorical argmax always exists. It is a resolved preference only when the same
+        # exact winner is supported by a majority of plausible evidence realizations.
+        if kind in {"PREFERRED", "PREFERRED_REGION", "WEAK_PREFERENCE"} and probability <= 0.5:
+            return ExactScientificConclusion(
+                "NO_CLEAR_PREFERENCE",
+                (),
+                "NO_CLEAR_PREFERENCE",
+                1.0 - probability,
+            )
+        if kind == "PRACTICALLY_EQUIVALENT" and practical_margin is None:
+            return ExactScientificConclusion(
+                "NO_CLEAR_PREFERENCE",
+                (),
+                "NO_CLEAR_PREFERENCE",
+                1.0 - probability,
+            )
+        labels = encoded.split("|") if separator and encoded else []
+        by_label = {_label(value): value for value in levels}
+        values = tuple(by_label[label] for label in labels if label in by_label)
+        if kind == "PRACTICALLY_EQUIVALENT":
+            values = tuple(levels)
+        return ExactScientificConclusion(kind, values, token, probability)
 
     @classmethod
     def _parameter_result(
@@ -877,6 +955,9 @@ class ScientificQuestionAnalyzer:
         stable_confidence = (
             float(confidence) if confidence is not None else float(probabilities[dominant])
         )
+        exact_distribution = dict(conclusion_distribution or probabilities)
+        modal_token = max(exact_distribution, key=lambda value: exact_distribution[value])
+        modal_probability = float(exact_distribution[modal_token])
         active_trials = set(observed)
         shared = cls._shared_seed_count({trial: outcomes.get(trial, {}) for trial in active_trials})
         del pruned
@@ -886,18 +967,29 @@ class ScientificQuestionAnalyzer:
             "parameter": name,
             "kind": "numeric" if numeric else "categorical",
             "conclusion_kind": dominant,
+            "exact_conclusion": ExactScientificConclusion(
+                dominant,
+                (),
+                modal_token,
+                stable_confidence,
+            ).to_dict(),
+            "modal_hypothesis": {
+                "token": modal_token,
+                "probability": modal_probability,
+            },
+            "point_estimate_leader": None,
             "summary": "The question remains unresolved."
             if dominant == "UNRESOLVED"
             else dominant.replace("_", " ").title(),
             "confidence": stable_confidence,
             "confidence_label": _confidence_label(stable_confidence),
             "probabilities": dict(probabilities),
-            "conclusion_distribution": dict(conclusion_distribution or probabilities),
+            "conclusion_distribution": exact_distribution,
             # Question uncertainty concerns the exact displayed answer (including which value or
             # region is preferred), not merely the coarse conclusion family.  Otherwise two
             # realizations that both say PREFERRED but disagree on the value would incorrectly
             # contribute zero scientific uncertainty.
-            "entropy": _normalized_entropy(conclusion_distribution or probabilities),
+            "entropy": _normalized_entropy(exact_distribution),
             "practical_margin": practical_margin,
             "authored_values": list(levels),
             "observed_values": sorted({_json_value(value) for value in observed.values()}, key=str),
@@ -933,6 +1025,12 @@ class ScientificQuestionAnalyzer:
         name = str(value["parameter"])
         kind = str(value["conclusion_kind"])
         response = [item for item in value.get("response", ()) if isinstance(item, Mapping)]
+        exact = value.get("exact_conclusion")
+        exact_values = (
+            [str(item) for item in exact.get("values", ())]
+            if isinstance(exact, Mapping)
+            else []
+        )
         if kind == "CONTEXT_DEPENDENT":
             interactions = value.get("main_interactions", ())
             other = next(
@@ -944,13 +1042,27 @@ class ScientificQuestionAnalyzer:
                 None,
             )
             return f"The effect of {name} depends on {other or 'other parameters'}."
-        if kind in {"PRACTICALLY_EQUIVALENT", "FLAT"}:
-            return f"No practically relevant {name} effect is supported in the studied range."
+        if kind == "PRACTICALLY_EQUIVALENT":
+            values = f" ({', '.join(exact_values)})" if exact_values else ""
+            return (
+                f"{name} values{values} are practically equivalent on the authored objective "
+                "scale."
+            )
+        if kind == "FLAT":
+            return (
+                f"No stable {name} response tendency is visible in the observed range; this "
+                "does not establish practical equivalence."
+            )
         if kind == "WEAK_PREFERENCE":
             best = max(response, key=lambda item: float(item.get("mean", -math.inf)), default={})
+            caveat = (
+                "alternatives remain within the authored practical margin"
+                if value.get("practical_margin") is not None
+                else "winner identity is not stable enough for a firm preference"
+            )
             return (
-                f"{best.get('value', 'One value')} is slightly preferred, but alternatives "
-                "are practically equivalent."
+                f"{exact_values[0] if exact_values else best.get('value', 'One value')} is "
+                f"slightly preferred, but {caveat}."
             )
         if kind in {"PREFERRED", "PREFERRED_REGION"}:
             ordered = sorted(
@@ -958,7 +1070,9 @@ class ScientificQuestionAnalyzer:
             )
             selected = [str(item.get("value")) for item in ordered if item.get("preferred")]
             region = (
-                ", ".join(selected)
+                ", ".join(exact_values)
+                if exact_values
+                else ", ".join(selected)
                 if selected
                 else str(ordered[0].get("value", "the supported optimum"))
             )
@@ -1991,6 +2105,7 @@ def random_probability(realization: Mapping[int, float], name: str) -> float:
 
 __all__ = [
     "CandidateDesignValue",
+    "ExactScientificConclusion",
     "ExperimentalDesignPolicy",
     "ScientificQuestionAnalyzer",
     "SeedNoiseEstimate",

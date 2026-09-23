@@ -32,6 +32,7 @@ from lambdaforge.controlplane.SubmissionService import SubmissionService
 from lambdaforge.controlplane.WorkService import WorkService
 from lambdaforge.diagnostics import DiagnosticContext
 from lambdaforge.ProjectContext import ProjectContext
+from lambdaforge.reproducibility.SeedProvider import SeedProvider
 from lambdaforge.work import ResultStore, WorkConfig, WorkRunner
 
 
@@ -104,6 +105,37 @@ class CommandLineInterface:
                 f"Project: {project.project_id}\nRoot: {project.root}",
                 arguments.json,
             )
+            return 0
+        if arguments.command == "seeds":
+            if arguments.count < 1:
+                raise ValueError("--count must be a positive integer.")
+            project = ProjectContext.discover()
+            stream = SeedProvider(project).stream(arguments.role)
+            payload = {
+                **stream.to_dict(),
+                "seeds": [value.to_dict() for value in stream.take(arguments.count)],
+            }
+            human = (
+                f"Project seed namespace: {stream.namespace}\n"
+                f"Stream: {stream.role} ({stream.version})\n"
+                + "\n".join(
+                    f"{value.ordinal:>4}  {value.value}" for value in stream.take(arguments.count)
+                )
+            )
+            cls._render(payload, human, arguments.json)
+            return 0
+        if arguments.command == "config":
+            config = WorkConfig.from_yaml(arguments.config)
+            payload = config.resolved_configuration()
+            selected_format = "json" if arguments.json else arguments.format
+            if selected_format == "json":
+                print(json.dumps(payload, indent=2))
+            elif selected_format == "yaml":
+                import yaml
+
+                print(yaml.safe_dump(payload, sort_keys=False))
+            else:
+                print(cls._resolved_configuration(payload))
             return 0
         if arguments.command == "validate":
             validation = WorkConfig.validate_file(arguments.config)
@@ -530,6 +562,42 @@ class CommandLineInterface:
                         "required" if parameter["required"] else f"default={parameter['default']!r}"
                     )
                     lines.append(f"    {parameter['name']}: {parameter['type']} ({state})")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _resolved_configuration(payload: Mapping[str, Any]) -> str:
+        lines = [f"Resolved Work configuration · {payload.get('name', 'unnamed')}"]
+        for level_number, level in enumerate(payload.get("levels", ()), 1):
+            for item in level:
+                design = item.get("design", {})
+                search = item.get("search") or {}
+                execution = item.get("execution", {})
+                resources = item.get("resources", {})
+                source = design.get("seed_source", {})
+                first = next(iter(source.get("resolved", ())), None)
+                lines.extend(
+                    (
+                        "",
+                        f"Level {level_number} · {item.get('name')}",
+                        f"  Study type: {item.get('study_type')}",
+                        f"  Goal: {design.get('goal', 'not applicable')}",
+                        f"  Seed source: {source.get('kind', 'none')} "
+                        f"{source.get('stream_version', '')}",
+                        (
+                            f"  First seed: #{first.get('ordinal')} -> {first.get('value')}"
+                            if isinstance(first, Mapping)
+                            else "  First seed: not applicable"
+                        ),
+                        f"  Replication: {design.get('replication', 'single')}",
+                        f"  Candidate budget: {search.get('trials') or 'convergence-controlled'}",
+                        f"  Stop: {(search.get('stop') or {}).get('mode', 'not applicable')}",
+                        f"  GPU packing: {execution.get('runs_per_gpu', 'auto')}",
+                        f"  Global parallelism: {execution.get('max_parallel', 'auto')}",
+                        f"  Hard resources: cpu={resources.get('cpu_cores')} "
+                        f"gpu={resources.get('gpu_count')} "
+                        f"time={resources.get('runtime_seconds')}",
+                    )
+                )
         return "\n".join(lines)
 
     @staticmethod

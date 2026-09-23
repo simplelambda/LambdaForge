@@ -9,6 +9,54 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+### Añadido
+
+- Añadidos streams deterministas de proyecto `replicate` y `confirmation` con provenance
+  valor/ordinal/rol/versión, override exacto `seeds`, shorthand `replicates` y comando `lf seeds`.
+  La permutación de 32 bits es estable por prefijo, sin colisiones en su dominio práctico y válida
+  para NumPy/PyTorch.
+- Añadida persistencia de `ResolvedStudyConfiguration` y `lf config resolve` en formato humano,
+  JSON o YAML. Un YAML mínimo resuelve antes de ejecutar nombre, goal equilibrado, replicación
+  mínima uno, pruning, confirmación nueva, parada científica y límites de ejecución automáticos.
+- Añadidos candidatos Sobol deterministas e incrementales controlados por convergencia, shorthand
+  de métricas registradas, goals de alto nivel y motivos exactos de parada.
+- Añadida replicación automática de sweeps por bloques completos compartidos con secuencias de
+  confianza Hoeffding pareadas, simultáneas y uniformes en el tiempo; `sweep.replicates` sigue fijo.
+
+- Añadidos `StudyDesign`, `EvidencePlan` y `EvidenceRequirement` first-class. `sweep.space` declara
+  ahora un protocolo fijo candidato por seed, con productos condicionales finitos, referencia
+  opcional y grids numéricos deterministas con `points`; `search.strategy: exhaustive` normaliza al
+  mismo diseño.
+- Añadidos YAML adaptativo estructurado (`search.budget`, `space`, `replication`, `pruning`),
+  `execution` raíz canónico y `objective.practical_margin`, conservando aliases legacy comprobados.
+  Los nombres de parámetros dentro de `search.space` ya no chocan con campos de política.
+- Añadido análisis pareado de sweeps con remuestreo por bloques de seed, celdas ausentes explícitas,
+  comparaciones con referencia, probabilidad de equivalencia práctica, líder puntual y conclusión
+  científica exacta cuya confianza pertenece a esa misma hipótesis.
+
+### Cambiado
+
+- Elevada la versión mínima de PyTorch a 2.3 y alineado NumPy con el runtime de `textual-plot` para
+  que una instalación limpia no pueda resolver la combinación incompatible de ABI PyTorch 2.2 /
+  NumPy 2.
+- Diseños fijos y adaptativos comparten ahora el dispatcher ARI existente. Las Runs del sweep siguen
+  siendo obligatorias mientras ARI puede reordenarlas, empaquetarlas, guardar checkpoints y
+  recuperarlas; los bloques de seeds equilibrados evitan confundir tratamiento y momento temporal.
+- El presupuesto de candidatos limita únicamente propuestas distintas. Tras publicar un candidato,
+  `replication.minimum` seeds distintas son deuda protegida; agotar candidatos ya no cancela seeds,
+  continuaciones, fidelidades ni confirmaciones obligatorias.
+- La telemetría terminal separa `status`, `design_status`, `scientific_status` y `finish_reason`,
+  reconcilia identidades en cola y distingue candidatos observados de completos. Un diseño completo
+  puede permanecer científicamente no resuelto.
+
+### Corregido
+
+- Evitada la cancelación de Runs fijas o de replicación mínima como evidencia sustituida y que un
+  Study terminal conserve Runs en cola. Los anchors iniciales mantienen prioridad de amplitud sobre
+  replicación adicional sin debilitar ninguna obligación.
+- Eliminadas conclusiones falsas de ganador/equivalencia categórica con identidad ganadora inestable
+  y la sustitución de una seed compartida ausente por otra seed del candidato.
+
 ## [0.15.0] - 2026-09-23
 
 ### Añadido

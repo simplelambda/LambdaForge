@@ -10,7 +10,7 @@ import math
 import os
 import types
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
@@ -19,13 +19,48 @@ import yaml
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveSearch import SEARCH_POLICY_FIELDS, AdaptiveSearchPolicy
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
+from lambdaforge.metrics.MetricRegistry import MetricRegistry
+from lambdaforge.ProjectContext import ProjectContext
+from lambdaforge.reproducibility.SeedProvider import SeedIdentity, SeedProvider
+from lambdaforge.work.design import (
+    EvidenceKind,
+    EvidencePlan,
+    ExecutionPolicy,
+    ResolvedStudyConfiguration,
+    StudyDesign,
+)
 from lambdaforge.work.models import immutable_mapping
 from lambdaforge.work.Work import Work
 
 _TOP_FIELDS = frozenset(
-    {"name", "run", "with", "resources", "seeds", "search", "objective", "steps"}
+    {
+        "name",
+        "run",
+        "with",
+        "resources",
+        "seeds",
+        "replicates",
+        "search",
+        "sweep",
+        "execution",
+        "objective",
+        "steps",
+    }
 )
-_RUN_FIELDS = frozenset({"name", "run", "with", "resources", "seeds", "search", "objective"})
+_RUN_FIELDS = frozenset(
+    {
+        "name",
+        "run",
+        "with",
+        "resources",
+        "seeds",
+        "replicates",
+        "search",
+        "sweep",
+        "execution",
+        "objective",
+    }
+)
 
 
 class WorkYamlError(yaml.YAMLError):
@@ -107,7 +142,12 @@ class RunDefinition:
     variants: tuple[Mapping[str, Any], ...] = ({},)
     objective: Mapping[str, Any] | None = None
     search_policy: AdaptiveSearchPolicy | None = None
+    execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
+    study_design: StudyDesign | None = None
     study_expected: bool = False
+    # Last on purpose: older internal callers constructed this dataclass
+    # positionally before seed provenance existed.
+    seed_metadata: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parameters", immutable_mapping(self.parameters))
@@ -118,11 +158,18 @@ class RunDefinition:
         )
         if self.objective is not None:
             object.__setattr__(self, "objective", immutable_mapping(self.objective))
+        object.__setattr__(
+            self,
+            "seed_metadata",
+            tuple(immutable_mapping(value) for value in self.seed_metadata),
+        )
 
     @property
     def run_count(self) -> int:
+        if self.study_design is not None and self.study_design.kind in {"sweep", "repeated"}:
+            return len(self.study_design.evidence.required)
         candidates = (
-            min(self.search_policy.candidate_budget, len(self.variants))
+            min(self.search_policy.candidate_budget or len(self.variants), len(self.variants))
             if self.search_policy is not None
             else len(self.variants)
         )
@@ -179,8 +226,11 @@ class WorkConfig:
                 f"Unknown top-level field(s): {sorted(unexpected)}. "
                 f"Allowed fields: {sorted(_TOP_FIELDS)}."
             )
-        name = _nonempty(data.get("name"), "name")
         source_path = Path(source).expanduser().resolve() if source is not None else None
+        name = _nonempty(
+            data.get("name", source_path.stem if source_path is not None else None), "name"
+        )
+        project = ProjectContext.discover(source_path or Path.cwd())
         if ("run" in data) == ("steps" in data):
             raise ValueError("A Work YAML must define exactly one run or steps.")
         default_resources = _work_resources(data.get("resources"))
@@ -192,6 +242,7 @@ class WorkConfig:
                             data,
                             default_name=name,
                             inherited_resources=None,
+                            project=project,
                         ),
                     )
                 ),
@@ -218,6 +269,7 @@ class WorkConfig:
                             item,
                             default_name=f"step-{index}-{offset}",
                             inherited_resources=default_resources,
+                            project=project,
                         )
                         for offset, item in enumerate(parallel, 1)
                     )
@@ -227,6 +279,7 @@ class WorkConfig:
                             step,
                             default_name=f"step-{index}",
                             inherited_resources=default_resources,
+                            project=project,
                         ),
                     )
                 duplicates = seen.intersection(run.name for run in definitions)
@@ -417,8 +470,13 @@ class WorkConfig:
                         "search": (
                             definition.search_policy.to_dict()
                             if definition.search_policy is not None
-                            else {"strategy": "exhaustive"}
+                            else (
+                                {"strategy": "fixed", "design": definition.study_design.to_dict()}
+                                if definition.study_design is not None
+                                else None
+                            )
                         ),
+                        "execution": definition.execution_policy.to_dict(),
                     }
                 )
             levels.append(current)
@@ -427,6 +485,65 @@ class WorkConfig:
             "levels": levels,
             "planned_runs": self.planned_runs,
             "resources": self.resources.to_dict(),
+            "resolved_configuration": self.resolved_configuration(),
+        }
+
+    def resolved_configuration(self) -> dict[str, Any]:
+        """Return the complete versioned policy authority consumed by execution."""
+        resolved: list[list[dict[str, Any]]] = []
+        for level in self.levels:
+            values: list[dict[str, Any]] = []
+            for definition in level.runs:
+                design = definition.study_design
+                study_type = design.kind if design is not None else "single"
+                configuration = ResolvedStudyConfiguration(
+                    name=definition.name,
+                    study_type=study_type,
+                    design=(
+                        design.to_dict()
+                        if design is not None
+                        else {
+                            "type": "single",
+                            "seed_source": (
+                                dict(definition.seed_metadata[0])
+                                if definition.seed_metadata
+                                else None
+                            ),
+                        }
+                    ),
+                    search=(
+                        {
+                            **definition.search_policy.to_dict(),
+                            "candidate_generation": {
+                                "mode": (
+                                    "deterministic-incremental"
+                                    if definition.search_policy.candidate_budget is None
+                                    else "deterministic-bounded"
+                                ),
+                                "generator": "scrambled-sobol-prefix-v1",
+                                "materialized_prefix": len(definition.variants),
+                                "candidate_cap": definition.search_policy.candidate_budget,
+                            },
+                            "confirmation_policy": (
+                                "automatic-fresh-project-stream"
+                                if definition.search_policy.confirmation_auto
+                                else "explicit"
+                            ),
+                        }
+                        if definition.search_policy is not None
+                        else None
+                    ),
+                    execution=definition.execution_policy.to_dict(),
+                    objective=dict(definition.objective or {}),
+                    resources=definition.resources.to_dict(),
+                )
+                values.append(configuration.to_dict())
+            resolved.append(values)
+        return {
+            "resolved_work_configuration_version": 1,
+            "name": self.name,
+            "source": str(self.source) if self.source is not None else None,
+            "levels": resolved,
         }
 
 
@@ -465,6 +582,7 @@ def _run_definition(
     *,
     default_name: str,
     inherited_resources: ResourceRequest | None,
+    project: ProjectContext,
 ) -> RunDefinition:
     if not isinstance(value, Mapping):
         raise TypeError("Every Work step must be a mapping.")
@@ -484,20 +602,139 @@ def _run_definition(
         if "resources" in data
         else inherited_resources or ResourceRequest()
     )
-    seeds = _seeds(data.get("seeds"))
     objective = _objective(data.get("objective"))
-    search = data.get("search")
-    policy = _search_policy(search, seeds=seeds, objective=objective, resources=resources)
+    raw_search = data.get("search")
+    raw_sweep = data.get("sweep")
+    if raw_search is not None and raw_sweep is not None:
+        raise ValueError("A Work may define search or sweep, never both.")
+    normalized_search = _normalize_search(raw_search, objective=objective)
+    unseeded_single = (
+        normalized_search is None
+        and raw_sweep is None
+        and "seeds" not in data
+        and "replicates" not in data
+    )
+    seed_identities: tuple[SeedIdentity, ...]
+    if unseeded_single:
+        seed_identities = ()
+        automatic_seed_source = False
+        automatic_sweep = False
+        seeds: tuple[int | None, ...] = (None,)
+    else:
+        seed_identities, automatic_seed_source, automatic_sweep = _seed_identities(
+            data,
+            search=normalized_search,
+            sweep=raw_sweep,
+            project=project,
+        )
+        seeds = tuple(value.value for value in seed_identities)
+    seed_source = {
+        "kind": (
+            "none" if unseeded_single else "project-stream" if automatic_seed_source else "explicit"
+        ),
+        "namespace": project.project_id,
+        "role": "replicate" if automatic_seed_source else "explicit",
+        "stream_version": (
+            "project-sha256-v1" if automatic_seed_source else "authored-v1"
+        ),
+        "extendable": automatic_seed_source,
+        "resolved": [value.to_dict() for value in seed_identities],
+    }
+    execution = _execution_policy(data.get("execution"), normalized_search)
+    if normalized_search is not None:
+        normalized_search = _apply_execution_policy(normalized_search, execution)
+    policy = _search_policy(
+        normalized_search,
+        seeds=seeds,
+        extendable_seeds=automatic_seed_source,
+        objective=objective,
+        resources=resources,
+    )
+    design: StudyDesign | None
+    if raw_sweep is not None:
+        sweep_space, sweep_reference = _sweep(raw_sweep)
+        variants = _sweep_variants(sweep_space)
+        _validate_sweep_reference(sweep_reference, variants)
+        if execution.max_runs is not None and execution.max_runs < len(variants) * len(seeds):
+            raise ValueError(
+                "The fixed sweep requires "
+                f"{len(variants) * len(seeds)} Runs, but execution.max_runs="
+                f"{execution.max_runs}. A sweep cannot silently start with an impossible "
+                "evidence budget."
+            )
+        design = StudyDesign(
+            "sweep",
+            sweep_space,
+            sweep_reference,
+            EvidencePlan.fixed(candidates=len(variants), seeds=seeds),
+            replication="auto-blocks" if automatic_sweep else "fixed",
+            seed_source=seed_source,
+        )
+    elif normalized_search is not None and policy is None:
+        exhaustive_space = _search_space(normalized_search)
+        variants = _exhaustive_variants(normalized_search)
+        if execution.max_runs is not None and execution.max_runs < len(variants) * len(seeds):
+            raise ValueError(
+                "The fixed sweep requires "
+                f"{len(variants) * len(seeds)} Runs, but execution.max_runs="
+                f"{execution.max_runs}. A sweep cannot silently start with an impossible "
+                "evidence budget."
+            )
+        design = StudyDesign(
+            "sweep",
+            exhaustive_space,
+            None,
+            EvidencePlan.fixed(candidates=len(variants), seeds=seeds),
+            replication="fixed",
+            seed_source=seed_source,
+        )
+    elif policy is not None:
+        assert normalized_search is not None
+        variants = _variants(normalized_search, adaptive=True)
+        design = StudyDesign(
+            "adaptive",
+            _search_space(normalized_search),
+            None,
+            EvidencePlan.adaptive(
+                candidates=min(policy.candidate_budget or len(variants), len(variants)),
+                seeds=seeds,
+                minimum=policy.min_seeds,
+            ),
+            goal=policy.goal,
+            replication="adaptive",
+            seed_source=seed_source,
+        )
+    else:
+        variants = ({},)
+        design = (
+            StudyDesign(
+                "repeated",
+                {},
+                None,
+                EvidencePlan.fixed(
+                    candidates=1,
+                    seeds=seeds,
+                    kind=EvidenceKind.SWEEP_REQUIRED,
+                ),
+                replication="fixed",
+                seed_source=seed_source,
+            )
+            if len(seeds) > 1
+            else None
+        )
     return RunDefinition(
-        name,
-        work_class,
-        dict(parameters),
-        resources,
-        seeds,
-        _variants(search, adaptive=policy is not None),
-        objective,
-        policy,
-        search is not None or len(seeds) > 1,
+        name=name,
+        work_class=work_class,
+        parameters=dict(parameters),
+        resources=resources,
+        seeds=seeds,
+        seed_metadata=tuple(value.to_dict() for value in seed_identities),
+        variants=variants,
+        objective=objective,
+        search_policy=policy,
+        execution_policy=execution,
+        study_design=design,
+        study_expected=design is not None,
     )
 
 
@@ -514,6 +751,36 @@ def _seeds(value: Any) -> tuple[int | None, ...]:
     return seeds
 
 
+def _seed_identities(
+    data: Mapping[str, Any],
+    *,
+    search: Mapping[str, Any] | None,
+    sweep: Any,
+    project: ProjectContext,
+) -> tuple[tuple[SeedIdentity, ...], bool, bool]:
+    """Resolve authored values or a project stream without hiding the concrete integers."""
+    if "seeds" in data and "replicates" in data:
+        raise ValueError("seeds and replicates are alternative authorities; use only one.")
+    provider = SeedProvider(project)
+    if "seeds" in data:
+        explicit = _seeds(data.get("seeds"))
+        values = tuple(int(value) for value in explicit if value is not None)
+        return provider.explicit(values), False, False
+    sweep_replicates: Any = None
+    if isinstance(sweep, Mapping):
+        sweep_replicates = sweep.get("replicates")
+    if data.get("replicates") is not None and sweep_replicates is not None:
+        raise ValueError("Top-level replicates and sweep.replicates cannot both be set.")
+    raw_count = data.get("replicates", sweep_replicates)
+    automatic_sweep = sweep is not None and raw_count is None
+    if raw_count is None:
+        raw_count = search.get("min_seeds", 1) if search is not None else 1
+    if isinstance(raw_count, bool) or not isinstance(raw_count, int) or raw_count < 1:
+        raise ValueError("replicates must be a positive integer.")
+    identities = provider.stream("replicate").take(raw_count)
+    return identities, True, automatic_sweep
+
+
 def _work_resources(value: Any) -> ResourceRequest:
     if value is not None and not isinstance(value, Mapping):
         raise TypeError("resources must be a mapping.")
@@ -526,6 +793,287 @@ def _work_resources(value: Any) -> ResourceRequest:
     return ResourceRequest.from_mapping(value)
 
 
+_EXECUTION_FIELDS = frozenset(
+    {"runs_per_gpu", "max_parallel", "failure_retries", "max_runs", "max_time"}
+)
+_STRUCTURED_SEARCH_FIELDS = frozenset({"budget", "space", "replication", "pruning"})
+
+
+def _normalize_search(
+    value: Any,
+    *,
+    objective: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Normalize modern and legacy search syntax before any downstream interpretation."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or not value:
+        raise TypeError("search must be a non-empty mapping.")
+    raw = copy.deepcopy(dict(value))
+    normalized = {
+        str(name): item
+        for name, item in raw.items()
+        if name not in _STRUCTURED_SEARCH_FIELDS
+    }
+    raw_space = raw.get("space")
+    if raw_space is not None:
+        if not isinstance(raw_space, Mapping) or not raw_space:
+            raise TypeError("search.space must be a non-empty mapping.")
+        legacy_dimensions = {
+            str(name)
+            for name in raw
+            if name not in SEARCH_POLICY_FIELDS
+            and name not in _STRUCTURED_SEARCH_FIELDS
+            and name != "trials"
+        }
+        if legacy_dimensions:
+            raise ValueError(
+                "search.space cannot be combined with legacy direct parameter fields: "
+                f"{sorted(legacy_dimensions)}."
+            )
+        normalized["parameter_space"] = {
+            str(name): _dimension_mapping(descriptor) for name, descriptor in raw_space.items()
+        }
+    raw_budget = raw.get("budget")
+    if raw_budget is not None:
+        if not isinstance(raw_budget, Mapping):
+            raise TypeError("search.budget must be a mapping.")
+        unknown = set(raw_budget) - {"candidates", "runs", "time"}
+        if unknown:
+            raise ValueError(f"Unknown search.budget field(s): {sorted(unknown)}.")
+        aliases = {
+            "candidates": "trials",
+            "runs": "max_runs",
+            "time": "max_time",
+        }
+        for modern, legacy in aliases.items():
+            if modern not in raw_budget:
+                continue
+            _merge_alias(
+                normalized,
+                legacy,
+                raw_budget[modern],
+                modern=f"search.budget.{modern}",
+                legacy=f"search.{legacy}",
+            )
+    raw_replication = raw.get("replication")
+    if raw_replication is not None:
+        if not isinstance(raw_replication, Mapping):
+            raise TypeError("search.replication must be a mapping.")
+        unknown = set(raw_replication) - {"minimum", "confirmation"}
+        if unknown:
+            raise ValueError(f"Unknown search.replication field(s): {sorted(unknown)}.")
+        if "minimum" in raw_replication:
+            _merge_alias(
+                normalized,
+                "min_seeds",
+                raw_replication["minimum"],
+                modern="search.replication.minimum",
+                legacy="search.min_seeds",
+            )
+        if "confirmation" in raw_replication:
+            confirmation = raw_replication["confirmation"]
+            if not (isinstance(confirmation, str) and confirmation.lower() == "auto"):
+                _merge_alias(
+                    normalized,
+                    "confirmation_seeds",
+                    confirmation,
+                    modern="search.replication.confirmation",
+                    legacy="search.confirmation_seeds",
+                )
+    if "pruning" in raw:
+        _merge_alias(
+            normalized,
+            "early_stopping",
+            raw["pruning"],
+            modern="search.pruning",
+            legacy="search.early_stopping",
+        )
+
+    practical_margin = objective.get("practical_margin") if objective is not None else None
+    authored_margins: list[tuple[str, float]] = []
+    if isinstance(practical_margin, int | float) and not isinstance(practical_margin, bool):
+        authored_margins.append(("objective.practical_margin", float(practical_margin)))
+    seed_racing = normalized.get("seed_racing")
+    if isinstance(seed_racing, Mapping) and isinstance(
+        seed_racing.get("equivalence_margin"), int | float
+    ):
+        authored_margins.append(
+            (
+                "search.seed_racing.equivalence_margin",
+                float(seed_racing["equivalence_margin"]),
+            )
+        )
+    pruning = normalized.get("early_stopping")
+    if isinstance(pruning, Mapping) and isinstance(
+        pruning.get("equivalence_margin"), int | float
+    ):
+        authored_margins.append(
+            (
+                "search.early_stopping.equivalence_margin",
+                float(pruning["equivalence_margin"]),
+            )
+        )
+    if isinstance(normalized.get("equivalence_margin"), int | float):
+        authored_margins.append(
+            ("search.equivalence_margin", float(normalized["equivalence_margin"]))
+        )
+    if authored_margins and any(
+        not math.isclose(value, authored_margins[0][1], rel_tol=0.0, abs_tol=0.0)
+        for _name, value in authored_margins[1:]
+    ):
+        details = ", ".join(f"{name}={margin}" for name, margin in authored_margins)
+        raise ValueError(
+            "All practical-equivalence aliases describe one scientific margin and cannot "
+            f"disagree: {details}."
+        )
+    if authored_margins:
+        canonical_margin = authored_margins[0][1]
+        normalized["equivalence_margin"] = canonical_margin
+        if objective is not None:
+            objective["practical_margin"] = canonical_margin
+    return normalized
+
+
+def _merge_alias(
+    target: dict[str, Any],
+    key: str,
+    value: Any,
+    *,
+    modern: str,
+    legacy: str,
+) -> None:
+    if key in target and target[key] != value:
+        raise ValueError(f"{modern} and {legacy} cannot disagree.")
+    target[key] = value
+
+
+def _execution_policy(value: Any, search: Mapping[str, Any] | None) -> ExecutionPolicy:
+    if value is not None and not isinstance(value, Mapping):
+        raise TypeError("execution must be a mapping.")
+    normalized = dict(value or {})
+    for name in _EXECUTION_FIELDS:
+        if search is None or name not in search:
+            continue
+        if name in normalized and normalized[name] != search[name]:
+            raise ValueError(f"execution.{name} and search.{name} cannot disagree.")
+        normalized[name] = search[name]
+    return ExecutionPolicy.from_mapping(normalized)
+
+
+def _apply_execution_policy(
+    search: Mapping[str, Any], execution: ExecutionPolicy
+) -> dict[str, Any]:
+    normalized = dict(search)
+    normalized.update(execution.to_dict())
+    return normalized
+
+
+def _dimension_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return {"values": list(value)}
+    raise TypeError("Search/sweep dimensions must be lists or mappings.")
+
+
+def _search_space(value: Mapping[str, Any]) -> dict[str, Any]:
+    raw = value.get("parameter_space")
+    if isinstance(raw, Mapping):
+        return {str(name): _dimension_mapping(descriptor) for name, descriptor in raw.items()}
+    return {
+        str(name): _dimension_mapping(descriptor)
+        for name, descriptor in value.items()
+        if str(name) not in SEARCH_POLICY_FIELDS and str(name) != "trials"
+    }
+
+
+def _sweep(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if not isinstance(value, Mapping):
+        raise TypeError("sweep must be a mapping containing space.")
+    unknown = set(value) - {"space", "reference", "replicates"}
+    if unknown:
+        forbidden = sorted(unknown)
+        raise ValueError(
+            "A sweep executes every authored combination with every authored seed; adaptive "
+            "candidate/seed controls are therefore not applicable: "
+            f"{forbidden}."
+        )
+    raw_space = value.get("space")
+    if not isinstance(raw_space, Mapping) or not raw_space:
+        raise TypeError("sweep.space must be a non-empty mapping.")
+    space = {str(name): _dimension_mapping(descriptor) for name, descriptor in raw_space.items()}
+    raw_reference = value.get("reference")
+    if raw_reference is not None and not isinstance(raw_reference, Mapping):
+        raise TypeError("sweep.reference must map parameter names to authored values.")
+    reference = (
+        {str(name): selected for name, selected in raw_reference.items()}
+        if isinstance(raw_reference, Mapping)
+        else None
+    )
+    return space, reference
+
+
+def _sweep_variants(space: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    normalized: dict[str, Any] = {}
+    for name, raw_descriptor in space.items():
+        descriptor = dict(raw_descriptor)
+        if "range" in descriptor:
+            points = descriptor.get("points")
+            if isinstance(points, bool) or not isinstance(points, int) or points < 2:
+                raise ValueError(
+                    f"sweep.space.{name}.range requires integer points >= 2; a sweep never "
+                    "interprets a continuous range as random search."
+                )
+            bounds = descriptor["range"]
+            if (
+                not isinstance(bounds, Sequence)
+                or isinstance(bounds, str | bytes)
+                or len(bounds) != 2
+            ):
+                raise TypeError(f"sweep.space.{name}.range must contain [low, high].")
+            low, high = float(bounds[0]), float(bounds[1])
+            if not math.isfinite(low) or not math.isfinite(high) or low >= high:
+                raise ValueError(f"sweep.space.{name}.range requires finite low < high.")
+            scale = str(descriptor.get("scale", "linear"))
+            if scale == "log":
+                if low <= 0:
+                    raise ValueError(f"sweep.space.{name} log range requires positive bounds.")
+                ratio = (high / low) ** (1.0 / (points - 1))
+                values = [low * ratio**index for index in range(points)]
+            elif scale == "linear":
+                values = [low + (high - low) * index / (points - 1) for index in range(points)]
+            else:
+                raise ValueError(f"sweep.space.{name}.scale must be linear or log.")
+            descriptor = {
+                "values": values,
+                **({"when": descriptor["when"]} if "when" in descriptor else {}),
+            }
+        elif "points" in descriptor:
+            raise ValueError(f"sweep.space.{name}.points is valid only with range.")
+        normalized[name] = descriptor
+    return _exhaustive_variants(normalized)
+
+
+def _validate_sweep_reference(
+    reference: Mapping[str, Any] | None, variants: Sequence[Mapping[str, Any]]
+) -> None:
+    if reference is None:
+        return
+    matches = [
+        variant
+        for variant in variants
+        if all(variant.get(name) == value for name, value in reference.items())
+    ]
+    if not matches:
+        raise ValueError("sweep.reference must identify at least one authored sweep combination.")
+    if len(matches) > 1:
+        raise ValueError(
+            "sweep.reference must identify exactly one authored combination; include the "
+            "remaining dimensions to avoid an ambiguous control."
+        )
+
+
 def _variants(value: Any, *, adaptive: bool = False) -> tuple[Mapping[str, Any], ...]:
     if value is None:
         return ({},)
@@ -534,18 +1082,25 @@ def _variants(value: Any, *, adaptive: bool = False) -> tuple[Mapping[str, Any],
     finite_names: list[str] = []
     finite_values: list[tuple[Any, ...]] = []
     random_space: dict[str, dict[str, Any]] = {}
-    random_count = 20
-    proposal_pool_size: int | None = None
+    raw_trials = value.get("trials")
+    random_count = int(raw_trials) if raw_trials is not None else 320
+    raw_pool_size = value.get("proposal_pool_size")
+    proposal_pool_size = int(raw_pool_size) if raw_pool_size is not None else None
     conditional = False
-    for raw_name, raw_descriptor in value.items():
+    parameter_space = value.get("parameter_space")
+    structured_space = isinstance(parameter_space, Mapping)
+    dimensions: Mapping[Any, Any] = (
+        parameter_space if isinstance(parameter_space, Mapping) else value
+    )
+    for raw_name, raw_descriptor in dimensions.items():
         name = str(raw_name)
-        if name == "trials":
+        if not structured_space and name == "trials":
             random_count = int(raw_descriptor)
             continue
-        if name == "proposal_pool_size":
+        if not structured_space and name == "proposal_pool_size":
             proposal_pool_size = int(raw_descriptor)
             continue
-        if name in SEARCH_POLICY_FIELDS:
+        if not structured_space and name in SEARCH_POLICY_FIELDS:
             continue
         descriptor = (
             raw_descriptor if isinstance(raw_descriptor, Mapping) else {"values": raw_descriptor}
@@ -579,27 +1134,30 @@ def _variants(value: Any, *, adaptive: bool = False) -> tuple[Mapping[str, Any],
         if condition is not None:
             random_space[name]["when"] = {str(key): item for key, item in condition.items()}
     has_range = any(
-        "range" in descriptor for descriptor in value.values() if isinstance(descriptor, Mapping)
+        isinstance(descriptor, Mapping) and "range" in descriptor
+        for descriptor in dimensions.values()
     )
     if not adaptive:
         return _exhaustive_variants(value)
-    if has_range or conditional or "trials" in value:
+    if has_range or conditional or raw_trials is not None:
         if random_count < 1:
             raise ValueError("search.trials must be >= 1.")
-        from lambdaforge.hpo.SobolSearch import SobolSearch
+        from lambdaforge.hpo.CandidateGenerator import DeterministicCandidateGenerator
 
         requested = (
             proposal_pool_size
             if proposal_pool_size is not None
-            else max(random_count, min(4096, random_count * 16))
+            else (
+                max(random_count, min(4096, random_count * 16))
+                if raw_trials is not None
+                else random_count
+            )
         )
         finite_cardinality = (
             math.prod(len(values) for values in finite_values) if not has_range else None
         )
         pool_count = min(requested, finite_cardinality) if finite_cardinality else requested
-        return tuple(
-            dict(trial.parameters) for trial in SobolSearch(random_space).trials(pool_count)
-        )
+        return DeterministicCandidateGenerator(random_space).prefix(pool_count)
     return tuple(
         dict(zip(finite_names, combination, strict=True))
         for combination in itertools.product(*finite_values)
@@ -610,9 +1168,14 @@ def _exhaustive_variants(value: Mapping[str, Any]) -> tuple[Mapping[str, Any], .
     """Enumerate an exact finite conditional sweep in authored parameter order."""
     dimensions: list[tuple[str, tuple[Any, ...], Mapping[str, Any] | None]] = []
     known: set[str] = set()
-    for raw_name, raw_descriptor in value.items():
+    parameter_space = value.get("parameter_space")
+    structured_space = isinstance(parameter_space, Mapping)
+    authored_dimensions: Mapping[str, Any] = (
+        parameter_space if isinstance(parameter_space, Mapping) else value
+    )
+    for raw_name, raw_descriptor in authored_dimensions.items():
         name = str(raw_name)
-        if name in SEARCH_POLICY_FIELDS or name == "trials":
+        if not structured_space and (name in SEARCH_POLICY_FIELDS or name == "trials"):
             continue
         descriptor = (
             raw_descriptor if isinstance(raw_descriptor, Mapping) else {"values": raw_descriptor}
@@ -659,6 +1222,7 @@ def _search_policy(
     value: Any,
     *,
     seeds: tuple[int | None, ...],
+    extendable_seeds: bool,
     objective: Mapping[str, Any] | None,
     resources: ResourceRequest,
 ) -> AdaptiveSearchPolicy | None:
@@ -674,7 +1238,12 @@ def _search_policy(
     if strategy not in {"adaptive", "exhaustive"}:
         raise ValueError("search.strategy must be adaptive or exhaustive.")
     if strategy == "exhaustive":
-        unexpected = set(SEARCH_POLICY_FIELDS.intersection(value) - {"strategy"})
+        # Physical limits are normalized into ``ExecutionPolicy`` for both controllers.  They
+        # remain in this mapping only so legacy ``search.runs_per_gpu`` et al. can share the same
+        # downstream representation as top-level ``execution``.
+        unexpected = set(
+            SEARCH_POLICY_FIELDS.intersection(value) - {"strategy"} - _EXECUTION_FIELDS
+        )
         if "trials" in value:
             unexpected.add("trials")
         if unexpected:
@@ -686,15 +1255,16 @@ def _search_policy(
     if objective is None:
         raise ValueError("Adaptive search requires a scalar or composite objective.")
     policy = AdaptiveSearchPolicy.from_search(value)
-    if "min_seeds" not in value:
-        policy = replace(policy, min_seeds=min(3, len(seeds)))
-    if "confirmation_seeds" not in value:
-        policy = replace(
-            policy,
-            confirmation_seeds=_automatic_confirmation_seeds(seeds, count=3),
-        )
-    if policy.min_seeds > len(seeds):
+    if policy.min_seeds > len(seeds) and not extendable_seeds:
         raise ValueError("search.min_seeds cannot exceed the number of configured seeds.")
+    variants = _variants(value, adaptive=True)
+    proposed_candidates = min(policy.candidate_budget or len(variants), len(variants))
+    required_minimum_runs = proposed_candidates * policy.min_seeds
+    if policy.max_runs is not None and policy.max_runs < required_minimum_runs:
+        raise ValueError(
+            "search/ execution run budget cannot satisfy the declared minimum replication: "
+            f"{required_minimum_runs} required Runs but max_runs={policy.max_runs}."
+        )
     overlap = set(policy.confirmation_seeds).intersection(
         seed for seed in seeds if seed is not None
     )
@@ -708,26 +1278,38 @@ def _search_policy(
     return policy
 
 
-def _automatic_confirmation_seeds(
-    search_seeds: Sequence[int | None], *, count: int
-) -> tuple[int, ...]:
-    """Return stable fresh seeds without coupling them to controller IDs or time."""
-    occupied = {seed for seed in search_seeds if seed is not None}
-    output: list[int] = []
-    candidate = 1_000_003
-    while len(output) < count:
-        if candidate not in occupied:
-            output.append(candidate)
-        candidate += 30
-    return tuple(output)
-
-
-def _objective(value: Any) -> Mapping[str, Any] | None:
+def _objective(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
+    if isinstance(value, str):
+        resolved = MetricRegistry.resolve(value)
+        if resolved is None:
+            raise ValueError(
+                f"Objective shorthand {value!r} is not a registered standard metric; use "
+                "objective: {metric: ..., mode: max|min}."
+            )
+        return resolved
     if not isinstance(value, Mapping):
-        raise TypeError("objective must be a mapping.")
-    return ObjectiveUtility.normalize(value)
+        raise TypeError("objective must be a registered metric name or a mapping.")
+    raw = dict(value)
+    practical_margin = raw.pop("practical_margin", None)
+    if practical_margin is not None and (
+        isinstance(practical_margin, bool)
+        or not isinstance(practical_margin, int | float)
+        or not math.isfinite(float(practical_margin))
+        or float(practical_margin) < 0
+    ):
+        raise ValueError("objective.practical_margin must be finite and non-negative.")
+    normalized = ObjectiveUtility.normalize(raw)
+    if "metrics" not in normalized and "range" not in normalized:
+        standard = MetricRegistry.resolve(str(normalized.get("metric", "")))
+        if standard is not None and standard.get("mode") == normalized.get("mode"):
+            known_range = standard.get("range")
+            if isinstance(known_range, list):
+                normalized["range"] = list(known_range)
+    if practical_margin is not None:
+        normalized["practical_margin"] = float(practical_margin)
+    return normalized
 
 
 def _signature_errors(target: type[Work], configured: Mapping[str, Any]) -> list[str]:

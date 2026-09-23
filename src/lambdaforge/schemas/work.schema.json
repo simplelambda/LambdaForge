@@ -4,7 +4,6 @@
   "title": "LambdaForge Work",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name"],
   "properties": {
     "name": {"type": "string", "minLength": 1},
     "run": {"type": "string", "pattern": "^[A-Za-z_]\\w*(\\.[A-Za-z_]\\w*)+$"},
@@ -16,7 +15,10 @@
       "uniqueItems": true,
       "items": {"type": "integer"}
     },
+    "replicates": {"type": "integer", "minimum": 1},
     "search": {"$ref": "#/$defs/search"},
+    "sweep": {"$ref": "#/$defs/sweep"},
+    "execution": {"$ref": "#/$defs/execution"},
     "objective": {"$ref": "#/$defs/objective"},
     "steps": {
       "type": "array",
@@ -55,32 +57,50 @@
         "with": {"type": "object"},
         "resources": {"$ref": "#/$defs/resources"},
         "seeds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer"}},
+        "replicates": {"type": "integer", "minimum": 1},
         "search": {"$ref": "#/$defs/search"},
+        "sweep": {"$ref": "#/$defs/sweep"},
+        "execution": {"$ref": "#/$defs/execution"},
         "objective": {"$ref": "#/$defs/objective"}
       }
     },
     "objective": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
         "metric": {"type": "string", "minLength": 1},
         "mode": {"enum": ["min", "max"]},
+        "range": {
+          "type": "array",
+          "prefixItems": [{"type": "number"}, {"type": "number"}],
+          "minItems": 2,
+          "maxItems": 2
+        },
         "aggregation": {"enum": ["weighted_mean", "geometric", "chebyshev"]},
+        "practical_margin": {"type": "number", "minimum": 0},
         "metrics": {
           "type": "object",
           "minProperties": 2,
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["mode", "weight", "range"],
+            "required": ["weight"],
             "properties": {
               "mode": {"enum": ["min", "max"]},
               "weight": {"type": "number", "minimum": 0},
               "range": {
-                "type": "array",
-                "prefixItems": [{"type": "number"}, {"type": "number"}],
-                "minItems": 2,
-                "maxItems": 2
+                "oneOf": [
+                  {"type": "number", "exclusiveMinimum": 0},
+                  {
+                    "type": "array",
+                    "prefixItems": [{"type": "number"}, {"type": "number"}],
+                    "minItems": 2,
+                    "maxItems": 2
+                  }
+                ]
               }
             }
           }
@@ -109,15 +129,17 @@
             }
           }
         }
-      },
-      "oneOf": [
-        {
-          "required": ["metric", "mode"],
-          "not": {"anyOf": [{"required": ["metrics"]}, {"required": ["aggregation"]}]}
-        },
-        {
-          "required": ["metrics"],
-          "not": {"anyOf": [{"required": ["metric"]}, {"required": ["mode"]}]}
+          },
+          "anyOf": [
+            {
+              "required": ["metric", "mode"],
+              "not": {"anyOf": [{"required": ["metrics"]}, {"required": ["aggregation"]}]}
+            },
+            {
+              "required": ["metrics"],
+              "not": {"anyOf": [{"required": ["metric"]}, {"required": ["mode"]}]}
+            }
+          ]
         }
       ]
     },
@@ -155,6 +177,68 @@
       "minProperties": 1,
       "properties": {
         "strategy": {"enum": ["adaptive", "exhaustive"]},
+        "goal": {"enum": ["optimize", "balanced", "understand"]},
+        "stop": {
+          "oneOf": [
+            {"const": "auto"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stability"],
+              "properties": {
+                "stability": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1}
+              }
+            }
+          ]
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "candidates": {"type": "integer", "minimum": 1},
+            "runs": {"type": "integer", "minimum": 1},
+            "time": {
+              "oneOf": [
+                {"type": "number", "exclusiveMinimum": 0},
+                {"type": "string", "pattern": "^\\s*[0-9]+(?:\\.[0-9]+)?\\s*[smhd]\\s*$"}
+              ]
+            }
+          }
+        },
+        "space": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"$ref": "#/$defs/searchDimension"}
+        },
+        "replication": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "minimum": {"type": "integer", "minimum": 1},
+            "confirmation": {
+              "oneOf": [
+                {"const": "auto"},
+                {"type": "array", "uniqueItems": true, "items": {"type": "integer"}}
+              ]
+            }
+          }
+        },
+        "pruning": {
+          "oneOf": [
+            {"type": "boolean"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "min_step": {"type": "integer", "minimum": 1},
+                "confirmations": {"type": "integer", "minimum": 1},
+                "probability_threshold": {"type": "number", "minimum": 0, "maximum": 1},
+                "equivalence_margin": {"type": "number", "minimum": 0}
+              }
+            }
+          ]
+        },
         "trials": {"type": "integer", "minimum": 1},
         "proposal_pool_size": {"type": "integer", "minimum": 1},
         "runs_per_gpu": {
@@ -232,6 +316,65 @@
         }
       },
       "additionalProperties": {"$ref": "#/$defs/searchDimension"}
+    },
+    "sweepDimension": {
+      "oneOf": [
+        {"type": "array", "minItems": 1},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "values": {"type": "array", "minItems": 1},
+            "range": {
+              "type": "array",
+              "prefixItems": [{"type": "number"}, {"type": "number"}],
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "points": {"type": "integer", "minimum": 2},
+            "scale": {"enum": ["linear", "log"]},
+            "when": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {"type": ["string", "number", "integer", "boolean", "null"]}
+            }
+          },
+          "oneOf": [
+            {"required": ["values"], "not": {"anyOf": [{"required": ["range"]}, {"required": ["points"]}]}},
+            {"required": ["range", "points"], "not": {"required": ["values"]}}
+          ]
+        }
+      ]
+    },
+    "sweep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["space"],
+      "properties": {
+        "space": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"$ref": "#/$defs/sweepDimension"}
+        },
+        "reference": {"type": "object", "minProperties": 1}
+        ,"replicates": {"type": "integer", "minimum": 1}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runs_per_gpu": {"oneOf": [{"type": "integer", "minimum": 1}, {"const": "auto"}]},
+        "max_parallel": {"oneOf": [{"type": "integer", "minimum": 1}, {"const": "auto"}, {"type": "null"}]},
+        "failure_retries": {"type": "integer", "minimum": 0, "maximum": 3},
+        "max_runs": {"type": "integer", "minimum": 1},
+        "max_time": {
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0},
+            {"type": "string", "pattern": "^\\s*[0-9]+(?:\\.[0-9]+)?\\s*[smhd]\\s*$"}
+          ]
+        }
+      }
     },
     "resources": {
       "type": "object",

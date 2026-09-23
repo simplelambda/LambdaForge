@@ -550,7 +550,11 @@ class StudyWorkspace(ResearchWorkspace):
             f"candidates {counts.get('candidates', len(candidates))}   "
             f"active {counts.get('active_runs', 0)}   waiting {counts.get('queued_runs', 0)}   "
             f"pruned {counts.get('pruned_runs', 0)}   "
-            f"GPU time {format_duration(self.study.get('cost', {}).get('gpu_seconds'))}"
+            f"GPU time {format_duration(self.study.get('cost', {}).get('gpu_seconds'))}\n"
+            f"design {self.study.get('required_completed', counts.get('completed_runs', 0))} / "
+            f"{self.study.get('required_runs', self.study.get('planned_runs', '—'))} required · "
+            f"{str(self.study.get('design_status', 'in progress')).replace('_', ' ')}   "
+            f"science {str(self.study.get('scientific_status', 'unresolved')).replace('_', ' ')}"
         )
         attention = []
         if counts.get("queued_runs", 0):
@@ -558,16 +562,23 @@ class StudyWorkspace(ResearchWorkspace):
         if best_candidate is not None:
             attention.append(f"★ Trial {best_candidate.get('trial')} currently leads selection")
         attention.append(f"† {counts.get('pruned_runs', 0)} censored/pruned Runs retained")
+        if self.study.get("required_missing"):
+            attention.append(
+                f"⚠ {self.study['required_missing']} required Run(s) remain missing"
+            )
         self.query_one("#study-overview-state", Static).update(
             "[b]STATE[/b]\n"
-            f"{str(self.work.get('state', 'unknown')).upper()}\n"
-            f"{self.study.get('strategy', 'Study')} · {self.work.get('cluster', 'local')}"
+            f"Execution: {str(self.study.get('status', self.work.get('state', 'unknown'))).upper()}\n"
+            f"Design: {str(self.study.get('design_status', 'in progress')).upper()} · "
+            f"Science: {str(self.study.get('scientific_status', 'unresolved')).upper()}"
         )
         self.query_one("#study-overview-trials", Static).update(
             "[b]TRIALS & RUNS[/b]\n"
             f"{counts.get('candidates', len(candidates))} candidates · "
             f"{counts.get('completed_runs', 0)} completed\n"
-            f"{counts.get('active_runs', 0)} active · {counts.get('queued_runs', 0)} waiting"
+            f"required {self.study.get('required_completed', '—')} / "
+            f"{self.study.get('required_runs', self.study.get('planned_runs', '—'))} · "
+            f"{counts.get('active_runs', 0)} active"
         )
         self.query_one("#study-overview-best", Static).update(
             "[b]CURRENT LEADER[/b]\n"
@@ -752,7 +763,38 @@ class StudyWorkspace(ResearchWorkspace):
             if isinstance(uncovered, Sequence) and not isinstance(uncovered, str | bytes)
             else 0
         )
+        strategy = str(self.study.get("strategy", "adaptive"))
+        design = self.study.get("design", {})
+        design = design if isinstance(design, Mapping) else {}
+        seed_source = design.get("seed_source", {})
+        seed_source = seed_source if isinstance(seed_source, Mapping) else {}
+        evidence = design.get("evidence", {})
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        sweep = self.analysis.get("sweep_analysis", {}) if isinstance(self.analysis, Mapping) else {}
+        sweep = sweep if isinstance(sweep, Mapping) else {}
+        conclusion = sweep.get("exact_conclusion", {})
+        conclusion = conclusion if isinstance(conclusion, Mapping) else {}
+        conclusion_text = (
+            f"{conclusion.get('kind', 'unresolved')} · "
+            f"confidence {format_value(conclusion.get('confidence'))} · "
+            f"point leader Trial {sweep.get('point_estimate_leader', '—')}"
+            if sweep
+            else "Live adaptive conclusions are listed per parameter below."
+        )
         return (
+            "SCIENTIFIC EVIDENCE PLAN\n"
+            f"Design               {strategy}\n"
+            f"Goal                 {design.get('goal', 'balanced')}\n"
+            f"Replication          {design.get('replication', 'fixed')}\n"
+            f"Seed stream          {seed_source.get('role', 'explicit')} · "
+            f"{seed_source.get('stream_version', 'authored')}\n"
+            f"Required Runs        {self.study.get('required_completed', 0)} / "
+            f"{self.study.get('required_runs', evidence.get('required_run_count', '—'))}\n"
+            f"Design status        {self.study.get('design_status', 'in progress')}\n"
+            f"Scientific status    {self.study.get('scientific_status', 'unresolved')}\n"
+            f"Finish reason        {self.study.get('finish_reason', 'not finished')}\n\n"
+            "SCIENTIFIC CONCLUSION\n"
+            f"{conclusion_text}\n\n"
             "INITIAL SCIENTIFIC DESIGN\n"
             f"Mode                 {initial.get('mode', 'unavailable')}\n"
             f"Authored dimensions  {initial.get('authored_dimensions', 'unavailable')}\n"
@@ -802,7 +844,8 @@ class StudyWorkspace(ResearchWorkspace):
         stop_summary = self._controller_stop_summary(controller)
         controller_status = stop_summary or f"Last: {latest.get('action', 'No decision yet')}"
         self.query_one("#hpo-strategy-card", Static).update(
-            f"[b]STRATEGY[/b]\n{self.study.get('strategy', 'adaptive')}\n{controller_status}"
+            f"[b]DESIGN[/b]\n{self.study.get('strategy', 'adaptive')}\n"
+            f"{self.study.get('design_status', controller_status)}"
         )
         self.query_one("#hpo-objective-card", Static).update(
             "[b]OBJECTIVE[/b]\n"
@@ -811,7 +854,9 @@ class StudyWorkspace(ResearchWorkspace):
         )
         self.query_one("#hpo-evidence-card", Static).update(
             "[b]EVIDENCE[/b]\n"
-            f"{counts.get('candidates', 0)} candidates · {counts.get('completed_runs', 0)} complete\n"
+            f"{counts.get('candidates', 0)} candidates · "
+            f"{self.study.get('required_completed', counts.get('completed_runs', 0))} / "
+            f"{self.study.get('required_runs', self.study.get('planned_runs', '—'))} required\n"
             f"anchors {initial.get('anchors_observed', 0)} observed / "
             f"{initial.get('anchors_pending', 0)} waiting · "
             f"O={format_value(understanding.get('optimization_opportunity'))} · "

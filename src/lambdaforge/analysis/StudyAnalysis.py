@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
+import random
+import statistics
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +25,7 @@ from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.hpo.ScientificDesign import ScientificQuestionAnalyzer
 from lambdaforge.work.atomic import atomic_write_json
 
-ANALYSIS_VERSION = 3
+ANALYSIS_VERSION = 4
 
 
 class StudyAnalysis:
@@ -53,7 +56,11 @@ class StudyAnalysis:
             2000 if resolved_status == "final" else provisional_bootstrap_replicates
         )
         policy = cls._search_policy(source)
-        equivalence_margin = cls._equivalence_margin(policy)
+        equivalence_margin = (
+            float(normalized_objective["practical_margin"])
+            if isinstance(normalized_objective.get("practical_margin"), int | float)
+            else cls._equivalence_margin(policy)
+        )
         aggregates = candidate_statistics(
             candidates,
             mode=mode,
@@ -98,6 +105,18 @@ class StudyAnalysis:
         constraint_summary = cls._constraints(aggregates)
         pareto = cls._component_pareto(aggregates, normalized_objective)
         pruning = cls._pruning(source)
+        design = cls._study_design(source)
+        sweep_analysis = (
+            cls._sweep_analysis(
+                aggregates,
+                design=design,
+                mode=mode,
+                practical_margin=equivalence_margin,
+                fingerprint=fingerprint,
+            )
+            if design.get("type") == "sweep"
+            else None
+        )
         scientific_understanding = ScientificQuestionAnalyzer.analyze(
             aggregates,
             normalized_objective,
@@ -119,6 +138,64 @@ class StudyAnalysis:
             pruning=pruning,
             constraints=constraint_summary,
         )
+        observed_candidate_count = sum(candidate.get("n", 0) > 0 for candidate in aggregates)
+        required_by_candidate = cls._required_by_candidate(design)
+        evidence_complete_candidate_count = sum(
+            bool(required_by_candidate.get(int(candidate.get("trial", 0))))
+            and required_by_candidate[int(candidate.get("trial", 0))].issubset(
+                {
+                    run.get("seed")
+                    for run in candidate.get("runs", ())
+                    if isinstance(run, Mapping) and run.get("final_objective") is not None
+                }
+            )
+            for candidate in aggregates
+        )
+        required_runs = sum(len(values) for values in required_by_candidate.values())
+        required_attempted = sum(
+            len(
+                required_by_candidate.get(int(candidate.get("trial", 0)), set())
+                & {
+                    run.get("seed")
+                    for run in candidate.get("runs", ())
+                    if isinstance(run, Mapping)
+                    and (
+                        run.get("final_objective") is not None
+                        or bool(run.get("censored"))
+                    )
+                }
+            )
+            for candidate in aggregates
+        )
+        required_completed = sum(
+            len(
+                required_by_candidate.get(int(candidate.get("trial", 0)), set())
+                & {
+                    run.get("seed")
+                    for run in candidate.get("runs", ())
+                    if isinstance(run, Mapping) and run.get("final_objective") is not None
+                }
+            )
+            for candidate in aggregates
+        )
+        design_status = (
+            str(source.get("design_status"))
+            if source.get("design_status") in {"complete", "incomplete"}
+            else "complete"
+            if required_runs and required_attempted == required_runs
+            else "incomplete"
+            if required_runs
+            else "unknown"
+        )
+        scientific_status = cls._scientific_status(scientific_understanding)
+        if isinstance(sweep_analysis, Mapping):
+            exact = sweep_analysis.get("exact_conclusion", {})
+            exact_kind = exact.get("kind") if isinstance(exact, Mapping) else None
+            scientific_status = (
+                "unresolved"
+                if exact_kind in {None, "UNRESOLVED", "NO_CLEAR_PREFERENCE"}
+                else "resolved"
+            )
         analysis = {
             "analysis_version": ANALYSIS_VERSION,
             "source": {
@@ -132,14 +209,34 @@ class StudyAnalysis:
             "search_space": space,
             "summary": {
                 "candidate_count": len(aggregates),
-                "complete_candidate_count": sum(
-                    candidate.get("n", 0) > 0 for candidate in aggregates
+                "observed_candidate_count": observed_candidate_count,
+                "complete_candidate_count": (
+                    evidence_complete_candidate_count
+                    if required_by_candidate
+                    else observed_candidate_count
                 ),
+                "evidence_complete_candidate_count": evidence_complete_candidate_count,
                 "run_count": len(runs),
                 "complete_run_count": sum(run.get("final_objective") is not None for run in runs),
                 "censored_run_count": sum(bool(run.get("censored")) for run in runs),
                 "failed_run_count": sum(run.get("state") == "failed" for run in runs),
+                "required_run_count": required_runs,
+                "required_completed": required_completed,
+                "required_attempted": required_attempted,
+                "required_censored": max(0, required_attempted - required_completed),
+                "required_missing": max(0, required_runs - required_attempted),
+                "evidence_completion_fraction": (
+                    required_completed / required_runs if required_runs else None
+                ),
+                "attempted_completion_fraction": (
+                    required_attempted / required_runs if required_runs else None
+                ),
+                "design_status": design_status,
+                "scientific_status": scientific_status,
             },
+            "study_design": design or None,
+            "design_status": design_status,
+            "scientific_status": scientific_status,
             "winner": winner,
             "candidates": aggregates,
             "candidate_comparisons": comparisons,
@@ -164,6 +261,7 @@ class StudyAnalysis:
             "practical_optimal_region": scientific_understanding["practical_optimal_region"],
             "optimization_opportunity": scientific_understanding["optimization_opportunity"],
             "scientific_uncertainty": scientific_understanding["scientific_uncertainty"],
+            "sweep_analysis": sweep_analysis,
             "resources": resources,
             "resource_conditioning": cls._resource_conditioning(source),
             "pareto": pareto,
@@ -189,6 +287,339 @@ class StudyAnalysis:
             },
         }
         return _portable_analysis_value(analysis)
+
+    @staticmethod
+    def _study_design(source: Mapping[str, Any]) -> dict[str, Any]:
+        direct = source.get("design")
+        if isinstance(direct, Mapping):
+            return dict(direct)
+        summary = source.get("summary")
+        if isinstance(summary, Mapping) and isinstance(summary.get("study_design"), Mapping):
+            return dict(summary["study_design"])
+        designs = source.get("study_designs")
+        if isinstance(designs, Sequence) and not isinstance(designs, str | bytes):
+            selected = next((value for value in designs if isinstance(value, Mapping)), None)
+            if selected is not None:
+                return dict(selected)
+        return {}
+
+    @staticmethod
+    def _required_by_candidate(design: Mapping[str, Any]) -> dict[int, set[Any]]:
+        evidence = design.get("evidence")
+        requirements = evidence.get("requirements", ()) if isinstance(evidence, Mapping) else ()
+        output: dict[int, set[Any]] = {}
+        for value in requirements:
+            if not isinstance(value, Mapping) or value.get("required") is not True:
+                continue
+            candidate = value.get("candidate")
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                output.setdefault(candidate, set()).add(value.get("seed"))
+        return output
+
+    @staticmethod
+    def _scientific_status(scientific: Mapping[str, Any]) -> str:
+        questions = [
+            value
+            for value in scientific.get("parameter_questions", ())
+            if isinstance(value, Mapping)
+        ]
+        if not questions or all(
+            value.get("conclusion_kind") in {"UNRESOLVED", "NO_CLEAR_PREFERENCE"}
+            for value in questions
+        ):
+            return "unresolved"
+        if any(
+            value.get("conclusion_kind") in {"UNRESOLVED", "NO_CLEAR_PREFERENCE"}
+            for value in questions
+        ):
+            return "partially_resolved"
+        return "resolved"
+
+    @classmethod
+    def _sweep_analysis(
+        cls,
+        candidates: Sequence[Mapping[str, Any]],
+        *,
+        design: Mapping[str, Any],
+        mode: str,
+        practical_margin: float | None,
+        fingerprint: str,
+    ) -> dict[str, Any]:
+        """Describe fixed shared-seed evidence without imputing missing cells."""
+        required = cls._required_by_candidate(design)
+        sign = 1.0 if mode == "max" else -1.0
+        rows: list[dict[str, Any]] = []
+        seed_values: dict[int, dict[Any, float]] = {}
+        evidence_rows: list[dict[str, Any]] = []
+        for candidate in candidates:
+            trial = int(candidate.get("trial", 0))
+            candidate_runs = [
+                run for run in candidate.get("runs", ()) if isinstance(run, Mapping)
+            ]
+            values = {
+                run.get("seed"): float(run["final_objective"])
+                for run in candidate_runs
+                if run.get("phase") != "confirmation"
+                and isinstance(run.get("final_objective"), int | float)
+                and not isinstance(run.get("final_objective"), bool)
+            }
+            seed_values[trial] = values
+            observed = list(values.values())
+            needed = required.get(trial, set())
+            standard_deviation = statistics.stdev(observed) if len(observed) >= 2 else None
+            rows.append(
+                {
+                    "trial": trial,
+                    "parameters": dict(candidate.get("parameters", {})),
+                    "completed_seeds": sorted(values, key=str),
+                    "required_seeds": sorted(needed, key=str),
+                    "completed_seed_count": len(set(values) & needed) if needed else len(values),
+                    "required_seed_count": len(needed),
+                    "mean": statistics.fmean(observed) if observed else None,
+                    "median": statistics.median(observed) if observed else None,
+                    "standard_deviation": standard_deviation,
+                    "standard_error": (
+                        standard_deviation / math.sqrt(len(observed))
+                        if standard_deviation is not None
+                        else None
+                    ),
+                    "uncertainty_interval": candidate.get("ci95"),
+                    "paired_support": None,
+                    "missing_cells": sorted(needed - set(values), key=str),
+                    "unpaired_descriptive_seed_count": len(set(values) - needed),
+                }
+            )
+            state_by_seed = {
+                run.get("seed"): (
+                    "completed"
+                    if run.get("final_objective") is not None
+                    else "pruned"
+                    if bool(run.get("censored"))
+                    else "failed"
+                    if run.get("state") in {"failed", "infeasible"}
+                    else str(run.get("state", "missing"))
+                )
+                for run in candidate_runs
+                if run.get("phase") != "confirmation"
+            }
+            evidence_rows.append(
+                {
+                    "trial": trial,
+                    "parameters": dict(candidate.get("parameters", {})),
+                    "cells": [
+                        {"seed": seed, "state": state_by_seed.get(seed, "missing")}
+                        for seed in sorted(needed, key=str)
+                    ],
+                }
+            )
+        for row in rows:
+            trial = int(row["trial"])
+            row["paired_support"] = max(
+                (
+                    len(set(seed_values[trial]) & set(other))
+                    for other_trial, other in seed_values.items()
+                    if other_trial != trial
+                ),
+                default=0,
+            )
+        reference_rule = design.get("reference")
+        reference_trial = next(
+            (
+                int(candidate.get("trial", 0))
+                for candidate in candidates
+                if isinstance(reference_rule, Mapping)
+                and all(
+                    candidate.get("parameters", {}).get(name) == value
+                    for name, value in reference_rule.items()
+                )
+            ),
+            None,
+        )
+
+        def comparison(left: int, right: int) -> dict[str, Any]:
+            shared = sorted(
+                set(seed_values.get(left, {})) & set(seed_values.get(right, {})),
+                key=str,
+            )
+            differences = [
+                sign * (seed_values[left][seed] - seed_values[right][seed]) for seed in shared
+            ]
+            mean = statistics.fmean(differences) if differences else None
+            interval = cls._paired_interval(
+                differences,
+                fingerprint=f"{fingerprint}:{left}:{right}",
+            )
+            return {
+                "left_trial": left,
+                "right_trial": right,
+                "paired_seeds": shared,
+                "paired_support": len(shared),
+                "missing_seed_cells": sorted(
+                    (required.get(left, set()) | required.get(right, set())) - set(shared),
+                    key=str,
+                ),
+                "paired_mean_difference": mean,
+                "paired_uncertainty_interval": interval,
+                "probability_of_superiority": (
+                    (
+                        sum(value > 0 for value in differences)
+                        + 0.5 * sum(value == 0 for value in differences)
+                    )
+                    / len(differences)
+                    if differences
+                    else None
+                ),
+                "sign_consistency": (
+                    max(
+                        sum(value >= 0 for value in differences),
+                        sum(value <= 0 for value in differences),
+                    )
+                    / len(differences)
+                    if differences
+                    else None
+                ),
+                "probability_of_practical_equivalence": (
+                    sum(abs(value) <= practical_margin for value in differences) / len(differences)
+                    if differences and practical_margin is not None
+                    else None
+                ),
+                "method": "paired-shared-seed-block-bootstrap",
+            }
+
+        trials = sorted(seed_values)
+        pairs = [
+            comparison(trial, reference_trial)
+            for trial in trials
+            if reference_trial is not None and trial != reference_trial
+        ] if reference_trial is not None else [
+            comparison(left, right)
+            for index, left in enumerate(trials)
+            for right in trials[index + 1 :]
+        ][:100]
+        common_seeds = sorted(
+            set.intersection(*(set(values) for values in seed_values.values()))
+            if seed_values and all(seed_values.values())
+            else set(),
+            key=str,
+        )
+        point_means = {
+            trial: statistics.fmean(values.values())
+            for trial, values in seed_values.items()
+            if values
+        }
+        point_leader = (
+            (max if mode == "max" else min)(point_means, key=lambda trial: point_means[trial])
+            if point_means
+            else None
+        )
+        winner_counts = {trial: 0 for trial in trials}
+        equivalent_count = 0
+        unresolved_count = 0
+        resamples = 2000 if common_seeds else 0
+        rng = random.Random(int(fingerprint.replace("sha256:", "")[:16], 16))
+        for _ in range(resamples):
+            sampled = [rng.choice(common_seeds) for _seed in common_seeds]
+            means = {
+                trial: statistics.fmean(seed_values[trial][seed] for seed in sampled)
+                for trial in trials
+            }
+            if practical_margin is not None and (
+                max(sign * value for value in means.values())
+                - min(sign * value for value in means.values())
+                <= practical_margin
+            ):
+                equivalent_count += 1
+                continue
+            ordered_scores = sorted((sign * value, trial) for trial, value in means.items())
+            if len(ordered_scores) >= 2 and math.isclose(
+                ordered_scores[-1][0],
+                ordered_scores[-2][0],
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                unresolved_count += 1
+            else:
+                winner_counts[ordered_scores[-1][1]] += 1
+        best_probability = {
+            str(trial): count / resamples if resamples else None
+            for trial, count in winner_counts.items()
+        }
+        equivalent_probability = equivalent_count / resamples if resamples else None
+        modal_trial = max(winner_counts, key=lambda trial: winner_counts[trial]) if trials else None
+        modal_probability = (
+            winner_counts[modal_trial] / resamples
+            if modal_trial is not None and resamples
+            else None
+        )
+        if equivalent_probability is not None and equivalent_probability > max(
+            0.5, modal_probability or 0.0
+        ):
+            conclusion = {
+                "kind": "PRACTICALLY_EQUIVALENT",
+                "trials": trials,
+                "confidence": equivalent_probability,
+            }
+        elif modal_trial is not None and modal_probability is not None and modal_probability > 0.5:
+            conclusion = {
+                "kind": "PREFERRED",
+                "trials": [modal_trial],
+                "confidence": modal_probability,
+            }
+        else:
+            conclusion = {
+                "kind": "NO_CLEAR_PREFERENCE" if common_seeds else "UNRESOLVED",
+                "trials": [],
+                "confidence": 1.0 - (modal_probability or 0.0),
+            }
+        return {
+            "analysis_version": 1,
+            "design": "fixed-shared-seed-sweep",
+            "reference": dict(reference_rule) if isinstance(reference_rule, Mapping) else None,
+            "reference_trial": reference_trial,
+            "cells": rows,
+            "evidence_matrix": {
+                "seeds": sorted(
+                    {seed for values in required.values() for seed in values}, key=str
+                ),
+                "rows": evidence_rows,
+            },
+            "comparisons": pairs,
+            "common_complete_seeds": common_seeds,
+            "best_value_probability": best_probability,
+            "point_estimate_leader": point_leader,
+            "exact_conclusion": conclusion,
+            "conclusion_distribution": {
+                **{
+                    f"PREFERRED:{trial}": probability
+                    for trial, probability in best_probability.items()
+                    if probability is not None
+                },
+                **(
+                    {"PRACTICALLY_EQUIVALENT": equivalent_probability}
+                    if equivalent_probability is not None
+                    else {}
+                ),
+                **(
+                    {"NO_CLEAR_PREFERENCE": unresolved_count / resamples}
+                    if resamples and unresolved_count
+                    else {}
+                ),
+            },
+            "pairwise_matrix_bounded": len(pairs) >= 100,
+            "missing_cells_are_imputed": False,
+            "primary_unit": "paired seed difference",
+            "practical_margin": practical_margin,
+        }
+
+    @staticmethod
+    def _paired_interval(values: Sequence[float], *, fingerprint: str) -> list[float] | None:
+        if len(values) < 2:
+            return None
+        rng = random.Random(int(fingerprint.replace("sha256:", "")[:16], 16))
+        samples = sorted(
+            statistics.fmean(rng.choice(values) for _ in values) for _ in range(1000)
+        )
+        return [samples[24], samples[974]]
 
     @staticmethod
     def _resource_conditioning(source: Mapping[str, Any]) -> dict[str, Any]:
@@ -262,8 +693,20 @@ class StudyAnalysis:
 
     @staticmethod
     def authored_space(configuration: Mapping[str, Any]) -> dict[str, Any]:
-        search = configuration.get("search")
+        search = configuration.get("sweep", configuration.get("search"))
         if isinstance(search, Mapping):
+            nested = search.get("space")
+            if isinstance(nested, Mapping):
+                return {
+                    str(name): (
+                        dict(value)
+                        if isinstance(value, Mapping)
+                        else {"values": list(value)}
+                        if isinstance(value, Sequence) and not isinstance(value, str | bytes)
+                        else {"values": [value]}
+                    )
+                    for name, value in nested.items()
+                }
             return {
                 str(name): dict(value)
                 for name, value in search.items()

@@ -326,6 +326,74 @@ añade una clase vaga `GNN`: topología, agregación y equivariancia son decisio
 
 ## Composición y experimentos adaptativos
 
+El YAML recomendado expresa intención científica y reserva externa; LambdaForge resuelve la
+política interna. Omitir una opción no deja el estudio sin control: selecciona una política
+automática versionada, persistida antes de ejecutar y visible sin lanzar nada:
+
+```bash
+lf config resolve experiments/train.yaml
+lf config resolve experiments/train.yaml --format yaml
+lf seeds --count 20
+lf seeds --role confirmation --count 10
+```
+
+La forma adaptativa mínima es:
+
+```yaml
+run: mi_proyecto.Training
+with:
+  dataset: {dataset: wisdom-dna@5}
+  epochs: 500
+  patience: 30
+search:
+  space:
+    hidden_dim: [64, 128, 256]
+    layers: [1, 2, 3]
+    dropout: {range: [0.0, 0.5]}
+    learning_rate: {range: [0.00001, 0.003], scale: log}
+objective: val_auprc
+resources:
+  gpu: 3
+  time: 168h
+```
+
+Si falta `name`, se usa el nombre del YAML. Los defaults son `goal: balanced`, una réplica inicial
+obligatoria por candidato, startup geométrico, sampler/pruning automáticos, candidatos
+deterministas incrementales, replicación adicional adaptativa, confirmación nueva y separada,
+convergencia científica y packing/paralelismo automáticos. `resources.gpu` sigue siendo explícito
+porque reserva hardware ajeno. Métricas estándar como `val_auprc`, `accuracy`,
+`balanced_accuracy`, `f1`, `auroc`, `mcc`, `kappa` y `val_loss` conocen su dirección (y rango finito
+cuando existe); una métrica propia exige `{metric: ..., mode: max|min}`.
+
+Cada proyecto posee streams versionados y separados `replicate[n]` y `confirmation[n]`. Todos los
+candidatos comparten ordinal para permitir comparaciones pareadas; confirmación nunca reutiliza
+evidencia de selección. Cada Run persiste entero, ordinal, rol, namespace y versión. `seeds: [4, 7,
+32]` es un override finito exacto; `replicates: 10` usa los diez primeros ordinales. El stream es
+estable por prefijo y ofrece más de dos mil millones de valores sin colisión por rol, compatibles
+con seeds de 32 bits.
+
+Un `sweep` fija sus celdas. Sin número de réplicas abre bloques completos de seed compartida y usa
+secuencias de confianza pareadas, simultáneas y válidas en cualquier instante para decidir cuándo
+parar; no inspecciona repetidamente intervalos de muestra fija. No hay pruning HPO ni carrera por
+celda. Un fallo permanente deja el bloque incompleto. Solo puede afirmar equivalencia práctica si
+el investigador declaró `objective.practical_margin`.
+
+```yaml
+run: mi_proyecto.Training
+sweep:
+  space:
+    optimization_profile: [baseline, warmup, clipping, ema, swa]
+objective: val_auprc
+resources: {gpu: 3, time: 72h}
+```
+
+`sweep.replicates: 10` exige exactamente diez bloques. Los controles avanzados están en
+`search.budget`, `search.replication`, `search.pruning`, `search.stop` y `execution`. `search.goal`
+puede ser `optimize`, `balanced` o `understand`; pondera de forma distinta optimización y preguntas
+pendientes dentro del mismo controlador. Un presupuesto duro es un techo de seguridad, no una
+prueba de convergencia. Se persisten estado y motivo exacto de parada, y una ejecución completa
+puede seguir científicamente no resuelta.
+
 La admisión GPU adaptativa consulta la misma cola científica al terminar una Run y al quedar
 capacidad utilizable: los candidatos/semillas iniciales aplazados no deben dejar una GPU concedida
 ociosa esperando a otra Run. Los límites son máximos, no garantías de aceleración. Cada hijo
@@ -401,31 +469,42 @@ Esto es optimización restringida de un único objetivo, no un compromiso multio
 Los umbrales deben expresar validez científica real; no añadas toda métrica registrada solo porque
 exista.
 
-El número de seeds es probabilístico, no igual ni fijado por rondas. Un orden compartido permite
-diferencias pareadas; se añade una seed solo mientras la probabilidad de estar a
-`seed_racing.equivalence_margin` del incumbent alcance
-`seed_racing.probability_threshold`. El ganador usa una cota
-conservadora de búsqueda o, preferiblemente, la media de `confirmation_seeds` nuevas sobre un top-K
-congelado. Por defecto LambdaForge empieza con una seed declarada por candidato y genera
-tres seeds de confirmación deterministas y nuevas; cada valor puede sobrescribirse expresamente.
+Más allá de `replication.minimum`, el número de seeds es probabilístico, no igual ni fijado por
+rondas. Una vez propuesto un candidato, ese mínimo es una obligación real: sus identidades de seed
+pueden esperar recursos, pero no descartarse por replanning. Una seed podada por rendimiento cuenta
+como evidencia censurada intentada, no como respuesta completa; un fallo de infraestructura solo
+cuenta tras agotar los reintentos. Las seeds adicionales siguen siendo adaptativas. Un orden
+compartido permite diferencias pareadas y `objective.practical_margin` define la diferencia
+científicamente relevante. El ganador usa una cota
+conservadora de búsqueda y después evidencia de confirmación separada sobre el conjunto congelado
+de contendientes posterior/prácticamente competitivos. Por defecto cada candidato comienza con
+`replicate[0]`, recibe ordinales adicionales solo cuando aportan valor y confirma con el stream
+nuevo del proyecto. `confirmation_seeds` y `confirmation_top_k` siguen como overrides avanzados.
 Los Runs de confirmación nunca reciben pruning de rendimiento ni preemption oportunista. Si falla
 una seed requerida o no cabe en el presupuesto global, `summary.confirmation.status` queda
 `incomplete`, `confirmation_incomplete` es true y nunca se elige el subconjunto afortunado que
 logró sobrevivir.
 
-Desactivar HPO es deliberadamente sencillo. `strategy: exhaustive` significa un sweep finito
-literal: ejecuta cada combinación de `values` y cada seed, incluidas ramas `when` finitas exactas.
-Un `range` continuo no puede agotarse; hay que discretizarlo con `values` o usar modo adaptativo.
-`trials` es un presupuesto de candidatos y por eso se rechaza en modo exhaustivo.
+Sustituir HPO por un diseño fijo es deliberadamente sencillo. `sweep` convierte cada combinación
+declarada por cada seed en evidencia obligatoria. ARI puede reordenar, esperar, empaquetar, guardar
+checkpoints y recuperar Runs, pero no descartarlos por interés científico. La paciencia interna del
+entreno sigue activa y es distinta del pruning de HPO. Un grid numérico exige `points` para ser
+finito y determinista. `search.strategy: exhaustive` sigue aceptándose como alias del mismo diseño
+y dispatcher, no como una ruta serial distinta.
 
 ```yaml
 name: sweep-optimizadores
 run: mi_proyecto.Training
 seeds: [7, 17]
-search:
-  strategy: exhaustive
-  optimizer: {values: [adamw, sgd]}
-  momentum: {values: [0.8, 0.9], when: {optimizer: sgd}}
+sweep:
+  space:
+    optimizer: [adamw, sgd]
+    momentum: {values: [0.8, 0.9], when: {optimizer: sgd}}
+    learning_rate: {range: [0.00001, 0.001], points: 5, scale: log}
+  reference: {optimizer: adamw}
+execution:
+  runs_per_gpu: auto
+  max_parallel: auto
 ```
 
 ```yaml
@@ -433,29 +512,34 @@ name: entreno-adaptativo
 run: mi_proyecto.Training
 seeds: [4, 7, 32, 54, 65, 94, 109, 124]
 search:
-  trials: 40
+  budget: {candidates: 40, runs: 180}
   proposal_pool_size: 640
-  min_seeds: 1
+  replication:
+    minimum: 1
+    confirmation: [1001, 1002, 1003]
+  pruning:
+    enabled: true
+    min_step: 5
+    confirmations: 2
+    probability_threshold: 0.05
   # Presupuesto científico exacto opcional; omitido deriva de la geometría, no del hardware.
   startup_trials: 10
-  seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.002}
+  seed_racing: {probability_threshold: 0.1}
   confirmation_top_k: 2
-  confirmation_seeds: [1001, 1002, 1003]
   sampler: auto
-  max_runs: 180
-  max_time: 12h
   # Opcional: parar tras 8 resultados completos sin mejorar 0.0005 el récord.
-  # Omite ambos campos para consumir los 40 candidatos completos (valor seguro por defecto).
+  # Controles legacy de récord; la convergencia científica automática es el default normal.
   convergence_patience: 8
   min_improvement: 0.0005
+  space:
+    learning_rate: {range: [0.00001, 0.003], scale: log}
+    hidden_dim: [64, 128, 256]
+execution:
   runs_per_gpu: auto  # o un entero positivo como máximo duro por GPU
   max_parallel: auto  # o un entero positivo como máximo duro global
   failure_retries: 1
-  early_stopping: {enabled: true, min_step: 5, confirmations: 2,
-                   probability_threshold: 0.05, equivalence_margin: 0.002}
-  learning_rate: {range: [0.00001, 0.003], scale: log}
-  hidden_dim: {values: [64, 128, 256]}
-objective: {metric: val_auprc, mode: max}
+  max_time: 12h
+objective: {metric: val_auprc, mode: max, practical_margin: 0.002}
 resources:
   gpu: 2
   gpu_memory: 16GiB  # VRAM libre mínima exigida antes de iniciar cada Run
@@ -463,26 +547,25 @@ resources:
   memory: 32GiB      # reserva total; las partes nunca exceden este límite exterior
 ```
 
-La ejecución separa tres capas. La **planificación científica** decide qué evidencia debería
-existir: anchors protegidos, candidatos de optimización, probes emparejados y acciones de
-seed/fidelidad. La **planificación de recursos** decide qué cabe de forma segura ahora. El
-**dispatch** crea el proceso aislado. Por ello un anchor necesario puede esperar recursos sin estar
+La ejecución separa cuatro autoridades. El **diseño** declara espacio y protocolo fijo o adaptativo;
+su **plan de evidencia** registra identidades lógicas obligatorias y opcionales. La **planificación
+científica** elige evidencia adaptativa adicional. La **planificación de recursos** decide qué cabe
+ahora y el **dispatch** crea el proceso aislado. Por ello una identidad necesaria puede esperar sin estar
 cancelado. Si una cota inferior dura demuestra que es imposible en todos los dispositivos
 asignados, LambdaForge lo reemplaza por el candidato que mejor conserva sus obligaciones y registra
 `REPLACE_STARTUP_ANCHOR`. La capacidad física sobrante no agranda el diseño protegido: mientras hay
 poca evidencia ejecuta puntos `OPPORTUNISTIC_COVERAGE` que sí pueden replanificarse.
 
-El `proposal_pool_size` determinista se almacena una sola vez; cada especificación ligera de
-candidato/seed referencia solo sus propios valores. La memoria de planificación crece así de forma
-lineal y un estudio grande válido no necesita reducir su presupuesto YAML para evitar amplificación
-de memoria del framework. La interpretación científica viva tampoco depende del tamaño bruto de
-ese pool: LambdaForge reutiliza su geometría y distancias inmutables, remuestrea con precisión viva
-acotada y rota una shortlist representativa tras cada evento. El sampler de optimización conserva
-el pool determinista completo y puede elegir cualquier miembro; es un límite computacional del
-análisis explicativo, no una reducción oculta del espacio de búsqueda. El análisis terminal puede
-usar evidencia más densa porque ya no retrasa la recogida ni planificación de Runs.
+El generador determinista materializa un prefijo acotado y amplía exactamente la misma secuencia
+Sobol/mixta solo cuando la planificación científica pide más candidatos. Los IDs y valores previos
+no cambian. El `proposal_pool_size` avanzado controla esa ventana computacional, no una regla de
+parada científica. Cada especificación ligera conserva únicamente sus propios valores y el análisis
+explicativo vivo trabaja sobre geometría cacheada y una shortlist rotatoria acotada.
 
-`trials` es el presupuesto de candidatos y LambdaForge lo consume completo por defecto. Una
+`budget.candidates` (`trials` en YAML legacy) limita configuraciones distintas propuestas, no la
+evidencia ya debida para ellas. Alcanzarlo impide proponer el candidato 41, pero no cancela seeds
+mínimas, seeds compartidas, promociones de fidelidad, continuaciones ni confirmación obligatorias.
+Sin presupuesto de candidatos, una política científica versionada controla la expansión; una
 confianza baja o cobertura escasa nunca se interpreta silenciosamente como convergencia.
 `max_runs` y `max_time` son límites globales explícitos. `convergence_patience` es una política de
 racha de récords deliberadamente opt-in: un valor positivo deja de proponer solo cuando esa
@@ -502,6 +585,20 @@ resolver una pregunta, LambdaForge puede registrar `SCIENTIFIC_CONTINUATION` y r
 Trial y seed desde su checkpoint durable como un nuevo Attempt. No consume otro slot de `trials`,
 evita el pruning competitivo y sí consume presupuesto de Runs/tiempo. El prune original permanece
 visible y sigue siendo correcto.
+
+La telemetría terminal separa ejecución, completitud del diseño y resolución científica. Un sweep
+80/80 puede ser `status: completed`, `design_status: complete` y `scientific_status: unresolved`.
+Uno limitado por tiempo a 25/80 queda `incomplete`. Antes de cerrar se reconcilian todas las
+identidades, por lo que un Study terminal nunca conserva Runs en cola o activos. El export distingue
+candidatos observados de candidatos completos y cuenta celdas obligatorias completadas, ausentes y
+fallidas, además de la fracción de completitud.
+
+Los sweeps de seeds compartidas usan diferencias pareadas y remuestrean bloques de seed completos.
+Una celda ausente reduce el soporte pareado; nunca se sustituye por otra seed. El líder puntual se
+separa de `ExactScientificConclusion`: sin `objective.practical_margin`, una identidad ganadora
+inestable produce `NO_CLEAR_PREFERENCE` o `UNRESOLVED`, no equivalencia inventada. Con un margen en
+la escala del objetivo (o utilidad compuesta normalizada), la evidencia estable sí puede respaldar
+`PRACTICALLY_EQUIVALENT`.
 
 Con `auto`, ARI puede aumentar el packing de cada GPU hasta que VRAM física, recursos host,
 throughput o política del sitio indiquen esperar. Sustituirlo por `runs_per_gpu: 4` impondría

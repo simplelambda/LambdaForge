@@ -424,6 +424,45 @@ the authoring API.
 
 ## 7. Sequence, parallelism, seeds and search
 
+### 7.1 Intent-first defaults and resolved authority
+
+The common path needs no authored seed integers or controller tuning. With `search.space` and an
+objective, omitted policy means: project `replicate` stream, minimum replication one, balanced
+goal, automatic geometry-derived startup/sampler/pruning/seed racing/fresh confirmation,
+incremental deterministic candidate generation, scientific convergence, and automatic internal
+parallelism. The YAML filename stem is the default name. External ownership remains explicit:
+`resources.gpu` is never changed to “all available GPUs”.
+
+`lf config resolve FILE` prints the exact `ResolvedStudyConfiguration`; `--format json|yaml` is
+stable for tools. The same object is persisted in `execution.json` and
+`resolved-configuration.json` before computation. It includes policy versions, resolved execution
+limits, initial concrete seed identity, design, goal, stop/confirmation/candidate-generation
+policies, objective and hard resources. `lf seeds [--role replicate|confirmation] [--count N]`
+inspects the project streams. Each result and Study Run stores seed value, ordinal, role, namespace
+and version; export includes the authored YAML, resolved authority and all actual identities.
+
+The stream is a SHA-256-derived keyed permutation over 31-bit ordinals. The confirmation role owns
+the other high-bit domain, so each role has (2^{31}) collision-free, NumPy-compatible values and
+the two automatic domains cannot overlap. Explicit `seeds` remain exact and finite. Top-level
+`replicates: N` or `sweep.replicates: N` selects project ordinals `[0, N)`.
+
+No candidate budget means convergence-controlled adaptive search. Its Sobol/mixed generator is
+prefix-stable: a bounded computational window is materialized and extended only when the shared
+scientific policy requests another region. Existing candidates never change. `goal: optimize`,
+`balanced`, or `understand` adjusts the value of unresolved questions within that policy. Explicit
+candidate/Run/time budgets remain hard ceilings and exhaustion is not relabelled convergence.
+Stop reasons such as `CONVERGED_BALANCED`, `CANDIDATE_BUDGET`, `RUN_BUDGET`, `TIME_BUDGET`,
+`SEARCH_SPACE_EXHAUSTED` and `NO_POSITIVE_VALUE_ACTION` are persisted separately from scientific
+status.
+
+An auto-replicated sweep starts with every cell at `replicate[0]`; it opens ordinal `n+1` only after
+the complete previous block (including configured recovery). Its primary paired comparisons use a
+simultaneous time-uniform Hoeffding confidence sequence with summable error allocation across
+looks and competitors. Therefore automatic stopping is valid under repeated inspection. Secondary
+fixed-sample descriptions are exploratory. A bounded objective is required; registered bounded
+metrics and composite utilities supply it, otherwise declare `objective.range`. Equivalence needs
+an authored `practical_margin`. Sweep HPO pruning and per-cell seed racing are always disabled.
+
 Sequence and parallel groups are the whole composition language:
 
 ```yaml
@@ -443,8 +482,9 @@ steps:
 ```
 
 Each level waits for the prior level. A parallel group gives each Work definition its own isolated
-spawned process. An exhaustive seed/search member runs serially inside its fixed allocation; an
-adaptive member owns its allocation and schedules independent child Runs within it.
+spawned process. Fixed sweeps and adaptive searches both own one outer allocation and schedule
+independent child Runs through the same ARI dispatcher. Their scientific controllers differ—fixed
+evidence is mandatory, adaptive evidence is selected—but physical placement is not duplicated.
 The enclosing scheduler Job owns the aggregate allocation and cancellation boundary. A named output
 reference is valid only when its producer expands to one Run. Complex branching, conditions and
 loops belong in Python.
@@ -457,31 +497,29 @@ run: project.Train
 with: {epochs: 20}
 seeds: [7, 17]
 search:
-  strategy: adaptive
-  trials: 12
+  budget: {candidates: 12, runs: 48}
   proposal_pool_size: 192
   startup_trials: 10
-  min_seeds: 1
-  seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.002}
+  replication: {minimum: 1, confirmation: [1001, 1002, 1003]}
+  pruning: {enabled: true, min_step: 5, confirmations: 2}
+  seed_racing: {probability_threshold: 0.1}
   confirmation_top_k: 2
-  confirmation_seeds: [1001, 1002, 1003]
   sampler: auto
-  max_runs: 180
-  max_time: 12h
   # Optional record-streak stop; omit to consume the authored candidate budget.
   convergence_patience: 8
   min_improvement: 0.0005
-  max_parallel: 2
-  failure_retries: 1
-  learning_rate: {range: [0.0001, 0.01], scale: log}
-  width: {values: [128, 256]}
-objective: {metric: val_score, mode: max}
+  space:
+    learning_rate: {range: [0.0001, 0.01], scale: log}
+    width: [128, 256]
+execution: {max_parallel: 2, failure_retries: 1, max_time: 12h}
+objective: {metric: val_score, mode: max, practical_margin: 0.002}
 ```
 
-Finite-only exhaustive dimensions form a Cartesian product. In explicit `strategy: exhaustive`
-mode this is an exact contract, not a sampling hint: finite `when` branches are enumerated, while
-`range` and `trials` are rejected because a continuous interval/candidate cap cannot be exhaustive.
-Replace a range with explicit `values` when a full reproducible sweep is required.
+Canonical `sweep.space` dimensions form a finite Cartesian product. Exact finite `when` branches
+are enumerated; numeric ranges require an explicit deterministic `points` count. Every combination
+times every authored seed becomes required evidence. `search.strategy: exhaustive` normalizes to
+the same fixed design and dispatcher for compatibility. Candidate, replication, pruning and
+confirmation controls are rejected because they contradict that fixed contract.
 Adaptive/numeric spaces build a deterministic scrambled-Sobol pool bounded by
 `proposal_pool_size` (by default up to 16 times `trials`, capped at 4096); `trials` is only the
 maximum number of candidates that may execute. Conditional parameters use `when` and carry
@@ -598,10 +636,14 @@ $$
 P(\mu_i\geq\mu_{i^\star}-\epsilon\mid D)\geq\delta,
 $$
 
-where `seed_racing.equivalence_margin` is \(\epsilon\) and
+where the canonical `objective.practical_margin` is \(\epsilon\) and
 `seed_racing.probability_threshold` is \(\delta\). Clearly
 dominated candidates stop receiving seeds; uncertainty near the decision boundary receives them
-first, divided by observed Run duration. `min_seeds` is only the initial evidence floor. Ambiguous
+first, divided by observed Run duration. `replication.minimum` (`min_seeds` in legacy YAML) is a
+strict obligation once a candidate is proposed: those distinct seeds cannot be removed by
+replanning. A performance-pruned seed satisfies attempted/censored evidence, but not completed
+response evidence; infrastructure failures count only after retries are exhausted. Seeds beyond
+the minimum remain adaptive. Ambiguous
 root `search.reduction_factor` and `search.confidence` fields are rejected: fidelity spacing,
 seed-racing probability and early-stop probability have separate named owners.
 
@@ -718,35 +760,58 @@ Use a finite exhaustive sweep when the scientific question requires every author
 
 ```yaml
 seeds: [7, 17]
-search:
-  strategy: exhaustive
-  optimizer: {values: [adamw, sgd]}
-  momentum: {values: [0.8, 0.9], when: {optimizer: sgd}}
+sweep:
+  space:
+    optimizer: [adamw, sgd]
+    momentum: {values: [0.8, 0.9], when: {optimizer: sgd}}
+  reference: {optimizer: adamw}
+execution: {runs_per_gpu: auto, max_parallel: auto}
 ```
 
 This runs one AdamW variant and two SGD variants for each seed: six Runs exactly. It does not use an
-objective, surrogate, pruning, adaptive seed allocation or confirmation. An objective may still be
-declared to summarize/rank the complete evidence, but it does not change which Runs execute.
+surrogate, HPO pruning, adaptive seed allocation or winner-only confirmation. Training patience in
+the Work remains valid. An objective may still summarize the evidence, but cannot change which Runs
+execute. ARI retains all placement, packing, OOM recovery and checkpoint responsibilities. A
+numeric dimension may use `{range: [LOW, HIGH], points: N, scale: linear|log}`; omitting `points`
+is invalid. An explicit Run budget smaller than the fixed design is rejected, while a wall-time
+limit may produce an honestly incomplete design.
+
+Internally, authored YAML is normalized once into `StudyDesign`, `EvidencePlan`, `ExecutionPolicy`
+and the objective policy. An evidence requirement has candidate, seed, phase, fidelity, required
+flag and lifecycle state. Candidate budget only stops new configurations; required minimum seeds,
+shared seeds, promotions, scientific continuations and confirmation remain eligible until completed
+or bounded by Run/time policy. Terminal telemetry exposes `status`, `design_status`,
+`scientific_status` and `finish_reason`, reconciles every queued identity, and reports observed and
+evidence-complete candidate counts separately.
+
+Sweep analysis is paired by exact shared seed. It reports each cell's completed/required seeds,
+mean, median, dispersion and uncertainty; reference comparisons add paired differences, support,
+superiority and—only when a practical margin exists—practical-equivalence probability. Resampling
+selects whole seed blocks. Missing cells reduce support and remain visible; they are never imputed
+with another seed. A point-estimate leader is descriptive, while the displayed exact conclusion
+and its confidence always refer to the same resampled hypothesis. Complete design and unresolved
+science are therefore a valid combination.
 
 ### 7.2 Independent trainings per GPU
 
 The YAML resource block is the fixed outer reservation. `resources.gpu` reserves GPUs for one
-study; it is not repeated per child. `search.runs_per_gpu` packs independent spawned Runs onto each
+study; it is not repeated per child. Top-level `execution.runs_per_gpu` packs spawned Runs onto each
 reserved device, and each child sees one GPU plus its divided share of CPU/RAM/storage:
 
 ```yaml
 seeds: [4, 7, 32, 54, 65, 94, 109, 124]
 search:
-  strategy: adaptive
-  trials: 40
+  budget: {candidates: 40}
+  replication: {minimum: 1}
+  pruning: {enabled: true, min_step: 5, confirmations: 2,
+            probability_threshold: 0.05}
+  space:
+    learning_rate: {range: [0.00001, 0.003], scale: log}
+    hidden_dim: [64, 128, 256]
+execution:
   runs_per_gpu: auto
   max_parallel: auto
-  min_seeds: 1
-  early_stopping: {enabled: true, min_step: 5, confirmations: 2,
-                   probability_threshold: 0.05, equivalence_margin: 0.0}
-  learning_rate: {range: [0.00001, 0.003], scale: log}
-  hidden_dim: {values: [64, 128, 256]}
-objective: {metric: val_auprc, mode: max}
+objective: {metric: val_auprc, mode: max, practical_margin: 0.0}
 resources:
   gpu: 2
   gpu_memory: 16GiB
@@ -987,15 +1052,15 @@ if self.stop_requested:
     return {"stopped": True}
 ```
 
-After `early_stopping.min_step`, the controller compares active Runs at a common observed step. A
+After `search.pruning.min_step`, the controller compares active Runs at a common observed step. A
 bounded local-linear posterior projects each curve a short distance forward and carries residual
 plus pooled uncertainty. Pruning does not activate until at least two distinct candidates have
 completed far enough to backtest prefix predictions against their real endpoints and produce a
 finite curve error. Two is the minimum that identifies a comparison, not a configurable tuning
 threshold; before that point every startup curve remains eligible to establish the reference.
 Once calibrated, it requests a stop only when the probability of remaining within
-`early_stopping.equivalence_margin` of the projected incumbent falls below
-`early_stopping.probability_threshold`. This is
+`objective.practical_margin` of the projected incumbent falls below
+`search.pruning.probability_threshold`. This is
 more conservative with noisy or still-improving curves than dropping a fixed fraction. By default
 the condition must remain true at two distinct common steps (`confirmations: 2`); repeated polling
 of the same epoch cannot satisfy it. Set `confirmations: 1` only when an intentionally aggressive
@@ -1566,6 +1631,8 @@ Attempt environment provenance remains after reconstructible environment bytes a
 |---|---|
 | `init` | scaffold an installable Work project |
 | `project` | show the current project root and storage identity |
+| `seeds` | inspect deterministic project replicate/confirmation streams |
+| `config resolve` | render the exact versioned configuration without execution |
 | `validate` | complete local configuration/class/input validation |
 | `explain` | signature/doc/default/resource explanation |
 | `run` | the only scientific execution command |

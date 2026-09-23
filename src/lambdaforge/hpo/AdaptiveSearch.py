@@ -73,13 +73,16 @@ class ControllerValuePolicy:
 class AdaptiveSearchPolicy:
     """Sequential candidate, fidelity and probability-driven seed policy."""
 
-    # ``None`` is the canonical internal representation of authored ``auto``.  Integer values
-    # remain hard user process-count caps; the default stays one for backward compatibility.
-    runs_per_gpu: int | None = 1
+    # ``None`` is the canonical internal representation of automatic operational/scientific
+    # limits. Integer values remain hard user caps.
+    runs_per_gpu: int | None = None
     max_parallel: int | None = None
     min_seeds: int = 1
-    candidate_budget: int = 20
+    candidate_budget: int | None = None
     proposal_pool_size: int = 320
+    goal: str = "balanced"
+    automatic_stop: bool = True
+    conclusion_stability: float = 0.95
     early_stopping: bool = True
     early_stopping_min_step: int = 3
     early_stopping_confirmations: int = 2
@@ -96,6 +99,7 @@ class AdaptiveSearchPolicy:
     practical_margin: float | None = None
     confirmation_top_k: int = 1
     confirmation_seeds: tuple[int, ...] = ()
+    confirmation_auto: bool = True
     max_runs: int | None = None
     max_time_seconds: float | None = None
     # Zero is deliberate: ``trials`` is the authored candidate budget.  Merely observing a
@@ -112,12 +116,17 @@ class AdaptiveSearchPolicy:
         for name in (
             "min_seeds",
             "confirmation_top_k",
-            "candidate_budget",
             "proposal_pool_size",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"search.{name} must be a positive integer.")
+        if self.candidate_budget is not None and (
+            isinstance(self.candidate_budget, bool)
+            or not isinstance(self.candidate_budget, int)
+            or self.candidate_budget < 1
+        ):
+            raise ValueError("search.candidate_budget must be a positive integer or auto.")
         if self.runs_per_gpu is not None and (
             isinstance(self.runs_per_gpu, bool)
             or not isinstance(self.runs_per_gpu, int)
@@ -138,8 +147,12 @@ class AdaptiveSearchPolicy:
             raise ValueError("search.early_stopping.min_step must be >= 1.")
         if self.early_stopping_confirmations < 1:
             raise ValueError("search.early_stopping.confirmations must be >= 1.")
-        if self.proposal_pool_size < self.candidate_budget:
+        if self.candidate_budget is not None and self.proposal_pool_size < self.candidate_budget:
             raise ValueError("search.proposal_pool_size must be >= search.trials.")
+        if self.goal not in {"optimize", "balanced", "understand"}:
+            raise ValueError("search.goal must be optimize, balanced or understand.")
+        if not 0 < self.conclusion_stability < 1:
+            raise ValueError("search.stop.stability must be strictly between 0 and 1.")
         if (
             isinstance(self.failure_retries, bool)
             or not isinstance(self.failure_retries, int)
@@ -245,14 +258,22 @@ class AdaptiveSearchPolicy:
         practical_margin = (
             seed_margin if seed_margin_authored else early_margin if early_margin_authored else None
         )
-        candidate_budget = int(value.get("trials", 20))
+        raw_candidate_budget = value.get("trials")
+        candidate_budget = (
+            int(raw_candidate_budget) if raw_candidate_budget is not None else None
+        )
         proposal_pool_size = int(
-            value.get("proposal_pool_size", max(candidate_budget, min(4096, candidate_budget * 16)))
+            value.get(
+                "proposal_pool_size",
+                max(candidate_budget, min(4096, candidate_budget * 16))
+                if candidate_budget is not None
+                else 320,
+            )
         )
         maximum = value.get("max_parallel")
         if isinstance(maximum, str) and maximum.lower() != "auto":
             raise ValueError("search.max_parallel must be a positive integer, auto or null.")
-        raw_runs_per_gpu = value.get("runs_per_gpu", 1)
+        raw_runs_per_gpu = value.get("runs_per_gpu", "auto")
         if isinstance(raw_runs_per_gpu, str):
             if raw_runs_per_gpu.lower() != "auto":
                 raise ValueError("search.runs_per_gpu must be a positive integer or auto.")
@@ -264,7 +285,9 @@ class AdaptiveSearchPolicy:
             raise TypeError("search.confirmation_seeds must be a list of integers.")
         raw_time = value.get("max_time")
         max_time = (
-            ResourceRequest.from_mapping({"time": raw_time}).runtime_seconds
+            float(raw_time)
+            if isinstance(raw_time, (int, float))
+            else ResourceRequest.from_mapping({"time": raw_time}).runtime_seconds
             if raw_time is not None
             else None
         )
@@ -272,6 +295,24 @@ class AdaptiveSearchPolicy:
         raw_fidelity = value.get("fidelity")
         if raw_fidelity is not None and not isinstance(raw_fidelity, Mapping):
             raise TypeError("search.fidelity must be a mapping.")
+        raw_stop = value.get("stop", "auto")
+        if isinstance(raw_stop, str):
+            if raw_stop.lower() != "auto":
+                raise ValueError("search.stop must be auto or a mapping.")
+            automatic_stop = True
+            stability = 0.95
+        elif isinstance(raw_stop, Mapping):
+            # ``to_dict`` is also the persisted, replayable input accepted here.
+            unknown_stop = set(raw_stop) - {"mode", "stability", "policy_version"}
+            if unknown_stop:
+                raise ValueError(f"Unknown search.stop field(s): {sorted(unknown_stop)}.")
+            stop_mode = str(raw_stop.get("mode", "auto")).lower()
+            if stop_mode not in {"auto", "disabled"}:
+                raise ValueError("search.stop.mode must be auto or disabled.")
+            automatic_stop = stop_mode == "auto"
+            stability = float(raw_stop.get("stability", 0.95))
+        else:
+            raise TypeError("search.stop must be auto or a mapping.")
         return cls(
             runs_per_gpu=parsed_runs_per_gpu,
             max_parallel=(
@@ -280,6 +321,9 @@ class AdaptiveSearchPolicy:
             min_seeds=int(value.get("min_seeds", 1)),
             candidate_budget=candidate_budget,
             proposal_pool_size=proposal_pool_size,
+            goal=str(value.get("goal", "balanced")).lower(),
+            automatic_stop=automatic_stop,
+            conclusion_stability=stability,
             early_stopping=early,
             early_stopping_min_step=min_step,
             early_stopping_confirmations=confirmations,
@@ -298,6 +342,10 @@ class AdaptiveSearchPolicy:
             practical_margin=practical_margin,
             confirmation_top_k=int(value.get("confirmation_top_k", 1)),
             confirmation_seeds=tuple(raw_confirmation),
+            confirmation_auto=(
+                str(value.get("confirmation", "")).lower() == "auto"
+                or "confirmation_seeds" not in value
+            ),
             max_runs=int(max_runs) if max_runs is not None else None,
             max_time_seconds=max_time,
             convergence_patience=int(value.get("convergence_patience", 0)),
@@ -333,6 +381,12 @@ class AdaptiveSearchPolicy:
             "min_seeds": self.min_seeds,
             "trials": self.candidate_budget,
             "proposal_pool_size": self.proposal_pool_size,
+            "goal": self.goal,
+            "stop": {
+                "mode": "auto" if self.automatic_stop else "disabled",
+                "stability": self.conclusion_stability,
+                "policy_version": "scientific-convergence-v1",
+            },
             "early_stopping": {
                 "enabled": self.early_stopping,
                 "min_step": self.early_stopping_min_step,
@@ -349,6 +403,7 @@ class AdaptiveSearchPolicy:
             "practical_equivalence_margin": self.scientific_margin,
             "confirmation_top_k": self.confirmation_top_k,
             "confirmation_seeds": list(self.confirmation_seeds),
+            "confirmation": "auto" if self.confirmation_auto else "explicit",
             "max_runs": self.max_runs,
             "max_time": self.max_time_seconds,
             "convergence_patience": self.convergence_patience,
@@ -392,6 +447,8 @@ SEARCH_POLICY_FIELDS = frozenset(
         "sampler",
         "fidelity",
         "parameter_space",
+        "goal",
+        "stop",
     }
 )
 

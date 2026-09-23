@@ -374,6 +374,43 @@ contenido se rechaza; DatasetArtifact v1 sigue siendo legible.
 
 ## 7. Secuencia, paralelismo, seeds y búsqueda
 
+### 7.1 Defaults por intención y autoridad resuelta
+
+El camino común no necesita enteros de seed ni ajuste manual del controlador. Con `search.space` y
+objetivo, omitir política significa: stream `replicate` del proyecto, replicación mínima uno,
+objetivo `balanced`, startup geométrico, sampler/pruning/carrera/confirmación nuevos automáticos,
+candidatos deterministas incrementales, convergencia científica y paralelismo interno automático.
+El stem del YAML es el nombre por defecto. La propiedad externa sigue explícita:
+`resources.gpu` nunca se convierte en «todas las GPU disponibles».
+
+`lf config resolve FICHERO` muestra el `ResolvedStudyConfiguration` exacto; `--format json|yaml`
+sirve para herramientas. Se persiste antes del cálculo en `execution.json` y
+`resolved-configuration.json`: versiones de políticas, ejecución resuelta, primera identidad de
+seed, diseño, goal, parada/confirmación/generación, objetivo y recursos duros. `lf seeds [--role
+replicate|confirmation] [--count N]` inspecciona los streams. Cada resultado/Run guarda valor,
+ordinal, rol, namespace y versión; el export incluye YAML, configuración resuelta y seeds reales.
+
+El stream es una permutación con clave derivada mediante SHA-256 sobre ordinales de 31 bits. El rol
+confirmation ocupa el otro dominio del bit alto: cada rol posee (2^{31}) valores sin colisión,
+compatibles con NumPy, y ambos dominios automáticos no se solapan. `seeds` explícitas siguen siendo
+exactas y finitas. `replicates: N` raíz o `sweep.replicates: N` elige ordinales `[0, N)`.
+
+Sin presupuesto de candidatos, la búsqueda termina por convergencia. El generador Sobol/mixto
+mantiene un prefijo estable: materializa una ventana computacional acotada y solo la amplía cuando
+la política científica pide otra región. Los candidatos previos nunca cambian. `goal: optimize`,
+`balanced` o `understand` cambia el valor de las preguntas pendientes en la misma política. Los
+presupuestos explícitos siguen siendo techos y agotarlos no se etiqueta como convergencia. Se
+persisten motivos como `CONVERGED_BALANCED`, `CANDIDATE_BUDGET`, `RUN_BUDGET`, `TIME_BUDGET`,
+`SEARCH_SPACE_EXHAUSTED` y `NO_POSITIVE_VALUE_ACTION`, separados del estado científico.
+
+Un sweep auto empieza con todas sus celdas en `replicate[0]` y solo abre el ordinal siguiente tras
+completar el bloque anterior (incluidos reintentos). Sus comparaciones primarias usan una secuencia
+de confianza Hoeffding pareada, simultánea y uniforme en el tiempo con error repartido entre looks
+y competidores; la parada sigue siendo válida al inspeccionar repetidamente. Los análisis
+secundarios de muestra fija son exploratorios. Se exige objetivo acotado; las métricas estándar y
+utilidades compuestas lo aportan o se declara `objective.range`. La equivalencia requiere
+`practical_margin`. En sweep no existe pruning HPO ni carrera por celda.
+
 ```yaml
 name: comparacion
 steps:
@@ -390,9 +427,10 @@ steps:
     run: proyecto.Comparar
 ```
 
-Cada nivel espera al anterior. Cada miembro paralelo usa un proceso spawn aislado. Un estudio
-exhaustivo es serial dentro de su reserva; uno adaptativo gestiona Runs hijos independientes dentro
-de esa reserva. Una referencia requiere un único Run
+Cada nivel espera al anterior. Cada miembro paralelo usa un proceso spawn aislado. Sweeps fijos y
+búsquedas adaptativas poseen una reserva exterior y planifican Runs hijos mediante el mismo
+dispatcher ARI. Sus controladores científicos difieren —evidencia obligatoria frente a evidencia
+seleccionada—, pero la colocación física no se duplica. Una referencia requiere un único Run
 productor. Ramas, condiciones y bucles complejos pertenecen a Python.
 
 `seeds` crea Runs independientes. Con `objective`, omitir `strategy` activa por defecto todas las
@@ -501,10 +539,14 @@ $$
 P(\mu_i\geq\mu_{i^\star}-\epsilon\mid D)\geq\delta,
 $$
 
-donde `seed_racing.equivalence_margin` es \(\epsilon\) y
+donde `objective.practical_margin` es la autoridad canónica para \(\epsilon\) y
 `seed_racing.probability_threshold` es \(\delta\). Los
 candidatos dominados dejan de recibir seeds y la reducción de incertidumbre se divide por el coste
-temporal observado. La selección final usa una cota conservadora o, preferiblemente, la media de
+temporal observado. `replication.minimum` (`min_seeds` en YAML legacy) es una obligación estricta
+tras proponer un candidato: el replanning no puede eliminar esas seeds. Una seed podada satisface
+evidencia intentada/censurada, no respuesta completa; un fallo de infraestructura solo cuenta tras
+agotar sus reintentos. Las seeds posteriores siguen siendo adaptativas. La selección final usa una
+cota conservadora o, preferiblemente, la media de
 `confirmation_seeds` nuevas sobre un top-K congelado. `trials` es el contrato de parada por defecto:
 se proponen todos los candidatos declarados salvo que se alcance un límite explícito de Runs o
 tiempo. `max_runs` y `max_time` limitan el gasto total. `convergence_patience` vale cero por defecto
@@ -602,41 +644,57 @@ afirmación de que una política gana en todo paisaje sintético.
 
 ### 7.1 Sweeps exactos sin HPO
 
-`strategy: exhaustive` ejecuta literalmente cada combinación finita y cada seed:
+`sweep` declara literalmente cada combinación finita por cada seed:
 
 ```yaml
 seeds: [7, 17]
-search:
-  strategy: exhaustive
-  optimizer: {values: [adamw, sgd]}
-  momentum: {values: [0.8, 0.9], when: {optimizer: sgd}}
+sweep:
+  space:
+    optimizer: [adamw, sgd]
+    momentum: {values: [0.8, 0.9], when: {optimizer: sgd}}
+  reference: {optimizer: adamw}
+execution: {runs_per_gpu: auto, max_parallel: auto}
 ```
 
-Son exactamente seis Runs: una variante AdamW y dos SGD por seed. No hay surrogate, pruning,
-asignación adaptativa de seeds ni confirmación. Un `range` continuo no puede ser exhaustivo y se
-rechaza, igual que `trials`; hay que discretizar con `values` o usar HPO adaptativo. Puede declararse
-`objective` para resumir el sweep completo sin cambiar qué Runs se ejecutan.
+Son exactamente seis Runs: una variante AdamW y dos SGD por seed. No hay surrogate, pruning de HPO,
+asignación adaptativa de seeds ni confirmación; la paciencia interna del entreno sí sigue activa.
+Un rango numérico exige `points` para formar un grid finito determinista. `strategy: exhaustive` es
+un alias compatible del mismo diseño y dispatcher. ARI conserva packing, recuperación OOM y
+checkpoints. Un presupuesto de Runs menor que el diseño se rechaza; un límite de tiempo puede
+producir un diseño honestamente incompleto.
+
+El YAML se normaliza una vez a `StudyDesign`, `EvidencePlan`, `ExecutionPolicy` y la política de
+objetivo. El presupuesto de candidatos solo detiene configuraciones nuevas; seeds mínimas,
+compartidas, promociones, continuaciones y confirmaciones debidas siguen siendo elegibles. La
+telemetría terminal expone `status`, `design_status`, `scientific_status` y `finish_reason`,
+reconcilia la cola y distingue candidatos observados de completos.
+
+El análisis compara seeds exactamente compartidas y remuestrea bloques enteros. Informa celdas
+requeridas/completadas, media, mediana, dispersión, incertidumbre y soporte pareado; una referencia
+añade diferencias, superioridad y, solo con margen práctico, equivalencia. Una celda ausente reduce
+el soporte y nunca se imputa con otra seed. El líder puntual es descriptivo; la conclusión exacta
+visible y su confianza siempre pertenecen a la misma hipótesis.
 
 ### 7.2 Entrenos independientes por GPU
 
 `resources` es la reserva externa fija. `resources.gpu` indica cuántas GPUs reserva el estudio y
-`search.runs_per_gpu` cuántos procesos de entreno independientes pueden compartir cada una:
+`execution.runs_per_gpu` cuántos procesos independientes pueden compartir cada una:
 
 ```yaml
 seeds: [4, 7, 32, 54, 65, 94, 109, 124]
 search:
-  strategy: adaptive
-  trials: 40
+  budget: {candidates: 40}
+  replication: {minimum: 1}
+  pruning: {enabled: true, min_step: 5, confirmations: 2,
+            probability_threshold: 0.05}
+  space:
+    learning_rate: {range: [0.00001, 0.003], scale: log}
+    hidden_dim: [64, 128, 256]
+execution:
   runs_per_gpu: auto
   max_parallel: auto
-  startup_trials: 10
-  min_seeds: 1
   failure_retries: 1
-  early_stopping: {enabled: true, min_step: 5, confirmations: 2,
-                   probability_threshold: 0.05, equivalence_margin: 0.0}
-  learning_rate: {range: [0.00001, 0.003], scale: log}
-  hidden_dim: {values: [64, 128, 256]}
-objective: {metric: val_auprc, mode: max}
+objective: {metric: val_auprc, mode: max, practical_margin: 0.0}
 resources:
   gpu: 2
   gpu_memory: 16GiB
@@ -855,14 +913,14 @@ mantiene el entreno normal a presupuesto completo.
 
 El stop es cooperativo. Un Work registra `self.metrics.log("val_auprc", valor, step=epoch)` y
 consulta `self.stop_requested` en un límite seguro, guardando checkpoint antes de retornar. El
-controlador compara Runs a un step común tras `early_stopping.min_step`. Una proyección lineal local
+controlador compara Runs a un step común tras `search.pruning.min_step`. Una proyección lineal local
 acotada conserva incertidumbre residual. El pruning no se activa hasta que al menos dos candidatos
 distintos hayan terminado con suficiente curva para contrastar predicciones de prefijos contra sus
 endpoints reales y obtener un error de curva finito. Dos es el mínimo que identifica una
 comparación, no un umbral configurable; antes todas las curvas iniciales pueden crear la referencia.
 Una vez calibrado, solicita parar solo cuando la probabilidad de seguir a
-`early_stopping.equivalence_margin` del incumbent cae bajo
-`early_stopping.probability_threshold`; no elimina una fracción
+`objective.practical_margin` del incumbent cae bajo
+`search.pruning.probability_threshold`; no elimina una fracción
 fija. Por defecto la condición debe mantenerse en dos steps comunes distintos
 (`confirmations: 2`): sondear repetidamente la misma época no suma evidencia. Usa
 `confirmations: 1` solo para una política deliberadamente agresiva. `min_step` solo marca el mínimo
@@ -1350,6 +1408,8 @@ permanece aunque se recojan bytes reconstruibles del entorno.
 |---|---|
 | `init` | crear proyecto Work instalable |
 | `project` | mostrar raíz e identidad de almacenamiento del proyecto actual |
+| `seeds` | inspeccionar streams deterministas replicate/confirmation |
+| `config resolve` | mostrar la configuración versionada exacta sin ejecutar |
 | `validate` | validar configuración/clase/entradas localmente |
 | `explain` | explicar firma, defaults y recursos |
 | `run` | única ejecución científica |

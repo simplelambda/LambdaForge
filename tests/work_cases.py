@@ -102,6 +102,14 @@ class ConditionalSweepWork(lf.Work):
         return {"model": model, "depth": depth}
 
 
+class PolicyNamedParameterWork(lf.Work):
+    """Ensure structured search space names never collide with controller policy fields."""
+
+    def run(self, trials: int, max_parallel: int) -> dict[str, int]:
+        self.metrics.log("score", float(trials + max_parallel), step=1)
+        return {"trials": trials, "max_parallel": max_parallel}
+
+
 class FidelityScoreWork(lf.Work):
     """Cooperative cumulative-budget fixture for adaptive continuation tests."""
 

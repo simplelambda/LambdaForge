@@ -272,14 +272,14 @@ def test_objective_search_enables_full_adaptive_defaults_and_exhaustive_is_expli
     adaptive = WorkConfig.from_mapping(base, source=tmp_path / "adaptive.yaml")
     policy = adaptive.levels[0].runs[0].search_policy
     assert policy is not None
-    assert policy.min_seeds == 3
+    assert policy.min_seeds == 1
     assert policy.early_stopping
     assert policy.sampler == "auto"
     # The authored trial count is consumed by default. Record-only convergence is opt-in because
     # a streak without a new maximum says nothing about mixed-space coverage.
     assert policy.convergence_patience == 0
-    assert len(policy.confirmation_seeds) == 3
-    assert set(policy.confirmation_seeds).isdisjoint({4, 7, 32, 54})
+    assert policy.confirmation_auto
+    assert policy.confirmation_seeds == ()
 
     explicit_convergence = WorkConfig.from_mapping(
         {

@@ -189,6 +189,7 @@ class WorkResult:
     objective_observation: Mapping[str, Any] | None = None
     termination_type: str = "completed"
     termination: Mapping[str, Any] = field(default_factory=dict)
+    seed_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -213,6 +214,7 @@ class WorkResult:
             "finished_at_utc": self.finished_at_utc,
             "duration_seconds": self.duration_seconds,
             "seed": self.seed,
+            "seed_metadata": _json_value(self.seed_metadata),
             "trial": copy.deepcopy(dict(self.trial)) if self.trial is not None else None,
             "parameters": _json_value(self.parameters),
             "inputs": [value.to_dict() for value in self.inputs],

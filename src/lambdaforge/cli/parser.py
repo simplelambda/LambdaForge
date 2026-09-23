@@ -37,6 +37,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     project.add_argument("--json", action="store_true")
 
+    seeds = commands.add_parser("seeds", help="Inspect deterministic project seed streams.")
+    seeds.add_argument("--count", type=int, default=10)
+    seeds.add_argument("--role", choices=("replicate", "confirmation"), default="replicate")
+    seeds.add_argument("--json", action="store_true")
+
+    config = commands.add_parser("config", help="Resolve Work configuration without execution.")
+    config_commands = config.add_subparsers(dest="config_command", required=True)
+    resolve = config_commands.add_parser(
+        "resolve", help="Show the complete versioned configuration used by runtime."
+    )
+    resolve.add_argument("config", type=Path)
+    resolve.add_argument("--format", choices=("human", "json", "yaml"), default="human")
+    resolve.add_argument("--json", action="store_true")
+
     init = commands.add_parser("init", help="Create an installable Work project.")
     init.add_argument("directory", type=Path)
     init.add_argument("--force", action="store_true")

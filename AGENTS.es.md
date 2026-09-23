@@ -19,6 +19,8 @@ runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada 
 |---|---|
 | Validar | `lf validate CONFIG` |
 | Explicar firma y recursos | `lf explain CONFIG` |
+| Resolver toda política automática | `lf config resolve CONFIG [--format json\|yaml]` |
+| Consultar streams de seed | `lf seeds [--role confirmation] [--count N]` |
 | Plan sin efectos | `lf run CONFIG --dry-run` |
 | Ejecutar | `lf run CONFIG [--on CLUSTER]` |
 | Nueva Execution deliberada | `lf run CONFIG --rerun` |
@@ -109,15 +111,24 @@ comparten un step entero. Una utilidad gobierna HPO, las constraints son guardas
 el frente Pareto crudo solo es diagnóstico. Toda
 búsqueda con objective activa por defecto inicio Sobol scrambled, GP mixto qLogNEI opcional y sensible al ruido con
 fallback k-NN mixto, carrera probabilística de seeds, pruning, convergencia y confirmación con seeds
-nuevas. Solo se publican candidatos propuestos. `strategy: exhaustive` enumera exactamente
-combinaciones finitas `values`/`when` y todas las seeds; rechaza `range` y `trials`. Las seeds de
+nuevas. Solo se publican candidatos propuestos. `sweep.space` canónico crea una identidad obligatoria
+por combinación finita y seed; rangos numéricos exigen `points` y `reference` opcional elige
+comparaciones pareadas explícitas. `strategy: exhaustive` normaliza al mismo `StudyDesign` fijo y
+dispatcher ARI. La evidencia de sweep no puede replanificarse científicamente, aunque ARI puede
+reordenarla, colocarla y recuperarla; la paciencia interna del Work sigue válida. Se rechazan
+controles adaptativos de candidatos, replicación, pruning y confirmación en un sweep. Las seeds de
 confirmación son disjuntas; `confirmation_seeds: []` las desactiva. `search.fidelity` declara
 presupuesto acumulativo definido por el Work; `self.fidelity` y checkpoints permiten continuar y
 LightningRunner enlaza epochs. Decisiones/snapshot viven en `hpo-control/decisions.jsonl` y
 `state.json`. Confirmación es inmune a pruning/preemption; un conjunto incompleto persiste
-`confirmation_incomplete` y no selecciona una media solo de supervivientes. `trials` limita
-candidatos ejecutados y `proposal_pool_size` el pool determinista
-mayor. El refill por eventos compara `START_NEW`, `DESIGNED_PROBE`, `ADD_SEED`,
+`confirmation_incomplete` y no selecciona una media solo de supervivientes. El YAML se normaliza
+una vez a `StudyDesign`, `EvidencePlan`, `ExecutionPolicy` y política de objetivo. La sintaxis
+adaptativa canónica usa `search.budget`, `.space`, `.replication` y `.pruning`; los campos planos
+son aliases. `execution` raíz posee concurrencia, reintentos y límites de Runs/tiempo; aliases
+contradictorios fallan. `objective.practical_margin` es la única autoridad de equivalencia.
+`trials` explícito limita candidatos; omitido activa convergencia científica. El generador
+`scrambled-sobol-prefix-v1` amplía ventanas deterministas sin cambiar candidatos anteriores y
+`proposal_pool_size` solo ajusta la ventana computacional. El refill por eventos compara `START_NEW`, `DESIGNED_PROBE`, `ADD_SEED`,
 `PROMOTE_FIDELITY` y `RESUME_PREEMPTED` tras cada evento terminal. Equilibra automáticamente la
 oportunidad de mejora práctica posterior O con la entropía K de preguntas no resueltas por coste
 incremental observado; ninguna es ganancia de información calibrada ni confianza mostrada al
@@ -130,6 +141,10 @@ Si se omite, `startup_trials` deriva un `InitialDesignPlan` determinista de rank
 D-optimal y maximin desde `ParameterSpace`; un valor explícito manda como presupuesto de anchors.
 Nunca depende del paralelismo. Intercala primeras seeds entre candidatos distintos antes de seeds
 extra; la capacidad sobrante puede usar `OPPORTUNISTIC_COVERAGE` replanificable.
+Tras proponer un candidato, `replication.minimum` seeds distintas son obligación, no sugerencia.
+Una poda cuenta como evidencia intentada/censurada, no como respuesta completa; un fallo de
+infraestructura solo cuenta tras agotar reintentos. Agotar candidatos detiene propuestas nuevas,
+nunca deuda requerida, continuación, fidelidad ni confirmación.
 `ScientificQuestionAnalyzer` es la única fuente compartida live/final de conclusiones de parámetros,
 interacciones por pares y región óptima práctica. `confidence` científica significa estabilidad de
 la conclusión exacta bajo remuestreo determinista por candidato/seeds compartidas, no cobertura,
@@ -348,13 +363,24 @@ copies datasets compartidos, entornos, caché ni el árbol staged del proyecto: 
 referencias de provenance. Rechaza symlinks, ficheros especiales y traversal del archive, elimina
 siempre temporales del proveedor y nunca publiques una exportación local parcial.
 
-`trials` adaptativo es el presupuesto de candidatos y se consume por defecto; cobertura escasa o
-confianza baja del análisis no equivalen a convergencia. La convergencia por racha solo es opt-in
-con `convergence_patience` positivo (cero/omitido la desactiva), y el snapshot terminal debe
-persistir FINISH y su motivo exacto de presupuesto/pool/convergencia antes del análisis final.
-Conserva una sola vez el pool determinista en el estado de planificación. Cada especificación Run
+Sin `seeds` se usa el stream `replicate` versionado del proyecto; candidatos comparten ordinal y el
+mínimo por defecto es uno. `seeds` es finito/autoritativo y `replicates` elige un prefijo. La
+confirmación automática usa el stream `confirmation` separado. Sin `trials`, la convergencia
+científica versionada decide; cobertura escasa o confianza baja no equivalen a convergencia. La
+racha legacy requiere override explícito y FINISH persiste el motivo exacto. Cada especificación Run
 contiene únicamente sus valores candidato/seed y una definición compacta; nunca copies el pool
 completo en cada una, porque un Study grande válido debe usar memoria lineal.
+Un sweep sin réplicas explícitas abre bloques completos compartidos y usa
+`paired-hoeffding-cs-v1`; no hay pruning/carrera por celda, un bloque ausente queda incompleto y la
+equivalencia práctica exige margen authored.
+Los Studies terminales reconcilian toda identidad en cola y exponen `status`, `design_status`,
+`scientific_status` y `finish_reason`. Un diseño fijo puede estar completo y científicamente no
+resuelto; agotar tiempo/Runs con deuda obligatoria implica incompleto. Distingue candidatos
+observados de completos. El análisis de sweep se empareja por seed exacta y remuestrea bloques de
+seed; nunca sustituye una celda ausente con otra seed. Texto humano y confianza derivan del mismo
+`ExactScientificConclusion`, mientras el líder puntual permanece separado. Sin
+`objective.practical_margin`, ganadores inestables son `NO_CLEAR_PREFERENCE`/`UNRESOLVED`, no
+equivalencia práctica.
 
 `lf` sin argumentos abre la Consola Textual solo en un TTY; sin TTY o con `--json` imprime ayuda.
 Overview separa Cluster, Work ordinario y Study, conserva historial acotado de recursos y no vuelca

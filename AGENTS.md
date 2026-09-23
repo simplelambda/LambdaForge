@@ -23,6 +23,8 @@ compatibility path unless the project explicitly reverses this architectural dec
 |---|---|
 | Validate without execution | `lf validate CONFIG` |
 | Explain signature/defaults/resources | `lf explain CONFIG` |
+| Resolve all automatic Study policy | `lf config resolve CONFIG [--format json\|yaml]` |
+| Inspect project seed streams | `lf seeds [--role confirmation] [--count N]` |
 | Read-only expansion | `lf run CONFIG --dry-run` |
 | Execute | `lf run CONFIG [--on CLUSTER]` |
 | Deliberate new execution | `lf run CONFIG --rerun` |
@@ -199,15 +201,25 @@ decision, constraints stay separate hard guardrails and raw-component Pareto sta
 Any search with an objective defaults to the full
 adaptive policy: scrambled-Sobol startup, optional noise-aware BoTorch mixed-GP qLogNEI with deterministic
 mixed-kNN fallback, probabilistic shared-seed racing, curve pruning, convergence and fresh-seed
-confirmation. Only proposed candidates become public. `strategy: exhaustive` instead enumerates
-exact finite `values`/`when` combinations and every seed; it rejects continuous `range` and
-`trials`. Default confirmation seeds are disjoint; `confirmation_seeds: []` deliberately disables
+confirmation. Only proposed candidates become public. Canonical `sweep.space` instead creates one
+required identity for every finite combination times every authored seed; numeric ranges require
+`points`, and optional `reference` selects explicit paired comparisons. `strategy: exhaustive`
+normalizes to that same fixed `StudyDesign` and common ARI dispatcher. Sweep evidence cannot be
+scientifically replanned, although ARI may reorder/place/recover it; Work-internal patience remains
+valid. Adaptive-only candidate, replication, pruning and confirmation controls are rejected in a
+sweep. Default confirmation seeds are disjoint; `confirmation_seeds: []` deliberately disables
 them. `search.fidelity` is explicit cumulative Work-defined budget; `self.fidelity` plus checkpoints
 implement continuation and LightningRunner bridges epoch budgets. Controller decisions/state live
 in `hpo-control/decisions.jsonl` and `state.json`. Confirmation is immune to performance
 pruning/preemption; an incomplete set persists `confirmation_incomplete` and cannot select a
-survivor-only mean. `trials` is the executed-candidate budget and
-`proposal_pool_size` the larger deterministic pool. Event-driven refill compares `START_NEW`,
+survivor-only mean. Normalize authored YAML once into `StudyDesign`, `EvidencePlan`,
+`ExecutionPolicy` and objective policy. Canonical adaptive syntax uses `search.budget`, `.space`,
+`.replication` and `.pruning`; legacy flat fields remain aliases. Top-level `execution` owns
+`runs_per_gpu`, `max_parallel`, failure retries and Run/time limits; conflicting aliases fail.
+`objective.practical_margin` is the single scientific-equivalence authority. Explicit `trials` is
+the executed-candidate ceiling; when omitted, automatic scientific convergence owns stopping. A
+prefix-stable `scrambled-sobol-prefix-v1` generator materializes and expands bounded windows without
+changing old candidates; `proposal_pool_size` is only an advanced window override. Event-driven refill compares `START_NEW`,
 `DESIGNED_PROBE`, `ADD_SEED`, `PROMOTE_FIDELITY` and `RESUME_PREEMPTED` after every terminal event.
 It automatically balances posterior practical-improvement opportunity O with unresolved-question
 entropy K per observed incremental cost; neither is a calibrated information gain or a user-facing
@@ -221,6 +233,10 @@ Omitted `startup_trials` derives a deterministic rank/coverage/D-optimal/maximin
 `InitialDesignPlan` from `ParameterSpace`; an explicit value is its authoritative anchor budget.
 It must never depend on parallelism. Interleave first seeds across distinct startup candidates
 before extra seeds; spare capacity may use replannable `OPPORTUNISTIC_COVERAGE`.
+Once an adaptive candidate is proposed, `replication.minimum` distinct seeds are required evidence,
+not cancellable hints. Performance-pruned Runs count as attempted/censored but not complete response
+evidence; infrastructure failure counts only after retries. Reaching candidate budget stops new
+candidates, never existing required debt, continuation, fidelity or confirmation.
 `ScientificQuestionAnalyzer` is the one shared live/final source for parameter conclusions,
 pairwise interactions and the practical optimal region. Scientific `confidence` means stability of
 the exact displayed conclusion under deterministic candidate-level/shared-seed resampling—not
@@ -406,13 +422,27 @@ copy shared datasets, environments, cache or the staged project tree into this p
 their provenance references. Reject symlinks, special files and archive traversal, remove temporary
 provider archives on every exit and never publish a partial local export.
 
-Adaptive `trials` is the candidate budget and must be consumed by default; sparse coverage or low
-analysis confidence is not convergence. Record-streak convergence is opt-in only through a positive
-`convergence_patience` (zero/omitted disables it), and every terminal controller snapshot must
-persist FINISH plus its exact budget/pool/explicit-convergence reason before final analysis.
-Keep the deterministic proposal pool once in planning state. Per-Run specifications contain only
+Omitted `seeds` uses the project's versioned collision-free 32-bit `replicate` stream; candidates
+share ordinals and minimum replication defaults to one. Explicit `seeds` is authoritative and
+finite; `replicates` selects a stream prefix. Fresh automatic confirmation uses the disjoint
+`confirmation` stream. Omitted adaptive `trials` uses versioned scientific convergence; sparse
+coverage or low confidence alone is not convergence. Record-streak convergence remains a legacy
+explicit override. Every terminal snapshot persists FINISH plus the exact convergence/budget/space
+reason. Per-Run specifications contain only
 their candidate/seed values and a compact definition; never embed or copy the complete pool into
 each specification, because valid large Studies must have linear planner memory.
+An omitted sweep replicate count means sequential complete shared-seed blocks. Primary stopping
+uses `paired-hoeffding-cs-v1` simultaneous time-uniform inference over a bounded objective; no
+pruning or per-cell racing. A missing cell is incomplete, and practical equivalence requires the
+authored margin.
+Terminal Studies reconcile every queued identity and expose execution `status`, `design_status`,
+`scientific_status` and `finish_reason`. Fixed designs may be complete while scientifically
+unresolved; time/Run exhaustion with required debt is incomplete. Keep observed and
+evidence-complete candidate counts distinct. Sweep analysis is paired by exact shared seed and
+block-resamples seeds; never substitute another seed for a missing cell. Human text and confidence
+must derive from the same `ExactScientificConclusion`, while point-estimate leader remains separate.
+Without `objective.practical_margin`, unstable winners are `NO_CLEAR_PREFERENCE`/`UNRESOLVED`, not
+practical equivalence.
 
 Bare `lf` opens the Textual Research Console only on a TTY; non-TTY or no-command `--json` prints
 help. Overview has separate Cluster, ordinary Work and Study panels, bounded resource history and

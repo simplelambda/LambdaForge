@@ -8,6 +8,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeGuard, cast
 
+from lambdaforge.metrics.MetricRegistry import MetricRegistry
+
 UTILITY_METRIC = "__lambdaforge_utility__"
 _AGGREGATIONS = frozenset({"weighted_mean", "geometric", "chebyshev"})
 
@@ -293,7 +295,15 @@ class ObjectiveUtility:
             and value.get("mode") == "max"
         ):
             value = {key: item for key, item in value.items() if key not in {"metric", "mode"}}
-        allowed = {"metric", "mode", "metrics", "aggregation", "constraints"}
+        allowed = {
+            "metric",
+            "mode",
+            "metrics",
+            "aggregation",
+            "constraints",
+            "practical_margin",
+            "range",
+        }
         unknown = set(value) - allowed
         if unknown:
             raise ValueError(f"Unknown objective field(s): {sorted(unknown)}.")
@@ -312,6 +322,17 @@ class ObjectiveUtility:
             if mode not in {"min", "max"}:
                 raise ValueError("objective.mode must be min or max.")
             output: dict[str, Any] = {"metric": metric, "mode": mode}
+            raw_range = value.get("range")
+            if raw_range is not None:
+                if (
+                    not isinstance(raw_range, Sequence)
+                    or isinstance(raw_range, str | bytes)
+                    or len(raw_range) != 2
+                    or not all(_finite(bound) for bound in raw_range)
+                    or float(raw_range[0]) >= float(raw_range[1])
+                ):
+                    raise ValueError("objective.range must be fixed finite [low, high].")
+                output["range"] = [float(raw_range[0]), float(raw_range[1])]
         else:
             raw_metrics = value.get("metrics")
             if not isinstance(raw_metrics, Mapping) or len(raw_metrics) < 2:
@@ -327,15 +348,13 @@ class ObjectiveUtility:
                 name = _nonempty(raw_name, "objective.metrics metric")
                 if not isinstance(raw_rule, Mapping):
                     raise TypeError(f"objective.metrics.{name} must be a mapping.")
-                if set(raw_rule) - {"mode", "weight", "range"} or not {
-                    "mode",
-                    "weight",
-                    "range",
-                } <= set(raw_rule):
+                if set(raw_rule) - {"mode", "weight", "range"} or "weight" not in raw_rule:
                     raise ValueError(
-                        f"objective.metrics.{name} requires only mode, weight and range."
+                        f"objective.metrics.{name} requires weight and either registered or "
+                        "explicit mode/range."
                     )
-                mode = str(raw_rule["mode"]).lower()
+                standard = MetricRegistry.resolve(name)
+                mode = str(raw_rule.get("mode", (standard or {}).get("mode", ""))).lower()
                 if mode not in {"min", "max"}:
                     raise ValueError(f"objective.metrics.{name}.mode must be min or max.")
                 weight = raw_rule["weight"]
@@ -343,7 +362,7 @@ class ObjectiveUtility:
                     raise ValueError(
                         f"objective.metrics.{name}.weight must be finite and non-negative."
                     )
-                bounds = raw_rule["range"]
+                bounds = raw_rule.get("range", (standard or {}).get("range"))
                 if (
                     not isinstance(bounds, Sequence)
                     or isinstance(bounds, str | bytes)
@@ -372,6 +391,15 @@ class ObjectiveUtility:
             }
         if constraints:
             output["constraints"] = constraints
+        practical_margin = value.get("practical_margin")
+        if practical_margin is not None:
+            if (
+                isinstance(practical_margin, bool)
+                or not _finite(practical_margin)
+                or float(practical_margin) < 0
+            ):
+                raise ValueError("objective.practical_margin must be finite and non-negative.")
+            output["practical_margin"] = float(practical_margin)
         return output
 
     @staticmethod

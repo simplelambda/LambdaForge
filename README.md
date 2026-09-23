@@ -373,6 +373,74 @@ choices.
 
 ## Composition and adaptive experiments
 
+The recommended YAML describes scientific intent and the external reservation; LambdaForge resolves
+the internal policy. Omitted settings are not uncontrolled: they select a versioned automatic
+policy which is persisted before execution and can be inspected without launching anything:
+
+```bash
+lf config resolve experiments/train.yaml
+lf config resolve experiments/train.yaml --format yaml
+lf seeds --count 20
+lf seeds --role confirmation --count 10
+```
+
+The minimal adaptive form is:
+
+```yaml
+run: my_project.Training
+with:
+  dataset: {dataset: wisdom-dna@5}
+  epochs: 500
+  patience: 30
+search:
+  space:
+    hidden_dim: [64, 128, 256]
+    layers: [1, 2, 3]
+    dropout: {range: [0.0, 0.5]}
+    learning_rate: {range: [0.00001, 0.003], scale: log}
+objective: val_auprc
+resources:
+  gpu: 3
+  time: 168h
+```
+
+The filename supplies `name` when omitted. Defaults are `goal: balanced`, one required initial
+replicate per proposed candidate, geometry-derived startup, automatic sampler/pruning, incremental
+deterministic candidate generation, adaptive extra replication, disjoint fresh confirmation,
+scientific convergence, and automatic packing/global concurrency. `resources.gpu` stays explicit
+because it reserves externally owned hardware. Known objectives such as `val_auprc`, `accuracy`,
+`balanced_accuracy`, `f1`, `auroc`, `mcc`, `kappa` and `val_loss` have registered direction (and a
+finite range where defined); custom metrics still require `{metric: ..., mode: max|min}`.
+
+Every project has domain-separated, versioned `replicate[n]` and `confirmation[n]` seed streams.
+Candidates share replicate ordinals for paired comparisons; confirmation never reuses selection
+evidence. Runs persist the actual integer, ordinal, role, namespace and generator version.
+`seeds: [4, 7, 32]` is an exact finite override; `replicates: 10` selects the first ten project
+ordinals. The automatic stream is prefix-stable and provides more than two billion collision-free
+32-bit-compatible values per role.
+
+A sweep fixes its cells. Without a replication count it opens complete shared-seed blocks
+sequentially and uses simultaneous time-uniform paired confidence sequences for the primary stop
+decision—not repeatedly inspected fixed-sample intervals. HPO pruning and per-cell seed racing are
+disabled. A missing permanent cell remains visibly incomplete. Practical equivalence is possible
+only when the researcher authored `objective.practical_margin`.
+
+```yaml
+run: my_project.Training
+sweep:
+  space:
+    optimization_profile: [baseline, warmup, clipping, ema, swa]
+objective: val_auprc
+resources: {gpu: 3, time: 72h}
+```
+
+Use `sweep.replicates: 10` for exactly ten shared blocks. Advanced caps and overrides live under
+`search.budget`, `search.replication`, `search.pruning`, `search.stop` and top-level `execution`.
+`search.goal` is `optimize`, `balanced` (default), or `understand`; it changes how the same planner
+values optimization versus unresolved supported questions. A hard budget is a safety ceiling, not
+evidence of convergence. Automatic stopping persists its state and exact reason; execution may be
+complete while scientific status remains unresolved.
+
 Adaptive GPU admission refills from the same scientific queue on both Run completion and newly
 usable capacity: deferred initial candidates/seeds must not leave an idle granted GPU waiting for
 another Run to finish. Limits are ceilings, not guaranteed speedups. Every adaptive child caps native
@@ -473,65 +541,84 @@ This is constrained single-objective optimization, not an implicit multi-objecti
 Use thresholds that express the actual scientific validity of a Run; do not add every logged
 metric merely because it exists.
 
-Seed counts are probability-driven rather than equal or fixed by a halving rung. Shared seed order
-enables paired differences; a candidate receives another seed only while its probability of being
-within `seed_racing.equivalence_margin` of the incumbent is at least
-`seed_racing.probability_threshold`. The final
-winner uses a conservative search bound, or preferably the mean of disjoint
-`confirmation_seeds` on a frozen top-K. By default LambdaForge starts with one authored seed per
-candidate and generates three deterministic fresh confirmation seeds; every default can
-still be overridden explicitly.
+Beyond the authored `replication.minimum`, seed counts are probability-driven rather than equal or
+fixed by a halving rung. Once a candidate is proposed, that minimum is a real evidence obligation:
+its distinct seed identities may wait for resources but cannot be silently superseded. A
+performance-pruned seed counts as attempted censored evidence, not as a full response; an
+infrastructure failure counts only after its retry policy is exhausted. Additional seeds remain
+adaptive. Shared seed order enables paired differences; an optional seed is useful while its
+probability of being within the objective's `practical_margin` of the incumbent is sufficiently
+high. The final
+winner uses a conservative search bound and then disjoint confirmation evidence over a frozen
+posterior/practically competitive contender set. By default LambdaForge starts each candidate with
+`replicate[0]`, requests further ordinals only when useful and draws shared fresh evidence from the
+project confirmation stream. Legacy `confirmation_seeds` and `confirmation_top_k` remain advanced
+explicit overrides.
 Confirmation Runs never receive performance pruning or opportunistic preemption. If a required
 seed fails or cannot run within the global budget, `summary.confirmation.status` is `incomplete`,
 `confirmation_incomplete` is true and no lucky subset of surviving confirmation seeds is selected.
 
-HPO is deliberately easy to disable. `strategy: exhaustive` means a literal finite sweep: every
-combination of `values` and every authored seed is run, including exact finite `when` branches.
-Continuous `range` dimensions cannot be exhaustive, so discretize them with `values` or use the
-adaptive strategy. `trials` is a candidate budget and is therefore rejected in exhaustive mode.
+HPO is deliberately easy to replace with a fixed experimental design. A `sweep` fixes every
+authored combination. Explicit seeds/replicates make their Cartesian product required evidence;
+otherwise complete shared-seed blocks are opened sequentially. ARI may reorder, wait, pack,
+checkpoint and recover those Runs, but scientific replanning cannot discard them. Work-internal
+training patience remains active; it is distinct from HPO pruning. A numeric grid needs `points`,
+so it remains finite and deterministic. `search.strategy: exhaustive` is a compatible alias for
+the same design and dispatcher, not a serial implementation.
 
 ```yaml
 name: optimizer-sweep
 run: my_project.Training
 seeds: [7, 17]
-search:
-  strategy: exhaustive
-  optimizer: {values: [adamw, sgd]}
-  momentum: {values: [0.8, 0.9], when: {optimizer: sgd}}
+sweep:
+  space:
+    optimizer: [adamw, sgd]
+    momentum: {values: [0.8, 0.9], when: {optimizer: sgd}}
+    learning_rate: {range: [0.00001, 0.001], points: 5, scale: log}
+  reference: {optimizer: adamw}
+execution:
+  runs_per_gpu: auto
+  max_parallel: auto
 ```
 
-One scheduler Job owns the fixed resource reservation. Adaptive Runs are independent spawned
-processes inside it. `resources.gpu` is the number of GPUs reserved for the whole study and
-`runs_per_gpu` is the explicit packing factor:
+One scheduler Job owns the fixed resource reservation. Every child Run is an independent spawned
+process inside it. `resources.gpu` is the number of GPUs reserved for the whole study, while the
+top-level `execution` block is the canonical operational policy. Fixed sweeps and adaptive search
+share the same ARI resource dispatcher:
 
 ```yaml
 name: adaptive-training
 run: my_project.Training
 seeds: [4, 7, 32, 54, 65, 94, 109, 124]
 search:
-  trials: 40
+  budget: {candidates: 40, runs: 180}
   proposal_pool_size: 640
-  min_seeds: 1
+  replication:
+    minimum: 1
+    confirmation: [1001, 1002, 1003]
+  pruning:
+    enabled: true
+    min_step: 5
+    confirmations: 2
+    probability_threshold: 0.05
   # Optional exact scientific-anchor budget; omitted means geometry-derived, never hardware-derived.
   startup_trials: 10
-  seed_racing: {probability_threshold: 0.1, equivalence_margin: 0.002}
+  seed_racing: {probability_threshold: 0.1}
   confirmation_top_k: 2
-  confirmation_seeds: [1001, 1002, 1003]
   sampler: auto
-  max_runs: 180
-  max_time: 12h
   # Optional: stop after 8 full-fidelity results without a 0.0005 record gain.
-  # Omit both fields to consume the complete 40-candidate budget (the safe default).
+  # Legacy record-streak controls; automatic scientific convergence is the normal default.
   convergence_patience: 8
   min_improvement: 0.0005
+  space:
+    learning_rate: {range: [0.00001, 0.003], scale: log}
+    hidden_dim: [64, 128, 256]
+execution:
   runs_per_gpu: auto  # or a positive integer hard cap per GPU
   max_parallel: auto  # or a positive integer hard global cap
   failure_retries: 1
-  early_stopping: {enabled: true, min_step: 5, confirmations: 2,
-                   probability_threshold: 0.05, equivalence_margin: 0.002}
-  learning_rate: {range: [0.00001, 0.003], scale: log}
-  hidden_dim: {values: [64, 128, 256]}
-objective: {metric: val_auprc, mode: max}
+  max_time: 12h
+objective: {metric: val_auprc, mode: max, practical_margin: 0.002}
 resources:
   gpu: 2
   gpu_memory: 16GiB  # minimum currently-free VRAM required before starting a Run
@@ -539,29 +626,29 @@ resources:
   memory: 32GiB      # total reservation; Run shares never exceed this outer limit
 ```
 
-Execution has three deliberately separate layers. **Scientific planning** decides which evidence
-should exist, including protected startup anchors, optimization candidates, matched coverage probes
-and seed/fidelity actions. **Resource planning** decides which of those actions safely fits now.
-**Dispatch** creates the isolated process. A scientifically required anchor may therefore wait for
+Study execution has four deliberately separate authorities. **Study design** states the authored
+space and fixed or adaptive protocol. Its **evidence plan** records required and optional logical
+candidate/seed/fidelity identities. **Scientific planning** selects additional adaptive evidence.
+**Resource planning** decides which actions safely fit now. **Dispatch** creates the isolated
+process. A scientifically required identity may therefore wait for
 resources without being cancelled. If a hard learned lower bound proves it impossible on every
 allocated device, LambdaForge replaces it with the closest candidate preserving its coverage
 obligations and records `REPLACE_STARTUP_ANCHOR`. Extra physical capacity does not enlarge the
 protected design: before enough outcomes exist it runs replannable `OPPORTUNISTIC_COVERAGE` points.
 
-The deterministic `proposal_pool_size` is stored once; lightweight candidate/seed specifications
-refer only to their own values. Planning memory therefore grows linearly with the internal pool and
-Run identities. A large valid study should not need smaller YAML budgets merely to avoid framework
-memory amplification. Live scientific interpretation is also independent of that pool's raw size:
-LambdaForge caches its immutable matching geometry and distances, resamples at bounded live
-precision and rotates a bounded representative shortlist after each event. The optimization
-sampler still owns and may choose from the complete deterministic pool; this is a computational
-boundary for explanatory analysis, not a hidden reduction of the search space. Terminal analysis
-may use denser evidence because it can no longer delay collection or scheduling of Runs.
+The deterministic candidate generator materializes a bounded prefix and expands that exact
+Sobol/mixed-space sequence only when scientific planning asks for more candidates. Existing IDs
+and mappings never change. Advanced `proposal_pool_size` controls this computational window, not a
+scientific stopping rule. Lightweight candidate/seed specifications contain only their own values;
+live explanatory analysis uses cached geometry and a bounded rotating shortlist.
 
-`trials` is the candidate budget and LambdaForge consumes it by default. Low confidence or sparse
-coverage is never silently interpreted as convergence. `max_runs` and `max_time` are explicit
-global spending limits. `convergence_patience` is a deliberately opt-in record-streak policy: a
-positive value stops proposing only after that many completed full-fidelity results fail to improve
+`budget.candidates` (`trials` in legacy YAML) limits distinct proposed configurations, not the
+evidence already owed for them. Reaching it stops candidate 41; it does not cancel required
+minimum seeds, shared seeds, fidelity promotions, scientific continuations or confirmation.
+When no candidate budget is authored, versioned scientific convergence controls expansion; sparse
+coverage or low confidence alone is never called convergence. `max_runs` and `max_time` remain
+explicit global ceilings. `convergence_patience` is a legacy opt-in record-streak policy: a
+positive value can stop proposing after that many completed full-fidelity results fail to improve
 the incumbent by more than `min_improvement`; it is not a multidimensional coverage test. The final
 controller event records whether execution ended because of candidate, Run or time budget,
 exhausted proposal pool, or this explicit convergence policy. Pruning and seed racing still save
@@ -578,6 +665,20 @@ cost-effective way to answer an unresolved parameter or interaction question, La
 record `SCIENTIFIC_CONTINUATION` and resume the same Trial and seed from its durable checkpoint as a
 new Attempt. It does not consume another `trials` slot, bypasses competitive-performance pruning,
 and still consumes Run/time budget. The original prune remains visible and valid.
+
+Terminal telemetry keeps execution, design completion and scientific resolution separate. A
+complete 80/80 sweep may legitimately be `status: completed`, `design_status: complete` and
+`scientific_status: unresolved`. Conversely, a time-limited 25/80 sweep is `incomplete`. Before
+closing, every remaining identity is reconciled, so a terminal Study never retains queued or active
+Runs. Exports distinguish observed from evidence-complete candidates and report required completed,
+missing and failed cells plus the evidence completion fraction.
+
+Fixed shared-seed sweeps use paired differences and resample whole seed blocks. A missing cell
+reduces paired support and is never replaced with a different seed. Analysis keeps the
+point-estimate leader separate from an `ExactScientificConclusion`: without
+`objective.practical_margin`, unstable winner identity yields `NO_CLEAR_PREFERENCE` or
+`UNRESOLVED`, never invented equivalence. With a margin on the objective (or normalized composite
+utility) scale, stable evidence may instead support `PRACTICALLY_EQUIVALENT`.
 
 With `auto`, ARI may grow packing independently on each GPU until physical VRAM, host resources,
 throughput or site policy says to wait. Replacing it with `runs_per_gpu: 4` would impose **at most**

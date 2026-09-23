@@ -976,14 +976,14 @@ import json,sys
 p=sys.argv[1]
 with open(p,encoding="utf-8") as f: s=json.load(f)
 cf=("trial","parameters","state","selection_objective","selection_seed_count","selection_standard_error","current_objective","best_objective","partially_censored","pareto_optimal","latest_metrics","cost","feasibility","confirmation_status")
-rf=("key","seed","phase","purpose","target_questions","fidelity","state","current_observed_objective","best_observed_objective","final_objective","objective_status","objective_censoring","latest_metrics","latest_step","best_step","best_objective","duration_seconds","gpu_index","gpu_token","termination_type","prune_reason","scientific_continuation")
+rf=("key","seed","phase","purpose","target_questions","fidelity","state","current_observed_objective","best_observed_objective","final_objective","objective_status","objective_censoring","latest_metrics","latest_step","best_step","best_objective","duration_seconds","gpu_index","gpu_token","termination_type","prune_reason","scientific_continuation","evidence_requirement")
 cs=[]
 for c in s.get("candidates",[]):
  if not isinstance(c,dict): continue
  q={k:c[k] for k in cf if k in c}
  q["runs"]=[{k:r[k] for k in rf if k in r} for r in c.get("runs",[]) if isinstance(r,dict)]
  cs.append(q)
-base=("study_telemetry_version","name","execution_id","strategy","objective","planned_runs","planned_candidates","counts","cost","initial_design","coverage_state","hpo_analysis","surrogate_belief","finished","created_at_utc","updated_at_utc")
+base=("study_telemetry_version","name","execution_id","strategy","design","objective","planned_runs","planned_candidates","status","design_status","scientific_status","finish_reason","required_runs","required_completed","required_pruned","required_failed","required_missing","evidence_completion_fraction","attempted_completion_fraction","counts","cost","initial_design","coverage_state","hpo_analysis","surrogate_belief","finished","created_at_utc","updated_at_utc")
 o={k:s[k] for k in base if k in s}; ctl=s.get("controller",{}); adm=s.get("admission",{})
 o.update(
  detail_level="interactive",candidates=cs,
