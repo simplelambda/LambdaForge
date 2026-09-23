@@ -123,11 +123,12 @@ class GpuAccessPolicy:
         return self.release_command
 
     def visibility_probe(self) -> tuple[str, ...]:
-        """Return an argv command that reports the allocation's current opaque tokens.
+        """Return an argv command that reports the allocation's owned opaque tokens.
 
         The common ``gpu exec`` launcher contract has a sibling ``gpu env`` command.  Profiles
         can state a different command explicitly; LambdaForge never falls back to nvidia-smi,
-        because physical visibility is not proof of ownership.
+        because physical visibility or current activity is not proof of ownership.  The configured
+        command must report reservations/grants, not only devices currently running a process.
         """
         if self.visibility_command:
             return self.visibility_command

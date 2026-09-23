@@ -35,6 +35,7 @@ from lambdaforge.data.DatasetResolver import DatasetResolver
 from lambdaforge.EnvironmentManifest import EnvironmentManifest
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveResources import (
+    RESOURCE_FRONTIER_LIMIT,
     ActiveResourceCommitment,
     ActiveResourceEvidence,
     AdmissionMode,
@@ -109,6 +110,7 @@ _GPU_LAUNCH_STAGGER_SECONDS = 5.0
 _GPU_RESOURCE_SAMPLE_SECONDS = 5.0
 _GPU_WAIT_LOG_SECONDS = 30.0
 _GPU_PROBE_FAILURE_LIMIT = 12
+_PRUNER_MIN_CALIBRATION_CANDIDATES = 2
 _PRUNER_AUDIT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
@@ -878,6 +880,15 @@ def _execute_run(specification: Mapping[str, Any]) -> WorkResult:
     try:
         with _scoped_environment(environment):
             try:
+                if metrics_path is not None and multiprocessing.parent_process() is not None:
+                    # The Job's native thread budget is aggregate, not a budget for every Run.
+                    # Only fresh adaptive children may alter process-wide native thread pools.
+                    from lambdaforge.training.orchestration.ProcessGuard import ProcessGuard
+
+                    cpu = int(specification["definition"]["resources"]["cpu_cores"])
+                    ProcessGuard().configure_cpu_thread_limits(
+                        torch_threads=max(1, cpu), interop_threads=1, override_env=True
+                    )
                 return _execute_run_inner(specification)
             except BaseException as error:
                 telemetry = (
@@ -2566,6 +2577,62 @@ def _execute_adaptive_group(
 
         register(limited)
 
+        def next_dispatch_action(
+            capacity: int,
+        ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+            """Use the same scientific queue on completion and physical-capacity events."""
+            retained: deque[dict[str, Any]] = deque()
+            for value in deferred_queue:
+                trial = int(value.get("candidate_pool_index", value["trial_index"]))
+                if scheduling_key(value) in scheduled_run_keys:
+                    continue
+                if any(
+                    result.seed == value.get("seed") or result.pruned
+                    for result in completed[trial]
+                ):
+                    continue
+                retained.append(value)
+            deferred_queue.clear()
+            deferred_queue.extend(retained)
+            protected_index = next(
+                (i for i, value in enumerate(deferred_queue) if value.get("hpo_startup_anchor")),
+                None,
+            )
+            if protected_index is not None:
+                protected = deferred_queue[protected_index]
+                del deferred_queue[protected_index]
+                return "STARTUP_ANCHOR", [protected], {
+                    "reason": "protected initial-design coverage obligation remains unresolved",
+                    "controller_value": None,
+                    "value_basis": "protected-initial-design-debt",
+                    "expected_cost_seconds": None,
+                    "score": None,
+                    "alternatives": [],
+                    "obligations": next(
+                        (
+                            list(anchor.obligations)
+                            for anchor in initial_design.anchors
+                            if anchor.trial == int(protected["candidate_pool_index"])
+                        ),
+                        [],
+                    ),
+                }
+            action, specifications, evidence = next_event_action(capacity)
+            if not specifications and deferred_queue:
+                specifications = [deferred_queue.popleft()]
+                action = "OPPORTUNISTIC_COVERAGE"
+                evidence = {
+                    "reason": "otherwise idle capacity can collect useful initial seed coverage",
+                    "alternatives": [],
+                }
+            selected = {scheduling_key(value) for value in specifications}
+            retained = deque(
+                value for value in deferred_queue if scheduling_key(value) not in selected
+            )
+            deferred_queue.clear()
+            deferred_queue.extend(retained)
+            return action, specifications, evidence
+
         def observed(
             result: WorkResult,
             queued_specifications: Sequence[Mapping[str, Any]],
@@ -2746,50 +2813,7 @@ def _execute_adaptive_group(
             )
             if remaining_capacity <= 0:
                 return ()
-            # Protected anchors are scientific debt, not a queue-parity heuristic. They may wait
-            # or reorder, but an acquisition update cannot silently erase them.
-            protected_index = next(
-                (
-                    index
-                    for index, value in enumerate(deferred_queue)
-                    if value.get("hpo_startup_anchor")
-                    and scheduling_key(value) not in scheduled_run_keys
-                    and not completed[int(value.get("candidate_pool_index", value["trial_index"]))]
-                ),
-                None,
-            )
-            evidence: dict[str, Any]
-            if protected_index is not None:
-                protected = deferred_queue[protected_index]
-                del deferred_queue[protected_index]
-                specifications = [protected]
-                action = "STARTUP_ANCHOR"
-                evidence = {
-                    "reason": "protected initial-design coverage obligation remains unresolved",
-                    "controller_value": None,
-                    "value_basis": "protected-initial-design-debt",
-                    "expected_cost_seconds": None,
-                    "score": None,
-                    "alternatives": [],
-                    "obligations": next(
-                        (
-                            list(anchor.obligations)
-                            for anchor in initial_design.anchors
-                            if anchor.trial
-                            == int(protected.get("candidate_pool_index", protected["trial_index"]))
-                        ),
-                        [],
-                    ),
-                }
-            else:
-                action, specifications, evidence = next_event_action(remaining_capacity)
-                if not specifications and deferred_queue:
-                    specifications = [deferred_queue.popleft()]
-                    action = "OPPORTUNISTIC_COVERAGE"
-                    evidence = {
-                        "reason": "otherwise idle capacity can collect useful broad coverage",
-                        "alternatives": [],
-                    }
+            action, specifications, evidence = next_dispatch_action(remaining_capacity)
             specifications = list(specifications[:remaining_capacity])
             if not specifications:
                 for stale in stale_queue:
@@ -2929,14 +2953,19 @@ def _execute_adaptive_group(
             queued_specifications: Sequence[Mapping[str, Any]],
             pending_specifications: Sequence[Mapping[str, Any]],
         ) -> Sequence[dict[str, Any]]:
-            """Ask once for more scientific alternatives when the current frontier cannot fit."""
+            """Refill from scientific debt as well as acquisition, without a terminal barrier."""
             capacity = min(
                 8,
+                _resource_frontier_room(
+                    queued_specifications,
+                    pending_specifications,
+                    parallelism=parallelism,
+                ),
                 allowance() - len(queued_specifications) - len(pending_specifications),
             )
             if capacity <= 0 or not within_time():
                 return ()
-            action, specifications, evidence = next_event_action(capacity)
+            action, specifications, evidence = next_dispatch_action(capacity)
             specifications = [
                 value for value in specifications if scheduling_key(value) not in scheduled_run_keys
             ][:capacity]
@@ -2949,8 +2978,8 @@ def _execute_adaptive_group(
             record_decision(
                 "EXPAND_RESOURCE_FRONTIER",
                 reason=(
-                    "the currently ranked frontier was resource-blocked; requesting bounded "
-                    "additional scientific alternatives"
+                    "physical capacity requested another bounded scientific action "
+                    "from initial coverage or adaptive acquisition"
                 ),
                 underlying_action=action,
                 trials=[int(value["trial_index"]) for value in specifications],
@@ -3807,6 +3836,51 @@ def _controller_failure_result(
     return result
 
 
+def _resource_frontier_identity(value: Mapping[str, Any]) -> tuple[str, str, str, int]:
+    """Return the stable logical identity used to deduplicate bounded frontier requests."""
+    raw_fidelity = value.get("hpo_fidelity")
+    fidelity = raw_fidelity if isinstance(raw_fidelity, Mapping) else {}
+    return (
+        str(value.get("candidate_pool_index", value.get("trial_index", ""))),
+        str(value.get("seed", "")),
+        str(value.get("hpo_phase", "search")),
+        int(fidelity.get("target", 0) or 0),
+    )
+
+
+def _resource_frontier_state(
+    queued: Sequence[Mapping[str, Any]],
+    active: Sequence[Mapping[str, Any]],
+) -> str:
+    """Identify one dispatcher state compactly without depending on terminal Run events."""
+    identities = sorted(
+        (
+            *(("queued", *_resource_frontier_identity(value)) for value in queued),
+            *(("active", *_resource_frontier_identity(value)) for value in active),
+        )
+    )
+    encoded = json.dumps(identities, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _resource_frontier_room(
+    queued: Sequence[Mapping[str, Any]],
+    active: Sequence[Mapping[str, Any]],
+    *,
+    parallelism: int,
+) -> int:
+    """Return bounded room for speculative scientific alternatives.
+
+    The dispatcher needs more than one candidate to backfill heterogeneous GPUs, but an
+    unavailable candidate must not make each newly proposed alternative look like permission to
+    grow the queue again. The waiting frontier is bounded independently from already-running
+    useful work, while remaining global parallelism still limits how much may be queued.
+    """
+    remaining_parallelism = max(0, parallelism - len(active))
+    limit = min(RESOURCE_FRONTIER_LIMIT, remaining_parallelism)
+    return max(0, limit - len(queued))
+
+
 def _execute_gpu_admitted_runs(
     prepared: Sequence[dict[str, Any]],
     *,
@@ -3875,8 +3949,12 @@ def _execute_gpu_admitted_runs(
     code_fingerprint, environment_fingerprint = _resource_runtime_fingerprints(control_root)
     next_wait_log = 0.0
     consecutive_probe_failures = 0
-    frontier_expanded_without_terminal_event = False
-    frontier_identities: set[tuple[Any, Any, Any, int]] = set()
+    # A frontier request is bounded by the exact queued/pending scientific identities.  Adding
+    # an alternative creates a new state that may request another one immediately; receiving no
+    # new identity closes only that state.  This prevents both idle-until-terminal stalls and
+    # repeated polling loops against an unchanged controller frontier.
+    frontier_request_states: set[str] = set()
+    frontier_identities: set[tuple[str, str, str, int]] = set()
     next_resource_sample = 0.0
     next_visibility_probe = 0.0
     granted_slots = set(range(len(visible_gpus)))
@@ -3888,7 +3966,6 @@ def _execute_gpu_admitted_runs(
         if pending:
             done, _ = wait(tuple(pending), timeout=0.5, return_when=FIRST_COMPLETED)
         for future in done:
-            frontier_expanded_without_terminal_event = False
             next_resource_sample = 0.0
             value, slot, pool = pending.pop(future)
             retry: dict[str, Any] | None
@@ -4129,14 +4206,58 @@ def _execute_gpu_admitted_runs(
                     value["hpo_allocation_revoked"] = True
                     _terminate_revoked_gpu_worker(value)
                 if revoked_slots:
+                    resource_store.record_event(
+                        "GPU_ALLOCATION_SHRUNK",
+                        {
+                            "requested_gpus": resources.gpu_count,
+                            "initial_tokens": list(visible_gpus),
+                            "previous_granted_tokens": [
+                                visible_gpus[index] for index in sorted(granted_slots)
+                            ],
+                            "currently_granted_tokens": [
+                                visible_gpus[index] for index in sorted(current_slots)
+                            ],
+                            "revoked_tokens": [
+                                visible_gpus[index] for index in sorted(revoked_slots)
+                            ],
+                            "visibility_command": list(
+                                _configured_gpu_visibility_command() or ()
+                            ),
+                            "reason": (
+                                "authoritative ownership probe no longer reported these "
+                                "initially granted tokens"
+                            ),
+                        },
+                    )
                     print(
-                        "[hpo] site GPU grant shrank; revoked token(s) "
+                        f"[hpo] GPU_ALLOCATION_SHRUNK {len(granted_slots)} -> "
+                        f"{len(current_slots)}; revoked token(s) "
                         + ", ".join(visible_gpus[index] for index in sorted(revoked_slots))
-                        + ". Their Runs will resume from durable checkpoints; unaffected GPUs "
-                        "continue normally.",
+                        + ". The authoritative visibility command stopped reporting those "
+                        "initially allocated tokens. Their Runs will resume from durable "
+                        "checkpoints; unaffected GPUs continue normally.",
                         flush=True,
                     )
                 if restored_slots:
+                    resource_store.record_event(
+                        "GPU_ALLOCATION_EXPANDED",
+                        {
+                            "requested_gpus": resources.gpu_count,
+                            "initial_tokens": list(visible_gpus),
+                            "previous_granted_tokens": [
+                                visible_gpus[index] for index in sorted(granted_slots)
+                            ],
+                            "currently_granted_tokens": [
+                                visible_gpus[index] for index in sorted(current_slots)
+                            ],
+                            "restored_tokens": [
+                                visible_gpus[index] for index in sorted(restored_slots)
+                            ],
+                            "visibility_command": list(
+                                _configured_gpu_visibility_command() or ()
+                            ),
+                        },
+                    )
                     print(
                         "[hpo] site GPU grant expanded; token(s) "
                         + ", ".join(visible_gpus[index] for index in sorted(restored_slots))
@@ -4264,10 +4385,20 @@ def _execute_gpu_admitted_runs(
         # readiness is itself an event: ask once for a bounded frontier whenever useful physical
         # capacity exists and no dispatchable action remains.  The existing planner still decides
         # whether a second lane is safe/exploratory, so this does not bypass memory policy.
+        frontier_state = _resource_frontier_state(
+            tuple(queued),
+            tuple(item for item, _slot, _pool in pending.values()),
+        )
+        frontier_room = _resource_frontier_room(
+            tuple(queued),
+            tuple(item for item, _slot, _pool in pending.values()),
+            parallelism=parallelism,
+        )
         if (
             not queued
             and on_resource_blocked is not None
-            and not frontier_expanded_without_terminal_event
+            and frontier_state not in frontier_request_states
+            and frontier_room > 0
             and len(pending) < parallelism
             and any(
                 active[index] < run_limits[index]
@@ -4275,34 +4406,34 @@ def _execute_gpu_admitted_runs(
                 for index in sorted(admission_slots)
             )
         ):
+            frontier_request_states.add(frontier_state)
             alternatives = tuple(
                 on_resource_blocked(
                     (),
                     tuple(item for item, _slot, _pool in pending.values()),
                 )
             )
-            known = {
-                (
-                    value.get("candidate_pool_index", value.get("trial_index")),
-                    value.get("seed"),
-                    value.get("hpo_phase", "search"),
-                    int((value.get("hpo_fidelity") or {}).get("target", 0)),
-                )
-                for value in queued
-            }
+            known = {_resource_frontier_identity(value) for value in queued}
+            added = 0
             for alternative in alternatives:
-                key = (
-                    alternative.get("candidate_pool_index", alternative.get("trial_index")),
-                    alternative.get("seed"),
-                    alternative.get("hpo_phase", "search"),
-                    int((alternative.get("hpo_fidelity") or {}).get("target", 0)),
-                )
+                if added >= frontier_room:
+                    break
+                key = _resource_frontier_identity(alternative)
                 if key not in known and key not in frontier_identities:
                     alternative["hpo_resource_frontier_extension"] = True
                     queued.append(alternative)
                     known.add(key)
                     frontier_identities.add(key)
-            frontier_expanded_without_terminal_event = True
+                    added += 1
+            if not added:
+                resource_store.record_event(
+                    "RESOURCE_FRONTIER_NO_NEW_ALTERNATIVE",
+                    {
+                        "reason": "scientific policy returned no unseen action for idle capacity",
+                        "active_runs": len(pending),
+                        "queued_runs": len(queued),
+                    },
+                )
         if not queued:
             resource_store.persist_ledger(devices)
             if telemetry is not None:
@@ -4318,6 +4449,7 @@ def _execute_gpu_admitted_runs(
                         exploration_evaluations=(),
                         granted_slots=admission_slots,
                         allocation_probe_available=visibility_probe_available,
+                        requested_gpu_count=resources.gpu_count,
                     )
                 )
             continue
@@ -4363,35 +4495,35 @@ def _execute_gpu_admitted_runs(
                     },
                 )
                 resource_store.record_event("RESOURCE_CHECKPOINT_REQUESTED", evaluation.to_dict())
+        frontier_state = _resource_frontier_state(
+            tuple(queued),
+            tuple(item for item, _slot, _pool in pending.values()),
+        )
+        frontier_room = _resource_frontier_room(
+            tuple(queued),
+            tuple(item for item, _slot, _pool in pending.values()),
+            parallelism=parallelism,
+        )
         if (
             not admitted
             and queued
             and on_resource_blocked is not None
-            and not frontier_expanded_without_terminal_event
+            and frontier_state not in frontier_request_states
+            and frontier_room > 0
         ):
+            frontier_request_states.add(frontier_state)
             alternatives = tuple(
                 on_resource_blocked(
                     tuple(queued),
                     tuple(item for item, _slot, _pool in pending.values()),
                 )
             )
-            known = {
-                (
-                    value.get("candidate_pool_index", value.get("trial_index")),
-                    value.get("seed"),
-                    value.get("hpo_phase", "search"),
-                    int((value.get("hpo_fidelity") or {}).get("target", 0)),
-                )
-                for value in queued
-            }
+            known = {_resource_frontier_identity(value) for value in queued}
             added = 0
             for alternative in alternatives:
-                key = (
-                    alternative.get("candidate_pool_index", alternative.get("trial_index")),
-                    alternative.get("seed"),
-                    alternative.get("hpo_phase", "search"),
-                    int((alternative.get("hpo_fidelity") or {}).get("target", 0)),
-                )
+                if added >= frontier_room:
+                    break
+                key = _resource_frontier_identity(alternative)
                 if key in known or key in frontier_identities:
                     continue
                 alternative["hpo_resource_frontier_extension"] = True
@@ -4399,7 +4531,6 @@ def _execute_gpu_admitted_runs(
                 known.add(key)
                 frontier_identities.add(key)
                 added += 1
-            frontier_expanded_without_terminal_event = True
             if added:
                 print(
                     f"[hpo] expanded the scientific frontier with {added} additional "
@@ -4407,6 +4538,14 @@ def _execute_gpu_admitted_runs(
                     flush=True,
                 )
                 continue
+            resource_store.record_event(
+                "RESOURCE_FRONTIER_NO_NEW_ALTERNATIVE",
+                {
+                    "reason": "scientific policy returned no unseen resource alternative",
+                    "active_runs": len(pending),
+                    "queued_runs": len(queued),
+                },
+            )
         resource_store.record_decisions((*admitted, *blocked))
         resource_store.record_trace(
             elapsed_seconds=max(0.0, now - scheduling_started),
@@ -4437,6 +4576,7 @@ def _execute_gpu_admitted_runs(
                     exploration_evaluations=planner.last_exploration_evaluations,
                     granted_slots=admission_slots,
                     allocation_probe_available=visibility_probe_available,
+                    requested_gpu_count=resources.gpu_count,
                 )
             )
         launched = False
@@ -4627,7 +4767,6 @@ def _execute_gpu_admitted_runs(
             if replacements:
                 queued.clear()
                 queued.extend(replacements)
-                frontier_expanded_without_terminal_event = False
                 continue
             raise RuntimeError(reason)
         if queued and not pending and not launched:
@@ -4964,6 +5103,17 @@ def _read_live_resource_snapshot(specification: Mapping[str, Any]) -> dict[str, 
             pass
     run_dir = declared.get("run_dir")
     if isinstance(run_dir, str):
+        try:
+            metric_progress = json.loads(
+                (Path(run_dir) / "metric-progress.json").read_text(encoding="utf-8")
+            )
+            metric_step = _optional_int(metric_progress.get("step"))
+            if metric_step is not None and metric_step >= 0:
+                snapshot["step"] = max(metric_step, _optional_int(snapshot.get("step")) or 0)
+                if snapshot.get("phase") in {None, "startup"}:
+                    snapshot["phase"] = "work-progress"
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
         progress = Path(run_dir) / "progress.json"
         try:
             value = json.loads(progress.read_text(encoding="utf-8"))
@@ -5634,7 +5784,8 @@ def _resource_observation_for_result(
         placement_succeeded=(False if memory_failure else True if result.ok else None),
         admission_mode=(
             cast(AdmissionMode, str(metadata["admission_mode"]))
-            if metadata.get("admission_mode") in {"SAFE_ADMISSION", "EXPLORATORY_ADMISSION"}
+            if metadata.get("admission_mode")
+            in {"BASELINE_ADMISSION", "SAFE_ADMISSION", "EXPLORATORY_ADMISSION"}
             else None
         ),
         predicted_peak_bytes=(
@@ -5795,8 +5946,40 @@ def _resource_admission_diagnostics(
     exploration_evaluations: Sequence[Any] = (),
     granted_slots: set[int] | None = None,
     allocation_probe_available: bool = True,
+    requested_gpu_count: int | None = None,
 ) -> dict[str, Any]:
     """Expose the exact backend placement read model without frontend inference."""
+    currently_granted = tuple(
+        value.token
+        for value in devices
+        if granted_slots is None or value.index in granted_slots
+    )
+
+    def idle_reason(device: GPUResourceState) -> str | None:
+        if device.active:
+            return None
+        if granted_slots is not None and device.index not in granted_slots:
+            return (
+                "allocation ownership probe unavailable; admission is paused"
+                if not allocation_probe_available
+                else "GPU token was removed from the authoritative site allocation"
+            )
+        if any(getattr(value, "target_gpu", None) == device.index for value in admitted):
+            return "protected baseline admission selected; launch is pending"
+        if user_minimum_bytes > 0 and device.free_bytes < user_minimum_bytes:
+            return "physical free VRAM is below the authored gpu_memory safety floor"
+        device_blocks = [
+            str(note.get("reason", "resource policy blocked admission"))
+            for decision in blocked
+            for note in getattr(decision, "devices", ())
+            if isinstance(note, Mapping) and note.get("gpu") == device.index
+        ]
+        if device_blocks:
+            return device_blocks[0]
+        if pending:
+            return "awaiting a scientifically useful admissible frontier action"
+        return "no pending scientific action is currently available"
+
     return {
         "admission_version": 3,
         "summary": "admissible" if admitted else "waiting_for_resources" if pending else "idle",
@@ -5811,6 +5994,23 @@ def _resource_admission_diagnostics(
             else "automatic-learned-candidate-specific-future-envelope"
         ),
         "user_minimum_bytes": user_minimum_bytes,
+        "allocation": {
+            "requested_gpus": (
+                requested_gpu_count if requested_gpu_count is not None else len(devices)
+            ),
+            "initial_cuda_visible_devices": [value.token for value in devices],
+            "currently_granted_tokens": list(currently_granted),
+            "admission_slots": sorted(granted_slots or ()) if granted_slots is not None else [
+                value.index for value in devices
+            ],
+            "visibility_command": list(_configured_gpu_visibility_command() or ()),
+            "visibility_probe_available": allocation_probe_available,
+            "visibility_semantics": (
+                "The command must report reservation/ownership tokens, not merely GPUs with "
+                "active compute processes. Reported tokens can only narrow or restore the "
+                "initial CUDA_VISIBLE_DEVICES allocation."
+            ),
+        },
         "devices": [
             {
                 "gpu": value.index,
@@ -5831,6 +6031,13 @@ def _resource_admission_diagnostics(
                     if allocation_probe_available
                     else "probe-unavailable"
                 ),
+                "grant_state": (
+                    "granted"
+                    if granted_slots is None or value.index in granted_slots
+                    else "revoked"
+                    if allocation_probe_available
+                    else "unknown-probe-unavailable"
+                ),
                 "provisional_committed_bytes": value.provisional_committed_bytes,
                 "predicted_headroom_bytes": value.predicted_headroom_bytes,
                 "provisional_headroom_bytes": value.provisional_headroom_bytes,
@@ -5838,10 +6045,15 @@ def _resource_admission_diagnostics(
                 "active_runs": len(value.active),
                 "runs_per_gpu": value.run_cap,
                 "role": (
-                    "exploration"
+                    "packing-probe"
                     if any(item.admission_mode == "EXPLORATORY_ADMISSION" for item in value.active)
-                    else "protected-progress"
+                    else "protected-baseline"
+                    if any(item.admission_mode == "BASELINE_ADMISSION" for item in value.active)
+                    else "safe-packed"
+                    if value.active
+                    else "idle"
                 ),
+                "idle_reason": idle_reason(value),
                 "active": [
                     {
                         "candidate": item.candidate_key,
@@ -6019,23 +6231,34 @@ def _visible_gpu_tokens(gpu_count: int) -> tuple[str, ...]:
     return tuple(str(index) for index in range(gpu_count))
 
 
+def _configured_gpu_visibility_command() -> tuple[str, ...] | None:
+    """Return the configured authoritative ownership probe as validated argv."""
+    raw = os.environ.get("LAMBDAFORGE_GPU_VISIBILITY_COMMAND")
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, list) or not decoded or not all(
+        isinstance(value, str) and value for value in decoded
+    ):
+        return None
+    return tuple(decoded)
+
+
 def _current_gpu_grant(initial_tokens: Sequence[str]) -> frozenset[str] | None:
     """Read the site's current allocation without treating physical visibility as ownership.
 
     ``None`` means that an authoritative probe was not configured or was temporarily
     unavailable.  Callers preserve the last known grant in that case; they never broaden it.
     """
-    raw = os.environ.get("LAMBDAFORGE_GPU_VISIBILITY_COMMAND")
-    if not raw:
+    command = _configured_gpu_visibility_command()
+    if command is None:
         return None
     try:
-        decoded = json.loads(raw)
-        if not isinstance(decoded, list) or not decoded or not all(
-            isinstance(value, str) and value for value in decoded
-        ):
-            return None
         completed = subprocess.run(
-            tuple(decoded),
+            command,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -6375,6 +6598,27 @@ def _request_early_stops(
         probability_threshold=probability_threshold,
         margin=margin,
     )
+    calibration_candidates = int(calibration.get("calibration_candidates", 0) or 0)
+    calibration_error = calibration.get("curve_rmse")
+    if (
+        calibration_candidates < _PRUNER_MIN_CALIBRATION_CANDIDATES
+        or not isinstance(calibration_error, int | float)
+        or isinstance(calibration_error, bool)
+        or not math.isfinite(float(calibration_error))
+    ):
+        # A probability threshold is meaningful only after complete curves have shown how prefix
+        # predictions relate to actual endpoints. With no retrospective discrimination sample,
+        # every startup candidate could previously be pruned against another equally provisional
+        # curve. Two candidates are the identifiability minimum for a comparison, not a user-tuned
+        # magic threshold. Clear prefix evidence so it cannot become a stale confirmation later.
+        for specification, _history in histories:
+            stop = Path(str(specification["hpo_stop_path"]))
+            stop.unlink(missing_ok=True)
+            stale_evidence_path = stop.with_name(
+                f"trial-{int(specification['trial_index']):05d}.prune-evidence.json"
+            )
+            stale_evidence_path.unlink(missing_ok=True)
+        return
     calibrated_prior = max(
         pooled_deviation,
         float(calibration.get("curve_rmse", 0.0) or 0.0),
@@ -6689,6 +6933,25 @@ def _pruner_calibration(
         confirmations=confirmations,
         probability_threshold=probability_threshold,
         margin=margin,
+    )
+    calibration_error = report.get("curve_rmse")
+    runtime_ready = bool(
+        int(report.get("calibration_candidates", 0) or 0)
+        >= _PRUNER_MIN_CALIBRATION_CANDIDATES
+        and isinstance(calibration_error, int | float)
+        and not isinstance(calibration_error, bool)
+        and math.isfinite(float(calibration_error))
+    )
+    report.update(
+        {
+            "runtime_pruning_ready": runtime_ready,
+            "required_calibration_candidates": _PRUNER_MIN_CALIBRATION_CANDIDATES,
+            "runtime_pruning_reason": (
+                "retrospective endpoint calibration is available"
+                if runtime_ready
+                else "waiting for two completed candidates with comparable endpoint curves"
+            ),
+        }
     )
     if len(_PRUNER_AUDIT_CACHE) >= 64:
         _PRUNER_AUDIT_CACHE.pop(next(iter(_PRUNER_AUDIT_CACHE)))

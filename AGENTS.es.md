@@ -1,6 +1,6 @@
 # Guía de LambdaForge para agentes
 
-Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.14.0. Consulta solo la
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.15.0. Consulta solo la
 sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
 
 ## Arquitectura no negociable
@@ -27,7 +27,7 @@ runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada 
 | Operar Work | `lf show/logs/cancel/retry/delete SELECTOR`; Run: `show/logs WORK --run CLAVE` |
 | Jobs de bajo nivel | `lf jobs list/show/logs/cancel/retry/delete/clear`; `lf doctor --on CLUSTER` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
-| Resultados | `lf results list/show/compare/analyze/report/replay` |
+| Resultados | `lf results list/show/compare/analyze/report/replay`; Study portable: `lf export SELECTOR --output DIR` |
 | Perfiles de clúster | Consola; `lf clusters add/set/unset/...` para automatización |
 | Limpiar almacenamiento seguro | `lf clean`; aplicar con `--apply` |
 
@@ -162,10 +162,12 @@ interno sigue siendo finito y derivado de recursos host. `resources.gpu_memory` 
 un suelo de seguridad del usuario por lanzamiento. La admisión efectiva usa el máximo entre ese
 suelo, una envolvente futura conservadora específica del candidato y cotas OOM conocidas. La VRAM
 física libre actual impone además el límite estricto. La VRAM física es la autoridad. Nunca
-multipliques el suelo por Runs activos ni mantengas otra reserva. Cold start crea progreso y después
-usa trayectorias PID/allocator activas censuradas, fase/progreso y checkpoints para pasos
-incrementales `SAFE_ADMISSION` o `EXPLORATORY_ADMISSION` antes de que haya Runs terminales. Conserva
-un carril protegido, un escalón sin caracterizar por clase y comparte evidencia provisional entre
+multipliques el suelo por Runs activos ni mantengas otra reserva. Cold start crea una
+`BASELINE_ADMISSION` por cada GPU concedida y ociosa antes de co-localizar; una baseline nunca
+consume un carril exploratorio ni activa `UNVALIDATED_LADDER_STEP`. Después usa trayectorias
+PID/allocator activas censuradas, fase/progreso y checkpoints para pasos incrementales
+`SAFE_ADMISSION` o `EXPLORATORY_ADMISSION` antes de que haya Runs terminales. Conserva un carril
+protegido a concurrencia baseline, un escalón sin caracterizar por clase y comparte evidencia provisional entre
 GPU hermanas. En grupos grandes permite preguntas de recursos distintas en paralelo, pero nunca
 duplica un experimento equivalente ni ocupa el último carril protegido.
 Los máximos minúsculos del allocator son deriva cuando la evidencia robusta lo indica; crecimiento
@@ -180,6 +182,11 @@ valor normalizado, incertidumbre y coste de `ScientificActionValue`. Persiste ev
 y WHY-WAIT sin spam. La estimación del próximo evento conserva incertidumbre de cadencia si hay
 intervalos repetidos; en otro caso sigue desconocida. El pruning científico no determina completitud de recursos. Las partes de
 CPU/RAM/almacenamiento se basan en el máximo global duro para no sobreprometer recursos host.
+Cada hijo adaptativo limita Torch/BLAS/OpenMP a su cuota CPU, no al presupuesto heredado del Job;
+nunca modifica los pools del controlador embebido. La reposición por capacidad y por finalización
+comparte la cola científica inicial/semillas y deduplicación exacta. Las métricas Work con paso
+publican `metric-progress.json` acotado; no recorrer su historial en cada sondeo de recursos ni
+confundir progreso escalar con checkpoint durable.
 Prefiere atribución NVML por proceso; el fallback agregado queda censurado. Una OOM
 restringe el packing exacto salvo que residencia propia más asignación solicitada demuestre cota
 intrínseca; nunca restaures backoff global de concurrencia. La historia compatible exacta o
@@ -189,8 +196,9 @@ packing best-fit más denso. `RESOURCE_BLOCKED` es reversible y científicamente
 reintentes una OOM compatible con headroom igual o menor. El planner consume una frontera científica
 acotada, permite backfill seguro, protege trabajo pesado con ventanas de finalización predichas y
 puede rechazar co-location aunque quepa si no mejora throughput agregado. Si toda la frontera queda
-bloqueada, pide como máximo una ampliación acotada a la misma política científica antes de dejar el
-recurso ocioso; nunca itera candidatos aleatorios por recursos. Cada Run GPU admitido usa un proceso spawn nuevo de un único worker y termina al
+bloqueada, pide ampliaciones nuevas y acotadas a la misma política sin esperar Runs terminales. Las
+identidades exactas de acciones en cola/activas y la detección explícita de ausencia de alternativas
+deben cortar los bucles; nunca itera candidatos aleatorios por recursos. Cada Run GPU admitido usa un proceso spawn nuevo de un único worker y termina al
 recibir resultado/error; no restaures pools CUDA persistentes porque sus contextos ociosos retienen
 VRAM y pueden bloquear la cola. El probe de memoria GPU debe seguir siendo un hijo efímero: el
 controlador no debe retener un contexto CUDA por dispositivo ni consumir una plaza científica. Un
@@ -238,6 +246,8 @@ nunca podes por pendiente a un candidato aún competitivo en el step común exac
 automáticamente escalares de callback y tiempos de época/validación. Un trainer propio registra
 curvas con `self.metrics.log(nombre, valor, step=epoch)`; `progress.update` es progreso grueso y
 `self.log`/print solo narración humana.
+No actives pruning de curvas hasta que dos candidatos distintos terminados produzcan una calibración
+retrospectiva finita; curvas startup provisionales no deben podarse entre sí sin endpoints reales.
 
 El controlador solo puede preemptar cooperativamente un Run de fidelidad puntuado, no de
 confirmación, con checkpoint propio verificado, al menos 30 segundos de ejecución y una alternativa
@@ -329,6 +339,15 @@ es observada/predicha y no atribuyas resolución a un pool no persistido. Confir
 de equivalencia. Separa coste intrínseco por Run de gasto total del controlador y Pareto científico
 de Pareto de recursos. Todo sigue siendo predictivo/descriptivo, no causal.
 
+`lf export SELECTOR --output PADRE` y **Export Study…** en la Consola usan un único servicio de
+dominio para exportar el Attempt exitoso más reciente. El destino es una carpeta atómica que no
+sobrescribe `NOMBRE--EXECUTION_ID`, con inventario SHA-256, evidencia exacta de Execution/Runs,
+registros completos del Study/controlador, ciclo de vida del Job, análisis JSON/HTML autocontenido
+opcional, replay de recursos, checkpoints/pesos retenidos y artefactos publicados finalizados. No
+copies datasets compartidos, entornos, caché ni el árbol staged del proyecto: conserva sus
+referencias de provenance. Rechaza symlinks, ficheros especiales y traversal del archive, elimina
+siempre temporales del proveedor y nunca publiques una exportación local parcial.
+
 `trials` adaptativo es el presupuesto de candidatos y se consume por defecto; cobertura escasa o
 confianza baja del análisis no equivalen a convergencia. La convergencia por racha solo es opt-in
 con `convergence_patience` positivo (cero/omitido la desactiva), y el snapshot terminal debe
@@ -371,7 +390,17 @@ Results finales. Cambiar de página de métricas restablece límites automático
 afecta a la página visible. Las categorías conservan sus etiquetas reales y pulsar un punto/barra
 muestra su valor exacto. La terminal mantiene la incertidumbre numérica sin pseudobandas engañosas;
 exportaciones Plotly opcionales explícitas pueden mostrar intervalos reales, hover, mapas de calor
-y superficies 3D. La cobertura usa tarjetas/gráficas/tablas acotadas, no JSON crudo, y la ayuda
+y superficies 3D. Las métricas de seed se exportan en un dashboard offline con selector
+agrupado/buscable, máximo de cuatro valores iniciales de objetivo/validación, curvas originales y
+normalizadas por métrica, barras de último valor/cambio, correlaciones al mismo step, relaciones X/Y
+por steps compartidos y estadística descriptiva exacta; las categorías se pliegan y seleccionar
+todas es deliberado. El HTML de Study navega comparación persistida de candidatos, respuestas,
+interacciones, cobertura, recursos y findings sin ajustar otro surrogate. Los heatmaps ofrecen
+paletas con centro neutral explícito. Las preferencias usan una clave local única por fichero:
+reabrir conserva y regenerar reinicia. Paneles redimensionables, categorías de métricas propias y
+especificaciones de gráficas guardadas son solo presentación: conservan las claves y consumen la
+evidencia persistida embebida sin recalcularla. La cobertura usa tarjetas/gráficas/tablas
+acotadas, no JSON crudo, y la ayuda
 contextual explica términos estadísticos. Las decisiones se añaden a
 `study/controller-history.jsonl`: conserva `controller.json.recent` acotado, carga el historial
 completo solo bajo demanda y mantiene el tail disponible en Studies antiguos sin ese fichero. Las

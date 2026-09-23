@@ -24,6 +24,7 @@ from lambdaforge.tui.screens.Workspace import (  # noqa: E402
     ClusterWorkspace,
     DatasetWorkspace,
     ExactConfirmation,
+    ExportDirectoryPicker,
     HpoActionWorkspace,
     HpoParameterWorkspace,
     ResultWorkspace,
@@ -118,6 +119,14 @@ class FakeServices:
 
     def report(self, selector, output: Path):
         return output
+
+    def export_result(self, selector, destination: Path):
+        self.calls.append(("export_result", (selector, destination)))
+        return {"path": str(destination / f"{selector}-export")}
+
+    def export_work(self, selector, destination: Path):
+        self.calls.append(("export_work", (selector, destination)))
+        return {"path": str(destination / f"{selector}-export")}
 
     def validate_work(self, config):
         self.calls.append(("validate_work", config))
@@ -1951,20 +1960,104 @@ def test_resource_chart_export_bubbles_to_the_app_without_blocking(
     asyncio.run(exercise())
 
 
-def test_metric_page_change_restores_data_driven_plot_limits() -> None:
-    class Plot:
-        def __init__(self) -> None:
-            self.calls: list[tuple[object, object]] = []
+def test_metric_pages_reset_scale_without_accumulating_render_work() -> None:
+    async def exercise() -> None:
+        services = FakeServices()
+        app = LambdaForgeApp(services)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(
+                SeedWorkspace(
+                    {"name": "study", "primary_job_id": "job-1"},
+                    {"trial": 17},
+                    {"key": "run-1", "seed": 54, "state": "completed"},
+                    services,
+                    objective={"metric": "val_auprc", "mode": "max"},
+                )
+            )
+            await pilot.pause(0.2)
+            dashboard = app.screen.query_one("#seed-metric-dashboard", MetricDashboard)
+            first_plot = dashboard.query_one(".metric-plot-0")
 
-        def set_xlimits(self, lower=None, upper=None) -> None:
-            self.calls.append((lower, upper))
+            # An unchanged live snapshot must not clear and reconstruct native plot data.
+            datasets = first_plot._datasets
+            detail = app.screen.detail
+            assert detail is not None
+            app.screen._render_curves(detail["curves"], detail)
+            assert first_plot._datasets is datasets
 
-        def set_ylimits(self, lower=None, upper=None) -> None:
-            self.calls.append((lower, upper))
+            # A user viewport belongs only to the current semantic metric page.
+            first_plot.set_ylimits(0.52, 0.54)
+            assert first_plot.user_viewport() is not None
+            app.screen.action_next_chart_page()
+            await pilot.pause(0.1)
+            assert first_plot.user_viewport() is None
+            assert first_plot._auto_x_min and first_plot._auto_x_max
+            assert first_plot._auto_y_min and first_plot._auto_y_max
+            assert 0.89 < first_plot._y_min < first_plot._y_max < 1.01
+            first_plot.action_zoom_in()
+            await pilot.pause(0.05)
+            assert first_plot.user_viewport() is not None
 
-    plot = Plot()
-    MetricDashboard._reset_viewport(plot)
-    assert plot.calls == [(None, None), (None, None)]
+            # Repeated navigation replaces at most the line plus two epoch markers.  It
+            # must not leave deferred paints or old page series behind.
+            for _ in range(12):
+                app.screen.action_next_chart_page()
+            await pilot.pause(0.2)
+            for plot in dashboard.query(".metric-plot"):
+                assert len(plot._datasets) <= 3
+                assert plot._batch_depth == 0
+                assert not plot._batch_rerender_pending
+
+    asyncio.run(exercise())
+
+
+def test_seed_metric_export_prefers_objective_and_marks_epochs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    written = threading.Event()
+
+    def write(curves, names, output, **options):
+        captured.update(curves=curves, names=names, options=options)
+        path = Path(output)
+        path.write_text("dashboard", encoding="utf-8")
+        written.set()
+        return path
+
+    monkeypatch.setattr("lambdaforge.tui.screens.Workspace.write_metric_html", write)
+    monkeypatch.setattr(
+        SeedWorkspace,
+        "_report_path",
+        staticmethod(lambda _name, _suffix: tmp_path / "metrics.html"),
+    )
+    monkeypatch.setattr(
+        "lambdaforge.tui.screens.Workspace.webbrowser.open_new_tab", lambda _uri: False
+    )
+
+    async def exercise() -> None:
+        services = FakeServices()
+        app = LambdaForgeApp(services)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(
+                SeedWorkspace(
+                    {"name": "study", "primary_job_id": "job-1"},
+                    {"trial": 17},
+                    {"key": "run-1", "seed": 54, "state": "completed"},
+                    services,
+                    objective={"metric": "val_auprc", "mode": "max"},
+                )
+            )
+            await pilot.pause(0.2)
+            await pilot.click("#curve-export")
+            await pilot.pause(0.2)
+            assert written.is_set()
+            options = captured["options"]
+            assert isinstance(options, dict)
+            assert options["preferred_names"] == ["val_auprc"]
+            assert options["best_step"] == 63
+            assert options["selected_step"] == 100
+
+    asyncio.run(exercise())
 
 
 def test_hpo_summary_exposes_terminal_controller_reason() -> None:
@@ -2120,6 +2213,64 @@ def test_result_delete_requires_exact_preview_and_cancel_does_not_apply() -> Non
             await pilot.click("#exact-apply")
             await pilot.pause(0.1)
             assert ("delete_result", ("execution-7", True)) in services.calls
+
+    asyncio.run(exercise())
+
+
+def test_result_export_uses_directory_browser_and_shared_service(tmp_path: Path) -> None:
+    services = FakeServices()
+    result = {"name": "study", "execution_id": "execution-7", "status": "succeeded"}
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(services)
+        async with app.run_test(size=(110, 36)) as pilot:
+            app.push_screen(ResultWorkspace(result, services))
+            await pilot.pause(0.05)
+            await pilot.click("#result-export")
+            assert isinstance(app.screen, ExportDirectoryPicker)
+            location = app.screen.query_one("#export-directory-location")
+            location.value = str(tmp_path)
+            await pilot.click("#export-directory-confirm")
+            await pilot.pause(0.15)
+            assert ("export_result", ("execution-7", tmp_path.resolve())) in services.calls
+
+    asyncio.run(exercise())
+
+
+def test_succeeded_study_exports_from_its_workspace(tmp_path: Path) -> None:
+    services = FakeServices()
+    work = {
+        "work_id": "work-study-export",
+        "name": "wisdom-v2",
+        "primary_job_id": "job-study-export",
+        "cluster": "gpu12",
+        "state": "succeeded",
+        "study_expected": True,
+        "study": {
+            "study_telemetry_version": 1,
+            "name": "wisdom-v2",
+            "execution_id": "execution-study-export",
+            "strategy": "adaptive",
+            "objective": {"metric": "score", "mode": "max"},
+            "counts": {"completed": 1},
+            "candidates": [],
+            "finished": True,
+        },
+    }
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(services)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(StudyWorkspace(work, services))
+            await pilot.pause(0.1)
+            export = app.screen.query_one("#study-export")
+            assert export.disabled is False
+            await pilot.click("#study-export")
+            assert isinstance(app.screen, ExportDirectoryPicker)
+            app.screen.query_one("#export-directory-location").value = str(tmp_path)
+            await pilot.click("#export-directory-confirm")
+            await pilot.pause(0.15)
+            assert ("export_work", ("work-study-export", tmp_path.resolve())) in services.calls
 
     asyncio.run(exercise())
 

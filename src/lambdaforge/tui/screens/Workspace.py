@@ -24,6 +24,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     DataTable,
+    DirectoryTree,
     Footer,
     Header,
     Input,
@@ -211,6 +212,77 @@ class ResearchWorkspace(Screen[None]):
         return directory / f"{safe}-{suffix}.html"
 
 
+class ExportDirectoryPicker(ModalScreen[Path | None]):
+    """Select a local parent directory for a portable experiment package."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, root: Path | None = None) -> None:
+        super().__init__()
+        self.selected = (root or Path.cwd()).expanduser().resolve()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-card wide-modal"):
+            yield Label("Export experiment", classes="modal-title")
+            yield Static(
+                "Choose the local parent directory. LambdaForge creates a new, named folder "
+                "there and never overwrites an earlier export."
+            )
+            with Horizontal():
+                yield Input(value=str(self.selected), id="export-directory-location")
+                yield Button("Open", id="export-directory-open")
+            yield Static("", id="export-directory-error", classes="status-line")
+            yield DirectoryTree(self.selected, id="export-directory-tree")
+            with Horizontal(classes="modal-actions"):
+                yield Button("Cancel", id="export-directory-cancel")
+                yield Button("Export here", id="export-directory-confirm", variant="success")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_directory_tree_directory_selected(self, event: DirectoryTree.DirectorySelected) -> None:
+        event.stop()
+        selected = event.path.expanduser().resolve()
+        self.selected = selected
+        self.query_one("#export-directory-location", Input).value = str(selected)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "export-directory-location":
+            self._open_location()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "export-directory-cancel":
+            self.dismiss(None)
+        elif event.button.id == "export-directory-open":
+            self._open_location()
+        elif event.button.id == "export-directory-confirm":
+            self._select_current()
+
+    def _open_location(self) -> None:
+        raw = self.query_one("#export-directory-location", Input).value.strip()
+        authored = Path(raw).expanduser()
+        path = authored.resolve()
+        if not path.is_dir() or authored.is_symlink():
+            self.query_one("#export-directory-error", Static).update(
+                "Choose an existing, non-symlinked local directory."
+            )
+            return
+        self.selected = path
+        self.query_one("#export-directory-error", Static).update("")
+        self.query_one("#export-directory-tree", DirectoryTree).path = path
+
+    def _select_current(self) -> None:
+        raw = self.query_one("#export-directory-location", Input).value.strip()
+        authored = Path(raw).expanduser()
+        path = authored.resolve()
+        if not path.is_dir() or authored.is_symlink():
+            self.query_one("#export-directory-error", Static).update(
+                "Choose an existing, non-symlinked local directory."
+            )
+            return
+        self.dismiss(path)
+
+
 class ExplanationDialog(ModalScreen[None]):
     """Readable contextual help for one evidence view."""
 
@@ -259,6 +331,7 @@ class StudyWorkspace(ResearchWorkspace):
         self._logs_loaded_at = 0.0
         self._cancel_running = False
         self._delete_running = False
+        self._export_running = False
         self._last_refresh_error: str | None = None
         super().__init__(f"Studies / {work.get('name', 'Study')}")
 
@@ -270,6 +343,7 @@ class StudyWorkspace(ResearchWorkspace):
         yield Static(id="study-header", classes="workspace-header")
         with Horizontal(id="study-control-bar"):
             yield Button("Cancel Study", id="study-cancel", variant="warning")
+            yield Button("Export Study…", id="study-export", variant="success")
             yield Button("Delete Study History…", id="study-delete", variant="error")
             yield Static("", id="study-action-status", classes="freshness-line")
         with Vertical(id="study-loading", classes="workspace-loading"):
@@ -422,6 +496,9 @@ class StudyWorkspace(ResearchWorkspace):
             "timeout",
         }
         self.query_one("#study-cancel", Button).disabled = terminal or not bool(self._selector)
+        self.query_one("#study-export", Button).disabled = str(
+            self.work.get("state", "unknown")
+        ) != "succeeded" or not bool(self._selector)
         self.query_one("#study-delete", Button).disabled = not bool(self._selector)
         self.query_one("#study-loading").display = not bool(self.study)
         self.query_one("#study-tabs").display = bool(self.study)
@@ -996,7 +1073,10 @@ class StudyWorkspace(ResearchWorkspace):
                 ]
                 lines.extend(
                     (
-                        f"GPU {device.get('gpu', '?')} · {device.get('hardware', 'unknown')}",
+                        f"GPU {device.get('gpu', '?')} · token {device.get('token', '?')} · "
+                        f"{device.get('hardware', 'unknown')}",
+                        f"  grant / role      {device.get('grant_state', 'unknown')} / "
+                        f"{device.get('role', 'unknown')}",
                         "  physical free     "
                         f"{self._resource_bytes(device.get('physical_free_bytes'))}",
                         f"  external/base     {self._resource_bytes(device.get('external_bytes'))}",
@@ -1011,6 +1091,9 @@ class StudyWorkspace(ResearchWorkspace):
                         "",
                     )
                 )
+                if not active_runs and device.get("idle_reason"):
+                    lines.append(f"  idle reason       {device.get('idle_reason')}")
+                    lines.append("")
                 for active in active_runs[:8]:
                     identity = (
                         f"Trial {active.get('trial')} · seed {active.get('seed')}"
@@ -1211,9 +1294,7 @@ class StudyWorkspace(ResearchWorkspace):
 
         Thread(target=load, daemon=True, name="lambdaforge-tui-study-actions").start()
 
-    def _apply_action_history(
-        self, actions: Sequence[Mapping[str, Any]] | None
-    ) -> None:
+    def _apply_action_history(self, actions: Sequence[Mapping[str, Any]] | None) -> None:
         self._actions_loading = False
         if actions is not None:
             self._persisted_hpo_actions = [dict(action) for action in actions]
@@ -1689,6 +1770,8 @@ class StudyWorkspace(ResearchWorkspace):
             self.app.push_screen(ExactConfirmation("Cancel Study", preview), self._apply_cancel)
         elif event.button.id == "study-delete":
             self._preview_delete()
+        elif event.button.id == "study-export":
+            self.app.push_screen(ExportDirectoryPicker(Path.cwd()), self._export_study)
         elif event.button.id in {
             "study-overview-export",
             "study-hpo-export",
@@ -1751,6 +1834,40 @@ class StudyWorkspace(ResearchWorkspace):
                 self.app.call_from_thread(self._cancel_complete, result)
 
         Thread(target=cancel, daemon=True, name="lambdaforge-tui-study-cancel").start()
+
+    def _export_study(self, destination: Path | None) -> None:
+        if destination is None or self._export_running:
+            return
+        self._export_running = True
+        self.query_one("#study-export", Button).disabled = True
+        self.query_one("#study-action-status", Static).update(
+            "Exporting complete evidence; large checkpoints may take time…"
+        )
+
+        def export() -> None:
+            try:
+                result = self.services.export_work(self._selector, destination)
+            except Exception as error:
+                self.app.call_from_thread(self._export_study_failed, error)
+            else:
+                self.app.call_from_thread(self._export_study_complete, result)
+
+        Thread(target=export, daemon=True, name="lambdaforge-tui-study-export").start()
+
+    def _export_study_failed(self, error: Exception) -> None:
+        self._export_running = False
+        self.query_one("#study-export", Button).disabled = False
+        self.query_one("#study-action-status", Static).update(
+            f"Export failed · {type(error).__name__}: {error}"
+        )
+        self.notify(str(error), title="Study export failed", severity="error")
+
+    def _export_study_complete(self, result: Mapping[str, Any]) -> None:
+        self._export_running = False
+        self.query_one("#study-export", Button).disabled = False
+        path = str(result.get("path", "export directory"))
+        self.query_one("#study-action-status", Static).update(f"Export complete · {path}")
+        self.notify(path, title="Study export complete")
 
     def _cancel_failed(self, error: Exception) -> None:
         self._cancel_running = False
@@ -2398,6 +2515,7 @@ class SeedWorkspace(ResearchWorkspace):
         )
         self._loading = False
         self.chart_page = 0
+        self._chart_page_count = 0
         trial, seed = candidate.get("trial", "?"), run.get("seed", "none")
         super().__init__(f"Studies / {work.get('name', 'Study')} / Trial {trial} / Seed {seed}")
 
@@ -2644,10 +2762,13 @@ class SeedWorkspace(ResearchWorkspace):
         self.chart_page = min(self.chart_page, page_count - 1)
         shown = names[self.chart_page * page_size : (self.chart_page + 1) * page_size]
         page_select = self.query_one("#curve-page-select", Select)
-        page_select.set_options(
-            tuple((f"Page {index + 1} of {page_count}", index) for index in range(page_count))
-        )
-        page_select.value = self.chart_page
+        if page_count != self._chart_page_count:
+            page_select.set_options(
+                tuple((f"Page {index + 1} of {page_count}", index) for index in range(page_count))
+            )
+            self._chart_page_count = page_count
+        if page_select.value != self.chart_page:
+            page_select.value = self.chart_page
         self.query_one("#curve-previous", Button).disabled = page_count <= 1
         self.query_one("#curve-next", Button).disabled = page_count <= 1
         best_step = detail.get("best_step") if isinstance(detail.get("best_step"), int) else None
@@ -2696,7 +2817,8 @@ class SeedWorkspace(ResearchWorkspace):
                 "Each curve is a scalar emitted by the Work. Green marks the epoch selected by "
                 "the objective; red marks the epoch selected in the table. Changing page resets "
                 "both axes to the new data automatically. Click a point for its exact epoch and "
-                "value, or open the HTML view for hover labels and zoom.",
+                "value, or open the HTML dashboard to filter metrics and compare raw curves, "
+                "normalized trends, latest values, correlations and exact statistics.",
             )
         elif event.button.id == "curve-export":
             self._export_curves()
@@ -2714,14 +2836,39 @@ class SeedWorkspace(ResearchWorkspace):
         aliases = chart_filter.get("display_names", {})
         aliases = aliases if isinstance(aliases, Mapping) else {}
         names = visible_metrics(curves, chart_filter)
+        objective_metrics = self.objective.get("metrics")
+        preferred_names = (
+            [str(name) for name in objective_metrics]
+            if isinstance(objective_metrics, Mapping)
+            else []
+        )
+        objective_metric = self.objective.get("metric")
+        if (
+            isinstance(objective_metric, str)
+            and objective_metric != "__lambdaforge_utility__"
+            and objective_metric not in preferred_names
+        ):
+            preferred_names.insert(0, objective_metric)
         trial = self.candidate.get("trial", "trial")
         seed = self.run.get("seed", "seed")
         path = self._report_path(
             str(self.work.get("name", "study")), f"trial-{trial}-seed-{seed}-curves"
         )
         self._write_and_open_report(
-            "Interactive learning curves",
-            lambda: write_metric_html(curves, names, path, display_names=aliases),
+            "Interactive metric dashboard",
+            lambda: write_metric_html(
+                curves,
+                names,
+                path,
+                display_names=aliases,
+                preferred_names=preferred_names,
+                best_step=(
+                    self.detail.get("best_step")
+                    if isinstance(self.detail.get("best_step"), int)
+                    else None
+                ),
+                selected_step=self.selected_epoch,
+            ),
         )
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -4162,6 +4309,7 @@ class ResultWorkspace(ResearchWorkspace):
         with Horizontal(classes="workspace-actions"):
             yield Button("Analyze / refresh", id="result-analyze", variant="primary")
             yield Button("Export HTML report", id="result-report")
+            yield Button("Export experiment…", id="result-export", variant="success")
             yield Button("Delete", id="result-delete", variant="error")
         with TabbedContent(initial="result-summary"):
             with TabPane("Summary", id="result-summary"):
@@ -4239,12 +4387,22 @@ class ResultWorkspace(ResearchWorkspace):
             self._result_operation(
                 "Report", lambda: {"path": str(self.services.report(self.selector, destination))}
             )
+        elif event.button.id == "result-export":
+            self.app.push_screen(ExportDirectoryPicker(Path.cwd()), self._export_result)
         elif event.button.id == "result-delete":
             self._result_operation(
                 "Delete preview",
                 lambda: self.services.delete_result(self.selector, apply=False),
                 self._confirm_result_delete,
             )
+
+    def _export_result(self, destination: Path | None) -> None:
+        if destination is None:
+            return
+        self._result_operation(
+            "Export experiment",
+            lambda: self.services.export_result(self.selector, destination),
+        )
 
     def _confirm_result_delete(self, preview: Mapping[str, Any]) -> None:
         self.app.push_screen(

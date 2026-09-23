@@ -60,6 +60,21 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-duplicate", action="store_true")
     run.add_argument("--json", action="store_true")
 
+    export_study = commands.add_parser(
+        "export", help="Download one succeeded Work/Study as a portable evidence package."
+    )
+    export_study.add_argument(
+        "selector", help="Exact Work ID, unambiguous Work name, revision or underlying Job ID."
+    )
+    export_study.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Local parent directory in which to create NAME--EXECUTION_ID.",
+    )
+    _cluster_selector(export_study)
+    export_study.add_argument("--json", action="store_true")
+
     doctor = commands.add_parser("doctor", help="Diagnose a local or remote runtime.")
     doctor.add_argument("--on", default="local")
     doctor.add_argument("--config", type=Path)

@@ -27,7 +27,7 @@ proyecto:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.14.0
+python -m pip install lambdaforge==0.15.0
 python -m pip install -e .
 python -m pip check
 ```
@@ -287,7 +287,7 @@ produce un error claro. La ruta y la versión consultada se registran una sola v
 ## Clustering
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.14.0"
+python -m pip install "lambdaforge[clustering]==0.15.0"
 ```
 
 ```python
@@ -325,6 +325,14 @@ incertidumbre viven en los namespaces correspondientes. El manual contiene el ma
 añade una clase vaga `GNN`: topología, agregación y equivariancia son decisiones científicas.
 
 ## Composición y experimentos adaptativos
+
+La admisión GPU adaptativa consulta la misma cola científica al terminar una Run y al quedar
+capacidad utilizable: los candidatos/semillas iniciales aplazados no deben dejar una GPU concedida
+ociosa esperando a otra Run. Los límites son máximos, no garantías de aceleración. Cada hijo
+adaptativo limita sus hilos nativos a su parte de CPU, no a la asignación de todo el Job. Los bucles
+Work que llaman a `self.metrics.log(name, value, step=epoch)` publican también progreso acotado para
+el planificador de recursos, sin necesitar Lightning. Compara tiempos de epoch, entrenamiento y
+validación antes de aumentar concurrencia: VRAM libre no implica CPU libre ni mayor rendimiento total.
 
 `steps` expresa una secuencia y `{parallel: [...]}` un grupo paralelo aislado por procesos. `seeds`
 crea Runs independientes; `search` expande variantes y `objective` define una métrica registrada o
@@ -525,12 +533,17 @@ checkpoint cuando la historia lo justifica, sin exigir a un Work genérico un ci
 fijo. `RAMPING` o `PROVISIONALLY_STABLE` explican el estado; el placement consume hazard por fase y
 el residual ponderado.
 
+`BASELINE_ADMISSION` es exactamente la primera Run protegida colocada en una GPU concedida y
+ociosa; no consume un carril exploratorio ni finge haber probado el packing 1→2. Las GPU concedidas
+vacías reciben estas baselines antes de co-localizar trabajo en una GPU ocupada.
 `SAFE_ADMISSION` cabe considerando incertidumbre y cotas OOM. `EXPLORATORY_ADMISSION` es un paso
 1→2→3 consciente de checkpoints cuyo progreso e información esperados superan el coste de rollback
-e interferencia. Con dos o más GPU intercambiables queda un carril de progreso protegido y solo una
+e interferencia. Con dos o más GPU intercambiables queda una GPU a concurrencia baseline protegida y solo una
 hermana prueba el mismo escalón incierto. Un éxito provisional promueve el packing antes del último
 epoch; una OOM posterior lo invalida. Por ello un cold start largo no queda bloqueado con una Run
-por GPU solo porque ningún entreno haya terminado.
+por GPU solo porque ningún entreno haya terminado. Si la frontera científica acotada queda bloqueada,
+cada alternativa nueva evaluada puede provocar otra petición acotada; una frontera idéntica que no
+devuelve identidades nuevas se registra y no se consulta en bucle.
 
 Esperar también tiene coste. Si existe trabajo útil pendiente y VRAM físicamente utilizable ociosa,
 LambdaForge integra fracción ociosa × tasa de valor científico normalizado. Este *wait regret*
@@ -550,9 +563,10 @@ duro por dispositivo y `max_parallel` un máximo global. Un candidato que no cab
 `RESOURCE_BLOCKED`, no fallido ni pruned, y se reconsidera cuando cambia la memoria. Un candidato
 menos prioritario puede hacer backfill seguro si termina antes de la ventana esperada del candidato
 pesado. El best fit y la frontera científica acotada evitan reintentos aleatorios y starvation. Si
-la primera frontera no puede ejecutarse, el controlador pide una única ampliación acotada a la
-misma política científica y lanza su miembro factible más valioso; nunca genera candidatos al azar
-hasta que alguno quepa.
+una ampliación se evalúa pero sigue bloqueada, el controlador puede pedir otra alternativa nueva y
+acotada a la misma política científica sin esperar una Run terminal. Las identidades exactas paran
+las peticiones cuando esa política no devuelve nada nuevo; nunca genera candidatos al azar hasta
+que alguno quepa.
 
 CPU, RAM y almacenamiento conservan una parte estable y prudente por Run, derivada del máximo
 global de concurrencia. No se prometen temporalmente todos los recursos host a las primeras Runs
@@ -715,7 +729,14 @@ etiquetas como `true` y `false`, y pulsar un punto o barra muestra sus coordenad
 de respuesta de terminal omite una pseudobanda visualmente ambigua; la incertidumbre continúa como
 dato numérico en la tabla. **Interactive HTML** exporta un informe Plotly offline con hover exacto,
 banda real de incertidumbre, mapas de calor por pares y superficies 3D cuando ambos parámetros son
-numéricos. El renderer opcional exige `lambdaforge[analysis-report]` y solo escribe tras una acción
+numéricos. El informe de una Run es un dashboard responsive: permite buscar métricas agrupadas,
+plegar categorías, comparar curvas originales/normalizadas, últimos valores, correlaciones por
+épocas comunes o una relación X/Y arbitraria y escoger una paleta divergente accesible. El
+separador de la barra de métricas y el borde inferior de los paneles se arrastran para cambiar su
+tamaño. `Organize` crea categorías locales y reasigna métricas sin renombrarlas; `My charts` guarda
+curvas, tendencias normalizadas, snapshots o relaciones X/Y de la selección actual. El mismo HTML
+recuerda tamaños, categorías, gráficas, selección, vista y colores; regenerarlo crea deliberadamente
+preferencias nuevas. El renderer opcional exige `lambdaforge[analysis-report]` y solo escribe tras una acción
 explícita del usuario.
 
 Métricas dependientes de threshold como F1, balanced accuracy, kappa de Cohen, accuracy, precision
@@ -812,6 +833,7 @@ lf jobs clear               # vista previa del historial terminal
 lf jobs clear --apply
 lf datasets list
 lf results list
+lf export ESTUDIO_EXITOSO --output ./exportaciones
 lf clean                    # vista previa de limpieza segura
 ```
 
@@ -912,11 +934,25 @@ y atómico. También puede calcularse o actualizarse expresamente:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.14.0"
+python -m pip install "lambdaforge[analysis-report]==0.15.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json
+lf export ESTUDIO_O_WORK --output ./exportaciones
 ```
+
+`lf export` resuelve un Work semántico no ambiguo del proyecto actual y descarga su Attempt exitoso
+más reciente, tanto si se ejecutó en local como en un clúster configurado. `--output` indica una
+carpeta padre local; LambdaForge crea `NOMBRE--EXECUTION_ID/` atómicamente y se niega a sobrescribir
+una exportación anterior. El paquete contiene el envelope inmutable de la Execution, YAML enviado,
+logs y métricas de Runs, evidencia completa del Study/controlador, análisis HPO JSON, replay de
+recursos registrado, checkpoints/pesos retenidos y artefactos publicados ya finalizados. Siempre
+incluye `reports/study-analysis.html` autocontenido; `lambdaforge[analysis-report]` activa el
+dashboard Plotly completo y la instalación base genera una alternativa HTML/JSON estructurada,
+registrando el aviso. `manifest.json` enumera SHA-256 y bytes de cada fichero. Datasets compartidos, entornos,
+caché reconstruible y el bundle de fuentes quedan referenciados por provenance, no se duplican. La
+Consola ofrece la misma operación como **Export Study…** con un navegador de directorios local y
+llama al mismo servicio de dominio, no a un subproceso CLI.
 
 El replay de recursos lee la traza versionada del scheduler, nunca texto de terminal. Es factual
 hasta que la política elegida toma una decisión distinta; desde ahí cada métrica se etiqueta como
@@ -949,8 +985,15 @@ equivalencia científico y la eficiencia por Run comparable nunca se mezcla con 
 controlador. Son resúmenes predictivos observacionales, no causales. En vivo son `PROVISIONAL`; con
 evidencia terminal son `FINAL`.
 
-El informe Plotly opcional es autocontenido y funciona offline. Plotly no forma parte de las
-dependencias base: sin el extra siguen funcionando la ejecución, el JSON y la Consola.
+El informe Plotly opcional es autocontenido y funciona offline. Su dashboard de Study separa
+overview, evidencia y comparación de dos Trials, respuestas y estadísticos por valor de parámetro,
+interacciones como mapa de calor/3D, cobertura, eficiencia de recursos y findings. Los selectores
+de métrica, parámetro, pareja, representación y color consumen exclusivamente `analysis.json`: el
+navegador no ajusta otro modelo ni altera conclusiones HPO. Sus paneles redimensionables y
+`My charts` guardan gráficas bar/line/scatter con ejes elegidos entre Trial, parámetros declarados,
+componentes del objetivo o recursos. Las preferencias pertenecen solo a ese HTML generado. Plotly
+no forma parte de las dependencias base: sin el extra siguen funcionando la
+ejecución, el JSON y la Consola.
 
 La admisión de recursos también queda estructurada: capacidad GPU/CPU/RAM, Runs activas/en cola,
 VRAM libre y requerida por GPU y motivo concreto de espera. `runs_per_gpu` es un máximo, no una
@@ -985,9 +1028,13 @@ resumen, gráfica marginal exacta y tabla de niveles/rangos observados frente a 
 soporte en bordes; describe candidatos muestreados, no atribuye cobertura a un pool no observado.
 Pulsar puntos o barras muestra valores exactos. Los controles contextuales `?` explican objetivo,
 confianza, fiabilidad, efectos de región superior, ganancia predictiva, cobertura y parada. Los
-controles **Interactive HTML** abren curvas, informes de Study o respuesta/interacciones de un
-parámetro, además del historial acotado de recursos del clúster, en Plotly autocontenido y de alta
-resolución cuando está instalado el extra opcional.
+controles **Interactive HTML** abren informes Plotly autocontenidos y de alta resolución cuando está
+instalado el extra opcional. La exportación de una seed es un dashboard responsive, no una gráfica
+saturada: selecciona inicialmente como máximo cuatro métricas de objetivo/validación, agrupa y
+filtra la lista completa y actualiza desde un solo selector las curvas originales, comparación
+normalizada de tendencias, barras de últimos valores, correlaciones en epochs comunes y una tabla
+estadística exacta. Las épocas mejor/seleccionada siguen marcadas y **Select all** es deliberado, no
+el valor por defecto. Los informes de Study, parámetros y recursos conservan sus vistas específicas.
 La estabilidad de seeds se resume en tarjetas, los Pareto científico/de recursos en tablas exactas
 separadas y los findings en una tabla de severidad/fiabilidad con recomendación legible.
 Las superficies HPO de respuesta e interacción indican y usan siempre el objetivo de selección

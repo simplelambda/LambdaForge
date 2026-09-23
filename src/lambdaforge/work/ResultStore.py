@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import html
 import json
 import os
+import re
 import shutil
-from collections.abc import Mapping
+import tempfile
+import unicodedata
+from collections.abc import Mapping, MutableSequence
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import fmean, stdev
 from typing import Any
@@ -360,6 +366,222 @@ class ResultStore:
         """Export the same analysis consumed by CLI/TUI to one offline HTML file."""
         return write_html(self.analysis(selector, recompute=recompute), output)
 
+    def export(
+        self,
+        selector: str,
+        destination: str | Path,
+        *,
+        supplementary: Mapping[str, str | Path] | None = None,
+        copy_published: bool = True,
+    ) -> dict[str, Any]:
+        """Create one atomic, portable archive directory for a successful Execution.
+
+        ``destination`` is a parent directory.  LambdaForge creates a uniquely named
+        child and never overwrites an earlier export.  Supplementary roots are used by
+        the control plane for bounded Job/Study evidence downloaded from a provider.
+        """
+        selected = self.select(selector)
+        if selected.get("already_deleted"):
+            raise ValueError(f"Work Execution {selector!r} was already deleted.")
+        if selected.get("status") != "succeeded":
+            raise ValueError(
+                "Only a succeeded Work Execution can be exported as final scientific evidence; "
+                f"{selector!r} is {selected.get('status', 'unknown')!r}."
+            )
+        manifest = Path(str(selected["_manifest_path"])).resolve()
+        execution_dir = self._execution_dir(manifest)
+        execution_id = str(selected.get("execution_id") or execution_dir.name)
+        name = str(selected.get("name") or "study")
+        authored_parent = Path(destination).expanduser()
+        if authored_parent.is_symlink():
+            raise ValueError(f"Export destination cannot be a symlink: {authored_parent}")
+        parent = authored_parent.resolve()
+        parent.mkdir(parents=True, exist_ok=True)
+        if parent.is_symlink() or not parent.is_dir():
+            raise ValueError(f"Export destination is not a safe directory: {parent}")
+        folder = parent / f"{_portable_name(name)}--{_portable_name(execution_id)}"
+        if folder.exists() or folder.is_symlink():
+            raise FileExistsError(
+                f"Export destination already exists: {folder}. Choose another directory or "
+                "move the previous export first."
+            )
+
+        warnings: list[str] = []
+        # Persist analysis before copying so the raw evidence and rendered report share
+        # exactly one analysis fingerprint. Ordinary one-Run Work has no HPO objective,
+        # so its complete evidence remains exportable without inventing an analysis.
+        try:
+            analysis = self.analysis(execution_id)
+        except ValueError as error:
+            analysis = None
+            warnings.append(f"Study Analysis was not applicable: {error}")
+        stage = Path(tempfile.mkdtemp(prefix=f".{folder.name}-", dir=parent))
+        try:
+            _copy_evidence_tree(execution_dir, stage / "execution")
+            source = None
+            try:
+                source = self.source(execution_id)
+            except (OSError, RuntimeError, ValueError) as error:
+                warnings.append(
+                    f"Authored YAML snapshot unavailable: {type(error).__name__}: {error}"
+                )
+            if source is not None:
+                _copy_evidence_tree(source, stage / "configuration" / source.name)
+
+            for label, raw_source in sorted((supplementary or {}).items()):
+                safe_label = _portable_name(str(label))
+                evidence_source = Path(raw_source).expanduser().resolve()
+                if not evidence_source.exists():
+                    warnings.append(f"Supplementary evidence {label!r} was unavailable.")
+                    continue
+                _copy_evidence_tree(evidence_source, stage / safe_label)
+
+            published = (
+                self._copy_published_artifacts(selected, execution_dir, stage, warnings)
+                if copy_published
+                else sum(1 for path in (stage / "published-artifacts").rglob("*") if path.is_file())
+                if (stage / "published-artifacts").is_dir()
+                else 0
+            )
+            reports = stage / "reports"
+            reports.mkdir(parents=True, exist_ok=True)
+            if analysis is not None:
+                atomic_json(reports / "study-analysis.json", analysis)
+                try:
+                    write_html(analysis, reports / "study-analysis.html")
+                except RuntimeError as error:
+                    _write_basic_analysis_html(analysis, reports / "study-analysis.html")
+                    warnings.append(
+                        "Plotly Study Analysis was unavailable; a structured self-contained HTML "
+                        f"fallback was generated instead: {error}"
+                    )
+            try:
+                atomic_json(
+                    reports / "resource-replay.json",
+                    self.resource_replay(execution_id, policy="recorded"),
+                )
+            except (OSError, RuntimeError, ValueError, KeyError) as error:
+                warnings.append(
+                    f"Recorded resource replay was unavailable: {type(error).__name__}: {error}"
+                )
+
+            report_hint = (
+                "Open reports/study-analysis.html for the interactive scientific report.\n"
+                if (reports / "study-analysis.html").is_file()
+                else "Study analysis remains available as reports/study-analysis.json.\n"
+            )
+            (stage / "README.txt").write_text(
+                "LambdaForge portable experiment export\n"
+                "======================================\n\n"
+                + report_hint
+                + "execution/ contains the immutable result envelope, Run logs, scalar evidence, "
+                "controller decisions, checkpoints and retained artifacts.\n"
+                "study/ and control-plane/ contain provider telemetry when this export came "
+                "from a managed Job. published-artifacts/ contains explicit finalized outputs "
+                "that lived outside the Execution root.\n\n"
+                "Shared datasets, environments, caches and the staged project bundle are "
+                "referenced by provenance but intentionally not duplicated.\n",
+                encoding="utf-8",
+            )
+            inventory = _inventory(stage)
+            export_manifest = {
+                "lambdaforge_export_version": 1,
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "name": name,
+                "execution_id": execution_id,
+                "scientific_fingerprint": selected.get("scientific_fingerprint"),
+                "status": selected.get("status"),
+                "source_result": {
+                    "name": selected.get("name"),
+                    "execution_id": selected.get("execution_id"),
+                    "scientific_fingerprint": selected.get("scientific_fingerprint"),
+                    "status": selected.get("status"),
+                    "run_count": len(selected.get("runs", ())),
+                },
+                "inventory": inventory,
+                "inventory_scope": "all regular package files except manifest.json itself",
+                "file_count": len(inventory),
+                "size_bytes": sum(int(item["size_bytes"]) for item in inventory),
+                "published_artifact_files": published,
+                "warnings": warnings,
+                "excluded_shared_state": [
+                    "managed datasets",
+                    "managed environments",
+                    "reconstructible caches",
+                    "staged project bundle",
+                ],
+            }
+            atomic_json(stage / "manifest.json", export_manifest)
+            stage.replace(folder)
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+        return {
+            "status": "exported",
+            "name": name,
+            "execution_id": execution_id,
+            "path": str(folder),
+            "manifest": str(folder / "manifest.json"),
+            "analysis_report": (
+                str(folder / "reports" / "study-analysis.html")
+                if (folder / "reports" / "study-analysis.html").is_file()
+                else None
+            ),
+            "file_count": len(inventory),
+            "size_bytes": sum(int(item["size_bytes"]) for item in inventory),
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _copy_published_artifacts(
+        selected: Mapping[str, Any],
+        execution_dir: Path,
+        stage: Path,
+        warnings: MutableSequence[str],
+    ) -> int:
+        """Copy explicit finalized outputs outside the owned Execution once."""
+        copied = 0
+        seen: set[Path] = set()
+        for run_index, run in enumerate(selected.get("runs", ())):
+            if not isinstance(run, Mapping):
+                continue
+            artifacts = run.get("artifacts", ())
+            if not isinstance(artifacts, list | tuple):
+                continue
+            for artifact_index, artifact in enumerate(artifacts):
+                if not isinstance(artifact, Mapping):
+                    continue
+                metadata = artifact.get("metadata")
+                metadata = metadata if isinstance(metadata, Mapping) else {}
+                raw = artifact.get("published_path") or metadata.get("published_to")
+                if not isinstance(raw, str) or not raw:
+                    continue
+                authored_path = Path(raw).expanduser()
+                if authored_path.is_symlink():
+                    warnings.append(f"Published artifact is a symlink and was not copied: {raw}")
+                    continue
+                path = authored_path.resolve()
+                if path in seen or path.is_relative_to(execution_dir):
+                    continue
+                seen.add(path)
+                if not path.exists():
+                    warnings.append(f"Published artifact is no longer available: {path}")
+                    continue
+                name = _portable_name(str(artifact.get("name") or path.name or "artifact"))
+                target = (
+                    stage
+                    / "published-artifacts"
+                    / f"run-{run_index:05d}"
+                    / (f"{artifact_index:04d}-{name}")
+                )
+                _copy_evidence_tree(path, target)
+                copied += (
+                    1
+                    if target.is_file()
+                    else sum(1 for item in target.rglob("*") if item.is_file())
+                )
+        return copied
+
     @property
     def _receipt_root(self) -> Path:
         return self.root.parent / "deletions"
@@ -410,6 +632,106 @@ def _read_mapping(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError(f"Expected a JSON object: {path}")
     return value
+
+
+def _portable_name(value: str) -> str:
+    """Return a readable filesystem component without trusting scientific names."""
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    selected = re.sub(r"[^A-Za-z0-9._-]+", "-", normalized).strip(".-")
+    return (selected or "experiment")[:120]
+
+
+def _copy_evidence_tree(source: Path, destination: Path) -> None:
+    """Copy regular evidence without following links or accepting special files."""
+    authored = source.expanduser()
+    if authored.is_symlink():
+        raise ValueError(f"Refusing symlinked export evidence: {authored}")
+    if authored.absolute() != authored.resolve():
+        raise ValueError(f"Refusing evidence below a symlinked path: {authored}")
+    source = authored.resolve()
+    if source.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        return
+    if not source.is_dir():
+        raise ValueError(f"Export evidence is not a regular file or directory: {source}")
+    destination.mkdir(parents=True, exist_ok=False)
+    for root, directories, files in os.walk(source, followlinks=False):
+        root_path = Path(root)
+        relative = root_path.relative_to(source)
+        safe_directories: list[str] = []
+        for name in sorted(directories):
+            candidate = root_path / name
+            if candidate.is_symlink():
+                raise ValueError(f"Refusing symlinked export evidence: {candidate}")
+            if not candidate.is_dir():
+                raise ValueError(f"Refusing special export evidence: {candidate}")
+            (destination / relative / name).mkdir(parents=True, exist_ok=True)
+            safe_directories.append(name)
+        directories[:] = safe_directories
+        for name in sorted(files):
+            candidate = root_path / name
+            if candidate.is_symlink() or not candidate.is_file():
+                raise ValueError(f"Refusing non-regular export evidence: {candidate}")
+            target = destination / relative / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, target)
+
+
+def _inventory(root: Path) -> list[dict[str, Any]]:
+    """Hash every exported regular file using portable relative paths."""
+    output: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        if path.is_symlink():
+            raise ValueError(f"Portable export contains an unsafe symlink: {path}")
+        if not path.is_file():
+            continue
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        output.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "size_bytes": size,
+                "sha256": digest.hexdigest(),
+            }
+        )
+    return output
+
+
+def _write_basic_analysis_html(analysis: Mapping[str, Any], output: Path) -> None:
+    """Keep exports browsable when the optional Plotly renderer is not installed."""
+    source = analysis.get("source")
+    source = source if isinstance(source, Mapping) else {}
+    summary = analysis.get("summary")
+    summary = summary if isinstance(summary, Mapping) else {}
+    document = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>LambdaForge Study Analysis</title><style>
+body{{font:15px/1.5 system-ui,sans-serif;max-width:1100px;margin:auto;padding:2rem;
+background:#111827;color:#e5e7eb}}
+h1,h2{{color:#7dd3fc}}.cards{{display:flex;gap:1rem;flex-wrap:wrap}}
+.card{{background:#1f2937;padding:1rem;border-radius:.6rem;min-width:12rem}}
+pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1220;padding:1rem;
+border-radius:.6rem;border:1px solid #334155}}
+</style></head><body><h1>LambdaForge Study Analysis</h1>
+<p>This portable fallback exposes the exact persisted analysis. Install
+<code>lambdaforge[analysis-report]</code> before exporting for the full interactive Plotly
+dashboard.</p>
+<div class="cards"><div class="card"><strong>Status</strong><br>{status}</div>
+<div class="card"><strong>Complete candidates</strong><br>{candidates}</div>
+<div class="card"><strong>Evidence fingerprint</strong><br>{fingerprint}</div></div>
+<h2>Persisted analysis JSON</h2><pre>{payload}</pre></body></html>
+""".format(
+        status=html.escape(str(source.get("status", "unknown"))),
+        candidates=html.escape(str(summary.get("complete_candidate_count", "unavailable"))),
+        fingerprint=html.escape(str(source.get("evidence_fingerprint", "unavailable"))),
+        payload=html.escape(json.dumps(analysis, indent=2, ensure_ascii=False)),
+    )
+    output.write_text(document, encoding="utf-8")
 
 
 def _analysis_definition(configuration: Mapping[str, Any]) -> dict[str, Any]:

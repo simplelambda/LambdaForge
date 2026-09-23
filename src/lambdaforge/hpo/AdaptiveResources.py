@@ -23,7 +23,11 @@ from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.work.atomic import atomic_write_json
 
 ResourceRunState = Literal["completed", "oom", "pruned", "failed", "cancelled"]
-AdmissionMode = Literal["SAFE_ADMISSION", "EXPLORATORY_ADMISSION"]
+AdmissionMode = Literal[
+    "BASELINE_ADMISSION",
+    "SAFE_ADMISSION",
+    "EXPLORATORY_ADMISSION",
+]
 ResourceEvidenceQuality = Literal[
     "terminal-high-quality",
     "sampled-physical",
@@ -44,7 +48,7 @@ PlacementState = Literal[
 # These bounds cap implementation cost and persisted diagnostic size; they are not scientific
 # policy knobs.  Placement results are invariant once all relevant frontier actions fit here.
 _HISTORY_LIMIT = 2048
-_FRONTIER_LIMIT = 16
+RESOURCE_FRONTIER_LIMIT = 16
 _TRAJECTORY_LIMIT = 192
 _BOOTSTRAP_POINTS = 31
 _OOM_ALLOCATION = re.compile(
@@ -1595,7 +1599,7 @@ class GPUPlacementPlanner:
         now: float | None = None,
     ) -> tuple[tuple[AdmissionDecision, ...], tuple[AdmissionDecision, ...]]:
         ranked = sorted(
-            actions[:_FRONTIER_LIMIT],
+            actions[:RESOURCE_FRONTIER_LIMIT],
             key=lambda value: (
                 value.value_contract.rank if value.value_contract is not None else math.inf,
                 -value.scientific_value,
@@ -1626,7 +1630,7 @@ class GPUPlacementPlanner:
         for action in ranked:
             if len(admitted) >= max_launches:
                 break
-            choices: list[tuple[int, float, float, int]] = []
+            choices: list[tuple[int, int, float, float, int]] = []
             device_notes: list[dict[str, Any]] = []
             for position, device in enumerate(mutable):
                 prediction = action.prediction_for(device)
@@ -1671,9 +1675,14 @@ class GPUPlacementPlanner:
                     }
                 )
                 if state == "ADMITTED":
-                    # Least non-negative slack is best fit. Risk and duration distinguish almost
-                    # equivalent packings without changing scientific ranking.
-                    choices.append((slack, -probability, duration, position))
+                    # A granted idle GPU is a missing baseline lane, not spare space that may be
+                    # ignored by best-fit packing.  Fill idle devices before co-locating; within
+                    # the same occupancy class, least non-negative slack remains best fit.  This
+                    # also makes the protected-lane invariant mean "baseline concurrency" rather
+                    # than "leave one accelerator empty".
+                    choices.append(
+                        (int(bool(device.active)), slack, -probability, duration, position)
+                    )
             if not choices:
                 infeasible = bool(device_notes) and all(
                     note["state"] == "RESOURCE_INFEASIBLE_ON_DEVICE_TYPE" for note in device_notes
@@ -1707,16 +1716,12 @@ class GPUPlacementPlanner:
                     )
                 )
                 continue
-            _slack, negative_probability, _duration, selected = min(choices)
+            _occupied, _slack, negative_probability, _duration, selected = min(choices)
             device = mutable[selected]
             selected_prediction = action.prediction_for(device)
-            cold_start_lane = (
-                not device.active
-                and selected_prediction.support == "cold-start"
-                and selected_prediction.commitment_bytes > device.admission_headroom_bytes
-            )
+            baseline_lane = not device.active
             admission_mode: AdmissionMode = (
-                "EXPLORATORY_ADMISSION" if cold_start_lane else "SAFE_ADMISSION"
+                "BASELINE_ADMISSION" if baseline_lane else "SAFE_ADMISSION"
             )
             commitment = ActiveResourceCommitment(
                 action.key,
@@ -1744,8 +1749,8 @@ class GPUPlacementPlanner:
                 (item for item in blocked if item.scientific_value > action.scientific_value), None
             )
             admission_reason = (
-                "cold-start protected progress lane on an otherwise idle GPU"
-                if cold_start_lane
+                "protected baseline progress on an otherwise idle GPU"
+                if baseline_lane
                 else "highest-value feasible action"
                 if higher is None
                 else "safe backfill while a higher-value action is resource-blocked"
@@ -1774,7 +1779,7 @@ class GPUPlacementPlanner:
             self.wait_regret.reset(
                 device.index,
                 reason=(
-                    "cold-start-progress-admitted" if cold_start_lane else "safe-work-admitted"
+                    "baseline-progress-admitted" if baseline_lane else "safe-work-admitted"
                 ),
             )
         # Conservative upper envelopes are deliberately broad at cold start.  Once live evidence
@@ -2232,8 +2237,9 @@ class GPUPlacementPlanner:
         # resource profile exists yet. Driver/context overhead means live free VRAM is normally a
         # little below total VRAM, so requiring that deliberately broad envelope to fit would
         # leave every otherwise idle GPU blocked forever. The first Run on each idle GPU is a
-        # protected exploratory baseline; the hard lower bound and any known failed placement
-        # above still fail closed, and co-location remains governed by live evidence.
+        # protected baseline (not a packing experiment); the hard lower bound and any known
+        # failed placement above still fail closed, and co-location remains governed by live
+        # evidence.
         if not device.active and prediction.support == "cold-start":
             return "ADMITTED", "cold-start-protected-progress-lane"
         if prediction.commitment_bytes > device.admission_headroom_bytes:
@@ -2439,7 +2445,7 @@ class ResourceHistoryStore:
         """Persist changed WHY-WAIT/WHY-EXPLORE evidence without poll-cycle spam."""
         if self.study_root is None or not evaluations:
             return
-        bounded = tuple(evaluations[:_FRONTIER_LIMIT])
+        bounded = tuple(evaluations[:RESOURCE_FRONTIER_LIMIT])
         signature = _digest(
             {
                 "evaluations": [
@@ -2560,7 +2566,7 @@ class ResourceHistoryStore:
                         for device in devices
                     },
                 }
-                for value in actions[:_FRONTIER_LIMIT]
+                for value in actions[:RESOURCE_FRONTIER_LIMIT]
             ],
             "decisions": [value.to_dict() for value in decisions],
             "exploration": [value.to_dict() for value in exploration_evaluations],
@@ -3345,6 +3351,7 @@ __all__ = [
     "ResourceTrajectoryAnalysis",
     "ResourceTrajectoryAnalyzer",
     "ResourcePhaseModel",
+    "RESOURCE_FRONTIER_LIMIT",
     "ScientificActionValue",
     "WaitRegretTracker",
     "oom_evidence",

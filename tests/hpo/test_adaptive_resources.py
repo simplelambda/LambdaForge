@@ -27,6 +27,7 @@ from lambdaforge.hpo.AdaptiveResources import (
     resource_state,
 )
 from lambdaforge.work.models import WorkResources, WorkResult
+from lambdaforge.work.runner import _resource_admission_diagnostics
 
 GIB = 1024**3
 
@@ -179,7 +180,148 @@ def test_cold_start_is_one_run_per_gpu_until_evidence_exists() -> None:
     )
     assert len(admitted) == 2
     assert {value.target_gpu for value in admitted} == {0, 1}
-    assert {value.admission_mode for value in admitted} == {"EXPLORATORY_ADMISSION"}
+    assert {value.admission_mode for value in admitted} == {"BASELINE_ADMISSION"}
+
+
+def test_three_gpu_runtime_baselines_allow_a_real_one_to_two_probe() -> None:
+    """Baseline placement must not masquerade as the first packing experiment."""
+    model = ResourceDemandModel()
+    actions = [
+        CandidateResourceAction(
+            f"candidate-{index}",
+            {"trial_index": index, "resource_compatibility_key": "compatible"},
+            1.0 - index / 100,
+            model.predict(
+                candidate_key=f"candidate-{index}",
+                compatibility_key="compatible",
+                parameters={"width": index},
+                hardware="H200-141",
+                total_bytes=141 * GIB,
+            ),
+        )
+        for index in range(1, 7)
+    ]
+    devices = tuple(
+        GPUResourceState(index, str(index), "H200-141", 141 * GIB, 140 * GIB, GIB, (), 50)
+        for index in range(3)
+    )
+    planner = GPUPlacementPlanner(model)
+
+    baselines, _ = planner.place(actions[:3], devices, max_launches=3)
+
+    assert len(baselines) == 3
+    assert {value.target_gpu for value in baselines} == {0, 1, 2}
+    assert {value.admission_mode for value in baselines} == {"BASELINE_ADMISSION"}
+
+    live_devices = tuple(
+        GPUResourceState(
+            device.index,
+            device.token,
+            device.hardware,
+            device.total_bytes,
+            125 * GIB,
+            GIB,
+            (
+                ActiveResourceCommitment(
+                    baselines[device.index].candidate_key,
+                    141 * GIB,
+                    current_bytes=15 * GIB,
+                    running_peak_bytes=15 * GIB,
+                    future_peak_samples=(15 * GIB, 24 * GIB, 141 * GIB),
+                    remaining_seconds=600.0,
+                    resource_state="PLATEAU_UNCONFIRMED",
+                    checkpoint_resumable=True,
+                    admission_mode=baselines[device.index].admission_mode,
+                ),
+            ),
+            50,
+        )
+        for device in devices
+    )
+
+    probe, _ = planner.place(actions[3:], live_devices, max_launches=3, now=10_000.0)
+
+    assert probe
+    assert probe[0].admission_mode == "EXPLORATORY_ADMISSION"
+    assert not {
+        value.rejection_reason
+        for value in planner.last_exploration_evaluations
+    } & {"UNVALIDATED_LADDER_STEP", "PROTECTED_LANE"}
+
+
+def test_empty_gpu_is_filled_before_colocating_on_an_occupied_gpu() -> None:
+    resident = ActiveResourceCommitment(
+        "resident",
+        10 * GIB,
+        current_bytes=10 * GIB,
+        running_peak_bytes=10 * GIB,
+        future_peak_samples=(10 * GIB,),
+        resource_state="RESOURCE_STABLE",
+        admission_mode="BASELINE_ADMISSION",
+    )
+    devices = (
+        gpu(0, free=70, active=(resident,), cap=50),
+        gpu(1, free=70, active=(resident,), cap=50),
+        gpu(2, free=80, active=(), cap=50),
+    )
+
+    admitted, _ = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (action("c1", 10 * GIB, 1.0),), devices, max_launches=1
+    )
+
+    assert admitted
+    assert admitted[0].target_gpu == 2
+    assert admitted[0].admission_mode == "BASELINE_ADMISSION"
+
+
+def test_admission_diagnostics_explain_every_allocated_or_revoked_gpu(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv(
+        "LAMBDAFORGE_GPU_VISIBILITY_COMMAND", '["gpu", "env"]'
+    )
+    baseline = ActiveResourceCommitment(
+        "baseline",
+        20 * GIB,
+        current_bytes=12 * GIB,
+        admission_mode="BASELINE_ADMISSION",
+    )
+    devices = (
+        gpu(0, free=68, active=(baseline,), cap=50),
+        gpu(1, free=80, active=(), cap=50),
+        gpu(2, free=80, active=(), cap=50),
+    )
+
+    payload = _resource_admission_diagnostics(
+        devices,
+        admitted=(),
+        blocked=(),
+        pending=1,
+        max_parallel=150,
+        configured_runs_per_gpu=50,
+        user_minimum_bytes=20 * GIB,
+        granted_slots={0, 1},
+        allocation_probe_available=True,
+        requested_gpu_count=3,
+    )
+
+    assert payload["allocation"] == {
+        "requested_gpus": 3,
+        "initial_cuda_visible_devices": ["0", "1", "2"],
+        "currently_granted_tokens": ["0", "1"],
+        "admission_slots": [0, 1],
+        "visibility_command": ["gpu", "env"],
+        "visibility_probe_available": True,
+        "visibility_semantics": (
+            "The command must report reservation/ownership tokens, not merely GPUs with "
+            "active compute processes. Reported tokens can only narrow or restore the "
+            "initial CUDA_VISIBLE_DEVICES allocation."
+        ),
+    }
+    assert payload["devices"][0]["role"] == "protected-baseline"
+    assert payload["devices"][1]["idle_reason"]
+    assert payload["devices"][2]["grant_state"] == "revoked"
+    assert "removed" in payload["devices"][2]["idle_reason"]
 
 
 def test_rejected_resource_probe_is_strict_json() -> None:
@@ -665,6 +807,7 @@ def test_concurrency_ladder_allows_only_one_uncharacterized_increment() -> None:
         future_peak_samples=(10 * GIB, 12 * GIB, 80 * GIB),
         resource_state="PROVISIONALLY_STABLE",
         checkpoint_resumable=True,
+        admission_mode="BASELINE_ADMISSION",
     )
     probe = ActiveResourceCommitment(
         "b",
@@ -695,11 +838,16 @@ def test_concurrency_ladder_allows_only_one_uncharacterized_increment() -> None:
             (10 * GIB, 20 * GIB, 80 * GIB),
         ),
     )
-    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+    planner = GPUPlacementPlanner(ResourceDemandModel())
+    admitted, blocked = planner.place(
         (candidate,), (gpu(free=60, active=(stable, probe), cap=5),), max_launches=1
     )
     assert not admitted
     assert blocked
+    assert any(
+        value.rejection_reason == "UNVALIDATED_LADDER_STEP"
+        for value in planner.last_exploration_evaluations
+    )
 
 
 def test_live_evidence_transfers_across_seed_without_becoming_exact() -> None:

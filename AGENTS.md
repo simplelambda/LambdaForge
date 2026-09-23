@@ -1,6 +1,6 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.14.0. Spanish is
+This is the low-token source of truth for agents using or modifying LambdaForge 0.15.0. Spanish is
 in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
 then inspect the public signature or implementation being changed. Current tests and code override
 assumptions.
@@ -31,7 +31,7 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Work operations | `lf show/logs/cancel/retry/delete SELECTOR`; study Run: `show/logs WORK --run KEY` |
 | Low-level jobs | `lf jobs list/show/logs/cancel/retry/delete`; `lf jobs clear [--apply]` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
-| Results | `lf results list/show/compare/analyze/report/replay` |
+| Results | `lf results list/show/compare/analyze/report/replay`; portable Study: `lf export SELECTOR --output DIR` |
 | Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Cluster profiles | Research Console; `lf clusters add/set/unset/...` for automation |
 | Preview safe storage cleanup | `lf clean [--on CLUSTER]`; add `--apply` after review |
@@ -255,10 +255,12 @@ artificial cap but still requires a finite host/resource-derived internal dispat
 admission uses the maximum of that floor, a candidate-specific conservative future envelope and
 known OOM lower bounds, bounded again by live physical free VRAM. Physical VRAM is authoritative.
 Never multiply the floor by active Runs or
-maintain a second reservation. Cold start creates one progress lane per GPU, then uses live
-right-censored PID/allocator trajectories, phase/progress and durable checkpoints to evaluate
-incremental `SAFE_ADMISSION` or `EXPLORATORY_ADMISSION` steps before terminal Runs exist. Keep one
-protected compatible-GPU lane, one uncharacterized ladder step per evidence class, and share
+maintain a second reservation. Cold start creates one `BASELINE_ADMISSION` progress lane per idle
+granted GPU before co-location; a baseline never consumes an exploration lane or triggers
+`UNVALIDATED_LADDER_STEP`. Live right-censored PID/allocator trajectories, phase/progress and
+durable checkpoints then evaluate incremental `SAFE_ADMISSION` or `EXPLORATORY_ADMISSION` steps
+before terminal Runs exist. Keep one protected compatible-GPU lane at baseline concurrency, one
+uncharacterized ladder step per evidence class, and share
 provisional knowledge across sibling GPUs. Larger groups may explore distinct resource questions
 concurrently, but never duplicate an equivalent experiment or consume the final protected lane.
 Tiny allocator maxima are drift when robust physical/allocator evidence says so; persistent signed
@@ -273,6 +275,11 @@ duration or use raw controller score as resource currency: consume `ScientificAc
 normalized value, uncertainty and cost. Persist changed evaluations and WHY-WAIT reasons without
 poll spam. Next-event estimates retain cadence uncertainty when repeated intervals exist; otherwise
 it remains unknown. Scientific pruning is independent of resource completeness.
+Capacity-triggered frontier refill and completion-triggered refill share the deferred initial-design/
+seed queue and exact deduplication. Generic stepped Work metrics publish bounded
+`metric-progress.json` for admission; never scan scalar history per resource poll or equate scalar
+progress with a durable checkpoint. Fresh adaptive children cap Torch/BLAS/OpenMP to their CPU share,
+not the inherited whole-Job budget; never change native pools in an embedded controller.
 CPU/RAM/storage shares remain based on the hard global concurrency ceiling so dynamic GPU packing
 cannot over-promise host resources. Exact NVML process attribution is preferred; aggregate
 fallback remains censored. OOM constraints belong to the exact packing unless reliable candidate
@@ -283,9 +290,10 @@ neutral; `RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` requires a hard lower bound above 
 Never retry a compatible OOM candidate at the same or lower effective headroom. The resource
 planner consumes a bounded ranked scientific frontier, may safely backfill, protects heavy work
 from starvation using predicted completion windows, and may stop memory-feasible co-location when
-measured aggregate throughput would not improve. If that frontier is entirely blocked, request at
-most one bounded extension from the same scientific policy before intentionally idling; never loop
-through random resource candidates. Every admitted GPU Run uses a fresh one-worker spawned process that exits on
+measured aggregate throughput would not improve. If that frontier is entirely blocked, request
+bounded unseen extensions from the same scientific policy without waiting for terminal Runs. Exact
+queued/active action identities and explicit no-new-alternative detection must stop loops; never
+iterate random resource candidates. Every admitted GPU Run uses a fresh one-worker spawned process that exits on
 result/error; never restore a persistent CUDA pool because idle contexts retain VRAM and can
 deadlock queued Runs. GPU memory probing must remain a short-lived child process: the controller
 must not retain one CUDA context per device or consume a scientific slot. Repeated objective observations need
@@ -329,6 +337,8 @@ a candidate still competitive at the exact common step solely from its fitted sl
 callback metrics plus epoch/validation time are automatic. Custom trainers log curves with
 `self.metrics.log(name, value, step=epoch)`; use `progress.update` for coarse progress and
 `self.log`/print only for human narration.
+Do not enable curve pruning until two distinct completed candidates yield a finite retrospective
+curve calibration; provisional startup curves must not prune one another without endpoint evidence.
 
 The controller may cooperatively preempt only a scored non-confirmation fidelity Run with a
 verified owned checkpoint, at least 30 seconds of runtime and a competing action exceeding both
@@ -387,6 +397,15 @@ uses the scientific equivalence margin. Keep per-comparable-Run intrinsic resour
 total controller spend and scientific Pareto separate from resource Pareto. All effects remain
 descriptive/predictive, not causal. Live analysis is provisional; terminal analysis is final.
 
+`lf export SELECTOR --output PARENT` and the Research Console **Export Study…** action use one
+domain service to export the newest succeeded Attempt. The destination is an atomic, non-overwriting
+`NAME--EXECUTION_ID` folder with an SHA-256 inventory, exact Execution/Run evidence, full persisted
+Study/controller records, Job lifecycle files, analysis JSON/optional self-contained HTML, recorded
+resource replay, retained checkpoints/weights and explicit finalized published artifacts. Never
+copy shared datasets, environments, cache or the staged project tree into this package; preserve
+their provenance references. Reject symlinks, special files and archive traversal, remove temporary
+provider archives on every exit and never publish a partial local export.
+
 Adaptive `trials` is the candidate budget and must be consumed by default; sparse coverage or low
 analysis confidence is not convergence. Record-streak convergence is opt-in only through a positive
 `convergence_patience` (zero/omitted disables it), and every terminal controller snapshot must
@@ -421,7 +440,17 @@ Metric page changes reset reused plots to automatic limits; user pan/zoom applie
 currently displayed page. Plot categories with their real labels and expose exact point/bar values
 on click. Keep terminal uncertainty numeric rather than drawing misleading pseudo-bands; explicit
 optional Plotly exports may show genuine shaded intervals, hover, pairwise heatmaps and numeric 3D
-surfaces. Coverage uses bounded cards/charts/tables, not raw JSON, and contextual help explains
+surfaces. Seed metric exports are one offline dashboard with a searchable/grouped selector, at most
+four objective/validation defaults, raw and per-metric normalized curves, latest/delta bars,
+same-step correlations, shared-step X/Y relationships and exact descriptive statistics; categories
+collapse and selecting every metric is opt-in. Study HTML navigates persisted candidate comparison,
+parameter responses, interactions, coverage, resources and findings without fitting a browser-side
+surrogate. Heatmaps offer explicit neutral-centre palettes. Visual preferences use a unique
+per-generated-file local-storage key: reopening preserves them and regeneration resets them.
+Resizable panels, custom metric categories and saved chart specifications are presentation-only;
+they must keep stable metric keys and consume embedded persisted observations without recomputing
+scientific evidence.
+Coverage uses bounded cards/charts/tables, not raw JSON, and contextual help explains
 statistical terms. Decisions append to `study/controller-history.jsonl`; keep
 `controller.json.recent` bounded, load the full
 history only on explicit drill-down and retain the available tail for legacy Studies without that

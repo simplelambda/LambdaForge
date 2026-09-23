@@ -157,8 +157,19 @@
         "strategy": {"enum": ["adaptive", "exhaustive"]},
         "trials": {"type": "integer", "minimum": 1},
         "proposal_pool_size": {"type": "integer", "minimum": 1},
-        "runs_per_gpu": {"type": "integer", "minimum": 1},
-        "max_parallel": {"type": "integer", "minimum": 1},
+        "runs_per_gpu": {
+          "oneOf": [
+            {"type": "integer", "minimum": 1},
+            {"const": "auto"}
+          ]
+        },
+        "max_parallel": {
+          "oneOf": [
+            {"type": "integer", "minimum": 1},
+            {"const": "auto"},
+            {"type": "null"}
+          ]
+        },
         "min_seeds": {"type": "integer", "minimum": 1},
         "startup_trials": {"type": "integer", "minimum": 1},
         "failure_retries": {"type": "integer", "minimum": 0, "maximum": 3},

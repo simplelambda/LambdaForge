@@ -1,4 +1,4 @@
-# Manual de LambdaForge 0.14
+# Manual de LambdaForge 0.15
 
 [English](MANUAL.md) · Español
 
@@ -645,6 +645,20 @@ resources:
   time: 24h
 ```
 
+Los procesos hijos adaptativos limitan Torch y los pools BLAS/OpenMP a su parte de CPU, sustituyendo
+solo dentro del hijo los límites heredados del Job completo. Es un límite de hilos, no afinidad CPU
+ni una cuota sobre subprocesos arbitrarios del consumidor. Las métricas con `step` de un Work
+personalizado publican `metric-progress.json`: una proyección pequeña por Attempt, actualizada una
+vez por paso creciente. La admisión la lee sin recorrer el historial y conserva fases más precisas
+de los callbacks. Un epoch reportado no demuestra estabilidad de memoria ni un checkpoint durable;
+las métricas sin paso no inventan progreso.
+
+Los eventos de capacidad física consultan la misma cola inicial/adaptativa que las finalizaciones.
+Las obligaciones iniciales conservan prioridad y las semillas iniciales útiles pueden ocupar huecos
+sin esperar otra finalización. Se mantienen identidades exactas candidato/semilla/fidelidad,
+presupuestos de Runs/tiempo y controles de recursos/rendimiento. Esto no convierte una búsqueda
+adaptativa en un barrido exhaustivo.
+
 La parte de CPU/RAM/almacenamiento se calcula con el máximo global duro de concurrencia, no con el
 número momentáneo de Runs GPU activas. Así no se prometen recursos host sobrantes a una Run inicial
 que después no podría redimensionarse. La reserva exterior nunca se sobreasigna y el contrato de
@@ -690,11 +704,12 @@ y el valor informativo sigue separado de la prioridad. La duración desconocida 
 ritmo vivo y, si no existen, sigue desconocida. Lightning puede atender selectivamente una
 petición de checkpoint en un límite seguro de epoch cuando solo el rollback impide experimentar.
 
-Cold start crea primero
-progreso y después usa trayectorias vivas de fase/step y checkpoints para experimentar 1→2→3 sin
-esperar picos terminales. `SAFE_ADMISSION` usa envolventes respaldadas;
-`EXPLORATORY_ADMISSION` exige que progreso e información esperados superen rollback e interferencia.
-GPU equivalentes mantienen un carril protegido y no duplican el mismo escalón sin validar.
+Cold start crea primero una `BASELINE_ADMISSION` en cada GPU concedida y ociosa, y después usa
+trayectorias vivas de fase/step y checkpoints para experimentar 1→2→3 sin esperar picos terminales.
+Una baseline es progreso protegido, nunca un experimento de packing sin validar ni un consumidor del
+carril exploratorio. `SAFE_ADMISSION` usa envolventes respaldadas; `EXPLORATORY_ADMISSION` exige que
+progreso e información esperados superen rollback e interferencia. GPU equivalentes mantienen un
+carril a concurrencia baseline y no duplican el mismo escalón sin validar.
 `RESOURCE_BLOCKED` es reversible; `RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` exige una cota intrínseca
 dura superior al dispositivo.
 
@@ -702,9 +717,11 @@ El controlador científico entrega una frontera ordenada y acotada. El planner u
 preserva GPU grandes para trabajo pesado y puede ejecutar backfill corto hasta la ventana predicha
 de un candidato prioritario. La interferencia histórica puede frenar packing adicional cuando
 reduce trabajo científico útil por tiempo. La escasez cambia cuándo/dónde se ejecuta, nunca el
-objective científico. Si toda esa frontera acotada está bloqueada, se pide una única ampliación
-acotada a la misma política científica. Esta es la ruta de probe restringido por fit: continúa
-guiada por optimización/información y no puede recorrer configuraciones aleatorias en bucle.
+objective científico. Si toda esa frontera acotada está bloqueada, la misma política científica
+puede entregar más alternativas nuevas acotadas sin esperar una Run terminal. Las identidades
+exactas comparten una frontera de espera dura —como máximo 16 y nunca por encima del paralelismo
+restante tras las Runs activas—. Añadir una alternativa no concede recursivamente permiso para
+proponer otra; una respuesta sin identidades nuevas cierra ese estado del dispatcher.
 
 LambdaForge sondea las GPU concedidas durante toda Run activa, aunque no haya una acción en cola, y
 ocupa solo capacidad segura; el resto espera. Los lanzamientos se escalonan para observar la
@@ -839,7 +856,11 @@ mantiene el entreno normal a presupuesto completo.
 El stop es cooperativo. Un Work registra `self.metrics.log("val_auprc", valor, step=epoch)` y
 consulta `self.stop_requested` en un límite seguro, guardando checkpoint antes de retornar. El
 controlador compara Runs a un step común tras `early_stopping.min_step`. Una proyección lineal local
-acotada conserva incertidumbre residual y solicita parar solo cuando la probabilidad de seguir a
+acotada conserva incertidumbre residual. El pruning no se activa hasta que al menos dos candidatos
+distintos hayan terminado con suficiente curva para contrastar predicciones de prefijos contra sus
+endpoints reales y obtener un error de curva finito. Dos es el mínimo que identifica una
+comparación, no un umbral configurable; antes todas las curvas iniciales pueden crear la referencia.
+Una vez calibrado, solicita parar solo cuando la probabilidad de seguir a
 `early_stopping.equivalence_margin` del incumbent cae bajo
 `early_stopping.probability_threshold`; no elimina una fracción
 fija. Por defecto la condición debe mantenerse en dos steps comunes distintos
@@ -1071,6 +1092,12 @@ Las rutas físicas son evidencia operacional y nunca sustituyen la identidad ló
 `lf results list/show/compare` lee manifests, no infiere semántica mediante globs. La comparación
 calcula count/media/min/max; una clasificación exige `--metric` y dirección explícita.
 
+Usa `lf export WORK_EXITOSO --output PADRE_LOCAL` cuando la evidencia deba salir del clúster de
+ejecución. No equivale a copiar manualmente el workspace: selecciona un Attempt exitoso exacto,
+incluye artefactos finalizados externos, crea vistas de análisis/replay y un inventario de
+checksums, excluyendo estado de runtime compartido. Si un nombre identifica varios Works falla como
+ambiguo; usa el `work_id` que muestra `lf overview --json`.
+
 ## 10. Clústeres y Jobs
 
 Un usuario configura el perfil en `lf` → Clusters. Primero aparecen campos comunes y cada opción
@@ -1136,6 +1163,10 @@ cada lectura con el grant heredado inicial, por lo que nunca descubre ni usa una
 Un token revocado detiene solo su worker verificado y reencola la misma Run lógica como Attempt
 compatible con checkpoint; los demás continúan y un token original restaurado vuelve a ser
 elegible. Si el probe falla temporalmente, se conservan Runs sanas pero no se admiten nuevas.
+Este comando debe informar reservas/propiedad, no solo GPU con procesos activos. La telemetría de
+recursos expone GPU solicitadas, tokens iniciales, grants actuales, slots admisibles y el motivo de
+ocio de cada dispositivo; una reducción real se persiste y registra como
+`GPU_ALLOCATION_SHRUNK N → M`.
 
 `workspace` y `project_root` tienen responsabilidades distintas. `workspace` es estado propiedad de
 LambdaForge: bundles, entornos, directorios de Job y logs se pueden limpiar según sus reglas.
@@ -1455,10 +1486,37 @@ reutilizan o recalculan el mismo documento:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute --json
 lf results report EXECUTION --output informe.html
+lf export ESTUDIO_O_WORK --output ./exportaciones
 ```
 
+`lf results report` escribe únicamente una vista HTML de una Execution local. `lf export` es la
+operación de evidencia portable: resuelve el historial semántico del Work en el proyecto actual,
+elige el Attempt exitoso más reciente y recupera su evidencia acotada desde proveedor local o
+remoto. El argumento de salida es una carpeta padre local. Se prepara y renombra atómicamente un
+nuevo directorio `NOMBRE--EXECUTION_ID`; nunca se mezcla ni sobrescribe uno existente.
+
+El paquete contiene `manifest.json` (inventario SHA-256/bytes por fichero), `execution/` (resultado,
+configuración, logs/scalars por Run, decisiones, checkpoints y artefactos retenidos), `study/`
+(telemetría completa persistida del Study/controlador), `control-plane/` (ciclo de vida del Job),
+`published-artifacts/` (outputs finalizados explícitos externos a la Execution) y `reports/`. Se
+intentan siempre el análisis JSON y replay de recursos. El HTML autocontenido se escribe siempre:
+`analysis-report` activa el dashboard Plotly completo y la instalación base genera una alternativa
+estructurada con evidencia exacta, registrando la limitación en el manifest. Se
+excluyen Dataset compartidos, entornos gestionados, caché y árbol staged del proyecto: sus
+referencias inmutables siguen en provenance y copiarlos a ciegas sería inseguro y potencialmente
+enorme. El empaquetado remoto rechaza enlaces/ficheros especiales, la extracción local rechaza
+traversal/enlaces, el tar temporal se borra incluso ante fallo y una carpeta parcial nunca se
+publica.
+
 HTML requiere `lambdaforge[analysis-report]`; JSON y Consola no. El informe incluye datos y runtime
-Plotly y no usa red.
+Plotly y no usa red. El informe de Run aporta catálogo de métricas buscable y plegable, vistas de
+curvas originales/normalizadas, snapshot, correlación y relación X/Y, además de paletas accesibles.
+El informe de Study separa comparación de Trials, respuestas y resúmenes por valor, interacciones
+heatmap/3D, cobertura, recursos y findings. El navegador solo describe evidencia persistida y nunca
+vuelve a ajustar el modelo HPO. Las preferencias se conservan para ese fichero; regenerarlo crea
+un ámbito limpio. La barra lateral de Run y los paneles de análisis se redimensionan arrastrando.
+Run permite crear categorías de métricas y guardar gráficas de la selección actual; Study guarda
+vistas bar/line/scatter con ejes de parámetro, componente del objetivo o recursos por candidato.
 
 ### 16.1 Semántica de evidencia
 
@@ -1619,6 +1677,16 @@ presentan tarjetas compactas y secciones semánticas acotadas en vez de JSON de 
 manifiesto sin formato.
 Las celdas de Runs/seeds podadas dicen `not final · pruned` o `not observed` cuando falta evidencia
 de forma esperable; `unavailable` queda reservado para fallos reales de recuperación o capacidad.
+
+La acción **Interactive HTML** de una seed convierte esas mismas series persistidas exactas en un
+dashboard de análisis responsive y offline. Empieza con un máximo de cuatro métricas de
+objetivo/validación; una barra agrupada y buscable permite añadir cualquier escalar registrado. La
+misma selección alimenta curvas originales, comparación de tendencias normalizada 0–1 por métrica,
+barras de último valor/cambio, correlación de Pearson por pares sobre epochs comunes y una vista
+estadística con último/mínimo/máximo/cambio/número de muestras. La normalización solo compara forma,
+no modifica ni ordena valores científicos; la correlación se etiqueta como descriptiva. Las épocas
+mejor y seleccionada siguen como referencias. El fichero incluye Plotly y todos los datos, no usa
+red ni se convierte en otro almacén de resultados.
 
 La implementación antigua `LiveJobMonitor` no es una interfaz pública. Se conserva temporalmente
 como oráculo de regresión mientras existan rutas avanzadas clasificadas `CLI-ONLY BY DESIGN`; solo

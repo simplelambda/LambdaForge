@@ -70,6 +70,14 @@ def test_live_gpu_grant_probe_can_only_shrink_or_restore_inherited_tokens(
 
     assert _current_gpu_grant(("0", "1", "2")) == frozenset({"0", "2"})
 
+    monkeypatch.setattr(
+        "lambdaforge.work.runner.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="0,1,2\n", stderr=""
+        ),
+    )
+    assert _current_gpu_grant(("0", "1", "2")) == frozenset({"0", "1", "2"})
+
 
 def test_gpu_access_rejects_ambiguous_or_incompatible_policies() -> None:
     with pytest.raises(ValueError, match="requires command_prefix"):

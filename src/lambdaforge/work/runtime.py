@@ -46,6 +46,8 @@ class MetricCollection:
         self._lock = Lock()
         self._latest: dict[str, int | float] = {}
         self._count = 0
+        self._progress_path = run_dir / "metric-progress.json"
+        self._progress_step: int | None = None
         mirror = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
         self._mirror = Path(mirror).resolve() if mirror else None
         raw_objective = os.environ.get("LAMBDAFORGE_HPO_OBJECTIVE_CONFIG")
@@ -114,6 +116,11 @@ class MetricCollection:
                             os.fsync(handle.fileno())
             self._latest[key] = value
             self._count += 1
+            if step is not None and (self._progress_step is None or step > self._progress_step):
+                # Generic Works need no Lightning callback to expose real progress to admission.
+                # One bounded write per advancing step, never one per scalar or full-history scan.
+                atomic_json(self._progress_path, {"step": step})
+                self._progress_step = step
 
     def log_many(
         self,

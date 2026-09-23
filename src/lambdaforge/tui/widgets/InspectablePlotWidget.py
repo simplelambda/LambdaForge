@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from rich.segment import Segment
@@ -51,6 +52,8 @@ class InspectablePlotWidget(PlotWidget):
         *,
         allow_pan_and_zoom: bool = True,
     ) -> None:
+        self._batch_depth = 0
+        self._batch_rerender_pending = False
         super().__init__(
             name=name,
             id=id,
@@ -59,6 +62,38 @@ class InspectablePlotWidget(PlotWidget):
             allow_pan_and_zoom=allow_pan_and_zoom,
         )
         self._inspection_points: tuple[InspectionPoint, ...] = ()
+
+    @contextmanager
+    def batch_update(self) -> Iterator[None]:
+        """Coalesce one semantic chart replacement into a single repaint.
+
+        ``textual-plot`` invalidates the canvas from ``clear()``, both limit setters and
+        every added series.  A learning-curve page replaces all of those properties at
+        once, so allowing each intermediate state to reach Textual can leave several
+        expensive high-resolution paints queued behind rapid page changes.  Keep the
+        dependency behind this adapter and expose one final, complete frame instead.
+        """
+        self._batch_depth += 1
+        try:
+            yield
+        finally:
+            self._batch_depth -= 1
+            if self._batch_depth == 0 and self._batch_rerender_pending:
+                self._batch_rerender_pending = False
+                super()._rerender()
+
+    def _rerender(self) -> None:
+        """Defer dependency repaint requests while an atomic update is in progress."""
+        if self._batch_depth:
+            self._batch_rerender_pending = True
+            self._needs_rerender = True
+            return
+        super()._rerender()
+
+    def reset_semantic_view(self) -> None:
+        """Forget interaction state before this widget displays another metric."""
+        self._is_dragging_legend = False
+        self.restore_viewport(None)
 
     def compose(self) -> ComposeResult:
         """Use textual-plot's canvas contract with a NO_COLOR-safe compatibility subclass."""

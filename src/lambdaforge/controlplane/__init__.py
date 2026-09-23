@@ -66,6 +66,7 @@ _NAMES = (
     "StorageGcPlan",
     "StorageReport",
     "StorageService",
+    "StudyExportService",
     "SubmissionService",
     "SystemKeyringCredentialProvider",
     "TorchInstallationPlan",

@@ -19,6 +19,7 @@ from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.OverviewService import OverviewService
 from lambdaforge.controlplane.ResourceService import ResourceService
 from lambdaforge.controlplane.StorageService import StorageService
+from lambdaforge.controlplane.StudyExportService import StudyExportService
 from lambdaforge.controlplane.SubmissionService import SubmissionService
 from lambdaforge.controlplane.WorkService import WorkService
 from lambdaforge.data.DatasetService import DatasetService
@@ -41,6 +42,12 @@ class ConsoleServices:
         self.jobs = JobService(self.catalog, factory=self.factory)
         self.storage = StorageService(self.catalog, self.factory, jobs=self.jobs)
         self.works = WorkService(self.catalog, jobs=self.jobs, storage=self.storage)
+        self.exports = StudyExportService(
+            self.catalog,
+            jobs=self.jobs,
+            works=self.works,
+            factory=self.factory,
+        )
         self.resources = ResourceService(self.catalog, self.factory)
         self.cluster_service = ClusterService(self.catalog, self.factory)
         self.credentials = CredentialService()
@@ -128,6 +135,14 @@ class ConsoleServices:
 
     def report(self, selector: str, output: Path) -> Path:
         return self.results.report(selector, output)
+
+    def export_result(self, selector: str, destination: Path) -> dict[str, Any]:
+        """Export one local persisted Execution through the shared package format."""
+        return self.results.export(selector, destination)
+
+    def export_work(self, selector: str, destination: Path) -> dict[str, Any]:
+        """Download and export one successful local or remote Study/Work."""
+        return self.exports.export(selector, destination)
 
     def study_run(
         self, job_id: str, run_key: str, *, tail: int = 2_000, curve_points: int = 200

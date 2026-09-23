@@ -10,8 +10,30 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-23
+
 ### Added
 
+- Added `lf export STUDY_OR_WORK --output DIRECTORY` and a matching **Export Study…** Research
+  Console action. The shared domain service retrieves the newest successful local or remote
+  Attempt into an atomic, non-overwriting portable folder containing exact Execution/Run evidence,
+  full Study/controller and Job lifecycle records, analysis JSON and optional offline HTML,
+  recorded resource replay, retained checkpoints/weights and finalized published artifacts. A
+  per-file SHA-256 manifest makes the package independently auditable; provider temporaries and
+  partial local exports are cleaned on failure, while shared datasets, environments, caches and
+  staged source bundles remain provenance references instead of accidental bulk copies.
+- Replaced the seed learning-curve HTML export's all-enabled single chart with a self-contained,
+  responsive metric dashboard. It provides a searchable grouped selector with at most four
+  objective/validation defaults, raw and normalized trajectories, latest/delta bars, shared-epoch
+  correlations, exact descriptive statistics and best/selected epoch references without changing
+  persisted evidence or requiring network access. Metric groups are collapsible, correlation
+  palettes have an explicit visible zero, arbitrary X/Y relationships expose shared epochs, and
+  per-file browser preferences survive reopening but reset on regeneration. The Study Analysis
+  export now uses the same dashboard language for candidate ranking and two-Trial comparison,
+  objective-component selection, parameter responses/value summaries, heatmap/3D interactions,
+  coverage, resources and findings without fitting a second model in the browser. Drag-resizable
+  sidebars/panels, presentation-only custom metric categories and per-file saved Run/Study chart
+  specifications make long names and recurring analyses reusable without mutating evidence.
 - Added a deterministic `InitialDesignPlan` whose protected anchors follow canonical
   `ParameterSpace` rank, authored discrete/conditional/numeric coverage, D-optimal information and
   maximin separation—independent of physical parallelism. Bounded search/response coverage state,
@@ -78,6 +100,25 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Adaptive curve pruning now remains disabled until at least two distinct completed candidates
+  provide an actual retrospective endpoint calibration (including a finite curve error). Startup
+  Runs can therefore establish trustworthy references instead of every provisional curve pruning
+  another provisional curve. The GPU dispatcher's waiting scientific frontier is also capped while
+  respecting active Runs and remaining parallelism, preventing changed queue hashes from consuming hundreds of candidates
+  while the same resource condition remains blocked.
+- Physical-capacity HPO refill now consumes deferred initial candidates/seeds through the same
+  selection path as completion events; a free GPU no longer waits behind an invisible startup queue.
+- Generic stepped Work metrics expose bounded live resource progress instead of remaining in
+  `startup` until completion. Adaptive children cap native thread pools to their per-Run CPU share
+  rather than inheriting the whole Job's OpenMP budget. Scientific objectives and memory guards are
+  unchanged; existing immutable remote workers are not hot-patched.
+- Separated cold-start `BASELINE_ADMISSION` from real 1→2+ `EXPLORATORY_ADMISSION` resource
+  experiments. Baselines now fill every idle granted GPU first without consuming exploration lanes;
+  live evidence can trigger a controlled co-location probe before a baseline finishes. Scientific
+  frontier refill is keyed by exact queued/active identities rather than one expansion per terminal
+  event, and allocation telemetry now explains requested/initial/current grants, every admission
+  slot and every idle GPU while persisting explicit `GPU_ALLOCATION_SHRUNK` transitions. The Work
+  JSON Schema now accepts the already-supported/documented `auto` concurrency values.
 - Fixed equal-distance live resource evidence attempting to compare immutable evidence objects
   during adaptive GPU prediction. Resource-neighbour and exploratory-placement ties now have
   explicit deterministic scalar keys, so a valid Study cannot terminate with an
@@ -110,7 +151,7 @@ metadata rather than invented release numbers.
 
 - Prevented rejected resource probes from persisting non-finite `-Infinity` sentinels into strict
   Study JSON and crashing the adaptive controller after a healthy Run completed. Cold start now
-  establishes one protected exploratory baseline on every otherwise idle allocated GPU even when
+  establishes one protected baseline on every otherwise idle allocated GPU even when
   unavoidable driver/context overhead makes physical free VRAM slightly lower than nominal VRAM;
   known lower bounds, failed-placement dominance and evidence-gated co-location remain enforced.
 - Made large mirrored `{file: ...}` directory verification independent of shell locale, filesystem

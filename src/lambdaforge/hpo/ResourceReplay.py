@@ -342,7 +342,7 @@ def _policy_admissions(
         if value[1] not in ramping
         and any(
             item.get("candidate_key") == value[0]
-            and item.get("admission_mode") == "SAFE_ADMISSION"
+            and item.get("admission_mode") in {"BASELINE_ADMISSION", "SAFE_ADMISSION"}
             for item in event.decisions
         )
     }

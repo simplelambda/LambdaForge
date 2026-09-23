@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from textual.app import ComposeResult
 from textual.containers import Grid, Vertical
@@ -26,6 +26,7 @@ class MetricDashboard(Vertical):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._page_signature: tuple[str, ...] = ()
+        self._slot_signatures: list[tuple[Any, ...] | None] = [None] * self.PAGE_SIZE
 
     def compose(self) -> ComposeResult:
         with Grid(classes="metric-plot-grid"):
@@ -52,53 +53,67 @@ class MetricDashboard(Vertical):
         self._page_signature = signature
         for index in range(self.PAGE_SIZE):
             card = self.query_one(f".metric-plot-card-{index}", Vertical)
+            plot = cast(
+                InspectablePlotWidget,
+                self.query_one(f".metric-plot-{index}"),
+            )
             if index >= len(names):
                 card.display = False
+                if self._slot_signatures[index] is not None:
+                    with plot.batch_update():
+                        plot.show_legend(is_visible=False)
+                        plot.clear()
+                        plot.set_inspection_points(())
+                        plot.reset_semantic_view()
+                    self._slot_signatures[index] = None
                 continue
             card.display = True
             name = names[index]
             points = self._points(curves.get(name))
-            self.query_one(f".metric-plot-title-{index}", Label).update(
-                metric_display_name(name, display_names)
-            )
-            plot: Any = self.query_one(f".metric-plot-{index}")
-            viewport = plot.user_viewport() if same_page else None
-            plot.clear()
-            plot.restore_viewport(viewport)
-            if not points:
+            display_name = metric_display_name(name, display_names)
+            self.query_one(f".metric-plot-title-{index}", Label).update(display_name)
+            slot_signature = (name, tuple(points), selected_step, best_step, display_name)
+            if same_page and slot_signature == self._slot_signatures[index]:
                 continue
-            x = [point[0] for point in points]
-            y = [point[1] for point in points]
-            plot.plot(
-                x,
-                y,
-                line_style="bright_cyan",
-                hires_mode=HiResMode.BRAILLE,
-                label="observed",
-            )
-            plot.set_inspection_points(
-                tuple(
-                    InspectionPoint(
-                        float(step),
-                        value,
-                        f"epoch={step}",
-                        f"{metric_display_name(name, display_names)}={value:.6g}",
-                        metric_display_name(name, display_names),
+            viewport = plot.user_viewport() if same_page else None
+            with plot.batch_update():
+                # Suppress the dependency's intermediate legend rebuilds while the
+                # observed line and epoch markers are being replaced.
+                plot.show_legend(is_visible=False)
+                plot.clear()
+                plot.set_inspection_points(())
+                if same_page:
+                    plot.restore_viewport(viewport)
+                else:
+                    plot.reset_semantic_view()
+                if points:
+                    x = [point[0] for point in points]
+                    y = [point[1] for point in points]
+                    plot.plot(
+                        x,
+                        y,
+                        line_style="bright_cyan",
+                        hires_mode=HiResMode.BRAILLE,
+                        label="observed",
                     )
-                    for step, value in points
-                )
-            )
-            self._mark(plot, points, best_step, "bright_green", "best")
-            self._mark(plot, points, selected_step, "bright_red", "selected")
-            plot.set_xlabel("epoch")
-            plot.set_ylabel("value")
-            plot.show_legend()
-
-    @staticmethod
-    def _reset_viewport(plot: Any) -> None:
-        """Return a reused plot to data-driven limits before drawing another metric."""
-        plot.set_xlimits(None, None)
-        plot.set_ylimits(None, None)
+                    plot.set_inspection_points(
+                        tuple(
+                            InspectionPoint(
+                                float(step),
+                                value,
+                                f"epoch={step}",
+                                f"{display_name}={value:.6g}",
+                                display_name,
+                            )
+                            for step, value in points
+                        )
+                    )
+                    self._mark(plot, points, best_step, "bright_green", "best")
+                    self._mark(plot, points, selected_step, "bright_red", "selected")
+                    plot.set_xlabel("epoch")
+                    plot.set_ylabel("value")
+                    plot.show_legend()
+            self._slot_signatures[index] = slot_signature
 
     @classmethod
     def _mark(

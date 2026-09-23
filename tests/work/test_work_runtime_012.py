@@ -166,7 +166,7 @@ def test_runtime_outputs_metrics_inputs_and_immutable_views(tmp_path: Path) -> N
         "name": "work-test-project",
         "version": "1.2.3",
     }
-    assert execution["lambdaforge_version"] == "0.14.0"
+    assert execution["lambdaforge_version"] == "0.15.0"
     with pytest.raises(TypeError):
         config.raw["name"] = "changed"  # type: ignore[index]
 
@@ -405,6 +405,39 @@ def test_local_result_store_exposes_logs_source_and_corruption(tmp_path: Path) -
     manifest.write_text("{broken", encoding="utf-8")
     with pytest.raises(RuntimeError, match="Corrupt Work result manifest"):
         store.list()
+
+
+def test_result_export_is_atomic_complete_and_refuses_overwrite(tmp_path: Path) -> None:
+    config_path = _yaml(
+        tmp_path,
+        {
+            "name": "portable-study",
+            "run": "tests.work_cases.SeedWork",
+            "seeds": [2, 4],
+            "objective": {"metric": "score", "mode": "max"},
+        },
+    )
+    result = WorkRunner().run(WorkConfig.from_yaml(config_path))
+    store = ResultStore(tmp_path / ".lambdaforge" / "runs")
+    exports = tmp_path / "exports"
+
+    exported = store.export(result.execution_id, exports)
+
+    package = Path(exported["path"])
+    manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["lambdaforge_export_version"] == 1
+    assert manifest["execution_id"] == result.execution_id
+    assert manifest["status"] == "succeeded"
+    assert manifest["file_count"] > 4
+    assert (package / "execution" / "result.json").is_file()
+    assert (package / "configuration" / config_path.name).is_file()
+    assert (package / "reports" / "study-analysis.json").is_file()
+    assert (package / "reports" / "study-analysis.html").is_file()
+    assert any(item["path"] == "execution/result.json" for item in manifest["inventory"])
+    assert not any(path.name.startswith(f".{package.name}-") for path in exports.iterdir())
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        store.export(result.execution_id, exports)
 
 
 def test_result_comparison_uses_persisted_run_metrics(tmp_path: Path) -> None:

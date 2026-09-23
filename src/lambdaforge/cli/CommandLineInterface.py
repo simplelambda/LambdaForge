@@ -27,6 +27,7 @@ from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.OverviewService import OverviewService
 from lambdaforge.controlplane.ResourceService import ResourceService
 from lambdaforge.controlplane.StorageService import StorageService
+from lambdaforge.controlplane.StudyExportService import StudyExportService
 from lambdaforge.controlplane.SubmissionService import SubmissionService
 from lambdaforge.controlplane.WorkService import WorkService
 from lambdaforge.diagnostics import DiagnosticContext
@@ -115,6 +116,20 @@ class CommandLineInterface:
             return 0
         if arguments.command == "run":
             return cls._run(arguments)
+        if arguments.command == "export":
+            catalog = ClusterCatalog.load(arguments.clusters)
+            payload = StudyExportService(catalog).export(arguments.selector, arguments.output)
+            human = (
+                f"Exported {payload['name']} to {payload['path']}\nManifest: {payload['manifest']}"
+            )
+            if payload.get("analysis_report"):
+                human += f"\nAnalysis: {payload['analysis_report']}"
+            cls._render(
+                payload,
+                human,
+                arguments.json,
+            )
+            return 0
         if arguments.command == "clusters":
             return run_cluster_command(arguments)
         if arguments.command == "jobs":

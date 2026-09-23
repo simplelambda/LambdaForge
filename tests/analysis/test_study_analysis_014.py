@@ -445,6 +445,7 @@ def test_interactive_curve_and_parameter_exports_use_optional_renderer(
 
     graph_objects.Figure = Figure  # type: ignore[attr-defined]
     graph_objects.Scatter = trace  # type: ignore[attr-defined]
+    graph_objects.Bar = trace  # type: ignore[attr-defined]
     graph_objects.Heatmap = trace  # type: ignore[attr-defined]
     graph_objects.Surface = trace  # type: ignore[attr-defined]
     plotly = ModuleType("plotly")
@@ -457,11 +458,28 @@ def test_interactive_curve_and_parameter_exports_use_optional_renderer(
     monkeypatch.setitem(sys.modules, "plotly.graph_objects", graph_objects)
     monkeypatch.setitem(sys.modules, "plotly.offline", offline)
 
+    metric_curves = {
+        name: [{"step": 1, "value": offset}, {"step": 2, "value": offset + 0.1}]
+        for offset, name in enumerate(
+            (
+                "val_score",
+                "val_loss",
+                "val_accuracy",
+                "train_loss",
+                "epoch_seconds",
+                "gpu_mem_mb",
+            ),
+            1,
+        )
+    }
     curves = write_metric_html(
-        {"val_score": [{"step": 1, "value": 0.5}, {"step": 2, "value": 0.7}]},
-        ["val_score"],
+        metric_curves,
+        list(metric_curves),
         tmp_path / "curves.html",
         display_names={"val_score": "Validation score"},
+        preferred_names=["val_score"],
+        best_step=2,
+        selected_step=1,
     )
     parameter = write_parameter_html(
         {
@@ -511,10 +529,54 @@ def test_interactive_curve_and_parameter_exports_use_optional_renderer(
         },
         tmp_path / "resources.html",
     )
+    study = write_html(
+        {
+            "source": {"status": "final"},
+            "objective": {"metric": "score", "mode": "max"},
+            "winner": {"screening_winner": {"trial": 2}},
+            "candidates": [
+                {
+                    "trial": 1,
+                    "parameters": {"width": 64},
+                    "mean": 0.6,
+                    "standard_error": 0.02,
+                    "n": 2,
+                    "objective_components": {"accuracy": 0.7},
+                },
+                {
+                    "trial": 2,
+                    "parameters": {"width": 128},
+                    "mean": 0.7,
+                    "standard_error": 0.01,
+                    "n": 3,
+                    "objective_components": {"accuracy": 0.8},
+                },
+            ],
+            "parameter_importance": {"width": {"importance": 1.0}},
+            "coverage": {"marginal": {"width": {"active_fraction": 1.0}}},
+        },
+        tmp_path / "study.html",
+    )
 
     curve_html = curves.read_text(encoding="utf-8")
-    assert "LambdaForge learning curves" in curve_html
-    assert "Learning curves" in curve_html
+    assert "Run metric dashboard" in curve_html
+    assert "Compare trends" in curve_html
+    assert "Latest values" in curve_html
+    assert "Correlations" in curve_html
+    assert "Relationship" in curve_html
+    assert "Statistics" in curve_html
+    assert "Search metrics" in curve_html
+    assert "metric-group" in curve_html
+    assert "Resize metric sidebar" in curve_html
+    assert "Organize metric categories" in curve_html
+    assert "My charts" in curve_html
+    assert "Save chart" in curve_html
+    assert "customGroups" in curve_html
+    assert "sidebarWidth" in curve_html
+    assert "Colour scale" in curve_html
+    assert "localStorage" in curve_html
+    assert "Best epoch 2" in curve_html
+    assert curve_html.count(" checked") == 4
     exported = parameter.read_text(encoding="utf-8")
     assert "Response: width" in exported
     assert "Pairwise response: width::depth" in exported
@@ -522,3 +584,14 @@ def test_interactive_curve_and_parameter_exports_use_optional_renderer(
     resource_html = resources.read_text(encoding="utf-8")
     assert "LambdaForge resources · gpu-cluster" in resource_html
     assert "GPU memory" in resource_html
+    study_html = study.read_text(encoding="utf-8")
+    assert "Study Analysis dashboard" in study_html
+    assert "Select at most two candidates to compare" in study_html
+    assert "Persisted adjusted response" in study_html
+    assert "3D surface" in study_html
+    assert "My charts" in study_html
+    assert "Parameter · width" in study_html
+    assert "Resource · GPU seconds" in study_html
+    assert "save-study-chart" in study_html
+    assert "panelHeights" in study_html
+    assert "Complete reproducible analysis JSON" in study_html

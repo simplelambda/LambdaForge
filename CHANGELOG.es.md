@@ -9,8 +9,30 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+## [0.15.0] - 2026-09-23
+
 ### Añadido
 
+- Añadidos `lf export ESTUDIO_O_WORK --output DIRECTORIO` y la acción equivalente **Export
+  Study…** de la Consola. El servicio de dominio común recupera el Attempt exitoso más reciente,
+  local o remoto, en una carpeta portable atómica que no sobrescribe: evidencia exacta de
+  Execution/Runs, registros completos de Study/controlador y ciclo de vida del Job, análisis JSON y
+  HTML offline opcional, replay de recursos, checkpoints/pesos retenidos y artefactos publicados.
+  Un manifest SHA-256 por fichero permite auditarla; temporales y exportaciones parciales se limpian
+  ante fallo, mientras datasets, entornos, cachés y bundles staged compartidos siguen como
+  referencias de provenance y no se copian accidentalmente.
+- Sustituida la gráfica HTML única con todas las curvas de seed activadas por un dashboard de
+  métricas autocontenido y responsive. Incluye selector agrupado/buscable con un máximo de cuatro
+  métricas iniciales de objetivo/validación, trayectorias originales y normalizadas, barras de
+  último valor/cambio, correlaciones en epochs comunes, estadística descriptiva exacta y referencias
+  a las épocas mejor/seleccionada sin alterar la evidencia ni requerir red. Los grupos son
+  plegables, las paletas de correlación muestran un cero explícito, una relación X/Y arbitraria
+  conserva las épocas compartidas y las preferencias del fichero sobreviven al reabrirlo pero se
+  reinician al regenerarlo. Study Analysis usa el mismo lenguaje visual para ranking y comparación
+  de dos Trials, componentes del objetivo, respuestas/resúmenes por valor, interacciones heatmap/3D,
+  cobertura, recursos y findings sin ajustar otro modelo en el navegador. Barras/paneles
+  redimensionables, categorías propias solo visuales y gráficas Run/Study guardadas por fichero
+  permiten reutilizar nombres largos y análisis recurrentes sin mutar evidencia.
 - Añadido `InitialDesignPlan` determinista con anchors protegidos derivados del rank del
   `ParameterSpace`, cobertura discreta/condicional/numérica declarada, información D-optimal y
   separación maximin, independiente del paralelismo físico. El estado acotado de cobertura de
@@ -78,6 +100,26 @@ metadata empaquetada.
 
 ### Corregido
 
+- El pruning adaptativo de curvas queda desactivado hasta que al menos dos candidatos distintos
+  terminados aporten una calibración retrospectiva real del endpoint, incluido un error de curva
+  finito. Así las Runs iniciales crean referencias fiables en vez de podarse entre curvas igualmente
+  provisionales. La frontera científica GPU en espera queda además acotada respetando Runs activas
+  y paralelismo restante, evitando que cada nuevo hash de cola consuma cientos de candidatos bajo el mismo bloqueo
+  de recursos.
+- La reposición HPO por capacidad física consume candidatos/semillas iniciales aplazados mediante
+  la misma selección que las finalizaciones; una GPU libre no espera una cola inicial invisible.
+- Las métricas Work con paso publican progreso de recursos acotado, sin permanecer en `startup`
+  hasta terminar. Cada hijo adaptativo limita hilos nativos a su cuota CPU en lugar de heredar el
+  presupuesto OpenMP del Job completo. No cambian objetivos ni guardas de memoria y no se parchean
+  en caliente los workers remotos inmutables existentes.
+- Separado `BASELINE_ADMISSION` de cold start de los experimentos reales de recursos 1→2+
+  `EXPLORATORY_ADMISSION`. Las baselines llenan primero cada GPU concedida y ociosa sin consumir
+  carriles exploratorios; la evidencia viva puede iniciar un probe controlado de co-localización
+  antes de que termine una baseline. El refill científico usa identidades exactas en cola/activas
+  en vez de una ampliación por evento terminal, y la telemetría explica grants
+  solicitados/iniciales/actuales, cada slot admisible y cada GPU ociosa, persistiendo transiciones
+  explícitas `GPU_ALLOCATION_SHRUNK`. El JSON Schema de Work acepta ahora los valores de
+  concurrencia `auto` ya soportados y documentados.
 - Corregida la comparación accidental de objetos de evidencia cuando dos observaciones vivas de
   recursos tenían la misma distancia durante la predicción GPU adaptativa. Los empates de vecinos
   y placement exploratorio usan ahora claves escalares deterministas, evitando que un Study válido
@@ -109,7 +151,7 @@ metadata empaquetada.
 
 - Evitado que probes de recursos rechazados persistan el centinela no finito `-Infinity` en el JSON
   estricto del Study y tumben el controlador adaptativo después de terminar correctamente una Run.
-  El cold start establece ahora una línea base exploratoria protegida en cada GPU asignada y ociosa
+  El cold start establece ahora una línea base protegida en cada GPU asignada y ociosa
   aunque el overhead inevitable de driver/contexto deje la VRAM libre algo por debajo de la nominal;
   se conservan las cotas conocidas, el dominio de packings fallidos y la co-localización con evidencia.
 - La verificación de directorios grandes `{file: ...}` en mirrors ya no depende del locale del

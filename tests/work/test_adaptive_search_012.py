@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from lambdaforge.execution.ResourceRequest import ResourceRequest
-from lambdaforge.hpo.AdaptiveResources import ResourcePrediction
+from lambdaforge.hpo.AdaptiveResources import ActiveResourceCommitment, ResourcePrediction
 from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservation
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
@@ -32,9 +32,53 @@ from lambdaforge.work.runner import (
     _gpu_memory_inventory,
     _objective_observation,
     _request_early_stops,
+    _resource_frontier_room,
     _retry_failed_result,
     _validate_gpu_memory_capacity,
 )
+
+
+def _completed_pruner_calibration(tmp_path: Path) -> tuple[WorkResult, WorkResult]:
+    """Return two complete curves: the minimum retrospective comparison evidence."""
+    results: list[WorkResult] = []
+    for trial, values in (
+        (1001, (0.50, 0.54, 0.57, 0.59, 0.61, 0.62)),
+        (1002, (0.44, 0.48, 0.51, 0.53, 0.55, 0.56)),
+    ):
+        run_dir = tmp_path / f"calibration-{trial}"
+        run_dir.mkdir()
+        (run_dir / "metrics.jsonl").write_text(
+            "".join(
+                json.dumps({"name": "score", "value": value, "step": step}) + "\n"
+                for step, value in enumerate(values, 1)
+            ),
+            encoding="utf-8",
+        )
+        results.append(
+            WorkResult(
+                name="work",
+                work_class="tests.work_cases.AdaptiveScoreWork",
+                execution_id="execution-calibration",
+                run_id=f"run-{trial}",
+                attempt_id="attempt-1",
+                attempt_number=1,
+                scientific_fingerprint=f"sha256:{trial}",
+                status="succeeded",
+                run_dir=run_dir,
+                created_at_utc="2026-01-01T00:00:00+00:00",
+                started_at_utc="2026-01-01T00:00:00+00:00",
+                finished_at_utc="2026-01-01T00:00:06+00:00",
+                duration_seconds=6.0,
+                seed=4,
+                trial={"index": trial, "parameters": {"width": trial}},
+                parameters={},
+                inputs=(),
+                requested_resources=WorkResources(1, 0, 0, 0, None, 0, 1),
+                metrics={"score": values[-1]},
+                termination_type="completed",
+            )
+        )
+    return results[0], results[1]
 
 
 def test_hpo_separates_current_curve_value_from_best_checkpoint(tmp_path: Path) -> None:
@@ -1341,6 +1385,186 @@ def test_gpu_dispatch_refills_an_empty_runtime_queue_before_active_run_finishes(
         )
 
 
+def test_three_gpu_dispatch_launches_baselines_then_live_packing_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the runtime modes: three baselines then a pre-completion 1→2 probe."""
+    gib = 1024**3
+    submitted_modes: list[tuple[int, str, int]] = []
+    clock = itertools.count(0.0, 2_000.0)
+
+    class ProbeLaunched(RuntimeError):
+        pass
+
+    class DeferredPool:
+        def __init__(self, *args: Any, initargs: tuple[str, ...] = (), **kwargs: Any) -> None:
+            del args, kwargs
+            self.token = initargs[0]
+
+        def submit(self, function: Any, value: dict[str, Any]) -> Future[Any]:
+            del function
+            submitted_modes.append(
+                (
+                    int(value["trial_index"]),
+                    str(value["resource_admission_mode"]),
+                    int(value["gpu_index"]),
+                )
+            )
+            if len(submitted_modes) == 4:
+                raise ProbeLaunched("controlled one-to-two probe launched")
+            return Future()
+
+        def shutdown(self, **kwargs: Any) -> None:
+            del kwargs
+
+    def publish_live_baselines(
+        memory: Any,
+        *,
+        pending: Any,
+        commitments: dict[Any, ActiveResourceCommitment],
+        **kwargs: Any,
+    ) -> tuple[Any, ...]:
+        del memory, pending, kwargs
+        for future, commitment in tuple(commitments.items()):
+            commitments[future] = replace(
+                commitment,
+                current_bytes=15 * gib,
+                running_peak_bytes=15 * gib,
+                future_peak_samples=(15 * gib, 24 * gib, 141 * gib),
+                remaining_seconds=600.0,
+                resource_state="PLATEAU_UNCONFIRMED",
+                checkpoint_resumable=True,
+                evidence_cycles=1,
+                growth_hazard=0.25,
+            )
+        return ()
+
+    monkeypatch.setattr(
+        "lambdaforge.work.runner._gpu_memory_inventory",
+        lambda count: ((125 * gib, 141 * gib),) * count,
+    )
+    monkeypatch.setattr(
+        "lambdaforge.work.runner._gpu_hardware_labels",
+        lambda count, memory: ("H200-141",) * count,
+    )
+    monkeypatch.setattr("lambdaforge.work.runner.ProcessPoolExecutor", DeferredPool)
+    monkeypatch.setattr(
+        "lambdaforge.work.runner.wait", lambda futures, **kwargs: (set(), set(futures))
+    )
+    monkeypatch.setattr(
+        "lambdaforge.work.runner._update_active_resource_commitments",
+        publish_live_baselines,
+    )
+    monkeypatch.setattr("lambdaforge.work.runner.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_LAUNCH_STAGGER_SECONDS", 0.0)
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_RESOURCE_SAMPLE_SECONDS", 0.0)
+
+    with pytest.raises(ProbeLaunched, match="one-to-two"):
+        _execute_gpu_admitted_runs(
+            [{"trial_index": index, "seed": index} for index in range(1, 7)],
+            resources=ResourceRequest(gpu_count=3),
+            policy=AdaptiveSearchPolicy(runs_per_gpu=50, max_parallel=150, early_stopping=False),
+            parallelism=150,
+            visible_gpus=("gpu-a", "gpu-b", "gpu-c"),
+            objective_metric="score",
+            objective_mode="max",
+            telemetry=None,
+            results=[],
+            executors=[],
+        )
+
+    assert {gpu for _trial, _mode, gpu in submitted_modes[:3]} == {0, 1, 2}
+    assert {mode for _trial, mode, _gpu in submitted_modes[:3]} == {"BASELINE_ADMISSION"}
+    assert submitted_modes[3][1] == "EXPLORATORY_ADMISSION"
+    assert submitted_modes[3][2] in {0, 1, 2}
+
+
+def test_gpu_dispatch_can_expand_frontier_twice_without_a_terminal_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked first extension must not close refill until a Run terminates."""
+    gib = 1024**3
+    active_future: Future[Any] = Future()
+    frontier_calls = 0
+
+    class SecondFrontierRequested(RuntimeError):
+        pass
+
+    class DeferredPool:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def submit(self, function: Any, value: dict[str, Any]) -> Future[Any]:
+            del function, value
+            return active_future
+
+        def shutdown(self, **kwargs: Any) -> None:
+            del kwargs
+
+    def refill(queued: Any, pending: Any) -> list[dict[str, Any]]:
+        nonlocal frontier_calls
+        assert len(pending) == 1
+        frontier_calls += 1
+        if frontier_calls == 1:
+            assert not queued
+            return [
+                {
+                    "trial_index": 2,
+                    "seed": 2,
+                    "trial_parameters": {"memory_gib": 100},
+                }
+            ]
+        raise SecondFrontierRequested("requested another bounded frontier")
+
+    def predict(self: Any, **kwargs: Any) -> ResourcePrediction:
+        del self
+        peak = int(kwargs["parameters"].get("memory_gib", 10)) * gib
+        return ResourcePrediction(
+            str(kwargs["candidate_key"]),
+            peak,
+            peak,
+            peak,
+            peak,
+            None,
+            100.0,
+            1,
+            1,
+            "exact-candidate",
+            "good",
+            "test",
+            (peak,),
+        )
+
+    monkeypatch.setattr(
+        "lambdaforge.work.runner._gpu_memory_inventory",
+        lambda count: ((70 * gib, 80 * gib),) * count,
+    )
+    monkeypatch.setattr("lambdaforge.work.runner.ResourceDemandModel.predict", predict)
+    monkeypatch.setattr("lambdaforge.work.runner.ProcessPoolExecutor", DeferredPool)
+    monkeypatch.setattr(
+        "lambdaforge.work.runner.wait", lambda futures, **kwargs: (set(), set(futures))
+    )
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_LAUNCH_STAGGER_SECONDS", 0.0)
+    monkeypatch.setattr("lambdaforge.work.runner._GPU_RESOURCE_SAMPLE_SECONDS", 0.0)
+
+    with pytest.raises(SecondFrontierRequested, match="another bounded frontier"):
+        _execute_gpu_admitted_runs(
+            [{"trial_index": 1, "seed": 1, "trial_parameters": {"memory_gib": 10}}],
+            resources=ResourceRequest(gpu_count=2),
+            policy=AdaptiveSearchPolicy(runs_per_gpu=2, early_stopping=False),
+            parallelism=4,
+            visible_gpus=("gpu-a", "gpu-b"),
+            objective_metric="score",
+            objective_mode="max",
+            telemetry=None,
+            results=[],
+            executors=[],
+            on_resource_blocked=refill,
+        )
+
+    assert frontier_calls == 2
+
+
 def test_gpu_run_failure_still_exits_its_cuda_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1404,6 +1628,15 @@ def test_gpu_run_failure_still_exits_its_cuda_worker(
     assert len(results) == 1
     assert results[0].status == "failed"
     assert results[0].gpu_index == 0
+
+
+def test_resource_frontier_bounds_waiting_actions_without_capping_active_work() -> None:
+    queued = tuple({"trial_index": value} for value in range(1, 17))
+    active = tuple({"trial_index": value} for value in range(17, 23))
+
+    assert _resource_frontier_room(queued, active, parallelism=150) == 0
+    assert _resource_frontier_room(queued[:2], active[:1], parallelism=4) == 1
+    assert _resource_frontier_room((), active, parallelism=150) == 16
 
 
 def test_killed_cpu_worker_is_retried_without_aborting_an_unrelated_run(
@@ -1640,11 +1873,43 @@ def test_early_stopping_requests_only_the_current_bottom_fraction(tmp_path: Path
         min_step=3,
         confirmations=1,
         probability_threshold=0.25,
+        historical_results=_completed_pruner_calibration(tmp_path),
     )
 
     assert not Path(specifications[0]["hpo_stop_path"]).exists()
     assert Path(specifications[2]["hpo_stop_path"]).is_file()
     assert Path(specifications[3]["hpo_stop_path"]).is_file()
+
+
+def test_early_stopping_waits_for_retrospective_curve_calibration(tmp_path: Path) -> None:
+    specifications = []
+    for trial, value in enumerate((0.95, 0.05), 1):
+        metrics = tmp_path / f"uncalibrated-{trial}.jsonl"
+        metrics.write_text(
+            "".join(
+                json.dumps({"name": "score", "value": value, "step": step}) + "\n"
+                for step in range(1, 7)
+            ),
+            encoding="utf-8",
+        )
+        specifications.append(
+            {
+                "trial_index": trial,
+                "hpo_metrics_path": metrics,
+                "hpo_stop_path": tmp_path / f"uncalibrated-{trial}.stop",
+            }
+        )
+
+    _request_early_stops(
+        specifications,
+        metric="score",
+        mode="max",
+        min_step=3,
+        confirmations=1,
+        probability_threshold=0.99,
+    )
+
+    assert not any(Path(value["hpo_stop_path"]).exists() for value in specifications)
 
 
 def test_probabilistic_curve_pruning_keeps_a_slow_improving_run(tmp_path: Path) -> None:
@@ -1674,6 +1939,7 @@ def test_probabilistic_curve_pruning_keeps_a_slow_improving_run(tmp_path: Path) 
         min_step=3,
         confirmations=1,
         probability_threshold=0.1,
+        historical_results=_completed_pruner_calibration(tmp_path),
     )
 
     assert not Path(specifications[0]["hpo_stop_path"]).exists()
@@ -1735,7 +2001,14 @@ def test_default_pruning_requires_two_distinct_uncompetitive_steps(tmp_path: Pat
             {"hpo_metrics_path": metrics, "hpo_stop_path": tmp_path / f"stable-{trial}.stop"}
         )
 
-    _request_early_stops(specifications, metric="score", mode="max", min_step=3)
+    calibration = _completed_pruner_calibration(tmp_path)
+    _request_early_stops(
+        specifications,
+        metric="score",
+        mode="max",
+        min_step=3,
+        historical_results=calibration,
+    )
 
     weak_stop = Path(specifications[1]["hpo_stop_path"])
     assert not weak_stop.exists()
@@ -1747,7 +2020,13 @@ def test_default_pruning_requires_two_distinct_uncompetitive_steps(tmp_path: Pat
                 json.dumps({"name": "score", "value": value, "step": 6, "split": None}) + "\n"
             )
 
-    _request_early_stops(specifications, metric="score", mode="max", min_step=3)
+    _request_early_stops(
+        specifications,
+        metric="score",
+        mode="max",
+        min_step=3,
+        historical_results=calibration,
+    )
 
     assert weak_stop.is_file()
     assert "confirmations=2/2" in weak_stop.read_text(encoding="utf-8")
@@ -1812,6 +2091,7 @@ def test_completed_historical_candidate_can_prune_a_lone_active_straggler(
         metrics={"score": 0.1},
         fidelity={"current": 0, "target": 3, "maximum": 9},
     )
+    calibration_peer = _completed_pruner_calibration(tmp_path)[0]
     stop = tmp_path / "active.stop"
 
     _request_early_stops(
@@ -1828,7 +2108,7 @@ def test_completed_historical_candidate_can_prune_a_lone_active_straggler(
         min_step=3,
         confirmations=1,
         probability_threshold=0.25,
-        historical_results=(historical, prior_same_seed),
+        historical_results=(historical, prior_same_seed, calibration_peer),
     )
 
     assert stop.is_file()

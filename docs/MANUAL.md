@@ -1,4 +1,4 @@
-# LambdaForge 0.14 manual
+# LambdaForge 0.15 manual
 
 ## Contents
 
@@ -760,6 +760,20 @@ number of active GPU Runs. This avoids promising excess host resources to an ear
 later be resized. The outer reservation remains non-oversubscribed and `self.resources` stays a
 stable contract throughout dynamic GPU admission.
 
+Fresh adaptive child processes enforce this CPU share for Torch and native BLAS/OpenMP pools,
+overriding inherited whole-Job thread counts inside the child only. This is a thread-pool cap, not
+CPU affinity or a quota on arbitrary subprocesses created by consumer code. A custom Work's stepped
+scalar metrics publish `metric-progress.json`, a bounded per-Attempt progress projection updated
+once per advancing step. Admission reads it without scanning metric history, preserves more precise
+callback phases, and does not interpret a reported epoch as a durable checkpoint or proven memory
+stability. Non-stepped scalars do not invent progress.
+
+Physical-capacity events consult the same deferred initial-design and adaptive-action queue as
+completion events. Protected anchors retain priority; otherwise useful initial seed coverage can
+fill idle capacity even before another Run finishes. Exact candidate/seed/fidelity identities and
+Run/time budgets still prevent duplicates and unbounded dispatch. This does not turn adaptive
+search into an exhaustive sweep or bypass resource/throughput checks.
+
 `auto` removes the artificial per-device/global process-count caps; ARI still derives a finite
 ceiling from runnable work, candidate/Run budget, allocated GPUs, host CPU and site constraints.
 An integer remains a hard ceiling: two GPUs with `runs_per_gpu: 4` permit at most eight Runs, while
@@ -803,11 +817,13 @@ resource-information value remains separate from candidate priority. Unknown dur
 candidate/near history or live step-rate extrapolation and otherwise stays unknown. Lightning can
 honor a selective checkpoint request at a safe epoch boundary when rollback alone blocks a useful
 experiment.
-Cold start first creates progress, then uses live phase/step trajectories and checkpoints for
-incremental 1→2→3 experiments without waiting for terminal peaks. `SAFE_ADMISSION` uses supported
-future envelopes; `EXPLORATORY_ADMISSION` is chosen only when expected progress plus resource
-information exceeds rollback/interference cost. Equivalent GPUs keep a protected progress lane and
-never duplicate the same unvalidated escalation. `RESOURCE_BLOCKED` is reversible;
+Cold start first creates one `BASELINE_ADMISSION` on every idle granted GPU, then uses live
+phase/step trajectories and checkpoints for incremental 1→2→3 experiments without waiting for
+terminal peaks. A baseline is protected progress, never an unvalidated packing experiment and never
+an exploration-lane consumer. `SAFE_ADMISSION` uses supported future envelopes;
+`EXPLORATORY_ADMISSION` is chosen only when expected progress plus resource information exceeds
+rollback/interference cost. Equivalent GPUs keep one lane at baseline concurrency and never
+duplicate the same unvalidated escalation. `RESOURCE_BLOCKED` is reversible;
 `RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` requires an intrinsic hard lower bound above the device.
 
 The scientific controller supplies a bounded ranked frontier. The resource planner uses best fit,
@@ -815,9 +831,11 @@ preserves larger devices for heavy work and may run a short feasible backfill wh
 heavy action waits for its predicted window. Learned co-location throughput can stop extra packing
 when it would reduce useful scientific work per wall-clock time. Resource scarcity changes
 when/where an action runs, never its scientific objective. If that complete bounded frontier is
-blocked, one bounded extension is requested from the same scientific policy. This is the
-fit-constrained probe path: it remains optimization/information driven and cannot loop through
-random configurations.
+blocked, the same scientific policy may provide further bounded unseen alternatives without waiting
+for a terminal Run. Waiting alternatives share a hard bounded planning frontier (at most 16 and
+never above parallelism left after active Runs). Exact identities still deduplicate requests; adding one
+alternative cannot recursively create unbounded permission to propose another, and a response with
+no new identity closes that dispatcher state.
 
 LambdaForge probes every allocated device throughout active Runs—even with no queued action—and
 fills only safe capacity; temporarily unavailable Runs remain queued. Same-device launches are
@@ -971,7 +989,11 @@ if self.stop_requested:
 
 After `early_stopping.min_step`, the controller compares active Runs at a common observed step. A
 bounded local-linear posterior projects each curve a short distance forward and carries residual
-plus pooled uncertainty. It requests a stop only when the probability of remaining within
+plus pooled uncertainty. Pruning does not activate until at least two distinct candidates have
+completed far enough to backtest prefix predictions against their real endpoints and produce a
+finite curve error. Two is the minimum that identifies a comparison, not a configurable tuning
+threshold; before that point every startup curve remains eligible to establish the reference.
+Once calibrated, it requests a stop only when the probability of remaining within
 `early_stopping.equivalence_margin` of the projected incumbent falls below
 `early_stopping.probability_threshold`. This is
 more conservative with noisy or still-improving curves than dropping a fixed fraction. By default
@@ -1238,6 +1260,12 @@ Execution result envelopes rather than filesystem guesses about scientific meani
 reports count/mean/min/max for each available scalar metric; `--metric NAME --mode min|max` adds an
 explicit mean-based ranking without guessing metric direction.
 
+Use `lf export SUCCEEDED_WORK --output LOCAL_PARENT` when the evidence must leave its execution
+cluster. This is different from copying the workspace manually: the exporter selects one exact
+succeeded Attempt, includes external finalized artifacts, produces analysis/replay views and writes
+a checksum inventory while excluding shared runtime state. Names that identify several Works fail
+as ambiguous; use the `work_id` shown by `lf overview --json`.
+
 ## 10. Clusters and jobs
 
 Humans configure the same profile in bare `lf` → Clusters. Common fields appear first and focused
@@ -1306,6 +1334,9 @@ new physical GPU. A revoked token stops only its verified one-Run worker; that l
 requeued as a checkpoint-compatible Attempt while unaffected tokens continue. Restored original
 tokens become eligible again. A temporarily unavailable visibility probe preserves healthy Runs
 but fails closed for new admission.
+This command must describe reservation/ownership, not merely GPUs with active processes. Study
+resource telemetry exposes requested GPUs, initial tokens, current grants, admission slots and an
+idle reason per device; a real contraction is persisted and logged as `GPU_ALLOCATION_SHRUNK N → M`.
 
 `workspace` and `project_root` are deliberately different. `workspace` is LambdaForge-owned state:
 bundle cache, environments, Job directories and logs may be garbage-collected according to their
@@ -1694,10 +1725,37 @@ Runs and never changes the controller. A terminal study automatically writes
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute --json
 lf results report EXECUTION --output report.html
+lf export STUDY_OR_WORK --output ./exports
 ```
 
+`lf results report` writes only one HTML view of a locally available Execution. `lf export` is the
+portable evidence operation: it resolves the current project's semantic Work history, selects the
+newest succeeded Attempt and retrieves its bounded evidence from either a local or remote provider.
+The output argument is a local parent directory. A new `NAME--EXECUTION_ID` directory is staged and
+renamed atomically; an existing destination is never merged or overwritten.
+
+The package contains `manifest.json` (per-file SHA-256/size inventory), `execution/` (result,
+configuration, per-Run logs/scalars, decisions, checkpoints and retained artifacts), `study/`
+(complete persisted Study/controller telemetry), `control-plane/` (Job lifecycle evidence),
+`published-artifacts/` (explicit finalized outputs outside the Execution), and `reports/`. The
+analysis JSON and recorded resource replay are always attempted. The self-contained HTML is always
+written: `analysis-report` enables its full interactive Plotly dashboard, while the base install
+writes a structured exact-evidence fallback and records that limitation in the manifest. Shared Dataset versions, managed environments, cache and the staged project tree
+are deliberately excluded: their immutable references remain in provenance and blindly copying
+them would make an experiment export both unsafe and unexpectedly enormous. Remote assembly rejects
+links/special files, local extraction rejects traversal/links, temporary provider archives are
+removed on both success and failure paths, and no partial local folder is published.
+
 The HTML route requires `lambdaforge[analysis-report]`; JSON analysis and the console do not. The
-report embeds its data and Plotly runtime and makes no network request.
+report embeds its data and Plotly runtime and makes no network request. Run reports provide a
+searchable, collapsible metric catalogue, raw/normalized/snapshot/correlation/relationship views
+and selectable accessible heatmap palettes. Study reports provide tabbed Trial comparison,
+parameter response and exact-value summaries, pair heatmap/3D views, coverage, resource and finding
+views. Browser analysis remains descriptive over persisted evidence and never refits the HPO
+model. The Run sidebar and analysis panels are drag-resizable. Run reports can create custom metric
+categories and save plots from the current metric selection; Study reports save bar/line/scatter
+views with candidate parameter, objective-component and resource axes. Preferences persist for that
+generated file; regenerating creates a clean preference scope.
 
 ### 16.1 Evidence semantics
 
@@ -1883,6 +1941,15 @@ navigation. The sidebar visibly separates Action, Browse and Session controls. C
 compact cards and bounded semantic sections rather than unformatted provider/manifest JSON.
 Pruned Run/seed cells describe absent terminal evidence as `not final · pruned` and absent partial
 observations as `not observed`; `unavailable` remains reserved for actual retrieval/capability gaps.
+
+The seed **Interactive HTML** action turns those same exact persisted series into a responsive
+offline analysis dashboard. It starts with no more than four objective/validation metrics, while a
+searchable, grouped sidebar can opt into any recorded scalar. One selection drives raw curves,
+per-metric 0–1 trend normalization, latest-value/delta bars, pairwise Pearson correlation over
+shared epochs and a statistics view with latest/minimum/maximum/change/sample count. Normalization
+compares shape and never changes or ranks original values; correlation is explicitly descriptive.
+Best and selected epochs remain reference lines. The file embeds Plotly and all data, contacts no
+service and does not become another result store.
 
 The old `LiveJobMonitor` implementation is not a public interface. It remains temporarily as a
 regression oracle while advanced routes still classified `CLI-ONLY BY DESIGN` are migrated; it may

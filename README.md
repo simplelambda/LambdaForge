@@ -29,7 +29,7 @@ projects, or an editable checkout while developing LambdaForge:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.14.0
+python -m pip install lambdaforge==0.15.0
 python -m pip install -e .
 python -m pip check
 lf --version
@@ -328,7 +328,7 @@ version probes live once in `environment.json`.
 Install the optional mature backend and use the uniform Python contract:
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.14.0"
+python -m pip install "lambdaforge[clustering]==0.15.0"
 ```
 
 ```python
@@ -372,6 +372,14 @@ add a vague generic `GNN` alias because graph topology, aggregation and equivari
 choices.
 
 ## Composition and adaptive experiments
+
+Adaptive GPU admission refills from the same scientific queue on both Run completion and newly
+usable capacity: deferred initial candidates/seeds must not leave an idle granted GPU waiting for
+another Run to finish. Limits are ceilings, not guaranteed speedups. Every adaptive child caps native
+CPU thread pools to its CPU share (not the whole Job allocation). Custom Work loops reporting
+`self.metrics.log(name, value, step=epoch)` also publish bounded resource-progress evidence; no
+Lightning callback is required. Compare epoch, training and validation times before raising packing:
+free VRAM does not imply spare CPU or faster aggregate throughput.
 
 YAML supports a sequence plus explicit parallel groups. The next level waits for the complete prior
 level. Each member of a parallel group uses an isolated spawned process inside the enclosing Job;
@@ -601,13 +609,18 @@ history supports it, but a generic Work is never forced to exhibit a fixed train
 The displayed `RAMPING`/`PROVISIONALLY_STABLE` state is an explanation; placement consumes the
 continuous phase hazard and weighted residual distribution.
 
+`BASELINE_ADMISSION` is exactly the first protected Run placed on an otherwise idle granted GPU;
+it does not consume an exploration lane or pretend that 1→2 packing has been tested. Empty granted
+GPUs receive these baselines before any occupied GPU receives co-located work.
 `SAFE_ADMISSION` fits after uncertainty and known OOM bounds are considered.
 `EXPLORATORY_ADMISSION` is a checkpoint-aware 1→2→3 packing step whose expected scientific progress
 and resource information exceed rollback and interference cost. With at least two interchangeable
-GPUs, one remains a protected progress lane while an equivalent unvalidated experiment runs on at
-most one sibling. A provisional success promotes the packing frontier before terminal epochs; a
+GPUs, one remains at protected baseline concurrency while an equivalent unvalidated experiment
+runs on at most one sibling. A provisional success promotes the packing frontier before terminal epochs; a
 later OOM invalidates it. Thus a long cold start cannot remain at one Run per GPU merely because no
-training has finished.
+training has finished. If the current bounded scientific frontier is resource-blocked, each newly
+evaluated unseen alternative may trigger another bounded request; an unchanged frontier that yields
+no new identity is recorded and not polled in a loop.
 
 Waiting is also a decision with a cost. While useful work is pending and physically usable VRAM is
 idle, LambdaForge integrates idle fraction × normalized scientific-value rate. This *wait regret*
@@ -628,10 +641,11 @@ When omitted, automatic prediction is used. `runs_per_gpu` remains a hard per-de
 `max_parallel` a hard global ceiling. A candidate that cannot fit now is `RESOURCE_BLOCKED`, not
 failed or pruned, and is reconsidered when memory changes. A lower-value candidate may safely
 backfill if it can finish before a high-value heavy candidate's expected window. Best-fit placement
-and a bounded ranked frontier avoid random retries and preserve room for heavy work. If the first
-frontier cannot run, the controller requests one bounded extension from the same scientific design
-policy and starts its highest-value feasible member; it never generates random candidates until
-one happens to fit.
+and a bounded ranked frontier avoid random retries and preserve room for heavy work. If one
+extension is evaluated but remains blocked, the controller may request another bounded unseen
+alternative from the same scientific design policy without waiting for a terminal Run. Exact
+action identities stop requests as soon as that policy returns no new alternative; it never
+generates random candidates until one happens to fit.
 
 CPU, RAM and storage retain a conservative stable per-Run share derived from the hard global
 concurrency ceiling. They are not temporarily over-promised to the first cold-start Runs, because
@@ -800,7 +814,15 @@ Terminal charts stay compact and truthful: categorical dimensions retain labels 
 `false`, and clicking a point or bar reports its exact coordinates. The terminal response chart
 omits a visually ambiguous pseudo-band; uncertainty remains numeric in the table. **Interactive
 HTML** exports an offline Plotly report with exact hover values and real shaded uncertainty, plus
-pairwise heatmaps and numeric 3D surfaces. This optional renderer requires
+pairwise heatmaps and numeric 3D surfaces. A Run report is a responsive dashboard: search its
+grouped metric catalogue, collapse categories, compare raw/normalized curves, latest values,
+same-epoch correlations or an arbitrary X/Y metric relationship, and choose an accessible
+diverging heatmap palette. Drag the metric/sidebar separator or the lower edge of analysis panels
+to resize them. `Organize` creates local categories and reassigns metrics without renaming them;
+`My charts` saves reusable curve, normalized, snapshot or X/Y views from the current selection.
+The same generated file remembers sizes, categories, charts, selections, active view and colours;
+regenerating it deliberately starts with fresh preferences. This optional
+renderer requires
 `lambdaforge[analysis-report]` and writes only after an explicit user action.
 
 Threshold-dependent metrics such as F1, balanced accuracy, Cohen's kappa, accuracy, precision and
@@ -913,6 +935,7 @@ lf jobs list                 # advanced scheduler/process view
 lf jobs clear                # preview terminal-history cleanup
 lf jobs clear --apply
 lf results list
+lf export SUCCEEDED_STUDY --output ./exports
 lf datasets list
 lf clean                     # preview only
 lf clean --apply
@@ -994,11 +1017,26 @@ can be run or refreshed explicitly:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.14.0"
+python -m pip install "lambdaforge[analysis-report]==0.15.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json
+lf export STUDY_OR_WORK --output ./exports
 ```
+
+`lf export` resolves one unambiguous semantic Work in the current project and downloads its newest
+successful Attempt, whether it ran locally or on a configured cluster. `--output` names a local
+parent directory; LambdaForge creates `NAME--EXECUTION_ID/` atomically and refuses to overwrite an
+earlier export. The package contains the immutable Execution envelope, submitted YAML, Run logs and
+metrics, complete Study/controller evidence, HPO analysis JSON, recorded resource replay, retained
+checkpoints/weights and finalized published artifacts. It always contains the self-contained
+`reports/study-analysis.html`; `lambdaforge[analysis-report]` enables the full interactive Plotly
+dashboard, while the base install emits a structured HTML/JSON fallback and records a warning.
+`manifest.json` lists the
+SHA-256 and byte size of every exported file. Shared datasets, environments, reconstructible cache
+and the staged source bundle remain referenced by provenance instead of being duplicated. The
+Research Console exposes the same operation as **Export Study…** and opens a local directory
+browser; it calls this domain service rather than a shell command.
 
 Resource replay reads the Study's versioned scheduler trace, never terminal prose. It is factual
 until the selected compatibility policy first disagrees; every later metric is explicitly marked
@@ -1032,8 +1070,15 @@ Effects are observational predictive summaries, not causal claims. Confirmation 
 scientific equivalence margin. Per-comparable-Run resource efficiency is never conflated with total
 HPO controller spend. Live analysis is `PROVISIONAL`; only terminal evidence is `FINAL`.
 
-The optional Plotly report is self-contained and works offline. Plotly is not a base dependency:
-without the extra, execution, JSON analysis and the Research Console remain fully functional.
+The optional Plotly report is self-contained and works offline. Its Study dashboard separates
+overview, candidate evidence and two-Trial comparison, parameter responses and exact-value
+summaries, pairwise heatmap/3D interactions, coverage, resource efficiency and findings. Metric,
+parameter, pair, plot-kind and colour controls use only persisted `analysis.json` evidence; the
+browser does not fit another model or change HPO conclusions. Its resizable panels and `My charts`
+view can persist custom bar/line/scatter plots whose axes are Trial, authored parameters, objective
+components or resource observations. Preferences are local to that
+generated HTML. Plotly is not a base dependency: without the extra, execution, JSON analysis and
+the Research Console remain fully functional.
 
 Resource admission is evidence too. Each study persists the current GPU/CPU/RAM admission state,
 including active capacity, queued Runs, per-GPU free/required VRAM and the concrete wait reason.
@@ -1087,9 +1132,13 @@ exact marginal chart and a table of observed versus authored levels/ranges, bins
 it describes sampled candidates rather than claiming that an unobserved proposal pool was covered.
 Charts expose exact values on click. Contextual `?` controls explain objective, confidence,
 reliability, top-region effects, predictive gain, coverage and stop semantics. Contextual
-**Interactive HTML** controls open self-contained high-resolution Plotly learning curves, Study
-reports, parameter response/interaction reports or bounded cluster resource histories when the
-optional analysis extra is installed.
+**Interactive HTML** controls open self-contained high-resolution Plotly reports when the optional
+analysis extra is installed. A seed export is a responsive dashboard rather than one overloaded
+plot: it initially selects at most four objective/validation metrics, groups and filters the full
+metric list, and updates raw curves, normalized trend comparison, latest-value bars, same-epoch
+correlations and an exact statistics table from one selector. Best/selected epoch markers remain
+explicit; **Select all** is deliberate rather than the default. Study reports, parameter
+response/interaction reports and bounded cluster resource histories use their matching views.
 Seed stability is summarized in cards, scientific/resource Pareto evidence in separate exact
 tables, and findings in a severity/reliability table with a readable recommendation preview.
 HPO response and interaction surfaces are labelled with—and always use—the Study's declared
