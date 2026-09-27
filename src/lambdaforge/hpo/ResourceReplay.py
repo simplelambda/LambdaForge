@@ -51,10 +51,12 @@ class ResourceSchedulerReplay:
         *,
         observations: Sequence[Mapping[str, Any]] = (),
         placement_failures: Sequence[Mapping[str, Any]] = (),
+        host_samples: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         self.events = tuple(sorted(events, key=lambda item: item.elapsed_seconds))
         self.observations = tuple(observations)
         self.placement_failures = tuple(placement_failures)
+        self.host_samples = tuple(host_samples)
 
     @classmethod
     def from_execution(cls, execution_dir: Path) -> ResourceSchedulerReplay:
@@ -73,6 +75,7 @@ class ResourceSchedulerReplay:
             ),
             observations=_read_jsonl(root / "observations.jsonl"),
             placement_failures=_read_jsonl(root / "placement-oom.jsonl"),
+            host_samples=_read_jsonl(root / "host-history.jsonl"),
         )
 
     def replay(self, policy: ReplayPolicyName = "ari-v3.1") -> dict[str, Any]:
@@ -85,12 +88,16 @@ class ResourceSchedulerReplay:
         time_to: dict[str, dict[str, float]] = {}
         concurrency_area = idle_vram_time = active_area = throughput_area = 0.0
         blocked_time = starvation_time = 0.0
+        concurrency_gpu_seconds: dict[str, float] = {}
+        idle_reason_gpu_seconds: dict[str, float] = {}
         rollback = 0.0
         checkpoint_costs: dict[str, float] = {}
         first_time = self.events[0].elapsed_seconds if self.events else 0.0
         prior_time = first_time
         prior_devices: tuple[Mapping[str, Any], ...] = ()
         prior_blocked = prior_starved = False
+        prior_frontier: tuple[Mapping[str, Any], ...] = ()
+        prior_decisions: tuple[Mapping[str, Any], ...] = ()
 
         for index, event in enumerate(self.events):
             recorded = _recorded_admissions(event)
@@ -118,11 +125,19 @@ class ResourceSchedulerReplay:
                     + _suppressed_resident_bytes(device, suppressed),
                 )
                 concurrency_area += elapsed * active
+                concurrency_gpu_seconds[str(active)] = (
+                    concurrency_gpu_seconds.get(str(active), 0.0) + elapsed
+                )
                 active_area += elapsed * int(active > 0)
                 idle_vram_time += elapsed * free / max(1, total)
                 throughput_area += elapsed * _active_throughput(
                     device, active_indices, candidates
                 )
+                if active == 0:
+                    reason = _idle_reason(prior_frontier, prior_decisions)
+                    idle_reason_gpu_seconds[reason] = (
+                        idle_reason_gpu_seconds.get(reason, 0.0) + elapsed
+                    )
             blocked_time += elapsed * int(prior_blocked)
             starvation_time += elapsed * int(prior_starved)
 
@@ -177,6 +192,8 @@ class ResourceSchedulerReplay:
             )
             prior_time = event.elapsed_seconds
             prior_devices = event.devices
+            prior_frontier = event.frontier
+            prior_decisions = event.decisions
 
         duration = max(0.0, prior_time - first_time)
         gpu_count = max(1, max((len(item.devices) for item in self.events), default=1))
@@ -210,6 +227,7 @@ class ResourceSchedulerReplay:
             _frontier_value(item, rank)
             for rank, item in enumerate(admitted_candidates.values(), 1)
         )
+        host = _host_efficiency(self.host_samples)
         return {
             "replay_version": 1,
             "policy": policy,
@@ -240,12 +258,20 @@ class ResourceSchedulerReplay:
             "metrics": {
                 "time_to_concurrency": time_to,
                 "mean_active_runs_per_gpu": concurrency_area / max(1e-12, duration * gpu_count),
+                "mean_active_gpus": active_area / max(1e-12, duration),
+                "time_at_concurrency_gpu_seconds": concurrency_gpu_seconds,
+                "idle_gpu_seconds": max(0.0, duration * gpu_count - active_area),
+                "idle_gpu_seconds_by_reason": idle_reason_gpu_seconds,
                 "idle_vram_time_gpu_seconds": idle_vram_time,
                 "idle_compute_time_gpu_seconds": None,
                 "gpu_active_fraction": active_area / max(1e-12, duration * gpu_count),
                 "scientific_value_per_hour": normalized_value / max(1e-12, hours),
                 "useful_actions_per_hour": len(admitted_candidates) / max(1e-12, hours),
                 "aggregate_throughput": throughput_area / max(1e-12, duration),
+                "cpu_utilization_fraction": host["cpu_utilization_fraction"],
+                "cpu_starvation_estimate": host["cpu_starvation_estimate"],
+                "ram_pressure_fraction": host["ram_pressure_fraction"],
+                "host_samples": host["samples"],
                 "completed_runs_per_hour": (
                     len(completed) / max(1e-12, hours) if divergence is None else None
                 ),
@@ -295,6 +321,70 @@ def _recorded_admissions(event: ResourceTraceEvent) -> set[tuple[str, str]]:
         (str(item.get("candidate_key")), str(item.get("target_gpu")))
         for item in event.decisions
         if item.get("state") == "ADMITTED" and item.get("target_gpu") is not None
+    }
+
+
+def _idle_reason(
+    frontier: Sequence[Mapping[str, Any]], decisions: Sequence[Mapping[str, Any]]
+) -> str:
+    """Classify factual idle time without inventing a cause absent from the trace."""
+    if not frontier:
+        return "NO_PENDING_WORK"
+    reasons = " ".join(str(value.get("reason", "")) for value in decisions).upper()
+    if "PROTECTED_LANE" in reasons:
+        return "PROTECTED_LANE"
+    if "HOST" in reasons or "CPU" in reasons or "RAM" in reasons:
+        return "HOST_RESOURCE_LIMIT"
+    if "ALLOCATION" in reasons or "REVOK" in reasons:
+        return "SITE_ALLOCATION"
+    if "THROUGHPUT" in reasons:
+        return "THROUGHPUT_SATURATION"
+    if "BLOCK" in reasons and "SWEEP" in reasons:
+        return "BLOCK_BARRIER"
+    return "RESOURCE_UNCERTAINTY"
+
+
+def _host_efficiency(samples: Sequence[Mapping[str, Any]]) -> dict[str, int | float | None]:
+    """Summarize process-tree host evidence without inventing missing measurements."""
+    cpu_fractions: list[float] = []
+    ram_fractions: list[float] = []
+    starvation: list[float] = []
+    for sample in samples:
+        capacity = sample.get("capacity")
+        summary = sample.get("summary")
+        runs = sample.get("active_runs")
+        if not isinstance(capacity, Mapping) or not isinstance(summary, Mapping):
+            continue
+        cpu_capacity = capacity.get("cpu")
+        cpu_used = summary.get("process_tree_cpu_utilization_percent")
+        if (
+            isinstance(cpu_capacity, int | float)
+            and not isinstance(cpu_capacity, bool)
+            and float(cpu_capacity) > 0
+            and isinstance(cpu_used, int | float)
+            and not isinstance(cpu_used, bool)
+        ):
+            fraction = max(0.0, float(cpu_used) / (100.0 * float(cpu_capacity)))
+            cpu_fractions.append(fraction)
+            if isinstance(runs, Sequence) and not isinstance(runs, str | bytes) and runs:
+                starvation.append(float(fraction >= 0.9))
+        ram_capacity = capacity.get("ram_bytes")
+        rss = summary.get("process_tree_rss_bytes")
+        if (
+            isinstance(ram_capacity, int | float)
+            and not isinstance(ram_capacity, bool)
+            and float(ram_capacity) > 0
+            and isinstance(rss, int | float)
+            and not isinstance(rss, bool)
+        ):
+            ram_fractions.append(max(0.0, float(rss) / float(ram_capacity)))
+    return {
+        "samples": len(samples),
+        "cpu_utilization_fraction": (
+            statistics.fmean(cpu_fractions) if cpu_fractions else None
+        ),
+        "cpu_starvation_estimate": statistics.fmean(starvation) if starvation else None,
+        "ram_pressure_fraction": max(ram_fractions) if ram_fractions else None,
     }
 
 

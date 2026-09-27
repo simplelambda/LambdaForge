@@ -150,9 +150,14 @@ class CommandLineInterface:
             return cls._run(arguments)
         if arguments.command == "export":
             catalog = ClusterCatalog.load(arguments.clusters)
-            payload = StudyExportService(catalog).export(arguments.selector, arguments.output)
+            payload = StudyExportService(catalog).export(
+                arguments.selector, arguments.output, profile=arguments.profile
+            )
             human = (
-                f"Exported {payload['name']} to {payload['path']}\nManifest: {payload['manifest']}"
+                f"Exported {payload['name']} to {payload['path']}\n"
+                f"Captured state: {payload.get('captured_state', 'unknown')} "
+                f"({payload.get('export_kind', 'snapshot')})\n"
+                f"Manifest: {payload['manifest']}"
             )
             if payload.get("analysis_report"):
                 human += f"\nAnalysis: {payload['analysis_report']}"

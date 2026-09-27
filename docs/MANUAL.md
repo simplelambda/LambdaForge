@@ -455,13 +455,18 @@ Stop reasons such as `CONVERGED_BALANCED`, `CANDIDATE_BUDGET`, `RUN_BUDGET`, `TI
 `SEARCH_SPACE_EXHAUSTED` and `NO_POSITIVE_VALUE_ACTION` are persisted separately from scientific
 status.
 
-An auto-replicated sweep starts with every cell at `replicate[0]`; it opens ordinal `n+1` only after
-the complete previous block (including configured recovery). Its primary paired comparisons use a
-simultaneous time-uniform Hoeffding confidence sequence with summable error allocation across
-looks and competitors. Therefore automatic stopping is valid under repeated inspection. Secondary
-fixed-sample descriptions are exploratory. A bounded objective is required; registered bounded
-metrics and composite utilities supply it, otherwise declare `objective.range`. Equivalence needs
-an authored `practical_margin`. Sweep HPO pruning and per-cell seed racing are always disabled.
+An auto-replicated sweep starts every cell at `replicate[0]`. Its primary paired differences use a
+simultaneous, time-uniform predictable plug-in empirical-Bernstein confidence sequence
+(`paired-pm-eb-cs-v1`), whose width adapts to observed variance while retaining optional-stopping
+validity. Multiplicity covers only the authored primary family: treatment versus `reference`, or
+the pairwise relations needed to identify a practical top set. The controller may commit exactly
+one next complete block as lookahead and orders its cells by prior duration; that block cannot alter
+the decision until complete. Thus a slow cell does not leave safe GPUs idle, while at most one
+extra block is spent. Point leader, exact descriptive conclusion/stability and formal sequential
+state/coverage are persisted separately. A bounded objective is required; equivalence additionally
+requires an authored `practical_margin`. The default family alpha is `0.05`; the advanced
+`sweep.sequential_alpha` override must be in `(0,1)` and is invalid with fixed `replicates`. Sweep
+HPO pruning and per-cell seed racing stay disabled.
 
 Sequence and parallel groups are the whole composition language:
 
@@ -820,14 +825,15 @@ resources:
   time: 24h
 ```
 
-That CPU/RAM/storage share is based on the hard global concurrency ceiling, not the momentary
-number of active GPU Runs. This avoids promising excess host resources to an early Run that cannot
-later be resized. The outer reservation remains non-oversubscribed and `self.resources` stays a
-stable contract throughout dynamic GPU admission.
+CPU, RAM and scratch use a dispatch-time `HostResourceLease`. The current residents share the
+aggregate Job allocation; admission recomputes commitments before every launch and never exceeds
+the hard global concurrency/host ceiling. CPU is elastic: Torch/BLAS/OpenMP limits and process-tree
+affinity are rebalanced when residents enter or leave, so three actual Runs can use the host instead
+of each receiving `total_cpu / theoretical_max_parallel`. RAM/storage are current-resident
+commitments checked against live process-tree RSS, not cold-start reservations for every possible
+future Run. The persisted lease explains the exact share and provenance used by each dispatch.
 
-Fresh adaptive child processes enforce this CPU share for Torch and native BLAS/OpenMP pools,
-overriding inherited whole-Job thread counts inside the child only. This is a thread-pool cap, not
-CPU affinity or a quota on arbitrary subprocesses created by consumer code. A custom Work's stepped
+A custom Work's stepped
 scalar metrics publish `metric-progress.json`, a bounded per-Attempt progress projection updated
 once per advancing step. Admission reads it without scanning metric history, preserves more precise
 callback phases, and does not interpret a reported epoch as a durable checkpoint or proven memory
@@ -1325,11 +1331,25 @@ Execution result envelopes rather than filesystem guesses about scientific meani
 reports count/mean/min/max for each available scalar metric; `--metric NAME --mode min|max` adds an
 explicit mean-based ranking without guessing metric direction.
 
-Use `lf export SUCCEEDED_WORK --output LOCAL_PARENT` when the evidence must leave its execution
-cluster. This is different from copying the workspace manually: the exporter selects one exact
-succeeded Attempt, includes external finalized artifacts, produces analysis/replay views and writes
-a checksum inventory while excluding shared runtime state. Names that identify several Works fail
-as ambiguous; use the `work_id` shown by `lf overview --json`.
+Use `lf export WORK --output LOCAL_PARENT` when the available evidence must leave its execution
+cluster. This is different from copying the workspace manually: the exporter selects the newest
+exact Attempt, records its current state, includes external finalized artifacts and writes a
+checksum inventory while excluding shared runtime state. Final evidence can include analysis and
+replay; active, cancelled or failed evidence is labelled as a point-in-time snapshot. Names that
+identify several Works fail as ambiguous; use the `work_id` shown by `lf overview --json`.
+
+Remote export first creates a ZIP64/Deflate archive and always removes it after transfer. Local
+transfer and extraction temporaries are allocated below `LOCAL_PARENT`, not system `/tmp`; ensure
+that filesystem can hold the compressed archive plus one extracted package. Safe hard links avoid
+duplicating extracted bytes during atomic assembly. In the Research Console export is a background
+operation: leave the Study workspace freely and follow phase, elapsed time and compressed size in
+the global **BACKGROUND** panel.
+
+`--profile default` is the portable audit profile: exact scientific results/controller decisions
+remain complete, metric trajectories are deterministically endpoint-preserving down-sampled when
+large, and high-frequency resource streams become bounded summaries. `--profile full` retains raw
+metric/resource streams. `manifest.json` lists every transformed or omitted source with its reason,
+original byte count and SHA-256, so compactness cannot be mistaken for missing evidence.
 
 ## 10. Clusters and jobs
 
@@ -1797,21 +1817,25 @@ lf export STUDY_OR_WORK --output ./exports
 
 `lf results report` writes only one HTML view of a locally available Execution. `lf export` is the
 portable evidence operation: it resolves the current project's semantic Work history, selects the
-newest succeeded Attempt and retrieves its bounded evidence from either a local or remote provider.
-The output argument is a local parent directory. A new `NAME--EXECUTION_ID` directory is staged and
-renamed atomically; an existing destination is never merged or overwritten.
+newest Attempt in any state and retrieves its bounded evidence from a local or remote provider.
+The output argument is a local parent directory. Final success uses `NAME--EXECUTION_ID`; all other
+states use a timestamped snapshot name. Directories are staged and renamed atomically and are never
+merged or overwritten. The manifest and command output always expose the captured state.
 
 The package contains `manifest.json` (per-file SHA-256/size inventory), `execution/` (result,
 configuration, per-Run logs/scalars, decisions, checkpoints and retained artifacts), `study/`
 (complete persisted Study/controller telemetry), `control-plane/` (Job lifecycle evidence),
 `published-artifacts/` (explicit finalized outputs outside the Execution), and `reports/`. The
-analysis JSON and recorded resource replay are always attempted. The self-contained HTML is always
-written: `analysis-report` enables its full interactive Plotly dashboard, while the base install
-writes a structured exact-evidence fallback and records that limitation in the manifest. Shared Dataset versions, managed environments, cache and the staged project tree
+analysis JSON and recorded resource replay are attempted when the persisted evidence supports them.
+An early snapshot may contain only submitted configuration and Job lifecycle files. When analysis
+is applicable, `analysis-report` enables its full interactive Plotly dashboard while the base
+install writes a structured exact-evidence fallback. Shared Dataset versions, managed environments, cache and the staged project tree
 are deliberately excluded: their immutable references remain in provenance and blindly copying
 them would make an experiment export both unsafe and unexpectedly enormous. Remote assembly rejects
 links/special files, local extraction rejects traversal/links, temporary provider archives are
-removed on both success and failure paths, and no partial local folder is published.
+removed on both success and failure paths, and no partial local folder is published. Transfer uses
+ZIP64/Deflate; local archive/extraction state lives below the selected output parent rather than
+system `/tmp`, and same-filesystem assembly safely reuses the owned extracted bytes.
 
 The HTML route requires `lambdaforge[analysis-report]`; JSON analysis and the console do not. The
 report embeds its data and Plotly runtime and makes no network request. Run reports provide a

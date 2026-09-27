@@ -159,12 +159,29 @@ def test_replay_loads_versioned_trace_and_reports_calibration(tmp_path: Path) ->
         + "\n",
         encoding="utf-8",
     )
+    (resources / "host-history.jsonl").write_text(
+        json.dumps(
+            {
+                "capacity": {"cpu": 4, "ram_bytes": 1000},
+                "active_runs": [{"trial": 1}],
+                "summary": {
+                    "process_tree_cpu_utilization_percent": 360.0,
+                    "process_tree_rss_bytes": 750,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     payload = ResourceSchedulerReplay.from_execution(tmp_path).replay("ari-v3.1")
     assert payload["events"] == 1
     assert payload["metrics"]["fit_probability_calibration"]["observations"] == 1
     assert payload["metrics"]["false_safe_admission_rate"] == 0.0
     assert payload["metrics"]["peak_prediction_mae_bytes"] == 2 * GIB
+    assert payload["metrics"]["cpu_utilization_fraction"] == 0.9
+    assert payload["metrics"]["cpu_starvation_estimate"] == 1.0
+    assert payload["metrics"]["ram_pressure_fraction"] == 0.75
 
 
 def test_resource_replay_is_exposed_by_the_shared_cli_parser() -> None:

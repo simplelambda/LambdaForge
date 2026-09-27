@@ -274,6 +274,34 @@ def test_empty_gpu_is_filled_before_colocating_on_an_occupied_gpu() -> None:
     assert admitted[0].admission_mode == "BASELINE_ADMISSION"
 
 
+def test_empty_gpu_baseline_ignores_a_conservative_learned_future_envelope() -> None:
+    learned = ResourcePrediction(
+        candidate_key="c1",
+        predicted_peak_bytes=78 * GIB,
+        lower_bytes=10 * GIB,
+        upper_bytes=78 * GIB,
+        known_lower_bound_bytes=10 * GIB,
+        predicted_time_to_envelope_seconds=10.0,
+        predicted_duration_seconds=100.0,
+        compatible_history_count=2,
+        exact_history_count=0,
+        support="parameter-neighbourhood",
+        calibration="provisional",
+        backend="test",
+        samples=(10 * GIB, 78 * GIB),
+    )
+    candidate = CandidateResourceAction("c1", {"trial_index": 1}, 1.0, learned)
+
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (candidate,), (gpu(2, free=60),), max_launches=1
+    )
+
+    assert admitted
+    assert not blocked
+    assert admitted[0].target_gpu == 2
+    assert admitted[0].admission_mode == "BASELINE_ADMISSION"
+
+
 def test_admission_diagnostics_explain_every_allocated_or_revoked_gpu(
     monkeypatch: Any,
 ) -> None:

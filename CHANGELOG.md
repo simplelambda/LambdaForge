@@ -12,6 +12,25 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Study export now captures the newest Attempt in any lifecycle state. Running, cancelled, failed
+  and pre-Execution Studies produce atomic timestamped snapshots whose manifest and console/CLI
+  feedback expose the captured state; only a succeeded finalized Execution is labelled final.
+- Remote Study evidence is now transferred as a compressed ZIP64 archive, and local transfer/
+  extraction temporaries live beside the selected destination instead of size-limited system
+  `/tmp`. Same-filesystem evidence assembly reuses safe hard links to avoid another full byte copy;
+  the Research Console runs export in the background and shows factual phase, elapsed-time and
+  compressed-size progress globally.
+- Added `default` and `full` export profiles. The default keeps exact scientific/decision evidence,
+  deterministic down-sampled curves and resource summaries; the full profile retains raw streams,
+  while manifests account for every transformed source with reason, original bytes and SHA-256.
+- Replaced the range-dominated paired Hoeffding sweep rule with an anytime-valid,
+  variance-adaptive predictable plug-in empirical-Bernstein sequence. Reference families,
+  practical top sets, exact descriptive stability, formal sequential evidence and one-block
+  duration-aware lookahead are now separate, persisted concepts.
+- Added dispatch-time elastic host-resource leases, process-tree CPU/RAM telemetry and affinity
+  rebalancing so current residents use the aggregate allocation without overcommitting the hard
+  host ceiling. Empty granted GPUs retain an unconditional safe baseline-admission path.
+
 - Added deterministic, project-scoped `replicate` and `confirmation` seed streams with persisted
   value/ordinal/role/version provenance, exact `seeds` overrides, `replicates` shorthand and the
   read-only `lf seeds` command. The keyed 32-bit permutation is prefix-stable, collision-free over
@@ -21,8 +40,8 @@ metadata rather than invented release numbers.
   fresh confirmation, scientific stopping and auto execution limits before runtime.
 - Added convergence-controlled candidate generation with a deterministic extensible Sobol prefix,
   registered objective shorthand, explicit high-level search goals, and exact stop reasons.
-- Added automatic sweep replication in complete shared-seed blocks with simultaneous time-uniform
-  paired Hoeffding confidence sequences; fixed `sweep.replicates` remains available.
+- Added automatic sweep replication in complete shared-seed blocks; fixed `sweep.replicates`
+  remains available.
 
 - Added first-class `StudyDesign`, `EvidencePlan` and `EvidenceRequirement` models. Canonical
   `sweep.space` now declares a fixed candidate-by-seed protocol, including conditional finite

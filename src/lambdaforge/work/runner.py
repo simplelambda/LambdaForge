@@ -63,6 +63,7 @@ from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
 from lambdaforge.hpo.BayesianSampler import BayesianSampler
 from lambdaforge.hpo.CandidateGenerator import DeterministicCandidateGenerator
 from lambdaforge.hpo.CurveEvidence import CompletedCurve, audit_pruner, predict_curve
+from lambdaforge.hpo.HostResources import HostResourceLease
 from lambdaforge.hpo.InitialDesign import AnchorState, CoverageState, InitialDesignPlanner
 from lambdaforge.hpo.ObjectiveUtility import (
     ObjectiveUtility,
@@ -85,6 +86,7 @@ from lambdaforge.hpo.SurvivalModel import (
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
 from lambdaforge.reproducibility.SeedProvider import ProjectSeedStream
+from lambdaforge.work.atomic import atomic_write_text
 from lambdaforge.work.cache import WorkCache
 from lambdaforge.work.checkpoints import CheckpointCollection
 from lambdaforge.work.config import RunDefinition, WorkConfig, import_work_class
@@ -116,6 +118,8 @@ _GPU_WAIT_LOG_SECONDS = 30.0
 _GPU_PROBE_FAILURE_LIMIT = 12
 _PRUNER_MIN_CALIBRATION_CANDIDATES = 2
 _PRUNER_AUDIT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_HOST_HISTORY_LIMIT = 2048
+_HOST_HISTORY_COMPACT_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -1024,6 +1028,22 @@ def _execute_fixed_evidence_group(
         replicate_stream = ProjectSeedStream.from_mapping(
             {**raw_seed_source, "role": "replicate"}
         )
+        raw_reference = design.get("reference")
+        reference_trial = (
+            next(
+                (
+                    int(value["trial_index"])
+                    for value in specifications
+                    if all(
+                        value.get("trial_parameters", {}).get(name) == expected
+                        for name, expected in raw_reference.items()
+                    )
+                ),
+                None,
+            )
+            if isinstance(raw_reference, Mapping)
+            else None
+        )
         sequential_analyzer = PairedSweepSequentialAnalyzer(
             mode=mode,
             bounds=bounds,
@@ -1032,6 +1052,10 @@ def _execute_fixed_evidence_group(
                 if isinstance(objective.get("practical_margin"), int | float)
                 and not isinstance(objective.get("practical_margin"), bool)
                 else None
+            ),
+            reference=reference_trial,
+            alpha=float(
+                (design.get("replication_policy") or {}).get("family_alpha", 0.05)
             ),
         )
     telemetry = StudyTelemetry.from_environment()
@@ -1069,17 +1093,101 @@ def _execute_fixed_evidence_group(
         / "hpo-control"
         / "sweep-sequential.json"
     )
+    block_progress_path = sequential_path.with_name("sweep-blocks.json")
     templates = {
         int(value["trial_index"]): dict(value)
         for value in prepared
     }
+    committed_lookahead: int | None = None
+
+    def block_ordinal(value: Mapping[str, Any]) -> int | None:
+        metadata = value.get("seed_metadata")
+        ordinal = metadata.get("ordinal") if isinstance(metadata, Mapping) else None
+        return ordinal if isinstance(ordinal, int) and not isinstance(ordinal, bool) else None
+
+    def make_block(ordinal: int, *, lookahead: bool) -> list[dict[str, Any]]:
+        assert replicate_stream is not None
+        identity = replicate_stream.at(ordinal)
+        durations: dict[int, list[float]] = {}
+        for observed in terminal_results:
+            trial = int((observed.trial or {"index": 0})["index"])
+            durations.setdefault(trial, []).append(max(0.0, observed.duration_seconds))
+        predicted = {
+            trial: statistics.median(values) for trial, values in durations.items() if values
+        }
+        block: list[dict[str, Any]] = []
+        for trial in sorted(templates, key=lambda value: (-predicted.get(value, 0.0), value)):
+            value = dict(templates[trial])
+            value["seed"] = identity.value
+            value["seed_metadata"] = identity.to_dict()
+            value["hpo_phase"] = "sweep"
+            value["sweep_block_ordinal"] = ordinal
+            value["sweep_lookahead"] = lookahead
+            value["predicted_duration_seconds"] = predicted.get(trial)
+            value["evidence_required"] = True
+            value["evidence_requirement"] = _evidence_requirement_record(
+                value, kind="SHARED_SEED", required=True
+            )
+            block.append(value)
+        return block
+
+    def persist_block_progress(
+        queued: Sequence[Mapping[str, Any]], pending: Sequence[Mapping[str, Any]]
+    ) -> None:
+        states: dict[int, dict[str, Any]] = {}
+        for observed in terminal_results:
+            ordinal = block_ordinal({"seed_metadata": observed.seed_metadata})
+            if ordinal is None:
+                continue
+            state = states.setdefault(
+                ordinal, {"completed": 0, "failed": 0, "active": 0, "queued": 0}
+            )
+            if observed.termination_type == "completed":
+                state["completed"] += 1
+            else:
+                state["failed"] += 1
+        for label, collection in (("queued", queued), ("active", pending)):
+            for value in collection:
+                ordinal = block_ordinal(value)
+                if ordinal is not None:
+                    state = states.setdefault(
+                        ordinal, {"completed": 0, "failed": 0, "active": 0, "queued": 0}
+                    )
+                    state[label] += 1
+        complete = [
+            ordinal
+            for ordinal, state in states.items()
+            if state["completed"] == candidate_count and state["failed"] == 0
+        ]
+        atomic_json(
+            block_progress_path,
+            {
+                "block_progress_version": 1,
+                "blocks": [
+                    {
+                        "ordinal": ordinal,
+                        "cells": candidate_count,
+                        **states[ordinal],
+                        "committed": ordinal == committed_lookahead,
+                    }
+                    for ordinal in sorted(states)
+                ],
+                "lookahead": {
+                    "maximum_blocks": 1,
+                    "committed_ordinal": committed_lookahead,
+                },
+                "inference_uses_blocks": (
+                    {"first": min(complete), "last": max(complete)} if complete else None
+                ),
+            },
+        )
 
     def retain_required_queue(
         result: WorkResult,
         queued: Sequence[Mapping[str, Any]],
         pending: Sequence[Mapping[str, Any]],
     ) -> Sequence[dict[str, Any]]:
-        nonlocal sequential_finish_reason
+        nonlocal committed_lookahead, sequential_finish_reason
         terminal_results.append(result)
         if (
             execution.max_time_seconds is None
@@ -1095,14 +1203,16 @@ def _execute_fixed_evidence_group(
                     value,
                     reason="execution time budget exhausted before required evidence ran",
                 )
-        if retained or pending or not automatic_blocks:
+        persist_block_progress(retained, pending)
+        if not automatic_blocks:
             return retained
         assert sequential_analyzer is not None
         assert replicate_stream is not None
         by_candidate: dict[int, dict[int, float]] = {
             trial: {} for trial in templates
         }
-        completed_ordinals: set[int] = set()
+        completed_cells: dict[int, set[int]] = {}
+        observed_ordinals: set[int] = set()
         permanent_failure = False
         for observed in terminal_results:
             public_trial = int((observed.trial or {"index": 0})["index"])
@@ -1110,7 +1220,7 @@ def _execute_fixed_evidence_group(
             ordinal = metadata.get("ordinal") if isinstance(metadata, Mapping) else None
             if not isinstance(ordinal, int) or isinstance(ordinal, bool):
                 continue
-            completed_ordinals.add(ordinal)
+            observed_ordinals.add(ordinal)
             objective_value = _result_objective(observed, metric)
             if (
                 observed.termination_type == "completed"
@@ -1118,6 +1228,7 @@ def _execute_fixed_evidence_group(
                 and observed.seed is not None
             ):
                 by_candidate.setdefault(public_trial, {})[int(observed.seed)] = objective_value
+                completed_cells.setdefault(ordinal, set()).add(public_trial)
             else:
                 permanent_failure = True
         if permanent_failure:
@@ -1125,13 +1236,51 @@ def _execute_fixed_evidence_group(
             atomic_json(
                 sequential_path,
                 {
-                    "policy_version": "paired-hoeffding-cs-v1",
+                    "policy_version": "paired-pm-eb-cs-v1",
                     "stop": True,
                     "conclusion": "INCOMPLETE",
                     "reason": "A shared-seed cell remained failed after configured recovery.",
                 },
             )
             return ()
+        if retained:
+            return retained
+        if pending:
+            # Statistical inference still consumes complete blocks only. Once the current block
+            # has a straggler and every queued cell has launched, one next block may fill otherwise
+            # idle hardware. A committed lookahead is always completed before another is opened.
+            if committed_lookahead is not None:
+                return ()
+            scheduled = {
+                ordinal
+                for value in (*pending, *queued)
+                if (ordinal := block_ordinal(value)) is not None
+            } | observed_ordinals
+            next_ordinal = max(scheduled, default=-1) + 1
+            projected = len(terminal_results) + len(pending) + candidate_count
+            if execution.max_runs is not None and projected > execution.max_runs:
+                return ()
+            committed_lookahead = next_ordinal
+            next_block = make_block(next_ordinal, lookahead=True)
+            if telemetry is not None:
+                telemetry.schedule(next_block)
+                telemetry.controller_decision(
+                    {
+                        "event_version": 2,
+                        "action": "COMMIT_SWEEP_LOOKAHEAD_BLOCK",
+                        "seed_ordinal": next_ordinal,
+                        "reason": (
+                            "one-block lookahead fills capacity while the preceding complete-"
+                            "evidence block waits for stragglers"
+                        ),
+                        "inference_excludes_partial_block": True,
+                    }
+                )
+            persist_block_progress(next_block, pending)
+            return next_block
+        # No cell remains active: a previously speculative block is now complete and may enter
+        # the formal decision. Only now can another block become eligible.
+        committed_lookahead = None
         decision = sequential_analyzer.evaluate(by_candidate)
         atomic_json(sequential_path, decision.to_dict())
         if decision.stop:
@@ -1143,19 +1292,12 @@ def _execute_fixed_evidence_group(
         ):
             sequential_finish_reason = "RUN_BUDGET"
             return ()
+        completed_ordinals = {
+            ordinal for ordinal, cells in completed_cells.items() if len(cells) == candidate_count
+        }
         next_ordinal = max(completed_ordinals, default=-1) + 1
+        next_block = make_block(next_ordinal, lookahead=False)
         identity = replicate_stream.at(next_ordinal)
-        next_block: list[dict[str, Any]] = []
-        for trial in sorted(templates):
-            value = dict(templates[trial])
-            value["seed"] = identity.value
-            value["seed_metadata"] = identity.to_dict()
-            value["hpo_phase"] = "sweep"
-            value["evidence_required"] = True
-            value["evidence_requirement"] = _evidence_requirement_record(
-                value, kind="SHARED_SEED", required=True
-            )
-            next_block.append(value)
         if telemetry is not None:
             telemetry.schedule(next_block)
             telemetry.controller_decision(
@@ -1168,6 +1310,7 @@ def _execute_fixed_evidence_group(
                     "sequential_inference": decision.to_dict(),
                 }
             )
+        persist_block_progress(next_block, ())
         return next_block
 
     outcomes = _execute_adaptive_dispatch(
@@ -2419,12 +2562,15 @@ def _execute_adaptive_group(
             "PREFERRED_REGION",
             "PRACTICALLY_EQUIVALENT",
             "FLAT",
+            "NO_MATERIAL_EFFECT",
             "CONTEXT_DEPENDENT",
-            "NO_CLEAR_PREFERENCE",
         }
         questions_resolved = bool(questions) and all(
             value.get("conclusion_kind") in stable_kinds
-            and float(value.get("confidence", 0.0)) >= policy.conclusion_stability
+            and float(
+                value.get("descriptive_stability", value.get("confidence", 0.0))
+            )
+            >= policy.conclusion_stability
             for value in questions
         )
         best = (
@@ -4434,7 +4580,12 @@ def _execute_cpu_isolated_runs(
                 }
             )
         while queued and len(pending) < parallelism:
-            value = queued.popleft()
+            value = _apply_host_resource_lease(
+                queued.popleft(),
+                resources,
+                active_runs=len(pending) + 1,
+                parallelism=parallelism,
+            )
             value["hpo_dispatched_monotonic"] = time.monotonic()
             pool = ProcessPoolExecutor(
                 max_workers=1,
@@ -4448,6 +4599,9 @@ def _execute_cpu_isolated_runs(
                 executors.remove(pool)
                 raise
             pending[future] = (value, pool)
+        _rebalance_host_cpu_leases(
+            [value for value, _pool in pending.values()], resources, parallelism
+        )
         done, _ = wait(tuple(pending), timeout=0.5, return_when=FIRST_COMPLETED)
         for future in done:
             value, pool = pending.pop(future)
@@ -5222,6 +5376,13 @@ def _execute_gpu_admitted_runs(
             )
             or ()
         )
+        _persist_host_resource_snapshot(
+            resource_root / "host-current.json" if resource_root is not None else None,
+            resources=resources,
+            pending=pending,
+            metadata=resource_metadata,
+            now=now,
+        )
         resource_store.persist_active(live_evidence)
         active_sampling = any(
             value.resource_state in {"STARTING", "RAMPING"}
@@ -5495,6 +5656,12 @@ def _execute_gpu_admitted_runs(
             action = by_candidate[selected_decision.candidate_key]
             value = next(item for item in queued if item is action.specification)
             queued.remove(value)
+            value = _apply_host_resource_lease(
+                value,
+                resources,
+                active_runs=len(pending) + 1,
+                parallelism=parallelism,
+            )
             value["hpo_dispatched_monotonic"] = time.monotonic()
             value["gpu_slot"] = visible_gpus[slot]
             value["gpu_index"] = slot
@@ -5590,6 +5757,10 @@ def _execute_gpu_admitted_runs(
                 flush=True,
             )
             launched = True
+
+        _rebalance_host_cpu_leases(
+            [value for value, _slot, _pool in pending.values()], resources, parallelism
+        )
 
         if queued and not launched and now >= next_wait_log:
             states = ", ".join(
@@ -6051,6 +6222,167 @@ def _descendant_pids(pid: int) -> set[int]:
                 found.add(child)
                 pending.append(child)
     return found
+
+
+def _process_tree_host_snapshot(specification: Mapping[str, Any]) -> dict[str, Any]:
+    """Measure one owned worker process tree without mistaking only its parent for the Run."""
+    raw_identity = specification.get("hpo_worker_identity_path")
+    if raw_identity is None:
+        return {}
+    try:
+        identity = json.loads(Path(str(raw_identity)).read_text(encoding="utf-8"))
+        pid = int(identity["pid"])
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return {}
+    try:
+        import psutil
+
+        parent = psutil.Process(pid)
+        processes = [parent, *parent.children(recursive=True)]
+        rss = 0
+        cpu_seconds = 0.0
+        live = 0
+        for process in processes:
+            try:
+                memory = process.memory_info()
+                cpu = process.cpu_times()
+            except psutil.Error:
+                continue
+            rss += int(memory.rss)
+            cpu_seconds += float(cpu.user + cpu.system)
+            live += 1
+        return {
+            "pid": pid,
+            "child_count": max(0, live - 1),
+            "process_count": live,
+            "rss_bytes": rss,
+            "cpu_seconds": cpu_seconds,
+        }
+    except Exception:
+        return {"pid": pid, "process_count": len(_descendant_pids(pid))}
+
+
+def _persist_host_resource_snapshot(
+    path: Path | None,
+    *,
+    resources: ResourceRequest,
+    pending: Mapping[Any, tuple[dict[str, Any], int, ProcessPoolExecutor]],
+    metadata: dict[Any, dict[str, Any]],
+    now: float,
+) -> None:
+    """Persist one bounded host summary; high-frequency raw samples are intentionally omitted."""
+    if path is None:
+        return
+    runs: list[dict[str, Any]] = []
+    for future, (specification, slot, _pool) in pending.items():
+        snapshot = _process_tree_host_snapshot(specification)
+        details = metadata.setdefault(future, {})
+        previous = details.get("host_sample")
+        utilization: float | None = None
+        if isinstance(previous, Mapping) and isinstance(snapshot.get("cpu_seconds"), int | float):
+            elapsed = now - float(previous.get("at", now))
+            delta = float(snapshot["cpu_seconds"]) - float(previous.get("cpu_seconds", 0.0))
+            if elapsed > 0 and delta >= 0:
+                utilization = 100.0 * delta / elapsed
+        details["host_sample"] = {
+            "at": now,
+            "cpu_seconds": snapshot.get("cpu_seconds", 0.0),
+        }
+        lease = specification.get("host_resource_lease")
+        runs.append(
+            {
+                "trial": specification.get("trial_index"),
+                "seed": specification.get("seed"),
+                "gpu": slot,
+                "cpu_utilization_percent": utilization,
+                "rss_bytes": snapshot.get("rss_bytes"),
+                "child_count": snapshot.get("child_count"),
+                "process_count": snapshot.get("process_count"),
+                "lease": dict(lease) if isinstance(lease, Mapping) else None,
+                "throughput": details.get("throughput"),
+            }
+        )
+    try:
+        import psutil
+
+        host_ram = int(psutil.virtual_memory().total)
+        available_ram = int(psutil.virtual_memory().available)
+    except Exception:
+        host_ram = resources.ram_bytes
+        available_ram = None
+    payload = {
+            "host_telemetry_version": 1,
+            "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+            "capacity": {
+                "cpu": resources.cpu_cores,
+                "ram_bytes": resources.ram_bytes or host_ram,
+                "available_ram_bytes": available_ram,
+                "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
+            },
+            "active_runs": runs,
+            "summary": {
+                "process_tree_rss_bytes": sum(
+                    int(value.get("rss_bytes") or 0) for value in runs
+                ),
+                "process_tree_cpu_utilization_percent": sum(
+                    float(value.get("cpu_utilization_percent") or 0.0) for value in runs
+                ),
+                "child_processes": sum(int(value.get("child_count") or 0) for value in runs),
+            },
+        }
+    atomic_json(path, payload)
+    history = path.with_name("host-history.jsonl")
+    history.parent.mkdir(parents=True, exist_ok=True)
+    with history.open("a", encoding="utf-8", buffering=1) as stream:
+        stream.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    # This is diagnostic/replay evidence rather than an unbounded second result store.  Compact
+    # only after a generous byte threshold so the ordinary sampling path remains append-only.
+    try:
+        if history.stat().st_size > _HOST_HISTORY_COMPACT_BYTES:
+            retained = history.read_text(encoding="utf-8").splitlines()[-_HOST_HISTORY_LIMIT:]
+            atomic_write_text(history, "\n".join(retained) + ("\n" if retained else ""))
+    except OSError:
+        # Losing one optional history compaction must never stop scientific scheduling; the
+        # current atomic snapshot above remains the authoritative live host view.
+        pass
+
+
+def _rebalance_host_cpu_leases(
+    specifications: Sequence[dict[str, Any]], resources: ResourceRequest, parallelism: int
+) -> None:
+    """Keep active Run process trees work-conserving without unbounded oversubscription."""
+    if not specifications:
+        return
+    from lambdaforge.training.orchestration.ProcessGuard import ProcessGuard
+
+    guard = ProcessGuard()
+    cpus = guard.available_cpu_ids()[: resources.cpu_cores]
+    if not cpus:
+        return
+    width = max(1, len(cpus) // len(specifications))
+    for index, specification in enumerate(specifications):
+        start = min(index * width, max(0, len(cpus) - width))
+        assigned = cpus[start : start + width]
+        lease = HostResourceLease.allocate(
+            resources,
+            active_runs=len(specifications),
+            hard_concurrency_ceiling=parallelism,
+        )
+        specification["host_resource_lease"] = {
+            **lease.to_dict(),
+            "cpu_affinity": assigned,
+            "provenance": "live-process-tree-affinity-rebalance",
+        }
+        raw_identity = specification.get("hpo_worker_identity_path")
+        if raw_identity is None:
+            continue
+        try:
+            identity = json.loads(Path(str(raw_identity)).read_text(encoding="utf-8"))
+            pid = int(identity["pid"])
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+        for owned_pid in _descendant_pids(pid):
+            guard.set_cpu_affinity(assigned, pid=owned_pid)
 
 
 def _gpu_process_memory(
@@ -7227,16 +7559,39 @@ def _initialize_gpu_worker(slot: str, identity_path: str, controller_pid: int) -
 
 
 def _adaptive_run_resources(resources: ResourceRequest, parallelism: int) -> ResourceRequest:
-    cpu = max(1, resources.cpu_cores // parallelism)
-    return ResourceRequest(
-        cpu_cores=cpu,
-        ram_bytes=resources.ram_bytes // parallelism,
-        gpu_count=1 if resources.gpu_count else 0,
-        gpu_memory_bytes=resources.gpu_memory_bytes,
-        runtime_seconds=resources.runtime_seconds,
-        storage_bytes=resources.storage_bytes // parallelism,
-        processes=min(cpu, resources.processes),
+    """Return the first dispatch lease, not a permanent theoretical split.
+
+    Kept as a narrow compatibility helper for callers/tests; subsequent dispatches use
+    :class:`HostResourceLease` with the actual resident count.
+    """
+    return HostResourceLease.allocate(
+        resources,
+        active_runs=1,
+        hard_concurrency_ceiling=parallelism,
+    ).resources(resources)
+
+
+def _apply_host_resource_lease(
+    specification: Mapping[str, Any],
+    resources: ResourceRequest,
+    *,
+    active_runs: int,
+    parallelism: int,
+) -> dict[str, Any]:
+    """Attach one dispatch-time host lease to an isolated Run specification."""
+    lease = HostResourceLease.allocate(
+        resources,
+        active_runs=max(1, active_runs),
+        hard_concurrency_ceiling=parallelism,
     )
+    value = dict(specification)
+    raw_definition = value.get("definition")
+    if isinstance(raw_definition, Mapping):
+        definition = dict(raw_definition)
+        definition["resources"] = lease.resources(resources).to_dict()
+        value["definition"] = definition
+    value["host_resource_lease"] = lease.to_dict()
+    return value
 
 
 def _candidate_score(

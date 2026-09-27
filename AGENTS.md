@@ -294,10 +294,11 @@ it remains unknown. Scientific pruning is independent of resource completeness.
 Capacity-triggered frontier refill and completion-triggered refill share the deferred initial-design/
 seed queue and exact deduplication. Generic stepped Work metrics publish bounded
 `metric-progress.json` for admission; never scan scalar history per resource poll or equate scalar
-progress with a durable checkpoint. Fresh adaptive children cap Torch/BLAS/OpenMP to their CPU share,
-not the inherited whole-Job budget; never change native pools in an embedded controller.
-CPU/RAM/storage shares remain based on the hard global concurrency ceiling so dynamic GPU packing
-cannot over-promise host resources. Exact NVML process attribution is preferred; aggregate
+progress with a durable checkpoint. Fresh adaptive children use the dispatch-time
+`HostResourceLease`; rebalance Torch/BLAS/OpenMP limits and process-tree CPU affinity as residents
+change, never native pools in an embedded controller. RAM/storage commitments likewise follow
+actual residents while the hard aggregate host ceiling prevents overcommit. Persist the lease and
+process-tree CPU/RSS evidence. Exact NVML process attribution is preferred; aggregate
 fallback remains censored. OOM constraints belong to the exact packing unless reliable candidate
 resident-plus-allocation evidence establishes an intrinsic bound; never restore global concurrency
 backoff. Compatible exact/censored
@@ -414,13 +415,23 @@ total controller spend and scientific Pareto separate from resource Pareto. All 
 descriptive/predictive, not causal. Live analysis is provisional; terminal analysis is final.
 
 `lf export SELECTOR --output PARENT` and the Research Console **Export Study…** action use one
-domain service to export the newest succeeded Attempt. The destination is an atomic, non-overwriting
-`NAME--EXECUTION_ID` folder with an SHA-256 inventory, exact Execution/Run evidence, full persisted
-Study/controller records, Job lifecycle files, analysis JSON/optional self-contained HTML, recorded
-resource replay, retained checkpoints/weights and explicit finalized published artifacts. Never
+domain service to export the newest Attempt in its current state. A succeeded finalized Execution
+uses an atomic, non-overwriting `NAME--EXECUTION_ID` folder; every other state uses a timestamped
+snapshot folder and records `status`, `export_kind` and `finalized` in its SHA-256 manifest. Include
+only evidence persisted at capture time: exact Execution/Run evidence when available, persisted
+Study/controller records, Job lifecycle files, applicable analysis/replay, retained
+checkpoints/weights and explicit finalized published artifacts. A pre-Execution snapshot contains
+only configuration and control-plane evidence and must never fabricate Runs or conclusions. Never
 copy shared datasets, environments, cache or the staged project tree into this package; preserve
 their provenance references. Reject symlinks, special files and archive traversal, remove temporary
-provider archives on every exit and never publish a partial local export.
+provider archives on every exit and never publish a partial local export. `--profile default`
+keeps complete scientific/decision evidence, deterministic down-sampled metric curves and
+summarized high-frequency resource streams; `--profile full` keeps raw streams. Every transformed
+or omitted source is listed with reason, byte size and SHA-256. Provider transfer uses a compressed
+ZIP64 archive. Put controller transfer/extraction temporaries beside the selected output
+parent rather than in system `/tmp`, reuse bytes only from owned extracted evidence, and publish
+factual export phases through the optional progress callback. The Research Console keeps exports in
+the background and exposes their state outside the initiating workspace without notification spam.
 
 Omitted `seeds` uses the project's versioned collision-free 32-bit `replicate` stream; candidates
 share ordinals and minimum replication defaults to one. Explicit `seeds` is authoritative and
@@ -432,9 +443,16 @@ reason. Per-Run specifications contain only
 their candidate/seed values and a compact definition; never embed or copy the complete pool into
 each specification, because valid large Studies must have linear planner memory.
 An omitted sweep replicate count means sequential complete shared-seed blocks. Primary stopping
-uses `paired-hoeffding-cs-v1` simultaneous time-uniform inference over a bounded objective; no
-pruning or per-cell racing. A missing cell is incomplete, and practical equivalence requires the
-authored margin.
+uses the variance-adaptive `paired-pm-eb-cs-v1` predictable plug-in empirical-Bernstein confidence
+sequence over paired bounded differences. It controls one authored primary family (treatments
+against `sweep.reference`, otherwise the practical top-set pairwise family), supports
+`PREFERRED`/`PRACTICAL_TOP_SET`/reference relations, and keeps a one-complete-block lookahead to
+avoid a statistical GPU barrier without letting partial evidence affect stopping. No pruning or
+per-cell racing is allowed. A missing cell is incomplete, and practical equivalence requires the
+authored margin. The family alpha defaults to `0.05`; only automatic sweeps may override it with
+advanced `sweep.sequential_alpha`, which fixed replicates reject. Persist point-estimate leader,
+exact descriptive conclusion/stability and formal
+sequential evidence as three different quantities; `UNRESOLVED` never means converged.
 Terminal Studies reconcile every queued identity and expose execution `status`, `design_status`,
 `scientific_status` and `finish_reason`. Fixed designs may be complete while scientifically
 unresolved; time/Run exhaustion with required debt is incomplete. Keep observed and

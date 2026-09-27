@@ -57,6 +57,16 @@ Screen {
     height: 1fr;
 }
 
+#background-activity {
+    height: auto;
+    max-height: 5;
+    margin: 0 1;
+    padding: 0 1;
+    color: $text-muted;
+    border-left: solid $accent;
+    overflow: hidden hidden;
+}
+
 #nav-exit {
     dock: bottom;
     color: $error;

@@ -20,6 +20,9 @@ from threading import Lock
 from typing import Any, ClassVar
 
 from lambdaforge.hpo.ParameterSpace import ParameterSpace
+from lambdaforge.hpo.ScientificConclusions import (
+    ScientificConclusion as ExactScientificConclusion,
+)
 
 _INACTIVE = "<inactive>"
 _PARAMETER_STATES = (
@@ -33,24 +36,6 @@ _PARAMETER_STATES = (
     "UNRESOLVED",
 )
 _INTERACTION_STATES = ("MATERIAL_INTERACTION", "WEAK_INTERACTION", "ADDITIVE", "UNRESOLVED")
-
-
-@dataclass(frozen=True, slots=True)
-class ExactScientificConclusion:
-    """One exact qualitative statement and the stability that belongs to it."""
-
-    kind: str
-    values: tuple[Any, ...]
-    token: str
-    confidence: float
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind,
-            "values": [_json_value(value) for value in self.values],
-            "token": self.token,
-            "confidence": self.confidence,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -890,6 +875,7 @@ class ScientificQuestionAnalyzer:
         } if token_distribution else {"token": "UNRESOLVED", "probability": 1.0}
         result["exact_conclusion"] = exact.to_dict()
         result["conclusion_kind"] = exact.kind
+        result["descriptive_stability"] = exact.descriptive_stability
         result["confidence"] = exact.confidence
         result["confidence_label"] = _confidence_label(exact.confidence)
         result["summary"] = cls._parameter_summary(result)
@@ -907,20 +893,29 @@ class ScientificQuestionAnalyzer:
         token = max(distribution, key=lambda value: distribution[value])
         probability = float(distribution[token])
         kind, separator, encoded = token.partition(":")
+        if kind == "WEAK_PREFERENCE":
+            if practical_margin is not None:
+                return ExactScientificConclusion(
+                    "PRACTICALLY_EQUIVALENT",
+                    tuple(levels),
+                    "PRACTICALLY_EQUIVALENT",
+                    probability,
+                )
+            return ExactScientificConclusion("UNRESOLVED", (), "UNRESOLVED", probability)
         # A categorical argmax always exists. It is a resolved preference only when the same
         # exact winner is supported by a majority of plausible evidence realizations.
         if kind in {"PREFERRED", "PREFERRED_REGION", "WEAK_PREFERENCE"} and probability <= 0.5:
             return ExactScientificConclusion(
-                "NO_CLEAR_PREFERENCE",
+                "UNRESOLVED",
                 (),
-                "NO_CLEAR_PREFERENCE",
+                "UNRESOLVED",
                 1.0 - probability,
             )
         if kind == "PRACTICALLY_EQUIVALENT" and practical_margin is None:
             return ExactScientificConclusion(
-                "NO_CLEAR_PREFERENCE",
+                "UNRESOLVED",
                 (),
-                "NO_CLEAR_PREFERENCE",
+                "UNRESOLVED",
                 1.0 - probability,
             )
         labels = encoded.split("|") if separator and encoded else []
@@ -952,6 +947,11 @@ class ScientificQuestionAnalyzer:
         authored_inactive: int = 0,
     ) -> dict[str, Any]:
         dominant = max(probabilities, key=lambda key: probabilities[key])
+        exact_kind = (
+            "UNRESOLVED"
+            if dominant in {"NO_CLEAR_PREFERENCE", "WEAK_PREFERENCE"}
+            else dominant
+        )
         stable_confidence = (
             float(confidence) if confidence is not None else float(probabilities[dominant])
         )
@@ -968,9 +968,9 @@ class ScientificQuestionAnalyzer:
             "kind": "numeric" if numeric else "categorical",
             "conclusion_kind": dominant,
             "exact_conclusion": ExactScientificConclusion(
-                dominant,
+                exact_kind,
                 (),
-                modal_token,
+                "UNRESOLVED" if exact_kind == "UNRESOLVED" else modal_token,
                 stable_confidence,
             ).to_dict(),
             "modal_hypothesis": {
@@ -982,6 +982,7 @@ class ScientificQuestionAnalyzer:
             if dominant == "UNRESOLVED"
             else dominant.replace("_", " ").title(),
             "confidence": stable_confidence,
+            "descriptive_stability": stable_confidence,
             "confidence_label": _confidence_label(stable_confidence),
             "probabilities": dict(probabilities),
             "conclusion_distribution": exact_distribution,

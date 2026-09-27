@@ -759,6 +759,10 @@ class StudyTelemetry:
             controller = self._read(self.root / "controller.json")
             admission = self._read(self.root / "admission.json")
             control_state = self._read(self.root.parent / "hpo-control" / "state.json")
+            sweep_sequential = self._read(
+                self.root.parent / "hpo-control" / "sweep-sequential.json"
+            )
+            sweep_blocks = self._read(self.root.parent / "hpo-control" / "sweep-blocks.json")
             recent_decisions = [
                 value for value in controller.get("recent", ()) if isinstance(value, Mapping)
             ]
@@ -822,6 +826,8 @@ class StudyTelemetry:
                     },
                 },
                 "admission": admission,
+                "sweep_sequential": sweep_sequential or None,
+                "sweep_blocks": sweep_blocks or None,
                 "initial_design": (
                     dict(control_state.get("initial_design", {}))
                     if isinstance(control_state.get("initial_design"), Mapping)

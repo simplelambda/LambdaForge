@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -140,9 +140,15 @@ class ConsoleServices:
         """Export one local persisted Execution through the shared package format."""
         return self.results.export(selector, destination)
 
-    def export_work(self, selector: str, destination: Path) -> dict[str, Any]:
-        """Download and export one successful local or remote Study/Work."""
-        return self.exports.export(selector, destination)
+    def export_work(
+        self,
+        selector: str,
+        destination: Path,
+        *,
+        progress: Callable[[Mapping[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Download and export the newest state of one local or remote Study/Work."""
+        return self.exports.export(selector, destination, progress=progress)
 
     def study_run(
         self, job_id: str, run_key: str, *, tail: int = 2_000, curve_points: int = 200

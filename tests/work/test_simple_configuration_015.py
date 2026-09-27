@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from lambdaforge.cli.CommandLineInterface import CommandLineInterface
 from lambdaforge.hpo.CandidateGenerator import DeterministicCandidateGenerator
 from lambdaforge.hpo.SequentialSweep import PairedSweepSequentialAnalyzer
@@ -97,13 +99,18 @@ def test_auto_sweep_uses_shared_blocks_and_anytime_valid_decision(tmp_path: Path
     definition = WorkConfig.from_mapping(
         {
             "run": "tests.work_cases.AdaptiveScoreWork",
-            "sweep": {"space": {"quality": [0.0, 1.0]}},
+            "sweep": {
+                "space": {"quality": [0.0, 1.0]},
+                "sequential_alpha": 0.025,
+            },
             "objective": "accuracy",
         },
         source=tmp_path / "auto-sweep.yaml",
     ).levels[0].runs[0]
     assert definition.study_design is not None
     assert definition.study_design.replication == "auto-blocks"
+    assert definition.study_design.sequential_alpha == 0.025
+    assert definition.study_design.to_dict()["replication_policy"]["family_alpha"] == 0.025
     assert definition.run_count == 2
     assert {requirement.seed for requirement in definition.study_design.evidence.required} == {
         definition.seeds[0]
@@ -122,7 +129,24 @@ def test_auto_sweep_uses_shared_blocks_and_anytime_valid_decision(tmp_path: Path
             break
     assert decision.stop
     assert decision.conclusion == "PREFERRED"
-    assert decision.policy_version == "paired-hoeffding-cs-v1"
+    assert decision.policy_version == "paired-pm-eb-cs-v1"
+
+
+def test_sequential_alpha_is_rejected_for_a_fixed_sweep(tmp_path: Path) -> None:
+    _project(tmp_path)
+    with pytest.raises(ValueError, match="applies only"):
+        WorkConfig.from_mapping(
+            {
+                "run": "tests.work_cases.AdaptiveScoreWork",
+                "sweep": {
+                    "space": {"quality": [0.0, 1.0]},
+                    "replicates": 3,
+                    "sequential_alpha": 0.025,
+                },
+                "objective": "accuracy",
+            },
+            source=tmp_path / "fixed-alpha.yaml",
+        )
 
 
 def test_candidate_generator_extension_preserves_existing_prefix() -> None:

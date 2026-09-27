@@ -1156,7 +1156,7 @@ def test_gpu_dispatch_requests_a_bounded_alternative_when_frontier_is_blocked(
             peak,
             peak,
             peak,
-            0,
+            peak,
             None,
             1.0,
             4,

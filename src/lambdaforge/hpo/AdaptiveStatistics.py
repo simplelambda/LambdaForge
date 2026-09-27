@@ -112,6 +112,24 @@ class AdaptiveSeedRacer:
             else min(estimates, key=lambda trial: estimates[trial].mean)
         )
         allowed = set(estimates) if eligible is None else set(eligible)
+        if not any(estimate.seed_noise_calibrated for estimate in estimates.values()):
+            # A single within-candidate repeat is enough to calibrate the initial seed-noise
+            # model.  Make that obligation deterministic and scientifically relevant: prefer
+            # the current incumbent when it still has an authored seed available, otherwise the
+            # best eligible candidate.  Returning one calibration option also prevents tiny,
+            # noisy wall-time differences from spending the first repeat on an inferior trial.
+            calibration_candidates = allowed & estimates.keys()
+            if calibration_candidates:
+                calibration_trial = (
+                    incumbent
+                    if incumbent in calibration_candidates
+                    else (
+                        max(calibration_candidates, key=lambda trial: estimates[trial].mean)
+                        if self.mode == "max"
+                        else min(calibration_candidates, key=lambda trial: estimates[trial].mean)
+                    )
+                )
+                allowed = {calibration_trial}
         competitor_probabilities: dict[int, float] = {}
         for trial, estimate in estimates.items():
             competitor_probabilities[trial] = (

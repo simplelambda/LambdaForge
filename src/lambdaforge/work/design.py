@@ -226,6 +226,7 @@ class StudyDesign:
     goal: str = "balanced"
     replication: str = "fixed"
     seed_source: Mapping[str, Any] = field(default_factory=dict)
+    sequential_alpha: float = 0.05
     policy_version: str = "study-design-v2"
 
     def __post_init__(self) -> None:
@@ -235,6 +236,8 @@ class StudyDesign:
             raise ValueError("Study goal must be optimize, balanced or understand.")
         if self.replication not in {"fixed", "adaptive", "auto-blocks"}:
             raise ValueError("Study replication must be fixed, adaptive or auto-blocks.")
+        if not math.isfinite(self.sequential_alpha) or not 0 < self.sequential_alpha < 1:
+            raise ValueError("Sweep sequential alpha must be strictly between zero and one.")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -248,8 +251,11 @@ class StudyDesign:
             "replication_policy": (
                 {
                     "unit": "complete-shared-seed-block",
-                    "inference": "paired-hoeffding-confidence-sequence",
-                    "policy_version": "paired-hoeffding-cs-v1",
+                    "inference": "paired-predictable-plugin-empirical-bernstein-cs",
+                    "policy_version": "paired-pm-eb-cs-v1",
+                    "family_alpha": self.sequential_alpha,
+                    "simultaneous_coverage_level": 1.0 - self.sequential_alpha,
+                    "lookahead_blocks": 1,
                     "hpo_pruning": False,
                 }
                 if self.replication == "auto-blocks"
@@ -289,10 +295,13 @@ class StudyConvergenceState:
             "goal": self.goal,
             "converged": self.converged,
             "optimization_stable": self.optimization_stable,
+            "optimization_converged": self.optimization_stable,
             "contenders_stable": self.contenders_stable,
             "questions_resolved": self.questions_resolved,
+            "understanding_converged": self.questions_resolved,
             "useful_action_available": self.useful_action_available,
             "confirmation_complete": self.confirmation_complete,
+            "confirmation_converged": self.confirmation_complete,
             "evidence_events": self.evidence_events,
         }
 

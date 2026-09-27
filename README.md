@@ -434,7 +434,13 @@ objective: val_auprc
 resources: {gpu: 3, time: 72h}
 ```
 
-Use `sweep.replicates: 10` for exactly ten shared blocks. Advanced caps and overrides live under
+Automatic replication uses a variance-adaptive, anytime-valid paired empirical-Bernstein confidence
+sequence. It resolves an authored-reference relation or a practical top set, not necessarily one
+winner, and separates the point leader, descriptive conclusion stability and formal sequential
+coverage. One complete lookahead block may run while the prior block is assessed; partial blocks
+never influence stopping. The family error is 5% by default; advanced protocols may set
+`sweep.sequential_alpha` explicitly. Use `sweep.replicates: 10` for exactly ten shared blocks
+(which therefore has no sequential alpha). Advanced caps and overrides live under
 `search.budget`, `search.replication`, `search.pruning`, `search.stop` and top-level `execution`.
 `search.goal` is `optimize`, `balanced` (default), or `understand`; it changes how the same planner
 values optimization versus unresolved supported questions. A hard budget is a safety ceiling, not
@@ -748,10 +754,10 @@ alternative from the same scientific design policy without waiting for a termina
 action identities stop requests as soon as that policy returns no new alternative; it never
 generates random candidates until one happens to fit.
 
-CPU, RAM and storage retain a conservative stable per-Run share derived from the hard global
-concurrency ceiling. They are not temporarily over-promised to the first cold-start Runs, because
-those Runs cannot later be resized safely as packing grows. Unused host capacity remains available
-to the operating system, while `self.resources` consistently reports the share a Run may rely on.
+CPU, RAM and storage use a dispatch-time host lease. Current residents share the aggregate Job
+allocation; native thread limits and process-tree affinity are rebalanced when concurrency changes,
+while live tree RSS and the hard host ceiling prevent RAM overcommit. This removes the artificial
+`total / theoretical maximum` starvation without promising capacity the outer Job does not own.
 
 LambdaForge probes every granted GPU, reacts to external occupancy, staggers same-device launches
 and updates active future envelopes from bounded trajectories for the full Run, including periods
@@ -1036,7 +1042,7 @@ lf jobs list                 # advanced scheduler/process view
 lf jobs clear                # preview terminal-history cleanup
 lf jobs clear --apply
 lf results list
-lf export SUCCEEDED_STUDY --output ./exports
+lf export STUDY --output ./exports
 lf datasets list
 lf clean                     # preview only
 lf clean --apply
@@ -1122,22 +1128,34 @@ python -m pip install "lambdaforge[analysis-report]==0.15.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json
-lf export STUDY_OR_WORK --output ./exports
+lf export STUDY_OR_WORK --output ./exports                 # compact auditable default
+lf export STUDY_OR_WORK --output ./exports --profile full  # raw high-frequency telemetry
 ```
 
 `lf export` resolves one unambiguous semantic Work in the current project and downloads its newest
-successful Attempt, whether it ran locally or on a configured cluster. `--output` names a local
-parent directory; LambdaForge creates `NAME--EXECUTION_ID/` atomically and refuses to overwrite an
-earlier export. The package contains the immutable Execution envelope, submitted YAML, Run logs and
-metrics, complete Study/controller evidence, HPO analysis JSON, recorded resource replay, retained
-checkpoints/weights and finalized published artifacts. It always contains the self-contained
-`reports/study-analysis.html`; `lambdaforge[analysis-report]` enables the full interactive Plotly
-dashboard, while the base install emits a structured HTML/JSON fallback and records a warning.
+Attempt, whether it is preparing, running, cancelled, failed or succeeded locally or on a cluster.
+`--output` names a local parent directory. A finalized success creates
+`NAME--EXECUTION_ID/`; every other state creates a non-overwriting timestamped snapshot. Both the
+command result and `manifest.json` report the captured state and whether the package is final. The
+package contains only evidence persisted at that instant: submitted YAML, available Execution/Run
+logs and metrics, Study/controller and Job records, checkpoints and finalized published artifacts.
+Finalized evidence also attempts HPO analysis and recorded resource replay; an early snapshot may
+contain only configuration and lifecycle records and says so instead of inventing missing evidence.
+When analysis is applicable, `lambdaforge[analysis-report]` enables the full interactive Plotly
+dashboard while the base install emits a structured HTML/JSON fallback and records a warning.
 `manifest.json` lists the
 SHA-256 and byte size of every exported file. Shared datasets, environments, reconstructible cache
 and the staged source bundle remain referenced by provenance instead of being duplicated. The
 Research Console exposes the same operation as **Export Study…** and opens a local directory
-browser; it calls this domain service rather than a shell command.
+browser; it calls this domain service rather than a shell command. Remote evidence travels in a
+compressed ZIP64 archive. Download and extraction temporaries are created beside the selected
+destination—not in a potentially small `/tmp`—and safe hard links avoid a second full local copy.
+Export continues in the background: the Study status line and the console's **BACKGROUND** panel
+show its real phase, elapsed time and compressed size, so the rest of `lf` remains usable.
+The default profile preserves exact scientific and decision evidence, deterministic down-sampled
+metric trajectories and summarized resource telemetry. `--profile full` also keeps raw
+high-frequency streams. The manifest records each transformed/omitted source, reason, byte size and
+SHA-256; neither profile changes or deletes the original Study.
 
 Resource replay reads the Study's versioned scheduler trace, never terminal prose. It is factual
 until the selected compatibility policy first disagrees; every later metric is explicitly marked

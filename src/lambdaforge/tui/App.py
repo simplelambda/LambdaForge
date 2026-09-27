@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import time
 import webbrowser
 from collections.abc import Iterable, Mapping
 from functools import partial
@@ -1042,6 +1043,10 @@ class LambdaForgeApp(App[None]):
     def __init__(self, services: ConsoleServices | None = None) -> None:
         super().__init__()
         self.services = services or ConsoleServices()
+        self._background_tasks: dict[str, tuple[str, float]] = {}
+        self._background_last_message = ""
+        self._background_label: Label | None = None
+        self._background_status: Static | None = None
         project = getattr(getattr(self.services, "catalog", None), "project", None)
         if project is not None:
             self.sub_title = f"Project: {project.project_id}"
@@ -1069,6 +1074,8 @@ class LambdaForgeApp(App[None]):
                         ("Results", "results"),
                     ):
                         yield Button(label, id=f"nav-{target}", classes="nav-button", flat=True)
+                yield Label("BACKGROUND", id="background-label", classes="sidebar-section-label")
+                yield Static("", id="background-activity")
                 yield Static("", classes="sidebar-spacer")
                 yield Label("SESSION", classes="sidebar-section-label")
                 yield Button(
@@ -1100,7 +1107,54 @@ class LambdaForgeApp(App[None]):
             self.show_screen(event.button.id.removeprefix("nav-"))
 
     def on_mount(self) -> None:
+        self._background_label = self.query_one("#background-label", Label)
+        self._background_status = self.query_one("#background-activity", Static)
+        self._background_label.display = False
+        self._background_status.display = False
+        self.set_interval(1.0, self._render_background_activity)
         self.show_screen("overview")
+
+    def update_background_activity(
+        self, task_id: str, message: str, *, terminal: bool = False
+    ) -> None:
+        """Keep long operations visible after the initiating workspace is closed."""
+        if terminal:
+            self._background_tasks.pop(task_id, None)
+            self._background_last_message = message
+        else:
+            started = self._background_tasks.get(task_id, ("", time.monotonic()))[1]
+            self._background_tasks[task_id] = (message, started)
+        self._render_background_activity()
+
+    def _render_background_activity(self) -> None:
+        """Refresh elapsed liveness even while a transfer emits no new phase event."""
+        # App.query_one() is scoped to the currently pushed Screen.  Keep references to the root
+        # sidebar widgets so the timer remains harmless while a workspace/modal is on top.
+        label = self._background_label
+        status = self._background_status
+        if label is None or status is None:
+            return
+        if not self._background_tasks and not self._background_last_message:
+            label.display = False
+            status.display = False
+            return
+        label.display = True
+        status.display = True
+        if self._background_tasks:
+            latest, started = next(reversed(self._background_tasks.values()))
+            elapsed = max(time.monotonic() - started, 0.0)
+            prefix = (
+                f"{len(self._background_tasks)} tasks · "
+                if len(self._background_tasks) > 1
+                else ""
+            )
+            status.update(f"{prefix}{latest} · active {elapsed:.0f}s")
+        else:
+            status.update(self._background_last_message)
+
+    def background_task_active(self, task_id: str) -> bool:
+        """Prevent duplicate activation while a long operation remains in flight."""
+        return task_id in self._background_tasks
 
     def on_resize(self, event: Resize) -> None:
         self.screen.set_class(event.size.width < 90, "narrow")

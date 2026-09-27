@@ -124,9 +124,22 @@ class FakeServices:
         self.calls.append(("export_result", (selector, destination)))
         return {"path": str(destination / f"{selector}-export")}
 
-    def export_work(self, selector, destination: Path):
+    def export_work(self, selector, destination: Path, *, progress=None):
         self.calls.append(("export_work", (selector, destination)))
-        return {"path": str(destination / f"{selector}-export")}
+        if progress is not None:
+            progress(
+                {
+                    "phase": "complete",
+                    "message": "Export complete.",
+                    "elapsed_seconds": 0.1,
+                    "terminal": True,
+                }
+            )
+        return {
+            "path": str(destination / f"{selector}-export"),
+            "captured_state": "succeeded",
+            "export_kind": "final",
+        }
 
     def validate_work(self, config):
         self.calls.append(("validate_work", config))
@@ -2237,14 +2250,15 @@ def test_result_export_uses_directory_browser_and_shared_service(tmp_path: Path)
     asyncio.run(exercise())
 
 
-def test_succeeded_study_exports_from_its_workspace(tmp_path: Path) -> None:
+@pytest.mark.parametrize("state", ("succeeded", "running", "cancelled"))
+def test_study_exports_from_its_workspace_in_any_state(tmp_path: Path, state: str) -> None:
     services = FakeServices()
     work = {
         "work_id": "work-study-export",
         "name": "wisdom-v2",
         "primary_job_id": "job-study-export",
         "cluster": "gpu12",
-        "state": "succeeded",
+        "state": state,
         "study_expected": True,
         "study": {
             "study_telemetry_version": 1,
@@ -2271,6 +2285,9 @@ def test_succeeded_study_exports_from_its_workspace(tmp_path: Path) -> None:
             await pilot.click("#export-directory-confirm")
             await pilot.pause(0.15)
             assert ("export_work", ("work-study-export", tmp_path.resolve())) in services.calls
+            background = app.query_one("#background-activity")
+            assert background.display is True
+            assert "Export complete" in str(background.render())
 
     asyncio.run(exercise())
 

@@ -195,10 +195,11 @@ próximo evento; rollback es por residente, el coste de checkpoint se aprende y 
 confirmación durable. No inventes duración de un segundo ni uses el score bruto: consume rango,
 valor normalizado, incertidumbre y coste de `ScientificActionValue`. Persiste evaluaciones cambiadas
 y WHY-WAIT sin spam. La estimación del próximo evento conserva incertidumbre de cadencia si hay
-intervalos repetidos; en otro caso sigue desconocida. El pruning científico no determina completitud de recursos. Las partes de
-CPU/RAM/almacenamiento se basan en el máximo global duro para no sobreprometer recursos host.
-Cada hijo adaptativo limita Torch/BLAS/OpenMP a su cuota CPU, no al presupuesto heredado del Job;
-nunca modifica los pools del controlador embebido. La reposición por capacidad y por finalización
+intervalos repetidos; en otro caso sigue desconocida. El pruning científico no determina completitud
+de recursos. Cada hijo usa su `HostResourceLease` de dispatch: al cambiar residentes rebalancea
+límites Torch/BLAS/OpenMP y affinity CPU del árbol de procesos, nunca pools del controlador
+embebido. RAM/almacenamiento siguen residentes reales y el techo agregado duro impide overcommit;
+persiste lease y evidencia CPU/RSS process-tree. La reposición por capacidad y por finalización
 comparte la cola científica inicial/semillas y deduplicación exacta. Las métricas Work con paso
 publican `metric-progress.json` acotado; no recorrer su historial en cada sondeo de recursos ni
 confundir progreso escalar con checkpoint durable.
@@ -355,13 +356,21 @@ de equivalencia. Separa coste intrínseco por Run de gasto total del controlador
 de Pareto de recursos. Todo sigue siendo predictivo/descriptivo, no causal.
 
 `lf export SELECTOR --output PADRE` y **Export Study…** en la Consola usan un único servicio de
-dominio para exportar el Attempt exitoso más reciente. El destino es una carpeta atómica que no
-sobrescribe `NOMBRE--EXECUTION_ID`, con inventario SHA-256, evidencia exacta de Execution/Runs,
-registros completos del Study/controlador, ciclo de vida del Job, análisis JSON/HTML autocontenido
-opcional, replay de recursos, checkpoints/pesos retenidos y artefactos publicados finalizados. No
+dominio para exportar el Attempt más reciente en su estado actual. Una Execution exitosa final usa
+`NOMBRE--EXECUTION_ID`; cualquier otro estado crea un snapshot atómico con timestamp y registra
+`status`, `export_kind` y `finalized` en el manifest SHA-256. Incluye solo evidencia persistida al
+capturar: Execution/Runs cuando existen, registros del Study/controlador y Job, análisis/replay
+aplicable, checkpoints/pesos y artefactos publicados finalizados. Antes de existir una Execution,
+el snapshot solo contiene configuración y control plane, sin inventar Runs ni conclusiones. No
 copies datasets compartidos, entornos, caché ni el árbol staged del proyecto: conserva sus
 referencias de provenance. Rechaza symlinks, ficheros especiales y traversal del archive, elimina
-siempre temporales del proveedor y nunca publiques una exportación local parcial.
+siempre temporales del proveedor y nunca publiques una exportación local parcial. `--profile
+default` conserva evidencia científica/decisiones completas, curvas métricas reducidas de forma
+determinista y telemetría de recursos de alta frecuencia resumida; `--profile full` conserva los
+streams crudos. Cada fuente transformada u omitida queda en el manifest con motivo, bytes y
+SHA-256. La transferencia usa ZIP64 comprimido; temporales/extracción del controlador van junto al destino, no a `/tmp`, y
+solo se reutilizan bytes de evidencia temporal propia. El callback publica fases reales. La Consola
+mantiene el export en background y muestra su estado fuera del workspace inicial sin spam.
 
 Sin `seeds` se usa el stream `replicate` versionado del proyecto; candidatos comparten ordinal y el
 mínimo por defecto es uno. `seeds` es finito/autoritativo y `replicates` elige un prefijo. La
@@ -370,9 +379,17 @@ científica versionada decide; cobertura escasa o confianza baja no equivalen a 
 racha legacy requiere override explícito y FINISH persiste el motivo exacto. Cada especificación Run
 contiene únicamente sus valores candidato/seed y una definición compacta; nunca copies el pool
 completo en cada una, porque un Study grande válido debe usar memoria lineal.
-Un sweep sin réplicas explícitas abre bloques completos compartidos y usa
-`paired-hoeffding-cs-v1`; no hay pruning/carrera por celda, un bloque ausente queda incompleto y la
-equivalencia práctica exige margen authored.
+Un sweep sin réplicas explícitas abre bloques completos compartidos y usa la secuencia de confianza
+empirical-Bernstein plug-in predecible y adaptativa a varianza `paired-pm-eb-cs-v1` sobre diferencias
+pareadas acotadas. Controla una familia primaria authored (tratamientos frente a
+`sweep.reference`, o la familia pairwise necesaria para el top set), expresa preferencias,
+`PRACTICAL_TOP_SET` y relaciones frente a referencia, y permite un solo bloque completo de
+lookahead para no crear una barrera GPU sin usar evidencia parcial al parar. No hay pruning/carrera
+por celda; una celda ausente deja el bloque incompleto y la equivalencia exige margen. El alpha de
+familia predeterminado es `0.05`; solo el sweep automático permite el ajuste avanzado
+`sweep.sequential_alpha`, rechazado con réplicas fijas. Persiste por
+separado líder puntual, conclusión/estabilidad descriptiva exacta y evidencia secuencial formal;
+`UNRESOLVED` nunca equivale a convergencia.
 Los Studies terminales reconcilian toda identidad en cola y exponen `status`, `design_status`,
 `scientific_status` y `finish_reason`. Un diseño fijo puede estar completo y científicamente no
 resuelto; agotar tiempo/Runs con deuda obligatoria implica incompleto. Distingue candidatos

@@ -403,13 +403,18 @@ presupuestos explícitos siguen siendo techos y agotarlos no se etiqueta como co
 persisten motivos como `CONVERGED_BALANCED`, `CANDIDATE_BUDGET`, `RUN_BUDGET`, `TIME_BUDGET`,
 `SEARCH_SPACE_EXHAUSTED` y `NO_POSITIVE_VALUE_ACTION`, separados del estado científico.
 
-Un sweep auto empieza con todas sus celdas en `replicate[0]` y solo abre el ordinal siguiente tras
-completar el bloque anterior (incluidos reintentos). Sus comparaciones primarias usan una secuencia
-de confianza Hoeffding pareada, simultánea y uniforme en el tiempo con error repartido entre looks
-y competidores; la parada sigue siendo válida al inspeccionar repetidamente. Los análisis
-secundarios de muestra fija son exploratorios. Se exige objetivo acotado; las métricas estándar y
-utilidades compuestas lo aportan o se declara `objective.range`. La equivalencia requiere
-`practical_margin`. En sweep no existe pruning HPO ni carrera por celda.
+Un sweep auto empieza todas sus celdas en `replicate[0]`. Sus diferencias pareadas usan la secuencia
+de confianza empirical-Bernstein plug-in predecible, simultánea, uniforme en el tiempo y adaptativa
+a varianza `paired-pm-eb-cs-v1`, manteniendo validez con parada opcional. La multiplicidad cubre solo
+la familia primaria authored: tratamientos frente a `reference`, o relaciones pairwise necesarias
+para identificar un top set práctico. El controlador puede comprometer exactamente un bloque
+completo siguiente como lookahead y ordena sus celdas por duración previa; no usa ese bloque para
+decidir hasta completarlo. Así una celda lenta no deja GPUs seguras ociosas y se gasta como máximo
+un bloque extra. Se persisten por separado líder puntual, conclusión/estabilidad descriptiva exacta
+y estado/cobertura secuencial formal. Se exige objetivo acotado y la equivalencia requiere
+`practical_margin`. El alpha de familia predeterminado es `0.05`; el ajuste avanzado
+`sweep.sequential_alpha` debe estar en `(0,1)` y es inválido con `replicates` fijo. En sweep no
+existe pruning HPO ni carrera por celda.
 
 ```yaml
 name: comparacion
@@ -703,9 +708,13 @@ resources:
   time: 24h
 ```
 
-Los procesos hijos adaptativos limitan Torch y los pools BLAS/OpenMP a su parte de CPU, sustituyendo
-solo dentro del hijo los límites heredados del Job completo. Es un límite de hilos, no afinidad CPU
-ni una cuota sobre subprocesos arbitrarios del consumidor. Las métricas con `step` de un Work
+CPU, RAM y scratch usan un `HostResourceLease` calculado al despachar. Los residentes actuales se
+reparten la asignación agregada del Job; cada admisión recalcula compromisos sin superar el techo
+global/host duro. CPU es elástico: límites Torch/BLAS/OpenMP y affinity del árbol de procesos se
+rebalancean cuando entran o salen residentes, evitando dar a tres Runs reales
+`total_cpu / theoretical_max_parallel`. RAM/almacenamiento son compromisos para residentes actuales
+contrastados con RSS vivo del árbol, no reservas cold-start para toda Run futura posible. Cada
+dispatch persiste el lease exacto y su provenance. Las métricas con `step` de un Work
 personalizado publican `metric-progress.json`: una proyección pequeña por Attempt, actualizada una
 vez por paso creciente. La admisión la lee sin recorrer el historial y conserva fases más precisas
 de los callbacks. Un epoch reportado no demuestra estabilidad de memoria ni un checkpoint durable;
@@ -716,11 +725,6 @@ Las obligaciones iniciales conservan prioridad y las semillas iniciales útiles 
 sin esperar otra finalización. Se mantienen identidades exactas candidato/semilla/fidelidad,
 presupuestos de Runs/tiempo y controles de recursos/rendimiento. Esto no convierte una búsqueda
 adaptativa en un barrido exhaustivo.
-
-La parte de CPU/RAM/almacenamiento se calcula con el máximo global duro de concurrencia, no con el
-número momentáneo de Runs GPU activas. Así no se prometen recursos host sobrantes a una Run inicial
-que después no podría redimensionarse. La reserva exterior nunca se sobreasigna y el contrato de
-`self.resources` permanece estable durante toda la admisión GPU dinámica.
 
 `auto` elimina topes artificiales globales/por dispositivo; ARI deriva un techo finito de acciones,
 presupuesto de candidatos/Runs, GPUs asignadas, CPU host y reglas del sitio. Un entero conserva un
@@ -1150,11 +1154,25 @@ Las rutas físicas son evidencia operacional y nunca sustituyen la identidad ló
 `lf results list/show/compare` lee manifests, no infiere semántica mediante globs. La comparación
 calcula count/media/min/max; una clasificación exige `--metric` y dirección explícita.
 
-Usa `lf export WORK_EXITOSO --output PADRE_LOCAL` cuando la evidencia deba salir del clúster de
-ejecución. No equivale a copiar manualmente el workspace: selecciona un Attempt exitoso exacto,
-incluye artefactos finalizados externos, crea vistas de análisis/replay y un inventario de
-checksums, excluyendo estado de runtime compartido. Si un nombre identifica varios Works falla como
-ambiguo; usa el `work_id` que muestra `lf overview --json`.
+Usa `lf export WORK --output PADRE_LOCAL` cuando la evidencia disponible deba salir del clúster.
+No equivale a copiar manualmente el workspace: selecciona el Attempt exacto más reciente, registra
+su estado actual, incluye artefactos finalizados externos y crea un inventario de checksums sin
+estado de runtime compartido. La evidencia final puede incluir análisis/replay; la activa,
+cancelada o fallida queda identificada como snapshot. Si un nombre identifica varios Works falla
+como ambiguo; usa el `work_id` que muestra `lf overview --json`.
+
+El export remoto crea primero un ZIP64/Deflate y lo elimina siempre tras transferirlo. Descarga y
+extracción local se alojan bajo `PADRE_LOCAL`, no en `/tmp`; ese filesystem debe admitir el ZIP y
+un paquete extraído. Hard links seguros evitan duplicar otra vez esos bytes durante el ensamblado
+atómico. En la Consola es una operación background: puedes abandonar el Study y seguir fase,
+tiempo y tamaño comprimido en el panel global **BACKGROUND**.
+
+`--profile default` es el perfil portable de auditoría: resultados científicos y decisiones del
+controlador siguen completos, las trayectorias métricas grandes se reducen de forma determinista
+conservando extremos y la telemetría de recursos de alta frecuencia se resume. `--profile full`
+mantiene los streams métricos/de recursos crudos. `manifest.json` enumera cada fuente transformada
+u omitida con motivo, bytes originales y SHA-256, evitando confundir compacidad con evidencia
+desconocida.
 
 ## 10. Clústeres y Jobs
 
@@ -1551,22 +1569,25 @@ lf export ESTUDIO_O_WORK --output ./exportaciones
 
 `lf results report` escribe únicamente una vista HTML de una Execution local. `lf export` es la
 operación de evidencia portable: resuelve el historial semántico del Work en el proyecto actual,
-elige el Attempt exitoso más reciente y recupera su evidencia acotada desde proveedor local o
-remoto. El argumento de salida es una carpeta padre local. Se prepara y renombra atómicamente un
-nuevo directorio `NOMBRE--EXECUTION_ID`; nunca se mezcla ni sobrescribe uno existente.
+elige el Attempt más reciente en cualquier estado y recupera su evidencia acotada desde proveedor
+local o remoto. El éxito final usa `NOMBRE--EXECUTION_ID`; el resto usa un nombre de snapshot con
+timestamp. Siempre se prepara y renombra atómicamente, sin mezclar ni sobrescribir, y manifest y
+comando muestran el estado capturado.
 
 El paquete contiene `manifest.json` (inventario SHA-256/bytes por fichero), `execution/` (resultado,
 configuración, logs/scalars por Run, decisiones, checkpoints y artefactos retenidos), `study/`
 (telemetría completa persistida del Study/controlador), `control-plane/` (ciclo de vida del Job),
 `published-artifacts/` (outputs finalizados explícitos externos a la Execution) y `reports/`. Se
-intentan siempre el análisis JSON y replay de recursos. El HTML autocontenido se escribe siempre:
-`analysis-report` activa el dashboard Plotly completo y la instalación base genera una alternativa
-estructurada con evidencia exacta, registrando la limitación en el manifest. Se
+intentan análisis JSON y replay cuando la evidencia persistida lo permite. Un snapshot temprano
+puede contener solo configuración enviada y ciclo de vida del Job. Cuando aplica el análisis,
+`analysis-report` activa el dashboard Plotly y la instalación base genera una alternativa
+estructurada con evidencia exacta. Se
 excluyen Dataset compartidos, entornos gestionados, caché y árbol staged del proyecto: sus
 referencias inmutables siguen en provenance y copiarlos a ciegas sería inseguro y potencialmente
 enorme. El empaquetado remoto rechaza enlaces/ficheros especiales, la extracción local rechaza
-traversal/enlaces, el tar temporal se borra incluso ante fallo y una carpeta parcial nunca se
-publica.
+traversal/enlaces, el ZIP temporal se borra incluso ante fallo y una carpeta parcial nunca se
+publica. Archivo y extracción local viven bajo el destino elegido, no en `/tmp`, y el ensamblado
+reutiliza de forma segura los bytes temporales propios cuando comparten filesystem.
 
 HTML requiere `lambdaforge[analysis-report]`; JSON y Consola no. El informe incluye datos y runtime
 Plotly y no usa red. El informe de Run aporta catálogo de métricas buscable y plegable, vistas de

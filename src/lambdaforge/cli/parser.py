@@ -86,6 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Local parent directory in which to create NAME--EXECUTION_ID.",
     )
+    export_study.add_argument(
+        "--profile",
+        choices=("default", "full"),
+        default="default",
+        help=(
+            "default keeps complete scientific/decision evidence with summarized telemetry; "
+            "full also includes duplicate high-frequency controller streams"
+        ),
+    )
     _cluster_selector(export_study)
     export_study.add_argument("--json", action="store_true")
 

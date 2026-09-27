@@ -652,9 +652,14 @@ def _run_definition(
     )
     design: StudyDesign | None
     if raw_sweep is not None:
-        sweep_space, sweep_reference = _sweep(raw_sweep)
+        sweep_space, sweep_reference, sweep_alpha = _sweep(raw_sweep)
         variants = _sweep_variants(sweep_space)
         _validate_sweep_reference(sweep_reference, variants)
+        if sweep_alpha is not None and not automatic_sweep:
+            raise ValueError(
+                "sweep.sequential_alpha applies only when replicates is auto/omitted; fixed "
+                "replication has no sequential stopping decision."
+            )
         if execution.max_runs is not None and execution.max_runs < len(variants) * len(seeds):
             raise ValueError(
                 "The fixed sweep requires "
@@ -669,6 +674,7 @@ def _run_definition(
             EvidencePlan.fixed(candidates=len(variants), seeds=seeds),
             replication="auto-blocks" if automatic_sweep else "fixed",
             seed_source=seed_source,
+            sequential_alpha=sweep_alpha if sweep_alpha is not None else 0.05,
         )
     elif normalized_search is not None and policy is None:
         exhaustive_space = _search_space(normalized_search)
@@ -988,10 +994,10 @@ def _search_space(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _sweep(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _sweep(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None, float | None]:
     if not isinstance(value, Mapping):
         raise TypeError("sweep must be a mapping containing space.")
-    unknown = set(value) - {"space", "reference", "replicates"}
+    unknown = set(value) - {"space", "reference", "replicates", "sequential_alpha"}
     if unknown:
         forbidden = sorted(unknown)
         raise ValueError(
@@ -1011,7 +1017,15 @@ def _sweep(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
         if isinstance(raw_reference, Mapping)
         else None
     )
-    return space, reference
+    raw_alpha = value.get("sequential_alpha")
+    if raw_alpha is not None and (
+        isinstance(raw_alpha, bool)
+        or not isinstance(raw_alpha, int | float)
+        or not math.isfinite(float(raw_alpha))
+        or not 0 < float(raw_alpha) < 1
+    ):
+        raise ValueError("sweep.sequential_alpha must be strictly between zero and one.")
+    return space, reference, float(raw_alpha) if raw_alpha is not None else None
 
 
 def _sweep_variants(space: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:

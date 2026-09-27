@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import html
 import json
@@ -10,7 +11,7 @@ import re
 import shutil
 import tempfile
 import unicodedata
-from collections.abc import Mapping, MutableSequence
+from collections.abc import Mapping, MutableSequence, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import fmean, stdev
@@ -373,25 +374,34 @@ class ResultStore:
         *,
         supplementary: Mapping[str, str | Path] | None = None,
         copy_published: bool = True,
+        captured_status: str | None = None,
+        link_evidence: bool = False,
+        profile: str = "full",
+        omissions: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
-        """Create one atomic, portable archive directory for a successful Execution.
+        """Create one atomic portable package for a final Execution or live snapshot.
 
         ``destination`` is a parent directory.  LambdaForge creates a uniquely named
         child and never overwrites an earlier export.  Supplementary roots are used by
         the control plane for bounded Job/Study evidence downloaded from a provider.
         """
-        selected = self.select(selector)
+        if profile not in {"default", "full"}:
+            raise ValueError("Export profile must be default or full.")
+        try:
+            selected = self.select(selector)
+        except KeyError:
+            selected = self._select_execution_snapshot(selector, captured_status)
         if selected.get("already_deleted"):
             raise ValueError(f"Work Execution {selector!r} was already deleted.")
-        if selected.get("status") != "succeeded":
-            raise ValueError(
-                "Only a succeeded Work Execution can be exported as final scientific evidence; "
-                f"{selector!r} is {selected.get('status', 'unknown')!r}."
-            )
         manifest = Path(str(selected["_manifest_path"])).resolve()
         execution_dir = self._execution_dir(manifest)
         execution_id = str(selected.get("execution_id") or execution_dir.name)
         name = str(selected.get("name") or "study")
+        execution_status = str(selected.get("status") or "unknown")
+        status = str(captured_status or execution_status)
+        finalized = (execution_dir / "result.json").is_file()
+        export_kind = "final" if finalized and status == "succeeded" else "snapshot"
+        captured_at = datetime.now(timezone.utc)
         authored_parent = Path(destination).expanduser()
         if authored_parent.is_symlink():
             raise ValueError(f"Export destination cannot be a symlink: {authored_parent}")
@@ -399,7 +409,10 @@ class ResultStore:
         parent.mkdir(parents=True, exist_ok=True)
         if parent.is_symlink() or not parent.is_dir():
             raise ValueError(f"Export destination is not a safe directory: {parent}")
-        folder = parent / f"{_portable_name(name)}--{_portable_name(execution_id)}"
+        folder_name = f"{_portable_name(name)}--{_portable_name(execution_id)}"
+        if export_kind == "snapshot":
+            folder_name += f"--snapshot-{captured_at.strftime('%Y%m%dT%H%M%S%fZ')}"
+        folder = parent / folder_name
         if folder.exists() or folder.is_symlink():
             raise FileExistsError(
                 f"Export destination already exists: {folder}. Choose another directory or "
@@ -407,23 +420,43 @@ class ResultStore:
             )
 
         warnings: list[str] = []
-        # Persist analysis before copying so the raw evidence and rendered report share
-        # exactly one analysis fingerprint. Ordinary one-Run Work has no HPO objective,
-        # so its complete evidence remains exportable without inventing an analysis.
-        try:
-            analysis = self.analysis(execution_id)
-        except ValueError as error:
-            analysis = None
-            warnings.append(f"Study Analysis was not applicable: {error}")
+        # Never invent a final conclusion for a live snapshot. Terminal evidence may still have
+        # no applicable Study Analysis (for example an ordinary one-Run Work).
+        analysis = None
+        if finalized:
+            try:
+                analysis = self.analysis(execution_id)
+            except (OSError, RuntimeError, ValueError, KeyError) as error:
+                warnings.append(f"Study Analysis was not applicable: {error}")
+        else:
+            warnings.append(
+                "This is a non-final Study snapshot; active or missing Runs and conclusions may "
+                "change after capture."
+            )
         stage = Path(tempfile.mkdtemp(prefix=f".{folder.name}-", dir=parent))
         try:
-            _copy_evidence_tree(execution_dir, stage / "execution")
-            source = None
+            _copy_evidence_tree(
+                execution_dir,
+                stage / "execution",
+                hardlink=link_evidence,
+            )
+            source: Path | None = None
+            source_error: Exception | None = None
             try:
                 source = self.source(execution_id)
-            except (OSError, RuntimeError, ValueError) as error:
+            except (OSError, RuntimeError, ValueError, KeyError) as error:
+                source_error = error
+            authored_snapshot = execution_dir / "authored.yaml"
+            if (
+                source is None
+                and authored_snapshot.is_file()
+                and not authored_snapshot.is_symlink()
+            ):
+                source = authored_snapshot
+            if source is None and source_error is not None:
                 warnings.append(
-                    f"Authored YAML snapshot unavailable: {type(error).__name__}: {error}"
+                    "Authored YAML snapshot unavailable: "
+                    f"{type(source_error).__name__}: {source_error}"
                 )
             if source is not None:
                 _copy_evidence_tree(source, stage / "configuration" / source.name)
@@ -434,7 +467,11 @@ class ResultStore:
                 if not evidence_source.exists():
                     warnings.append(f"Supplementary evidence {label!r} was unavailable.")
                     continue
-                _copy_evidence_tree(evidence_source, stage / safe_label)
+                _copy_evidence_tree(
+                    evidence_source,
+                    stage / safe_label,
+                    hardlink=link_evidence,
+                )
 
             published = (
                 self._copy_published_artifacts(selected, execution_dir, stage, warnings)
@@ -458,7 +495,7 @@ class ResultStore:
             try:
                 atomic_json(
                     reports / "resource-replay.json",
-                    self.resource_replay(execution_id, policy="recorded"),
+                    ResourceSchedulerReplay.from_execution(execution_dir).replay("recorded"),
                 )
             except (OSError, RuntimeError, ValueError, KeyError) as error:
                 warnings.append(
@@ -468,11 +505,18 @@ class ResultStore:
             report_hint = (
                 "Open reports/study-analysis.html for the interactive scientific report.\n"
                 if (reports / "study-analysis.html").is_file()
-                else "Study analysis remains available as reports/study-analysis.json.\n"
+                else "No finalized Study Analysis report is included in this package.\n"
+            )
+            state_notice = (
+                "This is a point-in-time snapshot, not a final scientific result. "
+                f"Captured control-plane state: {status}.\n\n"
+                if export_kind == "snapshot"
+                else "This package contains a finalized successful Execution.\n\n"
             )
             (stage / "README.txt").write_text(
                 "LambdaForge portable experiment export\n"
                 "======================================\n\n"
+                + state_notice
                 + report_hint
                 + "execution/ contains the immutable result envelope, Run logs, scalar evidence, "
                 "controller decisions, checkpoints and retained artifacts.\n"
@@ -485,17 +529,22 @@ class ResultStore:
             )
             inventory = _inventory(stage)
             export_manifest = {
-                "lambdaforge_export_version": 1,
-                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "lambdaforge_export_version": 2,
+                "created_at_utc": captured_at.isoformat(),
                 "name": name,
                 "execution_id": execution_id,
                 "scientific_fingerprint": selected.get("scientific_fingerprint"),
-                "status": selected.get("status"),
+                "status": status,
+                "attempt_state": status,
+                "execution_status": execution_status if finalized else None,
+                "export_kind": export_kind,
+                "profile": profile,
+                "finalized": finalized,
                 "source_result": {
                     "name": selected.get("name"),
                     "execution_id": selected.get("execution_id"),
                     "scientific_fingerprint": selected.get("scientific_fingerprint"),
-                    "status": selected.get("status"),
+                    "status": execution_status if finalized else None,
                     "run_count": len(selected.get("runs", ())),
                 },
                 "inventory": inventory,
@@ -504,6 +553,7 @@ class ResultStore:
                 "size_bytes": sum(int(item["size_bytes"]) for item in inventory),
                 "published_artifact_files": published,
                 "warnings": warnings,
+                "omitted_source_files": [dict(value) for value in omissions],
                 "excluded_shared_state": [
                     "managed datasets",
                     "managed environments",
@@ -520,6 +570,10 @@ class ResultStore:
             "status": "exported",
             "name": name,
             "execution_id": execution_id,
+            "captured_state": status,
+            "execution_status": execution_status if finalized else None,
+            "export_kind": export_kind,
+            "finalized": finalized,
             "path": str(folder),
             "manifest": str(folder / "manifest.json"),
             "analysis_report": (
@@ -530,6 +584,51 @@ class ResultStore:
             "file_count": len(inventory),
             "size_bytes": sum(int(item["size_bytes"]) for item in inventory),
             "warnings": warnings,
+            "profile": profile,
+        }
+
+    def _select_execution_snapshot(
+        self, selector: str, captured_status: str | None
+    ) -> dict[str, Any]:
+        """Resolve a non-final Execution from its immutable planning manifest."""
+        matches: list[tuple[Path, Mapping[str, Any]]] = []
+        if self.root.is_dir() and not self.root.is_symlink():
+            for path in sorted(self.root.glob("*/execution-*/execution.json")):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                value = _read_mapping(path)
+                if selector in {
+                    value.get("name"),
+                    value.get("execution_id"),
+                    value.get("scientific_fingerprint"),
+                }:
+                    matches.append((path, value))
+        if not matches:
+            raise KeyError(f"Unknown local Work Execution {selector!r}.")
+        if len(matches) != 1:
+            raise ValueError(
+                f"Work selector {selector!r} identifies {len(matches)} Execution snapshots; "
+                "use an Execution ID."
+            )
+        planning_path, planning = matches[0]
+        execution_dir = planning_path.parent
+        runs: list[Mapping[str, Any]] = []
+        for path in sorted((execution_dir / "runs").glob("*/result.json")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            value = _read_mapping(path)
+            if value.get("execution_id") == planning.get("execution_id"):
+                runs.append(value)
+        return {
+            "execution_result_version": 1,
+            "name": planning.get("name"),
+            "execution_id": planning.get("execution_id"),
+            "scientific_fingerprint": planning.get("scientific_fingerprint"),
+            "status": captured_status or "unknown",
+            "runs": runs,
+            # ``_execution_dir`` validates ownership from the path shape; the terminal envelope
+            # deliberately does not exist yet.
+            "_manifest_path": str(execution_dir / "result.json"),
         }
 
     @staticmethod
@@ -641,7 +740,9 @@ def _portable_name(value: str) -> str:
     return (selected or "experiment")[:120]
 
 
-def _copy_evidence_tree(source: Path, destination: Path) -> None:
+def _copy_evidence_tree(
+    source: Path, destination: Path, *, hardlink: bool = False
+) -> None:
     """Copy regular evidence without following links or accepting special files."""
     authored = source.expanduser()
     if authored.is_symlink():
@@ -651,7 +752,7 @@ def _copy_evidence_tree(source: Path, destination: Path) -> None:
     source = authored.resolve()
     if source.is_file():
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        _copy_evidence_file(source, destination, hardlink=hardlink)
         return
     if not source.is_dir():
         raise ValueError(f"Export evidence is not a regular file or directory: {source}")
@@ -675,7 +776,25 @@ def _copy_evidence_tree(source: Path, destination: Path) -> None:
                 raise ValueError(f"Refusing non-regular export evidence: {candidate}")
             target = destination / relative / name
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(candidate, target)
+            _copy_evidence_file(candidate, target, hardlink=hardlink)
+
+
+def _copy_evidence_file(source: Path, destination: Path, *, hardlink: bool) -> None:
+    """Materialize one verified file, reusing bytes only for owned temporary evidence."""
+    if hardlink:
+        try:
+            os.link(source, destination, follow_symlinks=False)
+            return
+        except OSError as error:
+            if error.errno not in {
+                errno.EXDEV,
+                errno.EPERM,
+                errno.EACCES,
+                errno.EMLINK,
+                errno.EOPNOTSUPP,
+            }:
+                raise
+    shutil.copy2(source, destination)
 
 
 def _inventory(root: Path) -> list[dict[str, Any]]:

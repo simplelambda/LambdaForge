@@ -11,6 +11,24 @@ metadata empaquetada.
 
 ### Añadido
 
+- La exportación de Studies captura ahora el Attempt más reciente en cualquier estado. Studies en
+  ejecución, cancelados, fallidos o aún sin Execution generan snapshots atómicos con timestamp;
+  manifest, CLI y Consola muestran el estado capturado y solo una Execution exitosa se marca final.
+- La evidencia remota se transfiere ahora como ZIP64 comprimido; temporales y extracción local se
+  sitúan junto al destino elegido y no en el `/tmp` limitado. El ensamblado reutiliza hard links
+  seguros cuando comparte filesystem, y la Consola ejecuta el export en background mostrando fase,
+  tiempo y tamaño comprimido como progreso global.
+- Añadidos perfiles de exportación `default` y `full`. El primero conserva evidencia científica y
+  decisiones exactas, curvas reducidas de modo determinista y resúmenes de recursos; el segundo
+  mantiene streams crudos, y el manifest registra toda transformación con motivo, bytes y SHA-256.
+- Sustituida la regla Hoeffding dominada por el rango por una secuencia empirical-Bernstein plug-in
+  predecible, adaptativa a varianza y válida en cualquier instante. Familias frente a referencia,
+  top sets prácticos, estabilidad descriptiva, evidencia secuencial formal y lookahead de un bloque
+  ordenado por duración quedan separados y persistidos.
+- Añadidos leases elásticos de host en dispatch, telemetría CPU/RAM del árbol de procesos y
+  rebalanceo de affinity. Los residentes actuales aprovechan la asignación agregada sin superar el
+  techo duro y una GPU concedida vacía mantiene una vía segura de admisión baseline.
+
 - Añadidos streams deterministas de proyecto `replicate` y `confirmation` con provenance
   valor/ordinal/rol/versión, override exacto `seeds`, shorthand `replicates` y comando `lf seeds`.
   La permutación de 32 bits es estable por prefijo, sin colisiones en su dominio práctico y válida
@@ -20,8 +38,8 @@ metadata empaquetada.
   mínima uno, pruning, confirmación nueva, parada científica y límites de ejecución automáticos.
 - Añadidos candidatos Sobol deterministas e incrementales controlados por convergencia, shorthand
   de métricas registradas, goals de alto nivel y motivos exactos de parada.
-- Añadida replicación automática de sweeps por bloques completos compartidos con secuencias de
-  confianza Hoeffding pareadas, simultáneas y uniformes en el tiempo; `sweep.replicates` sigue fijo.
+- Añadida replicación automática de sweeps por bloques completos compartidos;
+  `sweep.replicates` sigue fijo.
 
 - Añadidos `StudyDesign`, `EvidencePlan` y `EvidenceRequirement` first-class. `sweep.space` declara
   ahora un protocolo fijo candidato por seed, con productos condicionales finitos, referencia

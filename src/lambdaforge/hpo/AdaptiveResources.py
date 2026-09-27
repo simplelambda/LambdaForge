@@ -2233,15 +2233,13 @@ class GPUPlacementPlanner:
             return "RESOURCE_BLOCKED", "known-failed-placement-dominates-current-condition"
         if prediction.known_lower_bound_bytes > device.admission_headroom_bytes:
             return "RESOURCE_BLOCKED", "dominated-by-known-oom-lower-bound"
-        # A cold-start envelope deliberately spans up to the whole device because no completed
-        # resource profile exists yet. Driver/context overhead means live free VRAM is normally a
-        # little below total VRAM, so requiring that deliberately broad envelope to fit would
-        # leave every otherwise idle GPU blocked forever. The first Run on each idle GPU is a
-        # protected baseline (not a packing experiment); the hard lower bound and any known
-        # failed placement above still fail closed, and co-location remains governed by live
-        # evidence.
-        if not device.active and prediction.support == "cold-start":
-            return "ADMITTED", "cold-start-protected-progress-lane"
+        # 0 -> 1 is baseline progress, never a packing experiment. This invariant is independent
+        # of whether the prediction is labelled cold-start: a partially learned conservative
+        # future envelope may still span the whole device and must not leave another granted GPU
+        # empty. The physical/headroom lower-bound checks and exact failed-placement dominance
+        # above still fail closed. PROTECTED_LANE applies only to co-location (1 -> 2, ...).
+        if not device.active:
+            return "ADMITTED", "idle-device-baseline-admission"
         if prediction.commitment_bytes > device.admission_headroom_bytes:
             return "RESOURCE_BLOCKED", "future-envelope-exceeds-predicted-headroom"
         return "ADMITTED", "fits-conservative-future-envelope"

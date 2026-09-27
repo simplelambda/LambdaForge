@@ -6,6 +6,7 @@ import json
 import math
 import random
 import statistics
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,10 +23,11 @@ from lambdaforge.analysis.Evidence import (
     winner_summary,
 )
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
+from lambdaforge.hpo.ResourceReplay import ResourceSchedulerReplay
 from lambdaforge.hpo.ScientificDesign import ScientificQuestionAnalyzer
 from lambdaforge.work.atomic import atomic_write_json
 
-ANALYSIS_VERSION = 4
+ANALYSIS_VERSION = 5
 
 
 class StudyAnalysis:
@@ -113,6 +115,11 @@ class StudyAnalysis:
                 mode=mode,
                 practical_margin=equivalence_margin,
                 fingerprint=fingerprint,
+                sequential=(
+                    source.get("sweep_sequential")
+                    if isinstance(source.get("sweep_sequential"), Mapping)
+                    else None
+                ),
             )
             if design.get("type") == "sweep"
             else None
@@ -263,6 +270,10 @@ class StudyAnalysis:
             "scientific_uncertainty": scientific_understanding["scientific_uncertainty"],
             "sweep_analysis": sweep_analysis,
             "resources": resources,
+            "efficiency": {
+                "available": False,
+                "reason": "Execution resource trace is attached when analysis is persisted.",
+            },
             "resource_conditioning": cls._resource_conditioning(source),
             "pareto": pareto,
             "constraints": constraint_summary,
@@ -344,6 +355,7 @@ class StudyAnalysis:
         mode: str,
         practical_margin: float | None,
         fingerprint: str,
+        sequential: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Describe fixed shared-seed evidence without imputing missing cells."""
         required = cls._required_by_candidate(design)
@@ -513,8 +525,7 @@ class StudyAnalysis:
             else None
         )
         winner_counts = {trial: 0 for trial in trials}
-        equivalent_count = 0
-        unresolved_count = 0
+        conclusion_counts: Counter[str] = Counter()
         resamples = 2000 if common_seeds else 0
         rng = random.Random(int(fingerprint.replace("sha256:", "")[:16], 16))
         for _ in range(resamples):
@@ -523,54 +534,66 @@ class StudyAnalysis:
                 trial: statistics.fmean(seed_values[trial][seed] for seed in sampled)
                 for trial in trials
             }
-            if practical_margin is not None and (
-                max(sign * value for value in means.values())
-                - min(sign * value for value in means.values())
-                <= practical_margin
-            ):
-                equivalent_count += 1
-                continue
             ordered_scores = sorted((sign * value, trial) for trial, value in means.items())
-            if len(ordered_scores) >= 2 and math.isclose(
+            winner = ordered_scores[-1][1]
+            winner_counts[winner] += 1
+            if practical_margin is not None:
+                best_score = ordered_scores[-1][0]
+                top = tuple(
+                    sorted(
+                        trial
+                        for score, trial in ordered_scores
+                        if best_score - score <= practical_margin
+                    )
+                )
+                if len(top) == len(trials):
+                    conclusion_counts["ALL_PRACTICALLY_EQUIVALENT"] += 1
+                elif len(top) == 1:
+                    conclusion_counts[f"PREFERRED:{top[0]}"] += 1
+                else:
+                    conclusion_counts[
+                        "PRACTICAL_TOP_SET:" + "|".join(str(value) for value in top)
+                    ] += 1
+            elif len(ordered_scores) >= 2 and math.isclose(
                 ordered_scores[-1][0],
                 ordered_scores[-2][0],
                 rel_tol=1e-12,
                 abs_tol=1e-12,
             ):
-                unresolved_count += 1
+                conclusion_counts["UNRESOLVED"] += 1
             else:
-                winner_counts[ordered_scores[-1][1]] += 1
+                conclusion_counts[f"PREFERRED:{winner}"] += 1
         best_probability = {
             str(trial): count / resamples if resamples else None
             for trial, count in winner_counts.items()
         }
-        equivalent_probability = equivalent_count / resamples if resamples else None
-        modal_trial = max(winner_counts, key=lambda trial: winner_counts[trial]) if trials else None
-        modal_probability = (
-            winner_counts[modal_trial] / resamples
-            if modal_trial is not None and resamples
-            else None
+        distribution = {
+            token: count / resamples for token, count in sorted(conclusion_counts.items())
+        } if resamples else {"UNRESOLVED": 1.0}
+        modal_token = max(distribution, key=distribution.__getitem__)
+        modal_probability = distribution[modal_token]
+        kind, separator, encoded = modal_token.partition(":")
+        exact_trials = (
+            [int(value) for value in encoded.split("|") if value]
+            if separator
+            else list(trials)
+            if kind == "ALL_PRACTICALLY_EQUIVALENT"
+            else []
         )
-        if equivalent_probability is not None and equivalent_probability > max(
-            0.5, modal_probability or 0.0
-        ):
-            conclusion = {
-                "kind": "PRACTICALLY_EQUIVALENT",
-                "trials": trials,
-                "confidence": equivalent_probability,
-            }
-        elif modal_trial is not None and modal_probability is not None and modal_probability > 0.5:
-            conclusion = {
-                "kind": "PREFERRED",
-                "trials": [modal_trial],
-                "confidence": modal_probability,
-            }
-        else:
-            conclusion = {
-                "kind": "NO_CLEAR_PREFERENCE" if common_seeds else "UNRESOLVED",
-                "trials": [],
-                "confidence": 1.0 - (modal_probability or 0.0),
-            }
+        if modal_probability <= 0.5 or kind == "UNRESOLVED":
+            kind = "UNRESOLVED"
+            exact_trials = []
+            modal_token = "UNRESOLVED"
+            modal_probability = (
+                1.0 - modal_probability if modal_probability <= 0.5 else modal_probability
+            )
+        conclusion = {
+            "kind": kind,
+            "trials": exact_trials,
+            "token": modal_token,
+            "descriptive_stability": modal_probability,
+            "confidence": modal_probability,
+        }
         return {
             "analysis_version": 1,
             "design": "fixed-shared-seed-sweep",
@@ -588,27 +611,24 @@ class StudyAnalysis:
             "best_value_probability": best_probability,
             "point_estimate_leader": point_leader,
             "exact_conclusion": conclusion,
-            "conclusion_distribution": {
-                **{
-                    f"PREFERRED:{trial}": probability
-                    for trial, probability in best_probability.items()
-                    if probability is not None
-                },
-                **(
-                    {"PRACTICALLY_EQUIVALENT": equivalent_probability}
-                    if equivalent_probability is not None
-                    else {}
-                ),
-                **(
-                    {"NO_CLEAR_PREFERENCE": unresolved_count / resamples}
-                    if resamples and unresolved_count
-                    else {}
-                ),
-            },
+            "conclusion_distribution": distribution,
             "pairwise_matrix_bounded": len(pairs) >= 100,
             "missing_cells_are_imputed": False,
             "primary_unit": "paired seed difference",
             "practical_margin": practical_margin,
+            "formal_sequential_evidence": dict(sequential) if sequential is not None else None,
+            "sequential_decision": (
+                "RESOLVED" if sequential is not None and sequential.get("stop") is True
+                else "UNRESOLVED"
+            ),
+            "sequential_coverage_level": (
+                ((sequential.get("formal_sequential_evidence") or {}).get(
+                    "simultaneous_coverage_level"
+                ))
+                if sequential is not None
+                and isinstance(sequential.get("formal_sequential_evidence"), Mapping)
+                else None
+            ),
         }
 
     @staticmethod
@@ -644,6 +664,19 @@ class StudyAnalysis:
             authored_space=authored_space,
             status=status,
         )
+        try:
+            replay = ResourceSchedulerReplay.from_execution(target.parent).replay("recorded")
+        except (OSError, RuntimeError, ValueError, KeyError) as error:
+            computed["efficiency"] = {
+                "available": False,
+                "reason": f"{type(error).__name__}: {error}",
+            }
+        else:
+            metrics = replay.get("metrics")
+            computed["efficiency"] = {
+                "available": isinstance(metrics, Mapping),
+                **(dict(metrics) if isinstance(metrics, Mapping) else {}),
+            }
         if target.is_file() and not target.is_symlink() and not recompute:
             try:
                 cached = json.loads(target.read_text(encoding="utf-8"))

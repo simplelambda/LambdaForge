@@ -407,7 +407,7 @@ def test_complete_noisy_sweep_can_be_unresolved_or_practically_equivalent() -> N
     )
     assert noisy["design_status"] == "complete"
     assert noisy["scientific_status"] == "unresolved"
-    assert noisy["sweep_analysis"]["exact_conclusion"]["kind"] == "NO_CLEAR_PREFERENCE"
+    assert noisy["sweep_analysis"]["exact_conclusion"]["kind"] == "UNRESOLVED"
 
     equivalent = _analysis_sweep(
         {
@@ -417,7 +417,7 @@ def test_complete_noisy_sweep_can_be_unresolved_or_practically_equivalent() -> N
         margin=0.05,
     )
     conclusion = equivalent["sweep_analysis"]["exact_conclusion"]
-    assert conclusion["kind"] == "PRACTICALLY_EQUIVALENT"
+    assert conclusion["kind"] == "ALL_PRACTICALLY_EQUIVALENT"
     assert conclusion["confidence"] == pytest.approx(1.0)
 
 
@@ -454,5 +454,5 @@ def test_exact_conclusion_does_not_turn_argmax_or_missing_margin_into_a_claim() 
         practical_margin=None,
     )
 
-    assert unclear.kind == "NO_CLEAR_PREFERENCE"
-    assert equivalence_without_margin.kind == "NO_CLEAR_PREFERENCE"
+    assert unclear.kind == "UNRESOLVED"
+    assert equivalence_without_margin.kind == "UNRESOLVED"

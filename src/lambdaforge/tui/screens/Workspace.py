@@ -332,6 +332,9 @@ class StudyWorkspace(ResearchWorkspace):
         self._cancel_running = False
         self._delete_running = False
         self._export_running = False
+        self._export_task_id: str | None = None
+        self._export_started_at: float | None = None
+        self._export_progress: dict[str, Any] = {}
         self._last_refresh_error: str | None = None
         super().__init__(f"Studies / {work.get('name', 'Study')}")
 
@@ -496,9 +499,7 @@ class StudyWorkspace(ResearchWorkspace):
             "timeout",
         }
         self.query_one("#study-cancel", Button).disabled = terminal or not bool(self._selector)
-        self.query_one("#study-export", Button).disabled = str(
-            self.work.get("state", "unknown")
-        ) != "succeeded" or not bool(self._selector)
+        self.query_one("#study-export", Button).disabled = not bool(self._selector)
         self.query_one("#study-delete", Button).disabled = not bool(self._selector)
         self.query_one("#study-loading").display = not bool(self.study)
         self.query_one("#study-tabs").display = bool(self.study)
@@ -776,7 +777,8 @@ class StudyWorkspace(ResearchWorkspace):
         conclusion = conclusion if isinstance(conclusion, Mapping) else {}
         conclusion_text = (
             f"{conclusion.get('kind', 'unresolved')} · "
-            f"confidence {format_value(conclusion.get('confidence'))} · "
+            "descriptive stability "
+            f"{format_value(conclusion.get('descriptive_stability', conclusion.get('confidence')))} · "
             f"point leader Trial {sweep.get('point_estimate_leader', '—')}"
             if sweep
             else "Live adaptive conclusions are listed per parameter below."
@@ -1667,6 +1669,8 @@ class StudyWorkspace(ResearchWorkspace):
         self.query_one("#analysis-parameter-preview", Static).update("\n".join(lines))
 
     def _refresh_if_active(self) -> None:
+        if self._export_running and self._export_progress:
+            self._render_export_progress()
         self._refresh_study(force=False)
 
     def _refresh_study(self, *, force: bool) -> None:
@@ -1883,15 +1887,37 @@ class StudyWorkspace(ResearchWorkspace):
     def _export_study(self, destination: Path | None) -> None:
         if destination is None or self._export_running:
             return
+        task_id = f"study-export:{self._selector}"
+        active = getattr(self.app, "background_task_active", None)
+        if callable(active) and active(task_id):
+            self.app.notify(
+                "This Study export is already running in the background.",
+                title="Export already active",
+                severity="warning",
+            )
+            return
         self._export_running = True
+        self._export_task_id = task_id
+        self._export_started_at = time.monotonic()
         self.query_one("#study-export", Button).disabled = True
-        self.query_one("#study-action-status", Static).update(
-            "Exporting complete evidence; large checkpoints may take time…"
+        self._export_study_progress(
+            {
+                "phase": "queued",
+                "message": "Export queued in the background; you may keep using LambdaForge.",
+                "elapsed_seconds": 0.0,
+            }
         )
 
         def export() -> None:
+            def progress(value: Mapping[str, Any]) -> None:
+                self.app.call_from_thread(self._export_study_progress, dict(value))
+
             try:
-                result = self.services.export_work(self._selector, destination)
+                result = self.services.export_work(
+                    self._selector,
+                    destination,
+                    progress=progress,
+                )
             except Exception as error:
                 self.app.call_from_thread(self._export_study_failed, error)
             else:
@@ -1899,20 +1925,62 @@ class StudyWorkspace(ResearchWorkspace):
 
         Thread(target=export, daemon=True, name="lambdaforge-tui-study-export").start()
 
+    def _export_study_progress(self, progress: Mapping[str, Any]) -> None:
+        self._export_progress = dict(progress)
+        self._render_export_progress()
+
+    def _render_export_progress(self) -> None:
+        progress = self._export_progress
+        phase = str(progress.get("phase", "working")).replace("_", " ")
+        elapsed = (
+            max(time.monotonic() - self._export_started_at, 0.0)
+            if self._export_started_at is not None
+            else progress.get("elapsed_seconds")
+        )
+        elapsed_text = f" · {float(elapsed):.0f}s" if isinstance(elapsed, int | float) else ""
+        total = progress.get("bytes_total")
+        size_text = f" · {_artifact_size(total)}" if isinstance(total, int) else ""
+        global_message = f"Export {phase}{size_text}"
+        detail = str(progress.get("message", "")).strip()
+        if detail:
+            global_message += f" · {detail}"
+        message = f"Export {phase}{elapsed_text}{size_text}"
+        if detail:
+            message += f" · {detail}"
+        if self.is_mounted:
+            self.query_one("#study-action-status", Static).update(message)
+        updater = getattr(self.app, "update_background_activity", None)
+        if callable(updater) and self._export_task_id is not None:
+            updater(
+                self._export_task_id,
+                global_message,
+                terminal=bool(progress.get("terminal", False)),
+            )
+
     def _export_study_failed(self, error: Exception) -> None:
         self._export_running = False
-        self.query_one("#study-export", Button).disabled = False
-        self.query_one("#study-action-status", Static).update(
-            f"Export failed · {type(error).__name__}: {error}"
-        )
-        self.notify(str(error), title="Study export failed", severity="error")
+        message = f"Export failed · {type(error).__name__}: {error}"
+        if self.is_mounted:
+            self.query_one("#study-export", Button).disabled = False
+            self.query_one("#study-action-status", Static).update(message)
+        updater = getattr(self.app, "update_background_activity", None)
+        if callable(updater) and self._export_task_id is not None:
+            updater(self._export_task_id, message, terminal=True)
+        self.app.notify(str(error), title="Study export failed", severity="error")
 
     def _export_study_complete(self, result: Mapping[str, Any]) -> None:
         self._export_running = False
-        self.query_one("#study-export", Button).disabled = False
         path = str(result.get("path", "export directory"))
-        self.query_one("#study-action-status", Static).update(f"Export complete · {path}")
-        self.notify(path, title="Study export complete")
+        state = str(result.get("captured_state", "unknown"))
+        kind = str(result.get("export_kind", "snapshot"))
+        message = f"Export complete · {kind} · state {state} · {path}"
+        if self.is_mounted:
+            self.query_one("#study-export", Button).disabled = False
+            self.query_one("#study-action-status", Static).update(message)
+        updater = getattr(self.app, "update_background_activity", None)
+        if callable(updater) and self._export_task_id is not None:
+            updater(self._export_task_id, message, terminal=True)
+        self.app.notify(f"{kind} · state {state}\n{path}", title="Study export complete")
 
     def _cancel_failed(self, error: Exception) -> None:
         self._cancel_running = False

@@ -387,7 +387,13 @@ objective: val_auprc
 resources: {gpu: 3, time: 72h}
 ```
 
-`sweep.replicates: 10` exige exactamente diez bloques. Los controles avanzados están en
+La replicación automática usa una secuencia de confianza empirical-Bernstein pareada, válida en
+cualquier instante y adaptativa a varianza. Resuelve una relación frente a referencia o un top set
+práctico, no necesariamente un único ganador, y separa líder puntual, estabilidad descriptiva y
+cobertura secuencial formal. Puede ejecutar un único bloque completo de lookahead mientras evalúa
+el anterior; los bloques parciales nunca influyen en la parada. El error de familia es del 5% por
+defecto; un protocolo avanzado puede declarar `sweep.sequential_alpha`. `sweep.replicates: 10`
+exige exactamente diez bloques (y por ello no tiene alpha secuencial). Los controles avanzados están en
 `search.budget`, `search.replication`, `search.pruning`, `search.stop` y `execution`. `search.goal`
 puede ser `optimize`, `balanced` o `understand`; pondera de forma distinta optimización y preguntas
 pendientes dentro del mismo controlador. Un presupuesto duro es un techo de seguridad, no una
@@ -665,11 +671,10 @@ acotada a la misma política científica sin esperar una Run terminal. Las ident
 las peticiones cuando esa política no devuelve nada nuevo; nunca genera candidatos al azar hasta
 que alguno quepa.
 
-CPU, RAM y almacenamiento conservan una parte estable y prudente por Run, derivada del máximo
-global de concurrencia. No se prometen temporalmente todos los recursos host a las primeras Runs
-del cold start, porque no podrían redimensionarse con seguridad al crecer el packing. La capacidad
-no usada sigue disponible para el sistema operativo y `self.resources` comunica siempre la parte
-con la que una Run puede contar.
+CPU, RAM y almacenamiento usan un lease calculado en dispatch. Los residentes actuales comparten
+la asignación agregada del Job; límites de hilos nativos y affinity del árbol se rebalancean al
+cambiar la concurrencia, mientras RSS vivo y el techo host duro evitan overcommit de RAM. Así se
+elimina el starvation artificial `total / máximo teórico` sin prometer recursos que el Job no posee.
 
 LambdaForge sondea solo las GPU concedidas, reacciona al uso externo, escalona lanzamientos y
 actualiza las envolventes con trayectorias acotadas durante toda la Run, incluso cuando todos los
@@ -930,7 +935,7 @@ lf jobs clear               # vista previa del historial terminal
 lf jobs clear --apply
 lf datasets list
 lf results list
-lf export ESTUDIO_EXITOSO --output ./exportaciones
+lf export ESTUDIO --output ./exportaciones
 lf clean                    # vista previa de limpieza segura
 ```
 
@@ -1035,21 +1040,31 @@ python -m pip install "lambdaforge[analysis-report]==0.15.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json
-lf export ESTUDIO_O_WORK --output ./exportaciones
+lf export ESTUDIO_O_WORK --output ./exportaciones                 # default compacto auditable
+lf export ESTUDIO_O_WORK --output ./exportaciones --profile full  # telemetría cruda
 ```
 
-`lf export` resuelve un Work semántico no ambiguo del proyecto actual y descarga su Attempt exitoso
-más reciente, tanto si se ejecutó en local como en un clúster configurado. `--output` indica una
-carpeta padre local; LambdaForge crea `NOMBRE--EXECUTION_ID/` atómicamente y se niega a sobrescribir
-una exportación anterior. El paquete contiene el envelope inmutable de la Execution, YAML enviado,
-logs y métricas de Runs, evidencia completa del Study/controlador, análisis HPO JSON, replay de
-recursos registrado, checkpoints/pesos retenidos y artefactos publicados ya finalizados. Siempre
-incluye `reports/study-analysis.html` autocontenido; `lambdaforge[analysis-report]` activa el
-dashboard Plotly completo y la instalación base genera una alternativa HTML/JSON estructurada,
-registrando el aviso. `manifest.json` enumera SHA-256 y bytes de cada fichero. Datasets compartidos, entornos,
+`lf export` resuelve un Work semántico no ambiguo y descarga su Attempt más reciente, esté
+preparándose, ejecutándose, cancelado, fallido o completado en local o en un clúster. `--output`
+indica una carpeta padre local. Un éxito final crea `NOMBRE--EXECUTION_ID/`; el resto crea un
+snapshot con timestamp que nunca sobrescribe otro. El resultado y `manifest.json` muestran el
+estado capturado y si el paquete es final. Solo se incluye evidencia persistida en ese instante:
+YAML, Execution/Runs disponibles, logs, métricas, registros del Study/controlador y Job,
+checkpoints y artefactos publicados finalizados. La evidencia final intenta generar análisis HPO y
+replay; un snapshot temprano puede contener solo configuración y ciclo de vida, indicándolo sin
+inventar datos. Si aplica el análisis, `lambdaforge[analysis-report]` activa el dashboard Plotly y
+la instalación base genera una alternativa estructurada con aviso. `manifest.json` enumera SHA-256 y bytes de cada fichero. Datasets compartidos, entornos,
 caché reconstruible y el bundle de fuentes quedan referenciados por provenance, no se duplican. La
 Consola ofrece la misma operación como **Export Study…** con un navegador de directorios local y
-llama al mismo servicio de dominio, no a un subproceso CLI.
+llama al mismo servicio de dominio, no a un subproceso CLI. La evidencia remota viaja en un ZIP64
+comprimido. Descarga y extracción usan temporales junto al destino elegido —no un `/tmp`
+potencialmente pequeño— y hard links seguros evitan una segunda copia local completa. El export
+sigue en background: la línea del Study y el panel **BACKGROUND** muestran fase real, tiempo y
+tamaño comprimido, mientras el resto de `lf` continúa utilizable.
+El perfil default conserva evidencia científica y de decisiones exacta, curvas métricas reducidas
+de modo determinista y telemetría de recursos resumida. `--profile full` añade los streams crudos de
+alta frecuencia. El manifest registra cada fuente transformada/omitida, motivo, bytes y SHA-256;
+ningún perfil modifica ni elimina el Study original.
 
 El replay de recursos lee la traza versionada del scheduler, nunca texto de terminal. Es factual
 hasta que la política elegida toma una decisión distinta; desde ahí cada métrica se etiqueta como

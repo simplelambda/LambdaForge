@@ -425,7 +425,7 @@ def test_result_export_is_atomic_complete_and_refuses_overwrite(tmp_path: Path) 
 
     package = Path(exported["path"])
     manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["lambdaforge_export_version"] == 1
+    assert manifest["lambdaforge_export_version"] == 2
     assert manifest["execution_id"] == result.execution_id
     assert manifest["status"] == "succeeded"
     assert manifest["file_count"] > 4
