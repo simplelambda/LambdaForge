@@ -10,6 +10,8 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-28
+
 ### Added
 
 - Study export now captures the newest Attempt in any lifecycle state. Running, cancelled, failed
@@ -56,6 +58,20 @@ metadata rather than invented release numbers.
 
 ### Changed
 
+- Adaptive HPO now separates screening stability, actual fresh-seed confirmation and material
+  scientific backfill. `goal` weights optimization versus understanding instead of disabling the
+  latter; convergence requires no remaining feasible material action, while hard exhaustion stays
+  an explicit non-convergence finish reason.
+- Strong curve pruning is calibration-gated by finite-sample residual resolution, retrospective
+  interval/probability quality and harmful-prune evidence. Required anchors, minimum evidence,
+  confirmation and scientific continuations are protected, and readiness is persisted separately
+  from basic operational availability.
+- Study science now distinguishes search, terminal-response and conclusion support. Incomplete
+  discrete domains retain predictive surrogate leaders but emit an exact `UNRESOLVED` conclusion
+  with concrete direct/censored/predictive support gaps.
+- Interactive Study telemetry uses a versioned compact projection with fingerprint caching and
+  lazy selected-Run evidence. HTML reports separate terminal comparable ranking from the complete
+  censored Trial ledger and render evidence-driven interpretation and compact parameter values.
 - Raised the minimum PyTorch version to 2.3 and aligned NumPy with the `textual-plot` runtime so a
   clean installation cannot resolve the known PyTorch 2.2 / NumPy 2 ABI-incompatible combination.
 - Fixed and adaptive designs now share the existing ARI dispatcher. Sweep Runs remain mandatory

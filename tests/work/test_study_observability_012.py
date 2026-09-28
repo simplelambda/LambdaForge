@@ -88,7 +88,10 @@ def test_study_telemetry_folds_live_metrics_without_copying_run_evidence(
     interactive = json.loads((tmp_path / "study" / "interactive.json").read_text())
     assert interactive["detail_level"] == "interactive"
     assert interactive["candidates"][0]["runs"][0]["latest_step"] == 2
-    assert "metrics_path" not in interactive["candidates"][0]["runs"][0]
+    # The compact index retains only owned references needed by the lazy selected-Run route;
+    # scalar history and latest-metric dictionaries remain outside the overview payload.
+    assert interactive["candidates"][0]["runs"][0]["metrics_path"] == str(metrics)
+    assert "latest_metrics" not in interactive["candidates"][0]["runs"][0]
 
 
 def test_interactive_study_projection_omits_per_run_bulk() -> None:
@@ -119,11 +122,41 @@ def test_interactive_study_projection_omits_per_run_bulk() -> None:
         "key": "trial-00001-seed-4",
         "state": "failed",
         "best_objective": 0.7,
+        "log_path": "/remote/large.log",
     }
     assert projected["admission"] == {
         "current": {"summary": "idle"},
         "updated_at_utc": None,
     }
+    assert projected["interactive_projection_version"] == 2
+
+
+def test_interactive_projection_omits_metric_dictionaries_at_large_scale() -> None:
+    candidates = [
+        {
+            "trial": trial,
+            "parameters": {"learning_rate": trial / 1_000_000},
+            "latest_metrics": {f"metric_{index}": index / 100 for index in range(100)},
+            "runs": [
+                {
+                    "key": f"trial-{trial}-seed-1",
+                    "state": "running",
+                    "latest_step": 10,
+                    "latest_metrics": {
+                        f"metric_{index}": index / 100 for index in range(100)
+                    },
+                }
+            ],
+        }
+        for trial in range(300)
+    ]
+    source = {"study_telemetry_version": 1, "candidates": candidates}
+
+    projected = interactive_study(source)
+
+    assert "latest_metrics" not in projected["candidates"][0]
+    assert "latest_metrics" not in projected["candidates"][0]["runs"][0]
+    assert len(json.dumps(projected)) < len(json.dumps(source)) / 10
 
 
 def test_study_snapshot_exposes_initial_design_and_coverage_state(tmp_path: Path) -> None:
@@ -220,6 +253,29 @@ def test_scientific_continuation_keeps_prior_prune_attempt_in_telemetry(
     assert run["continued_from_attempt"] == "attempt-0001"
     assert run["attempt_history"][0]["termination_type"] == "performance_pruned"
     assert run["original_prune"]["common_step"] == 7
+
+
+def test_cancelled_planned_dispatch_is_debt_not_an_executable_queue_entry(
+    tmp_path: Path,
+) -> None:
+    study = StudyTelemetry(tmp_path / "study")
+    specification = _specification()
+    study.initialize(
+        name="replanned",
+        execution_id="execution-1",
+        strategy="adaptive",
+        objective={"metric": "score", "mode": "max"},
+        specifications=(specification,),
+    )
+    study.schedule((specification,))
+    assert study.refresh()["counts"]["queued_runs"] == 1
+
+    study.queued_action_cancelled(specification, reason="superseded-by-new-evidence")
+    snapshot = study.refresh()
+
+    assert snapshot["counts"]["queued_runs"] == 0
+    assert snapshot["counts"]["cancelled_before_start"] == 1
+    assert snapshot["counts"]["scheduled_runs"] == 0
 
 
 def test_study_telemetry_preserves_best_epoch_outside_the_bounded_tail(
@@ -776,7 +832,7 @@ def test_hpo_renderer_recomputes_an_old_remote_analysis_snapshot_locally() -> No
     analysis, parameters = StudyInsightRenderer.analysis(payload, 0)
 
     assert analysis is not None
-    assert analysis["analysis_version"] == 5
+    assert analysis["analysis_version"] == 6
     assert len(parameters[0]["response"]["points"]) == 3
     screen = StudyParameterInsightRenderer.render(
         payload,

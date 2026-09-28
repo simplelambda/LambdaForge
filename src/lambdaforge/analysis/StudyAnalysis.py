@@ -27,7 +27,7 @@ from lambdaforge.hpo.ResourceReplay import ResourceSchedulerReplay
 from lambdaforge.hpo.ScientificDesign import ScientificQuestionAnalyzer
 from lambdaforge.work.atomic import atomic_write_json
 
-ANALYSIS_VERSION = 5
+ANALYSIS_VERSION = 6
 
 
 class StudyAnalysis:

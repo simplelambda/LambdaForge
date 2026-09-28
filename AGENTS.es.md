@@ -1,6 +1,6 @@
 # Guía de LambdaForge para agentes
 
-Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.15.0. Consulta solo la
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.16.0. Consulta solo la
 sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
 
 ## Arquitectura no negociable
@@ -262,8 +262,11 @@ nunca podes por pendiente a un candidato aún competitivo en el step común exac
 automáticamente escalares de callback y tiempos de época/validación. Un trainer propio registra
 curvas con `self.metrics.log(nombre, valor, step=epoch)`; `progress.update` es progreso grueso y
 `self.log`/print solo narración humana.
-No actives pruning de curvas hasta que dos candidatos distintos terminados produzcan una calibración
-retrospectiva finita; curvas startup provisionales no deben podarse entre sí sin endpoints reales.
+Dos curvas terminadas distintas identifican una comparación retrospectiva, pero no bastan para que
+la poda sea segura. La poda fuerte exige además resolución residual de muestra finita, cobertura
+retrospectiva de intervalos y discriminación probabilística compatibles con el umbral escrito. La
+disponibilidad operativa y la calibración fuerte se persisten por separado. Los anchors de startup,
+evidencia obligatoria, confirmación y continuaciones científicas nunca reciben poda competitiva.
 
 El controlador solo puede preemptar cooperativamente un Run de fidelidad puntuado, no de
 confirmación, con checkpoint propio verificado, al menos 30 segundos de ejecución y una alternativa

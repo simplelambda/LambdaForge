@@ -372,6 +372,20 @@ class ScientificQuestionAnalyzer:
             if isinstance(parameter_space, ParameterSpace)
             else ParameterSpace.from_schema(parameter_space, tuple(pool.values()))
         )
+        pool_names = {str(name) for values in pool.values() for name in values}
+        if pool_names - set(geometry.names):
+            # Legacy telemetry may persist a partial/empty authored schema before it has emitted
+            # candidate rows. Complete only the missing descriptors from exact candidate values.
+            inferred = ParameterSpace.from_schema(None, tuple(pool.values()))
+            schema = geometry.to_schema()
+            inferred_schema = inferred.to_schema()
+            schema.update(
+                {
+                    name: inferred_schema[name]
+                    for name in sorted(pool_names - set(geometry.names))
+                }
+            )
+            geometry = ParameterSpace.from_schema(schema, tuple(pool.values()))
         noise = SeedNoiseModel.fit(outcomes)
         natural_scale = cls._natural_scale(rows, objective)
         resamples = cls._resample_count(
@@ -452,6 +466,8 @@ class ScientificQuestionAnalyzer:
                 interactions=interaction_by_parameter[name],
                 practical_margin=margin,
                 pruned=pruned,
+                parameter_kind=geometry.descriptor(name).kind,
+                parameter_finite_domain=bool(geometry.descriptor(name).values),
             )
             for name in names
         ]
@@ -476,8 +492,26 @@ class ScientificQuestionAnalyzer:
             natural_scale=natural_scale,
         )
         questions = [*parameter_questions, *interactions]
+        for question in questions:
+            entropy = min(1.0, max(0.0, float(question.get("entropy", 0.0) or 0.0)))
+            if question.get("kind") == "interaction":
+                probabilities = question.get("probabilities", {})
+                materiality = (
+                    float(probabilities.get("MATERIAL_INTERACTION", 0.0))
+                    + 0.5 * float(probabilities.get("WEAK_INTERACTION", 0.0))
+                    if isinstance(probabilities, Mapping)
+                    else 0.0
+                )
+            else:
+                materiality = 1.0 if question.get("missing_evidence") else max(
+                    float(question.get("confidence", 0.0)), 0.25
+                )
+            question["materiality"] = min(1.0, max(0.0, materiality))
+            question["remaining_information_value"] = entropy * question["materiality"]
         uncertainty = (
-            statistics.fmean(float(value["entropy"]) for value in questions) if questions else 0.0
+            statistics.fmean(float(value["remaining_information_value"]) for value in questions)
+            if questions
+            else 0.0
         )
         denominator = opportunity + uncertainty
         optimization_weight = opportunity / denominator if denominator > 0 else 0.5
@@ -497,16 +531,16 @@ class ScientificQuestionAnalyzer:
                     "kind": value["kind"],
                     "confidence": value["confidence"],
                     "entropy": value["entropy"],
+                    "remaining_information_value": value["remaining_information_value"],
                     "missing_evidence": value.get("missing_evidence", []),
                 }
                 for value in questions
-                if value.get("conclusion_kind") in {"UNRESOLVED", "NO_CLEAR_PREFERENCE"}
-                or float(value.get("entropy", 0.0)) > 0
+                if float(value.get("remaining_information_value", 0.0)) > 0
             ),
             key=lambda value: (-float(value["entropy"]), str(value["question"])),
         )
         result = {
-            "scientific_question_version": 1,
+            "scientific_question_version": 2,
             "status": "available" if rows else "insufficient",
             "objective": dict(objective),
             "practical_margin": margin,
@@ -522,6 +556,7 @@ class ScientificQuestionAnalyzer:
                 "the optimization sampler still considers the complete proposal pool"
             ),
             "scientific_uncertainty": uncertainty,
+            "scientific_action_resolution": phase_resolution,
             "optimization_weight": optimization_weight,
             "information_weight": information_weight,
             "phase": phase,
@@ -715,6 +750,8 @@ class ScientificQuestionAnalyzer:
         interactions: Sequence[Mapping[str, Any]],
         practical_margin: float | None,
         pruned: set[int],
+        parameter_kind: str,
+        parameter_finite_domain: bool,
     ) -> dict[str, Any]:
         observed = {
             trial: values[name]
@@ -728,9 +765,24 @@ class ScientificQuestionAnalyzer:
             trial in rows and name not in values for trial, values in parameters.items()
         )
         authored_inactive = sum(name not in values for values in pool.values())
+        finite_authored = parameter_kind in {"categorical", "boolean"} or (
+            parameter_kind == "integer" and parameter_finite_domain
+        )
         if len(levels) < 2 or len(set(map(_label, observed.values()))) < 2:
             probabilities = cls._unresolved_distribution(_PARAMETER_STATES)
-            return cls._parameter_result(
+            direct_labels = {_label(value) for value in observed.values()}
+            unsupported = [value for value in levels if _label(value) not in direct_labels]
+            missing = (
+                [
+                    f"no terminal response for {name}={_display_label(value)}"
+                    for value in unsupported
+                ]
+                if finite_authored
+                else []
+            )
+            if not missing:
+                missing = ["at least two observed parameter values in comparable completed Runs"]
+            result = cls._parameter_result(
                 name,
                 numeric,
                 levels,
@@ -741,11 +793,31 @@ class ScientificQuestionAnalyzer:
                 interactions=interactions,
                 outcomes=outcomes,
                 pruned=pruned,
-                missing=["at least two observed parameter values in comparable completed Runs"],
+                missing=missing,
                 pruned_parameter_count=pruned_parameter_count,
                 observed_inactive=observed_inactive,
                 authored_inactive=authored_inactive,
             )
+            censored_labels = {
+                _label(values[name])
+                for trial, values in parameters.items()
+                if trial in pruned and name in values and _label(values[name]) not in direct_labels
+            }
+            result["response_support"] = {
+                "direct": [
+                    _display_label(value) for value in levels if _label(value) in direct_labels
+                ],
+                "censored_only": [
+                    _display_label(value) for value in levels if _label(value) in censored_labels
+                ],
+                "surrogate_only": [
+                    _display_label(value)
+                    for value in levels
+                    if _label(value) not in direct_labels
+                    and _label(value) not in censored_labels
+                ],
+            }
+            return result
         response_realizations: list[list[tuple[Any, float]]] = []
         kinds: list[str] = []
         conclusion_tokens: list[str] = []
@@ -833,6 +905,18 @@ class ScientificQuestionAnalyzer:
                         practical_equivalent * count / max(1, total)
                     )
                 token_distribution = transformed
+        direct_labels = {_label(value) for value in observed.values()}
+        censored_values = {
+            _label(values[name]): values[name]
+            for trial, values in parameters.items()
+            if trial in pruned and name in values and _label(values[name]) not in direct_labels
+        }
+        unsupported = [value for value in levels if _label(value) not in direct_labels]
+        missing = (
+            [f"no terminal response for {name}={_display_label(value)}" for value in unsupported]
+            if finite_authored
+            else []
+        )
         result = cls._parameter_result(
             name,
             numeric,
@@ -844,7 +928,7 @@ class ScientificQuestionAnalyzer:
             interactions=interactions,
             outcomes=outcomes,
             pruned=pruned,
-            missing=[],
+            missing=missing,
             confidence=confidence,
             conclusion_distribution=token_distribution,
             pruned_parameter_count=pruned_parameter_count,
@@ -852,9 +936,29 @@ class ScientificQuestionAnalyzer:
             authored_inactive=authored_inactive,
         )
         result["practically_equivalent_probability"] = practical_equivalent
-        result["best_value_probability"] = {
+        predictive_best = {
             _display_label(json.loads(label)): count / max(1, len(best_labels))
             for label, count in sorted(best_distribution.items())
+        }
+        result["surrogate_best_frequency"] = predictive_best
+        # Compatibility alias for existing readers.  Its semantics are explicitly predictive,
+        # never scientific confidence.
+        result["best_value_probability"] = predictive_best
+        result["best_value_probability_semantics"] = "surrogate-resampling-frequency"
+        result["response_support"] = {
+            "direct": [
+                _display_label(value) for value in levels if _label(value) in direct_labels
+            ],
+            "censored_only": [
+                _display_label(value)
+                for value in levels
+                if _label(value) in censored_values
+            ],
+            "surrogate_only": [
+                _display_label(value)
+                for value in unsupported
+                if _label(value) not in censored_values
+            ],
         }
         point_leader = max(
             response_summary,
@@ -869,6 +973,15 @@ class ScientificQuestionAnalyzer:
             levels=levels,
             practical_margin=practical_margin,
         )
+        predictive_exact = exact
+        if finite_authored and unsupported:
+            exact = ExactScientificConclusion(
+                "UNRESOLVED",
+                (),
+                "UNRESOLVED",
+                predictive_exact.descriptive_stability,
+            )
+            result["predictive_conclusion"] = predictive_exact.to_dict()
         result["modal_hypothesis"] = {
             "token": max(token_distribution, key=lambda value: token_distribution[value]),
             "probability": max(token_distribution.values()),
@@ -962,7 +1075,7 @@ class ScientificQuestionAnalyzer:
         shared = cls._shared_seed_count({trial: outcomes.get(trial, {}) for trial in active_trials})
         del pruned
         return {
-            "question_version": 1,
+            "question_version": 2,
             "question": f"What can we conclude about {name} in the studied space?",
             "parameter": name,
             "kind": "numeric" if numeric else "categorical",
@@ -993,7 +1106,24 @@ class ScientificQuestionAnalyzer:
             "entropy": _normalized_entropy(exact_distribution),
             "practical_margin": practical_margin,
             "authored_values": list(levels),
-            "observed_values": sorted({_json_value(value) for value in observed.values()}, key=str),
+            "observed_values": [
+                _json_value(value)
+                for value in levels
+                if _label(value) in {_label(item) for item in observed.values()}
+            ],
+            "response_support": {
+                "direct": [
+                    _display_label(value)
+                    for value in levels
+                    if _label(value) in {_label(item) for item in observed.values()}
+                ],
+                "censored_only": [],
+                "surrogate_only": [
+                    _display_label(value)
+                    for value in levels
+                    if _label(value) not in {_label(item) for item in observed.values()}
+                ],
+            },
             "response": list(response),
             "support": {
                 "completed_candidates": len(active_trials),
@@ -1599,7 +1729,10 @@ class ExperimentalDesignPolicy:
                 self._coverage_targets(
                     parameters,
                     questions=questions,
-                    observed=set(rows) | set(search_covered),
+                    # Censored attempts satisfy search coverage, never response coverage.  The
+                    # latter is the authority for scientific-question support.
+                    observed=set(rows),
+                    search_covered=set(search_covered),
                 )
             )
             targeted.sort(reverse=True)
@@ -1668,6 +1801,7 @@ class ExperimentalDesignPolicy:
         *,
         questions: Sequence[Mapping[str, Any]],
         observed: set[int],
+        search_covered: set[int],
     ) -> list[tuple[float, str, str, float, float]]:
         """Value authored levels/cells by missing matched-context support, never quotas."""
         targets: list[tuple[float, str, str, float, float]] = []
@@ -1697,7 +1831,19 @@ class ExperimentalDesignPolicy:
                     default=1.0,
                 )
                 support = len(observed_same)
-                information = entropy * (0.5 + 0.5 * diversity) / math.sqrt(1 + support)
+                attempted_same = sum(
+                    self.candidates[trial].get(name, _INACTIVE) == value
+                    for trial in search_covered
+                )
+                # A censored attempt resolves geometry/search debt but not response debt.  It
+                # therefore reduces novelty without making the information value disappear.
+                attempt_discount = math.sqrt((1 + support) / (1 + support + attempted_same))
+                information = (
+                    entropy
+                    * (0.5 + 0.5 * diversity)
+                    / math.sqrt(1 + support)
+                    * attempt_discount
+                )
                 targets.append(
                     (
                         information,

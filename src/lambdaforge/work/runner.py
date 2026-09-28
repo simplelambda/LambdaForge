@@ -116,6 +116,8 @@ _GPU_LAUNCH_STAGGER_SECONDS = 5.0
 _GPU_RESOURCE_SAMPLE_SECONDS = 5.0
 _GPU_WAIT_LOG_SECONDS = 30.0
 _GPU_PROBE_FAILURE_LIMIT = 12
+# Two curves identify an endpoint error, but do not calibrate a strong pruning decision.  Kept as
+# an internal identifiability fact for old diagnostics; runtime readiness is quality-derived below.
 _PRUNER_MIN_CALIBRATION_CANDIDATES = 2
 _PRUNER_AUDIT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _HOST_HISTORY_LIMIT = 2048
@@ -2535,6 +2537,15 @@ def _execute_adaptive_group(
     )
     stale_events = int(restored_controller.get("stale_events", 0) or 0)
     search_converged = bool(restored_controller.get("search_converged", False))
+    default_confirmation_complete = not bool(
+        policy.confirmation_auto or policy.confirmation_seeds
+    )
+    raw_confirmation_complete = restored_controller.get("confirmation_complete")
+    confirmation_complete = (
+        raw_confirmation_complete
+        if isinstance(raw_confirmation_complete, bool)
+        else default_confirmation_complete
+    )
     convergence_state: dict[str, Any] = dict(
         restored_controller.get("convergence_state", {})
         if isinstance(restored_controller.get("convergence_state"), Mapping)
@@ -2596,10 +2607,31 @@ def _execute_adaptive_group(
             )
         resolution = max(policy.scientific_margin or 0.0, noise_resolution)
         optimization_stable = bool(estimates) and opportunity <= resolution
-        uncertainty = float(scientific.get("scientific_uncertainty", math.inf))
-        useful = not optimization_stable or (
-            policy.goal != "optimize"
-            and (not questions_resolved or uncertainty > 1.0 - policy.conclusion_stability)
+        action_resolution = float(
+            scientific.get("scientific_action_resolution", 0.0) or 0.0
+        )
+        remaining_values = [
+            float(value.get("remaining_information_value", value.get("entropy", 0.0)) or 0.0)
+            for value in questions
+        ]
+        meaningful_science = max(remaining_values, default=0.0) > action_resolution
+        required_response_debt = any(
+            anchor_states.get(trial) not in {"OBSERVED"} for trial in anchor_trials
+        ) or any(
+            bool(value.get("evidence_required")) for value in pending_actions.values()
+        )
+        feasible_science = within_time() and allowance() > 0 and (
+            len(proposed) < candidate_budget
+            or any(
+                result.termination_type == "performance_pruned"
+                and _result_checkpoint_available(result)
+                for result in outcomes
+            )
+        )
+        useful = (
+            not optimization_stable
+            or required_response_debt
+            or (meaningful_science and feasible_science)
         )
         return StudyConvergenceState(
             policy.goal,
@@ -2607,7 +2639,7 @@ def _execute_adaptive_group(
             contenders_stable,
             questions_resolved,
             useful,
-            True,
+            confirmation_complete,
             len(outcomes),
         )
 
@@ -2691,7 +2723,7 @@ def _execute_adaptive_group(
         atomic_json(
             state_path,
             {
-                "state_version": 4,
+                "state_version": 5,
                 "execution_id": study_execution_id,
                 "updated_at_utc": datetime.now(timezone.utc).isoformat(),
                 "proposed_pool_trials": list(proposed),
@@ -2703,6 +2735,7 @@ def _execute_adaptive_group(
                     "best_value": best_value,
                     "stale_events": stale_events,
                     "search_converged": search_converged,
+                    "confirmation_complete": confirmation_complete,
                     "convergence_state": convergence_state,
                     "elapsed_seconds": max(0.0, time.monotonic() - started),
                 },
@@ -2753,6 +2786,8 @@ def _execute_adaptive_group(
             "phase": str(specification.get("hpo_phase", "search")),
             "fidelity": dict(specification.get("hpo_fidelity", {})),
             "startup_anchor": bool(specification.get("hpo_startup_anchor")),
+            "evidence_required": bool(specification.get("evidence_required")),
+            "evidence_requirement": dict(specification.get("evidence_requirement", {})),
             "opportunistic": bool(specification.get("hpo_opportunistic")),
             "scientific_continuation": bool(specification.get("hpo_scientific_continuation")),
             "resume_preempted": bool(specification.get("hpo_resume_preempted")),
@@ -2850,6 +2885,21 @@ def _execute_adaptive_group(
         scientific = scientific_snapshot()
         optimization_weight = float(scientific["optimization_weight"])
         information_weight = float(scientific["information_weight"])
+        # Goal is a priority preference, not a Boolean science gate.  Automatic normalization
+        # preserves positive scientific value under ``optimize`` and positive optimization value
+        # under ``understand``.
+        goal_factors = {
+            "optimize": (1.0, 0.25),
+            "balanced": (1.0, 1.0),
+            "understand": (0.25, 1.0),
+        }
+        optimization_factor, information_factor = goal_factors.get(policy.goal, (1.0, 1.0))
+        optimization_weight *= optimization_factor
+        information_weight *= information_factor
+        weight_total = optimization_weight + information_weight
+        if weight_total > 0:
+            optimization_weight /= weight_total
+            information_weight /= weight_total
 
         provisional_values = values_by_trial(final_only=False)
         eligible = [trial for trial in proposed if next_seed_specification(trial) is not None]
@@ -3166,7 +3216,7 @@ def _execute_adaptive_group(
         proposal: tuple[int, ...] = ()
         if len(proposed) < candidate_budget and not search_converged:
             proposal = propose(1)
-        if len(proposed) < candidate_budget and provisional_values and not search_converged:
+        if len(proposed) < candidate_budget and provisional_values:
             costs_by_trial = {
                 trial: statistics.fmean(
                     result.duration_seconds
@@ -3202,6 +3252,10 @@ def _execute_adaptive_group(
             # backfill work whenever the nominal winner is resource-blocked.
             frontier_width = min(8, max(4, capacity), candidate_budget - len(proposed))
             candidates_to_value = list(designed[:frontier_width])
+            if search_converged:
+                candidates_to_value = [
+                    value for value in candidates_to_value if value.purpose != "OPTIMIZE"
+                ]
             if proposal:
                 optimization_candidate = next(
                     (value for value in designed if value.trial == proposal[0]), None
@@ -3469,9 +3523,9 @@ def _execute_adaptive_group(
                         [],
                     ),
                 }
-            if search_converged:
+            if search_converged and not confirmation_complete:
                 return "AUTO_CONVERGED", [], {
-                    "reason": "versioned scientific convergence policy found no useful action",
+                    "reason": "optimization screening is stable; confirmation has priority",
                     "convergence_state": convergence_state,
                     "alternatives": [],
                 }
@@ -3576,11 +3630,17 @@ def _execute_adaptive_group(
             if policy.candidate_budget is None and policy.automatic_stop and not search_converged:
                 evaluated = evaluate_automatic_convergence()
                 convergence_state = evaluated.to_dict()
-                if evaluated.converged:
+                if evaluated.screening_stable:
                     search_converged = True
                     record_decision(
                         "STOP_PROPOSING",
-                        reason=f"CONVERGED_{policy.goal.upper()}",
+                        reason=(
+                            f"CONVERGED_{policy.goal.upper()}"
+                            if evaluated.converged
+                            else "SCREENING_STABLE_SCIENTIFIC_BACKFILL"
+                            if confirmation_complete
+                            else "SCREENING_STABLE_ENTER_CONFIRMATION"
+                        ),
                         convergence_state=convergence_state,
                     )
             persist_state()
@@ -3616,7 +3676,77 @@ def _execute_adaptive_group(
                     ),
                 )
             if result.study_phase == "confirmation":
-                return [dict(value) for value in queued_specifications]
+                retained_confirmation = [dict(value) for value in queued_specifications]
+                room = _confirmation_backfill_room(
+                    parallelism=parallelism,
+                    remaining_run_allowance=allowance(),
+                    pending_runs=pending_runs,
+                    queued_confirmation_runs=len(retained_confirmation),
+                )
+                if room <= 0 or not within_time():
+                    return retained_confirmation
+                action, backfill, evidence = next_event_action(room)
+                backfill = [
+                    value
+                    for value in backfill
+                    if value.get("hpo_phase") != "confirmation"
+                    and scheduling_key(value) not in scheduled_run_keys
+                ][:room]
+                if not backfill:
+                    return retained_confirmation
+                for specification in backfill:
+                    specification["hpo_scheduler_action"] = action
+                    specification["hpo_confirmation_backfill"] = True
+                register(backfill)
+                record_decision(
+                    "SCIENTIFIC_BACKFILL",
+                    scheduler_action=action,
+                    trials=[int(value["trial_index"]) for value in backfill],
+                    reason=(
+                        "confirmation retained priority; otherwise idle capacity collects the "
+                        "highest-value safe scientific evidence"
+                    ),
+                    scientific_evidence=evidence,
+                )
+                return [*retained_confirmation, *backfill]
+            if any(
+                value.get("hpo_phase") == "confirmation"
+                for value in (*queued_specifications, *pending_specifications)
+            ):
+                # A scientific backfill completion must not invalidate queued confirmation
+                # identities. Refill only genuinely spare lanes and leave the confirmation block
+                # intact so shared-seed semantics remain auditable.
+                retained_during_confirmation = [
+                    dict(value) for value in queued_specifications
+                ]
+                room = _confirmation_backfill_room(
+                    parallelism=parallelism,
+                    remaining_run_allowance=allowance(),
+                    pending_runs=pending_runs,
+                    queued_confirmation_runs=len(retained_during_confirmation),
+                )
+                if room <= 0 or not within_time():
+                    return retained_during_confirmation
+                action, backfill, evidence = next_event_action(room)
+                backfill = [
+                    value
+                    for value in backfill
+                    if value.get("hpo_phase") != "confirmation"
+                    and scheduling_key(value) not in scheduled_run_keys
+                ][:room]
+                if backfill:
+                    for specification in backfill:
+                        specification["hpo_scheduler_action"] = action
+                        specification["hpo_confirmation_backfill"] = True
+                    register(backfill)
+                    record_decision(
+                        "SCIENTIFIC_BACKFILL",
+                        scheduler_action=action,
+                        trials=[int(value["trial_index"]) for value in backfill],
+                        reason="a scientific backfill lane reopened during confirmation",
+                        scientific_evidence=evidence,
+                    )
+                return [*retained_during_confirmation, *backfill]
             stale_queue = [dict(value) for value in queued_specifications]
             for stale in stale_queue:
                 scheduled_run_keys.discard(scheduling_key(stale))
@@ -4248,6 +4378,7 @@ def _execute_adaptive_group(
                 reason=confirmation_reason,
             )
             if stable:
+                confirmation_complete = True
                 record_decision(
                     "STOP_CONFIRMATION",
                     reason=confirmation_reason,
@@ -4294,6 +4425,43 @@ def _execute_adaptive_group(
             full_fidelity=(policy.fidelity.maximum if policy.fidelity is not None else None),
         )
         execute(explicit_confirmation, active)
+        expected_confirmation_runs = len(active) * len(confirmation_seeds)
+        completed_confirmation_runs = sum(
+            result.study_phase == "confirmation"
+            and result.termination_type == "completed"
+            for result in outcomes
+        )
+        confirmation_complete = (
+            expected_confirmation_runs > 0
+            and completed_confirmation_runs >= expected_confirmation_runs
+        )
+
+    if (
+        policy.candidate_budget is None
+        and policy.automatic_stop
+        and confirmation_complete
+        and within_time()
+        and allowance() > 0
+    ):
+        action, scientific_backfill, evidence = next_event_action(
+            min(parallelism, allowance())
+        )
+        if scientific_backfill:
+            record_decision(
+                "SCIENTIFIC_BACKFILL",
+                scheduler_action=action,
+                trials=[int(value["trial_index"]) for value in scientific_backfill],
+                reason=(
+                    "fresh confirmation completed; remaining useful evidence gets spare capacity"
+                ),
+                scientific_evidence=evidence,
+            )
+            execute(scientific_backfill, active)
+
+    if policy.candidate_budget is None and policy.automatic_stop:
+        final_convergence = evaluate_automatic_convergence()
+        convergence_state = final_convergence.to_dict()
+        persist_state()
 
     final_pruning_audit = (
         _pruner_calibration(
@@ -4316,12 +4484,12 @@ def _execute_adaptive_group(
         if budget_exhausted
         else "TIME_BUDGET"
         if time_exhausted
-        else (
-            f"CONVERGED_{policy.goal.upper()}"
-            if bool(convergence_state.get("converged"))
-            else "EXPLICIT_RECORD_CONVERGENCE"
-        )
-        if search_converged
+        else f"CONVERGED_{policy.goal.upper()}"
+        if bool(convergence_state.get("converged"))
+        else "CONFIRMATION_INCOMPLETE"
+        if not confirmation_complete and bool(policy.confirmation_auto or policy.confirmation_seeds)
+        else "EXPLICIT_RECORD_CONVERGENCE"
+        if search_converged and policy.convergence_patience > 0
         else "CANDIDATE_BUDGET"
         if policy.candidate_budget is not None and candidate_budget_reached
         else "SEARCH_SPACE_EXHAUSTED"
@@ -4331,6 +4499,7 @@ def _execute_adaptive_group(
     finish_reason = {
         "RUN_BUDGET": "run-budget-exhausted",
         "TIME_BUDGET": "time-budget-exhausted",
+        "CONFIRMATION_INCOMPLETE": "confirmation-incomplete",
         "EXPLICIT_RECORD_CONVERGENCE": "explicit-record-convergence",
         "CANDIDATE_BUDGET": "candidate-budget-reached",
         "SEARCH_SPACE_EXHAUSTED": "candidate-pool-exhausted",
@@ -4351,6 +4520,7 @@ def _execute_adaptive_group(
         candidate_pool_exhausted=candidate_pool_exhausted,
         budget_exhausted=budget_exhausted,
         time_exhausted=time_exhausted,
+        confirmation_complete=confirmation_complete,
         convergence_enabled=policy.convergence_patience > 0,
         pruning_audit=final_pruning_audit,
     )
@@ -7391,6 +7561,24 @@ def _memory_text(value: int) -> str:
     return f"{value}B"
 
 
+def _confirmation_backfill_room(
+    *,
+    parallelism: int,
+    remaining_run_allowance: int,
+    pending_runs: int,
+    queued_confirmation_runs: int,
+) -> int:
+    """Return lanes confirmation leaves available to the existing scientific dispatcher."""
+    occupied_or_reserved = max(0, pending_runs) + max(0, queued_confirmation_runs)
+    return max(
+        0,
+        min(
+            remaining_run_allowance - occupied_or_reserved,
+            parallelism - occupied_or_reserved,
+        ),
+    )
+
+
 def _adaptive_parallelism(resources: ResourceRequest, policy: AdaptiveSearchPolicy) -> int:
     run_budget = policy.max_runs or (
         (policy.candidate_budget or policy.proposal_pool_size) * max(1, policy.min_seeds)
@@ -7818,9 +8006,7 @@ def _request_early_stops(
     evaluator = ObjectiveUtility(objective or {"metric": metric, "mode": mode})
     histories: list[tuple[Mapping[str, Any], tuple[tuple[int, float], ...]]] = []
     for ordinal, specification in enumerate(specifications, 1):
-        if specification.get("hpo_phase") == "confirmation" or specification.get(
-            "hpo_scientific_continuation"
-        ):
+        if _performance_pruning_protected(specification):
             continue
         resolved = dict(specification)
         resolved.setdefault("trial_index", ordinal)
@@ -7845,14 +8031,7 @@ def _request_early_stops(
         probability_threshold=probability_threshold,
         margin=margin,
     )
-    calibration_candidates = int(calibration.get("calibration_candidates", 0) or 0)
-    calibration_error = calibration.get("curve_rmse")
-    if (
-        calibration_candidates < _PRUNER_MIN_CALIBRATION_CANDIDATES
-        or not isinstance(calibration_error, int | float)
-        or isinstance(calibration_error, bool)
-        or not math.isfinite(float(calibration_error))
-    ):
+    if not calibration.get("strong_pruning_ready", False):
         # A probability threshold is meaningful only after complete curves have shown how prefix
         # predictions relate to actual endpoints. With no retrospective discrimination sample,
         # every startup candidate could previously be pruned against another equally provisional
@@ -7866,9 +8045,20 @@ def _request_early_stops(
             )
             stale_evidence_path.unlink(missing_ok=True)
         return
+    residual_quantile = calibration.get("endpoint_absolute_residual_q90")
+    residual_count = int(calibration.get("endpoint_residual_count", 0) or 0)
+    conformal_deviation = (
+        float(residual_quantile) / 1.645 * (1.0 + 1.0 / math.sqrt(residual_count))
+        if isinstance(residual_quantile, int | float)
+        and not isinstance(residual_quantile, bool)
+        and math.isfinite(float(residual_quantile))
+        and residual_count > 0
+        else 0.0
+    )
     calibrated_prior = max(
         pooled_deviation,
         float(calibration.get("curve_rmse", 0.0) or 0.0),
+        conformal_deviation,
         1e-6,
     )
     fidelity_targets = [
@@ -8113,8 +8303,7 @@ def _cancel_queued_pruned_candidates(
         trial = int(specification["trial_index"])
         if (
             trial not in pruned_trials
-            or specification.get("hpo_phase") == "confirmation"
-            or specification.get("evidence_required")
+            or _performance_pruning_protected(specification)
         ):
             retained.append(specification)
             continue
@@ -8126,6 +8315,20 @@ def _cancel_queued_pruned_candidates(
         if on_cancel is not None:
             on_cancel(specification)
     queued.extend(retained)
+
+
+def _performance_pruning_protected(specification: Mapping[str, Any]) -> bool:
+    """Return whether a Run owes response evidence and cannot be performance-pruned."""
+    requirement = specification.get("evidence_requirement")
+    explicitly_required = bool(specification.get("evidence_required")) or (
+        isinstance(requirement, Mapping) and bool(requirement.get("required"))
+    )
+    return bool(
+        specification.get("hpo_startup_anchor")
+        or specification.get("hpo_scientific_continuation")
+        or specification.get("hpo_phase") in {"confirmation", "scientific_continuation"}
+        or explicitly_required
+    )
 
 
 def _pruner_calibration(
@@ -8186,22 +8389,97 @@ def _pruner_calibration(
         margin=margin,
     )
     calibration_error = report.get("curve_rmse")
-    runtime_ready = bool(
+    operational = bool(
         int(report.get("calibration_candidates", 0) or 0)
         >= _PRUNER_MIN_CALIBRATION_CANDIDATES
         and isinstance(calibration_error, int | float)
         and not isinstance(calibration_error, bool)
         and math.isfinite(float(calibration_error))
     )
+    residual_count = int(report.get("endpoint_residual_count", 0) or 0)
+    advertised_coverage = float(report.get("advertised_interval_coverage", 0.90))
+    empirical_coverage = report.get("interval_coverage_90")
+    resolution = report.get("calibration_resolution")
+    brier = report.get("probability_brier_score")
+    null_brier = report.get("null_brier_score")
+    false_prune_rate = report.get("false_prune_rate")
+    # A nominal p interval cannot be validated until finite-sample conformal resolution can
+    # represent p.  This is derived from the advertised interval, not an arbitrary candidate
+    # quota.  Coverage, discrimination and harmful-prune evidence must all support strong use.
+    finite_sample_support = (
+        residual_count > 0
+        and residual_count / (residual_count + 1) >= advertised_coverage
+    )
+    interval_calibrated = bool(
+        isinstance(empirical_coverage, int | float)
+        and not isinstance(empirical_coverage, bool)
+        and isinstance(resolution, int | float)
+        and float(empirical_coverage) + float(resolution) >= advertised_coverage
+    )
+    probability_calibrated = bool(
+        isinstance(brier, int | float)
+        and not isinstance(brier, bool)
+        and isinstance(null_brier, int | float)
+        and not isinstance(null_brier, bool)
+        and float(brier) <= float(null_brier) + (float(resolution) if resolution else 0.0)
+    )
+    harmful_prunes_bounded = bool(
+        isinstance(false_prune_rate, int | float)
+        and not isinstance(false_prune_rate, bool)
+        and float(false_prune_rate) <= probability_threshold
+    )
+    strong_ready = bool(
+        operational
+        and finite_sample_support
+        and interval_calibrated
+        and probability_calibrated
+        and harmful_prunes_bounded
+    )
+    reasons: list[str] = []
+    if not operational:
+        reasons.append("endpoint prediction is not yet identifiable from completed curves")
+    if not finite_sample_support:
+        reasons.append(
+            "finite-sample residual resolution cannot validate the advertised 90% interval"
+        )
+    if operational and not interval_calibrated:
+        reasons.append("retrospective endpoint intervals under-cover their advertised probability")
+    if operational and not probability_calibrated:
+        reasons.append("competitive probabilities do not improve on the empirical null forecast")
+    if operational and not harmful_prunes_bounded:
+        reasons.append(
+            "retrospective harmful-prune rate exceeds the authored probability threshold"
+        )
     report.update(
         {
-            "runtime_pruning_ready": runtime_ready,
+            # Backward-compatible field now means only that the model can be evaluated.  Strong
+            # decisions must consume ``strong_pruning_ready``.
+            "runtime_pruning_ready": operational,
+            "operationally_available": operational,
+            "strong_pruning_ready": strong_ready,
+            "probability_calibrated": probability_calibrated,
+            "interval_calibrated": interval_calibrated,
+            "finite_sample_supports_advertised_interval": finite_sample_support,
+            "harmful_prunes_bounded": harmful_prunes_bounded,
             "required_calibration_candidates": _PRUNER_MIN_CALIBRATION_CANDIDATES,
+            "required_calibration_candidates_semantics": "identifiability-minimum-only",
             "runtime_pruning_reason": (
-                "retrospective endpoint calibration is available"
-                if runtime_ready
-                else "waiting for two completed candidates with comparable endpoint curves"
+                "retrospective model is operational and calibrated for strong decisions"
+                if strong_ready
+                else "; ".join(reasons)
             ),
+            "calibration_evidence": {
+                "endpoint_residual_count": residual_count,
+                "curve_rmse": calibration_error,
+                "endpoint_absolute_residual_q90": report.get("endpoint_absolute_residual_q90"),
+                "advertised_interval_coverage": advertised_coverage,
+                "empirical_interval_coverage": empirical_coverage,
+                "probability_brier_score": brier,
+                "null_brier_score": null_brier,
+                "harmful_false_prune_rate": false_prune_rate,
+                "authored_probability_threshold": probability_threshold,
+                "practical_margin": margin,
+            },
         }
     )
     if len(_PRUNER_AUDIT_CACHE) >= 64:

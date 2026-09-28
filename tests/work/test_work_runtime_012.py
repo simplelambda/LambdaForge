@@ -166,7 +166,7 @@ def test_runtime_outputs_metrics_inputs_and_immutable_views(tmp_path: Path) -> N
         "name": "work-test-project",
         "version": "1.2.3",
     }
-    assert execution["lambdaforge_version"] == "0.15.0"
+    assert execution["lambdaforge_version"] == "0.16.0"
     with pytest.raises(TypeError):
         config.raw["name"] = "changed"  # type: ignore[index]
 

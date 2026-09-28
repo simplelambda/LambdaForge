@@ -13,7 +13,26 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.hpo.ParameterSpace import ParameterSpace
+from lambdaforge.scientific_format import format_parameter_vector
 from lambdaforge.work.atomic import atomic_write_text
+
+
+def _pruned_run(candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the first persisted censored Run for human ledger rendering."""
+    return next(
+        (
+            value
+            for value in candidate.get("runs", ())
+            if isinstance(value, Mapping) and bool(value.get("censored"))
+        ),
+        {},
+    )
+
+
+def _display(value: Any) -> str:
+    """Render absent scientific evidence explicitly without inventing a value."""
+    return "—" if value is None else str(value)
 
 
 def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
@@ -300,6 +319,22 @@ def _write_study_dashboard(
 ) -> Path:
     """Render persisted Study Analysis as one navigable offline dashboard."""
     candidates = [dict(value) for value in analysis.get("candidates", ()) if isinstance(value, Mapping)]
+    comparable_candidates = [
+        value for value in candidates if isinstance(value.get("mean"), int | float)
+    ]
+    try:
+        parameter_space = ParameterSpace.from_schema(
+            analysis.get("search_space")
+            if isinstance(analysis.get("search_space"), Mapping)
+            else None,
+            tuple(
+                value.get("parameters", {})
+                for value in candidates
+                if isinstance(value.get("parameters"), Mapping)
+            ),
+        )
+    except (TypeError, ValueError):
+        parameter_space = None
     parameter_names = sorted(
         {str(name) for candidate in candidates for name in candidate.get("parameters", {})}
     )
@@ -322,11 +357,13 @@ def _write_study_dashboard(
     ranking = go.Figure(
         data=[
             go.Bar(
-                x=[str(value.get("trial")) for value in candidates],
-                y=[value.get("mean") for value in candidates],
+                x=[str(value.get("trial")) for value in comparable_candidates],
+                y=[value.get("mean") for value in comparable_candidates],
                 error_y={
                     "type": "data",
-                    "array": [value.get("standard_error") or 0 for value in candidates],
+                    "array": [
+                        value.get("standard_error") or 0 for value in comparable_candidates
+                    ],
                 },
                 marker={"color": "#58a6ff"},
                 hovertemplate="trial=%{x}<br>selection objective=%{y:.6g}<extra></extra>",
@@ -442,7 +479,7 @@ def _write_study_dashboard(
             config=plot_config,
         ),
     }
-    completed = sum(1 for value in candidates if isinstance(value.get("mean"), int | float))
+    completed = len(comparable_candidates)
     censored = sum(int(value.get("censored_observations") or 0) for value in candidates)
     winner = analysis.get("winner", {})
     winner = winner if isinstance(winner, Mapping) else {}
@@ -460,6 +497,50 @@ def _write_study_dashboard(
         + html.escape(str(value.get("recommendation", "")))
         + "</p></article>"
         for value in findings
+    )
+    scientific = analysis.get("scientific_understanding", {})
+    scientific = scientific if isinstance(scientific, Mapping) else {}
+    parameter_questions = [
+        value
+        for value in scientific.get("parameter_questions", ())
+        if isinstance(value, Mapping)
+    ]
+    interpretation_html = "".join(
+        '<article class="finding"><span class="badge">'
+        + html.escape(str(value.get("conclusion_kind", "UNRESOLVED")))
+        + " · stability "
+        + html.escape(
+            f"{100 * float(value.get('descriptive_stability', 0.0) or 0.0):.0f}%"
+        )
+        + "</span><h3>"
+        + html.escape(str(value.get("parameter", "Parameter")))
+        + "</h3><p>"
+        + html.escape(str(value.get("summary", "The question remains unresolved.")))
+        + "</p><p><b>Direct support:</b> "
+        + html.escape(
+            ", ".join(map(str, value.get("response_support", {}).get("direct", ())))
+            or "none"
+        )
+        + " · <b>Censored only:</b> "
+        + html.escape(
+            ", ".join(
+                map(str, value.get("response_support", {}).get("censored_only", ()))
+            )
+            or "none"
+        )
+        + " · <b>Predictive only:</b> "
+        + html.escape(
+            ", ".join(
+                map(str, value.get("response_support", {}).get("surrogate_only", ()))
+            )
+            or "none"
+        )
+        + '</p><p class="muted"><b>Missing evidence:</b> '
+        + html.escape(
+            "; ".join(map(str, value.get("missing_evidence", ()))) or "none identified"
+        )
+        + "</p></article>"
+        for value in parameter_questions
     )
     coverage_rows = "".join(
         "<tr><td>"
@@ -643,12 +724,20 @@ updateRanking();updateParameter();updateInteraction();updateResources();renderCo
         for name in pair_names
     )
     trial_rows = "".join(
-        "<tr><td><input class=\"trial-compare\" type=\"checkbox\" value=\""
+        "<tr><td>"
+        + (
+            "✓"
+            if isinstance(value.get("mean"), int | float)
+            else "×"
+            if value.get("censored_observations")
+            else "·"
+        )
+        + "</td><td><input class=\"trial-compare\" type=\"checkbox\" value=\""
         + html.escape(str(value.get("trial")), quote=True)
         + "\"></td><td>"
         + html.escape(str(value.get("trial")))
         + "</td><td>"
-        + html.escape(str(value.get("mean", "—")))
+        + html.escape(_display(value.get("mean")))
         + "</td><td>"
         + html.escape(str(value.get("standard_error", "—")))
         + "</td><td>"
@@ -656,7 +745,37 @@ updateRanking();updateParameter();updateInteraction();updateResources();renderCo
         + "</td><td>"
         + html.escape(str(value.get("censored_observations", 0)))
         + "</td><td>"
-        + html.escape(json.dumps(value.get("parameters", {}), ensure_ascii=False, default=str))
+        + html.escape(_display(value.get("best_observed_objective")))
+        + "</td><td>"
+        + html.escape(
+            str(
+                _pruned_run(value).get(
+                    "prune_step",
+                    _pruned_run(value).get("best_step", "—"),
+                )
+            )
+        )
+        + "</td><td>"
+        + html.escape(
+            str(
+                _pruned_run(value).get(
+                    "prune_reason",
+                    _pruned_run(value).get("termination", {}).get("reason", "—")
+                    if isinstance(_pruned_run(value).get("termination"), Mapping)
+                    else "—",
+                )
+            )
+        )
+        + "</td><td>"
+        + html.escape(_display(_pruned_run(value).get("probability_competitive")))
+        + "</td><td>"
+        + html.escape(_display(_pruned_run(value).get("pruning_threshold")))
+        + "</td><td>"
+        + html.escape(_display(_pruned_run(value).get("reference_candidate")))
+        + "</td><td>"
+        + html.escape(
+            format_parameter_vector(value.get("parameters", {}), parameter_space)
+        )
         + "</td></tr>"
         for value in candidates
     )
@@ -705,8 +824,10 @@ updateRanking();updateParameter();updateInteraction();updateResources();renderCo
         + figure_html["ranking"]
         + '</div></article><article class="panel"><h2>Predictive importance</h2><div class="plot">'
         + figure_html["importance"]
-        + '</div></article><article class="panel"><h2>Interpretation</h2><div class="empty">Importance describes the fitted surrogate, not causality. Open Parameters and Interactions before narrowing a search space.</div></article></div></section>'
-        '<section class="view" id="study-trials" hidden><div class="panel"><div class="tools"><span class="muted">Select at most two candidates to compare.</span></div><div class="table-wrap"><table><thead><tr><th>Compare</th><th>Trial</th><th>Selection</th><th>SE</th><th>Seeds</th><th>Censored</th><th>Parameters</th></tr></thead><tbody>'
+        + '</div></article><article class="panel"><h2>Interpretation</h2><p class="note">Associations describe persisted evidence and fitted predictions; they are not causal. Predictive importance is meaningful only with the support and reliability shown below.</p>'
+        + (interpretation_html or '<div class="empty">No parameter conclusion is available yet.</div>')
+        + '</article></div></section>'
+        '<section class="view" id="study-trials" hidden><div class="panel"><div class="tools"><span class="muted">Select at most two candidates to compare. Comparable ranking contains terminal selection evidence only. This ledger retains every attempted candidate; × means performance-pruned and its final selection remains unavailable.</span></div><div class="table-wrap"><table><thead><tr><th>State</th><th>Compare</th><th>Trial</th><th>Final selection</th><th>SE</th><th>Seeds</th><th>Censored</th><th>Partial best</th><th>Prune step</th><th>Prune reason</th><th>P(competitive)</th><th>Threshold</th><th>Reference</th><th>Parameters</th></tr></thead><tbody>'
         + trial_rows
         + '</tbody></table></div><div class="compare" id="trial-comparison"></div></div></section>'
         '<section class="view" id="study-parameters" hidden><div class="tools"><label>Parameter <select id="parameter-select">'

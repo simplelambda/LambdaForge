@@ -1,6 +1,6 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.15.0. Spanish is
+This is the low-token source of truth for agents using or modifying LambdaForge 0.16.0. Spanish is
 in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
 then inspect the public signature or implementation being changed. Current tests and code override
 assumptions.
@@ -354,8 +354,12 @@ a candidate still competitive at the exact common step solely from its fitted sl
 callback metrics plus epoch/validation time are automatic. Custom trainers log curves with
 `self.metrics.log(name, value, step=epoch)`; use `progress.update` for coarse progress and
 `self.log`/print only for human narration.
-Do not enable curve pruning until two distinct completed candidates yield a finite retrospective
-curve calibration; provisional startup curves must not prune one another without endpoint evidence.
+Two distinct completed curves identify a retrospective comparison but do not by themselves make
+pruning safe. Strong runtime pruning additionally requires finite-sample residual resolution,
+retrospective interval coverage and competitive-probability discrimination consistent with the
+authored threshold. Persist operational and strong-calibration readiness separately. Protected
+startup anchors, required evidence, confirmation and scientific continuations never receive
+competitive pruning.
 
 The controller may cooperatively preempt only a scored non-confirmation fidelity Run with a
 verified owned checkpoint, at least 30 seconds of runtime and a competing action exceeding both

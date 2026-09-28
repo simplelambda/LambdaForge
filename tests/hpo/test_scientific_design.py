@@ -121,6 +121,69 @@ def test_large_effect_and_min_mode_select_the_scientifically_correct_value() -> 
     assert minimum["best_value_probability"]["shallow"] > 0.8
 
 
+def test_incomplete_discrete_support_keeps_full_domain_conclusion_unresolved() -> None:
+    pool = {
+        1: {"width": 32},
+        2: {"width": 64},
+        3: {"width": 128},
+        4: {"width": 256},
+    }
+    analysis = _analyze(
+        [
+            _candidate(1, pool[1], [0.40, 0.41]),
+            _candidate(2, pool[2], [0.45], pruned=True),
+            _candidate(4, pool[4], [0.80, 0.81]),
+        ],
+        margin=0.02,
+        pool=pool,
+    )
+    question = analysis["parameter_questions"][0]
+
+    assert question["authored_values"] == [32, 64, 128, 256]
+    assert question["observed_values"] == [32, 256]
+    assert question["conclusion_kind"] == "UNRESOLVED"
+    assert question["predictive_conclusion"]["kind"] in {
+        "PREFERRED",
+        "PREFERRED_REGION",
+        "PRACTICALLY_EQUIVALENT",
+    }
+    assert question["surrogate_best_frequency"]
+    assert question["best_value_probability_semantics"] == "surrogate-resampling-frequency"
+    assert question["missing_evidence"] == [
+        "no terminal response for width=64",
+        "no terminal response for width=128",
+    ]
+    assert question["response_support"] == {
+        "direct": ["32", "256"],
+        "censored_only": ["64"],
+        "surrogate_only": ["128"],
+    }
+
+
+def test_sparse_discrete_support_still_separates_censored_and_predictive_values() -> None:
+    pool = {
+        1: {"width": 32},
+        2: {"width": 64},
+        3: {"width": 128},
+        4: {"width": 256},
+    }
+    question = _analyze(
+        [
+            _candidate(1, pool[1], [0.40, 0.41]),
+            _candidate(2, pool[2], [0.45], pruned=True),
+        ],
+        margin=0.02,
+        pool=pool,
+    )["parameter_questions"][0]
+
+    assert question["conclusion_kind"] == "UNRESOLVED"
+    assert question["response_support"] == {
+        "direct": ["32"],
+        "censored_only": ["64"],
+        "surrogate_only": ["128", "256"],
+    }
+
+
 def test_joint_effect_is_reported_as_context_dependent() -> None:
     candidates: list[dict[str, Any]] = []
     trial = 0

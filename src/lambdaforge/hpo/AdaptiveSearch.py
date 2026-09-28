@@ -385,7 +385,7 @@ class AdaptiveSearchPolicy:
             "stop": {
                 "mode": "auto" if self.automatic_stop else "disabled",
                 "stability": self.conclusion_stability,
-                "policy_version": "scientific-convergence-v1",
+                "policy_version": "scientific-convergence-v2",
             },
             "early_stopping": {
                 "enabled": self.early_stopping,

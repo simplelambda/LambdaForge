@@ -44,6 +44,7 @@ class JobService:
         self.catalog = catalog or ClusterCatalog.load()
         self.store = store or JobStore(project=self.catalog.project)
         self.factory = factory or ControlPlaneFactory()
+        self._study_projection_cache: dict[str, tuple[str, dict[str, Any]]] = {}
 
     def submit(
         self,
@@ -925,78 +926,94 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             )
         return artifacts
 
-    @staticmethod
-    def _load_study_summary(record: JobRecord, transport: Any) -> dict[str, Any] | None:
+    def _load_study_summary(self, record: JobRecord, transport: Any) -> dict[str, Any] | None:
         root = PurePosixPath(record.work_dir).parent / "study"
         interactive_path = str(root / "interactive.json")
         path = str(root / "summary.json")
-        # New workers persist a transport-safe index.  Keep the full summary as a legacy
-        # fallback, but never silently truncate JSON (a tail is not a valid document).
-        selected = interactive_path
-        exists = transport.run(("test", "-f", interactive_path), timeout=10.0)
-        if exists.returncode != 0:
-            selected = path
-        linked = transport.run(("test", "-L", selected), timeout=10.0)
-        if linked.returncode == 0:
-            return None
-        stat = transport.run(("stat", "-c", "%s", selected), timeout=10.0)
-        try:
-            size = int(stat.stdout.strip()) if stat.returncode == 0 else None
-        except ValueError:
-            size = None
-        if selected == path and size is not None and size > 8 * 1024 * 1024:
-            loaded = JobService._project_legacy_study(transport, path)
-        else:
-            loaded = transport.run(("cat", selected), timeout=15.0)
+        cached = self._study_projection_cache.get(record.job_id)
+        cached_fingerprint = cached[0] if cached is not None else ""
+        # Selection, symlink validation, fingerprinting and projection happen in one bounded
+        # host-side read.  An unchanged refresh returns only a tiny marker.
+        script = r'''
+import json,os,sys
+interactive,summary,known=sys.argv[1:]
+known="" if known=="-" else known
+selected=interactive if os.path.isfile(interactive) else summary
+if not os.path.isfile(selected) or os.path.islink(selected):
+ print(json.dumps({"missing":True},separators=(",",":")));raise SystemExit
+st=os.stat(selected);fingerprint=f"{st.st_mtime_ns}:{st.st_size}"
+if fingerprint==known:
+ print(json.dumps(
+  {"unchanged":True,"fingerprint":fingerprint},separators=(",",":")
+ ))
+ raise SystemExit
+with open(selected,encoding="utf-8") as stream:value=json.load(stream)
+if selected==summary:
+ try:
+  from lambdaforge.study_projection import interactive_study
+  value=interactive_study(value)
+ except (ImportError,AttributeError):
+  fields=(
+   "study_telemetry_version","name","execution_id","strategy","design","objective",
+   "planned_runs","planned_candidates","status","design_status","scientific_status",
+   "finish_reason","counts","cost","initial_design","coverage_state","hpo_analysis",
+   "finished","created_at_utc","updated_at_utc"
+  )
+  candidate_fields=(
+   "trial","parameters","state","selection_objective","selection_seed_count",
+   "selection_standard_error","current_objective","best_objective","partially_censored",
+   "pareto_optimal","cost","feasibility","confirmation_status"
+  )
+  run_fields=(
+   "key","seed","phase","purpose","target_questions","fidelity","state",
+   "current_observed_objective","best_observed_objective","final_objective",
+   "objective_status","objective_censoring","latest_step","best_step","best_objective",
+   "duration_seconds","gpu_index","gpu_token","termination_type","prune_reason",
+   "scientific_continuation","evidence_requirement","run_dir","log_path",
+   "metrics_path","training_metrics_path"
+  )
+  candidates=[
+   {
+    **{k:c[k] for k in candidate_fields if k in c},
+    "runs":[
+     {k:r[k] for k in run_fields if k in r}
+     for r in c.get("runs",[]) if isinstance(r,dict)
+    ]
+   }
+   for c in value.get("candidates",[]) if isinstance(c,dict)
+  ]
+  value={k:value[k] for k in fields if k in value}|{
+   "detail_level":"interactive","candidates":candidates
+  }
+print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":")))
+'''
+        loaded = transport.run(
+            ("python3", "-c", script, interactive_path, path, cached_fingerprint or "-"),
+            timeout=30.0,
+        )
         if loaded.returncode != 0 or not loaded.stdout.strip():
             return None
-        limit = 16 * 1024 * 1024 if selected == interactive_path else 8 * 1024 * 1024
+        limit = 8 * 1024 * 1024
         if len(loaded.stdout.encode("utf-8")) > limit:
-            if selected == path:
-                raise RuntimeError(
-                    "Legacy Study telemetry is too large for an interactive read. Upgrade the "
-                    "remote LambdaForge worker so it publishes study/interactive.json."
-                )
-            raise RuntimeError("Compact Study telemetry exceeds its 16 MiB safety limit.")
+            raise RuntimeError("Compact Study telemetry exceeds its 8 MiB safety limit.")
         try:
-            value = json.loads(loaded.stdout)
+            envelope = json.loads(loaded.stdout)
         except (json.JSONDecodeError, TypeError) as error:
             raise RuntimeError(
-                f"Corrupt study telemetry for {record.job_id}: {selected}"
+                f"Corrupt study telemetry for {record.job_id}."
             ) from error
+        if not isinstance(envelope, Mapping) or envelope.get("missing"):
+            return None
+        if envelope.get("unchanged"):
+            return dict(cached[1]) if cached is not None else None
+        value = envelope.get("value")
         if not isinstance(value, dict) or value.get("study_telemetry_version") != 1:
-            raise RuntimeError(f"Unsupported study telemetry for {record.job_id}: {selected}")
+            raise RuntimeError(f"Unsupported study telemetry for {record.job_id}.")
+        fingerprint = str(envelope.get("fingerprint", ""))
+        self._study_projection_cache[record.job_id] = (fingerprint, dict(value))
+        if len(self._study_projection_cache) > 32:
+            self._study_projection_cache.pop(next(iter(self._study_projection_cache)))
         return value
-
-    @staticmethod
-    def _project_legacy_study(transport: Any, path: str) -> Any:
-        """Project an old oversized summary on its host instead of transferring it whole."""
-        script = r'''
-import json,sys
-p=sys.argv[1]
-with open(p,encoding="utf-8") as f: s=json.load(f)
-cf=("trial","parameters","state","selection_objective","selection_seed_count","selection_standard_error","current_objective","best_objective","partially_censored","pareto_optimal","latest_metrics","cost","feasibility","confirmation_status")
-rf=("key","seed","phase","purpose","target_questions","fidelity","state","current_observed_objective","best_observed_objective","final_objective","objective_status","objective_censoring","latest_metrics","latest_step","best_step","best_objective","duration_seconds","gpu_index","gpu_token","termination_type","prune_reason","scientific_continuation","evidence_requirement")
-cs=[]
-for c in s.get("candidates",[]):
- if not isinstance(c,dict): continue
- q={k:c[k] for k in cf if k in c}
- q["runs"]=[{k:r[k] for k in rf if k in r} for r in c.get("runs",[]) if isinstance(r,dict)]
- cs.append(q)
-base=("study_telemetry_version","name","execution_id","strategy","design","objective","planned_runs","planned_candidates","status","design_status","scientific_status","finish_reason","required_runs","required_completed","required_pruned","required_failed","required_missing","evidence_completion_fraction","attempted_completion_fraction","counts","cost","initial_design","coverage_state","hpo_analysis","surrogate_belief","finished","created_at_utc","updated_at_utc")
-o={k:s[k] for k in base if k in s}; ctl=s.get("controller",{}); adm=s.get("admission",{})
-o.update(
- detail_level="interactive",candidates=cs,
- controller={
-  k:ctl[k]
-  for k in ("last","recent","history_count","surrogate_belief","scheduler")
-  if k in ctl
- },
- admission={"current":adm.get("current"),"updated_at_utc":adm.get("updated_at_utc")},
-)
-json.dump(o,sys.stdout,separators=(",",":"))
-'''
-        return transport.run(("python3", "-c", script, path), timeout=30.0)
 
     @staticmethod
     def _owned_study_path(record: JobRecord, value: Any) -> PurePosixPath | None:

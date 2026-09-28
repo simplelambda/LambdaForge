@@ -1,4 +1,4 @@
-# Manual de LambdaForge 0.15
+# Manual de LambdaForge 0.16
 
 [English](MANUAL.md) · Español
 
@@ -595,6 +595,23 @@ rendimiento, reducción esperada de entropía, coste incremental observado y pri
 diseño empírico-bayesianos auditables, no ganancia de información Shannon calibrada. Un probe puede
 superar a un candidato algo mejor predicho si su contrafactual emparejado resuelve más incertidumbre
 material por coste; si vuelve a aumentar la mejora práctica, optimización recupera prioridad.
+
+`goal` modifica esas prioridades; no es un permiso que descarte el valor científico. Cuando el
+screening y el conjunto práctico de contendientes se estabilizan, LambdaForge deja de proponer
+candidatos ordinarios de optimización y entra en confirmación con seeds nuevas. Las obligaciones
+protegidas del diseño inicial siguen completándose y los huecos libres pueden recoger response
+coverage, comparaciones emparejadas o continuaciones desde checkpoint de mayor valor. La
+confirmación conserva prioridad y solo su estado real persistido puede satisfacer convergencia. Un
+límite duro de Runs, tiempo o capacidad mantiene un motivo de parada incompleta distinto.
+
+El pruning de curvas tiene dos niveles de disponibilidad. El operativo indica que endpoints
+terminados permiten identificar el modelo; el fuerte exige además resolución residual de muestra
+finita, cobertura retrospectiva de intervalos, discriminación probabilística y una tasa de podas
+perjudiciales compatible con el umbral escrito. Solo este último autoriza paradas competitivas.
+Anchors iniciales, evidencia mínima obligatoria, confirmación y continuaciones científicas están
+protegidos. Search coverage registra intentos, response coverage respuestas terminales y scientific
+coverage el soporte de la conclusión exacta mostrada; ninguno sustituye a otro.
+
 Startup puede entrelazarse con decisiones del modelo. Identidades
 y fidelidades pendientes condicionan el surrogate. La cola no despachada es provisional: nueva
 evidencia puede sustituir una acción no-anchor con coste científico cero y registrar

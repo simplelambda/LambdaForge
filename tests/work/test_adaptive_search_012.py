@@ -20,6 +20,7 @@ from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler, CandidateObservatio
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
 from lambdaforge.hpo.BayesianSampler import BayesianSampler
+from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.hpo.SobolSearch import SobolSearch
 from lambdaforge.work import WorkConfig, WorkRunner
 from lambdaforge.work.models import WorkResources, WorkResult
@@ -31,6 +32,7 @@ from lambdaforge.work.runner import (
     _execute_gpu_admitted_runs,
     _gpu_memory_inventory,
     _objective_observation,
+    _pruner_calibration,
     _request_early_stops,
     _resource_frontier_room,
     _retry_failed_result,
@@ -38,13 +40,13 @@ from lambdaforge.work.runner import (
 )
 
 
-def _completed_pruner_calibration(tmp_path: Path) -> tuple[WorkResult, WorkResult]:
-    """Return two complete curves: the minimum retrospective comparison evidence."""
+def _completed_pruner_calibration(tmp_path: Path) -> tuple[WorkResult, ...]:
+    """Return well-calibrated complete curves for tests that exercise strong pruning."""
     results: list[WorkResult] = []
-    for trial, values in (
-        (1001, (0.50, 0.54, 0.57, 0.59, 0.61, 0.62)),
-        (1002, (0.44, 0.48, 0.51, 0.53, 0.55, 0.56)),
-    ):
+    for offset in range(12):
+        trial = 1001 + offset
+        base = 0.20 + 0.05 * offset
+        values = tuple(base + 0.02 * step for step in range(6))
         run_dir = tmp_path / f"calibration-{trial}"
         run_dir.mkdir()
         (run_dir / "metrics.jsonl").write_text(
@@ -78,7 +80,7 @@ def _completed_pruner_calibration(tmp_path: Path) -> tuple[WorkResult, WorkResul
                 termination_type="completed",
             )
         )
-    return results[0], results[1]
+    return tuple(results)
 
 
 def test_hpo_separates_current_curve_value_from_best_checkpoint(tmp_path: Path) -> None:
@@ -513,6 +515,10 @@ def test_incomplete_confirmation_is_explicit_and_cannot_select_survivors(
     candidate = result.summary["candidates"][0]
     assert candidate["confirmation_incomplete"] is True
     assert candidate["confirmation_complete"] is False
+    state = json.loads(
+        (result.execution_dir / "hpo-control" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state["controller"]["confirmation_complete"] is False
 
 
 def test_multi_fidelity_resumes_only_a_competitive_configuration(
@@ -1912,6 +1918,85 @@ def test_early_stopping_waits_for_retrospective_curve_calibration(tmp_path: Path
     assert not any(Path(value["hpo_stop_path"]).exists() for value in specifications)
 
 
+def test_two_poorly_calibrated_curves_do_not_enable_strong_pruning(tmp_path: Path) -> None:
+    historical = list(_completed_pruner_calibration(tmp_path))[:2]
+    calibration = _pruner_calibration(
+        historical,
+        ObjectiveUtility({"metric": "score", "mode": "max"}),
+        min_step=3,
+        confirmations=1,
+        probability_threshold=0.25,
+        margin=0.0,
+    )
+    assert calibration["operationally_available"] is True
+    assert calibration["strong_pruning_ready"] is False
+    assert calibration["finite_sample_supports_advertised_interval"] is False
+    assert calibration["runtime_pruning_reason"]
+    specifications = []
+    for trial, value in enumerate((0.95, 0.05), 1):
+        metrics = tmp_path / f"poor-active-{trial}.jsonl"
+        metrics.write_text(
+            "".join(
+                json.dumps({"name": "score", "value": value, "step": step}) + "\n"
+                for step in range(1, 7)
+            ),
+            encoding="utf-8",
+        )
+        specifications.append(
+            {
+                "trial_index": trial,
+                "hpo_metrics_path": metrics,
+                "hpo_stop_path": tmp_path / f"poor-active-{trial}.stop",
+            }
+        )
+
+    _request_early_stops(
+        specifications,
+        metric="score",
+        mode="max",
+        min_step=3,
+        confirmations=1,
+        probability_threshold=0.25,
+        historical_results=historical,
+    )
+
+    assert not any(Path(value["hpo_stop_path"]).exists() for value in specifications)
+
+
+def test_required_startup_anchor_is_not_performance_pruned(tmp_path: Path) -> None:
+    specifications = []
+    for trial, value in enumerate((0.95, 0.05), 1):
+        metrics = tmp_path / f"anchor-active-{trial}.jsonl"
+        metrics.write_text(
+            "".join(
+                json.dumps({"name": "score", "value": value, "step": step}) + "\n"
+                for step in range(1, 7)
+            ),
+            encoding="utf-8",
+        )
+        specifications.append(
+            {
+                "trial_index": trial,
+                "hpo_metrics_path": metrics,
+                "hpo_stop_path": tmp_path / f"anchor-active-{trial}.stop",
+                "hpo_startup_anchor": trial == 2,
+                "evidence_required": trial == 2,
+            }
+        )
+
+    _request_early_stops(
+        specifications,
+        metric="score",
+        mode="max",
+        min_step=3,
+        confirmations=1,
+        probability_threshold=0.25,
+        historical_results=_completed_pruner_calibration(tmp_path),
+    )
+
+    assert not Path(specifications[1]["hpo_stop_path"]).exists()
+
+
 def test_probabilistic_curve_pruning_keeps_a_slow_improving_run(tmp_path: Path) -> None:
     curves = (
         (0.10, 0.20, 0.30, 0.40, 0.50),
@@ -2091,7 +2176,7 @@ def test_completed_historical_candidate_can_prune_a_lone_active_straggler(
         metrics={"score": 0.1},
         fidelity={"current": 0, "target": 3, "maximum": 9},
     )
-    calibration_peer = _completed_pruner_calibration(tmp_path)[0]
+    calibration_peers = _completed_pruner_calibration(tmp_path)
     stop = tmp_path / "active.stop"
 
     _request_early_stops(
@@ -2108,12 +2193,12 @@ def test_completed_historical_candidate_can_prune_a_lone_active_straggler(
         min_step=3,
         confirmations=1,
         probability_threshold=0.25,
-        historical_results=(historical, prior_same_seed, calibration_peer),
+        historical_results=(historical, prior_same_seed, *calibration_peers),
     )
 
     assert stop.is_file()
     evidence = json.loads((tmp_path / "active.stop.evidence.json").read_text())
-    assert evidence["reference_candidate"] == 1
+    assert evidence["reference_candidate"] in {1, 1012}
     assert evidence["comparison_method"] == "independent-candidate-posterior"
     assert evidence["candidate_seed_evidence"] == 1
 

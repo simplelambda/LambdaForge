@@ -38,6 +38,7 @@ from textual.widgets import (
 )
 
 from lambdaforge.analysis.Report import write_html, write_metric_html, write_parameter_html
+from lambdaforge.scientific_format import format_parameter_value
 from lambdaforge.tui.viewmodels import (
     confirmation_text,
     epoch_rows,
@@ -602,7 +603,9 @@ class StudyWorkspace(ResearchWorkspace):
         best_parameters.clear(columns=True)
         best_parameters.add_columns("Parameter", "Value")
         for name, value in sorted((best_candidate or {}).get("parameters", {}).items()):
-            best_parameters.add_row(str(name).replace("_", " ").title(), format_value(value))
+            best_parameters.add_row(
+                str(name).replace("_", " ").title(), format_parameter_value(value)
+            )
         self._populate_trials(candidates)
         self.query_one("#study-hpo-content", Static).update(self._hpo_text())
         self._update_hpo_summary()
@@ -2533,7 +2536,7 @@ class TrialWorkspace(ResearchWorkspace):
         parameters.clear(columns=True)
         parameters.add_columns("Parameter", "Value")
         for name, value in sorted(candidate.get("parameters", {}).items()):
-            parameters.add_row(str(name), format_value(value))
+            parameters.add_row(str(name), format_parameter_value(value))
         latest = candidate.get("latest_metrics", {})
         metric_lines = [
             f"{metric_display_name(name):32} {format_value(value)}"

@@ -9,6 +9,8 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+## [0.16.0] - 2026-09-28
+
 ### Añadido
 
 - La exportación de Studies captura ahora el Attempt más reciente en cualquier estado. Studies en
@@ -54,6 +56,20 @@ metadata empaquetada.
 
 ### Cambiado
 
+- HPO adaptativo separa ahora estabilidad del screening, confirmación real con seeds nuevas y
+  backfill científico material. `goal` pondera optimización frente a comprensión sin desactivar
+  esta última; converger exige que no quede una acción material y factible, mientras el agotamiento
+  duro conserva un motivo explícito que no se llama convergencia.
+- El pruning fuerte depende ahora de resolución residual de muestra finita, calidad retrospectiva
+  de intervalos/probabilidades y evidencia de podas perjudiciales. Anchors, evidencia mínima,
+  confirmación y continuaciones científicas están protegidos; disponibilidad operativa y
+  calibración fuerte se persisten por separado.
+- El soporte científico distingue cobertura de búsqueda, respuesta terminal y conclusión. Un
+  dominio discreto incompleto conserva líderes predictivos del surrogate pero emite conclusión
+  exacta `UNRESOLVED` con gaps directos, censurados y solo predictivos concretos.
+- La telemetría interactiva usa una proyección compacta versionada, caché por fingerprint y detalle
+  lazy del Run seleccionado. El HTML separa ranking terminal comparable del ledger censurado
+  completo y muestra interpretación basada en evidencia y parámetros compactos.
 - Elevada la versión mínima de PyTorch a 2.3 y alineado NumPy con el runtime de `textual-plot` para
   que una instalación limpia no pueda resolver la combinación incompatible de ABI PyTorch 2.2 /
   NumPy 2.

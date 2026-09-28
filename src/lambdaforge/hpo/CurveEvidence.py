@@ -80,6 +80,7 @@ def audit_pruner(
         "confirmations": confirmations,
         "equivalence_margin": margin,
         "curve_model": "conservative-local-linear-last-5",
+        "advertised_interval_coverage": 0.90,
     }
     if len(grouped) < 2:
         return {
@@ -96,6 +97,10 @@ def audit_pruner(
             "probability_brier_score": None,
             "curve_rmse": None,
             "interval_coverage_90": None,
+            "endpoint_residual_count": 0,
+            "endpoint_absolute_residual_q90": None,
+            "calibration_resolution": None,
+            "null_brier_score": None,
         }
     sign = 1.0 if mode == "max" else -1.0
     final_scores = {
@@ -213,6 +218,26 @@ def audit_pruner(
         (probability - float(competitive[trial])) ** 2
         for trial, probability in last_probabilities.items()
     ]
+    absolute_errors = sorted(abs(value) for value in errors)
+    # Split-conformal finite-sample quantile.  The ``n + 1`` rank makes sparse calibration
+    # honestly conservative instead of pretending that two residuals validate a 90% interval.
+    conformal_index = min(
+        len(absolute_errors) - 1,
+        max(0, math.ceil(0.90 * (len(absolute_errors) + 1)) - 1),
+    ) if absolute_errors else None
+    competitive_rate = (
+        statistics.fmean(float(competitive[trial]) for trial in last_probabilities)
+        if last_probabilities
+        else None
+    )
+    null_brier = (
+        statistics.fmean(
+            (competitive_rate - float(competitive[trial])) ** 2
+            for trial in last_probabilities
+        )
+        if competitive_rate is not None
+        else None
+    )
     return {
         **settings,
         "completed_candidates": len(grouped),
@@ -229,6 +254,12 @@ def audit_pruner(
             math.sqrt(statistics.fmean(error * error for error in errors)) if errors else None
         ),
         "interval_coverage_90": covered / len(errors) if errors else None,
+        "endpoint_residual_count": len(errors),
+        "endpoint_absolute_residual_q90": (
+            absolute_errors[conformal_index] if conformal_index is not None else None
+        ),
+        "calibration_resolution": 1.0 / (len(errors) + 1) if errors else None,
+        "null_brier_score": null_brier,
     }
 
 

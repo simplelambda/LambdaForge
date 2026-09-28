@@ -29,7 +29,7 @@ projects, or an editable checkout while developing LambdaForge:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.15.0
+python -m pip install lambdaforge==0.16.0
 python -m pip install -e .
 python -m pip check
 lf --version
@@ -328,7 +328,7 @@ version probes live once in `environment.json`.
 Install the optional mature backend and use the uniform Python contract:
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.15.0"
+python -m pip install "lambdaforge[clustering]==0.16.0"
 ```
 
 ```python
@@ -776,6 +776,14 @@ than inventing a candidate size. The same or a dominated experiment is not repea
 new Attempt of the same logical Run resumes a valid checkpoint. It is never a bad scientific
 objective or a new Trial. Measured co-location throughput can also stop extra packing even when
 VRAM fits, because the goal is useful scientific work per wall-clock time rather than full memory.
+Performance pruning becomes operational only after completed curves identify endpoint error, and
+becomes eligible for strong decisions only when retrospective 90% intervals, probabilities and the
+harmful-prune rate support the authored probability threshold. Two curves alone are not treated as
+calibration. Initial-design anchors, required response evidence, confirmation and scientific
+continuations are protected. Search coverage may include a censored attempt; response coverage and
+full-domain discrete conclusions require terminal response evidence. Unsupported authored values
+remain explicitly predictive and the exact conclusion stays unresolved.
+
 Performance-pruned Runs still train the resource model when their forward/backward/optimizer/
 validation phases and per-process measurements make the memory profile complete; their scientific
 objective remains censored. Resource diagnostics persist changed `RESOURCE_WAIT`,
@@ -1124,7 +1132,7 @@ can be run or refreshed explicitly:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.15.0"
+python -m pip install "lambdaforge[analysis-report]==0.16.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json

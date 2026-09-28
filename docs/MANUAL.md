@@ -1,4 +1,4 @@
-# LambdaForge 0.15 manual
+# LambdaForge 0.16 manual
 
 ## Contents
 
@@ -701,6 +701,24 @@ priority. These are auditable empirical-Bayes design scores—not calibrated Sha
 gain. A designed probe may rank above a slightly better predicted candidate when its matched
 counterfactual resolves materially more uncertainty per unit cost; a later increase in practical
 improvement makes optimization dominant again.
+
+`goal` changes those priorities; it is not a permission switch that discards scientific value.
+Once screening and the practical contender set stabilize, LambdaForge stops proposing ordinary
+optimization candidates and enters fresh-seed confirmation. Protected initial-design obligations
+still complete, while otherwise idle lanes may collect the highest-value response coverage,
+matched comparison or checkpoint continuation. Confirmation has priority, and only its actual
+persisted completion state can satisfy convergence. A hard Run/time/physical limit remains a
+distinct incomplete stop reason rather than being relabelled scientific convergence.
+
+Curve pruning has two readiness levels. Operational readiness means completed endpoints make the
+curve model identifiable; strong readiness additionally requires finite-sample residual resolution,
+retrospective interval coverage, probability discrimination and a harmful-prune rate consistent
+with the authored threshold. The latter alone authorizes competitive stopping. Startup anchors,
+minimum required evidence, confirmation and scientific continuations are protected from it.
+Search coverage records attempts, response coverage records terminal objective evidence, and
+scientific coverage describes support for the exact displayed conclusion; none substitutes for
+another.
+
 Startup work is submitted gradually and can interleave with model-directed decisions. Pending
 identities and exact target fidelities condition the surrogate and prevent duplicate queued seeds.
 Undispatched actions form a mutable dispatch buffer. After new evidence, a stale non-anchor action

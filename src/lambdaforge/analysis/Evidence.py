@@ -267,6 +267,8 @@ def _normalize_run(raw: Mapping[str, Any], evaluator: ObjectiveUtility) -> dict[
     phase = str(raw.get("phase", raw.get("study_phase", "search")))
     raw_metrics = raw.get("metrics")
     metrics: Mapping[str, Any] = raw_metrics if isinstance(raw_metrics, Mapping) else {}
+    raw_termination = raw.get("termination")
+    termination = dict(raw_termination) if isinstance(raw_termination, Mapping) else {}
     return {
         "key": raw.get("key", raw.get("run_id")),
         "seed": raw.get("seed"),
@@ -281,6 +283,13 @@ def _normalize_run(raw: Mapping[str, Any], evaluator: ObjectiveUtility) -> dict[
         "objective_status": status_mapping,
         "censored": state == "pruned" or raw.get("termination_type") == "performance_pruned",
         "censoring_reason": "performance-pruned" if state == "pruned" else None,
+        "prune_reason": raw.get("prune_reason", termination.get("reason")),
+        "prune_step": termination.get(
+            "common_step", termination.get("observed_step", raw.get("latest_step"))
+        ),
+        "probability_competitive": termination.get("probability_competitive"),
+        "pruning_threshold": termination.get("threshold"),
+        "reference_candidate": termination.get("reference_candidate"),
         "metrics": dict(metrics),
         "components": dict(observation.get("components", {}))
         if isinstance(observation.get("components"), Mapping)

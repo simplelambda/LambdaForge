@@ -224,7 +224,7 @@ class StudyInsightAnalyzer:
             final=final,
         )
         result = {
-            "analysis_version": 5,
+            "analysis_version": 6,
             "analysis_kind": "marginal-and-pairwise-descriptive-diagnostics",
             "objective": {
                 "metric": metric,
@@ -883,7 +883,7 @@ class StudyInsightAnalyzer:
     @staticmethod
     def _empty(metric: str, mode: str, reason: str) -> dict[str, Any]:
         return {
-            "analysis_version": 5,
+            "analysis_version": 6,
             "objective": {"metric": metric, "mode": mode},
             "candidate_observations": 0,
             "terminal_candidate_observations": 0,

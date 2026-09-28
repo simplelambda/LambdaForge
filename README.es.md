@@ -27,7 +27,7 @@ proyecto:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.15.0
+python -m pip install lambdaforge==0.16.0
 python -m pip install -e .
 python -m pip check
 ```
@@ -287,7 +287,7 @@ produce un error claro. La ruta y la versión consultada se registran una sola v
 ## Clustering
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.15.0"
+python -m pip install "lambdaforge[clustering]==0.16.0"
 ```
 
 ```python
@@ -657,6 +657,14 @@ El controlador científico entrega rango, valor normalizado, incertidumbre y cos
 que su score interno nunca es moneda de recursos. La duración desconocida sigue siendo incierta.
 El cálculo de checkpoint trata cada residente por separado, conserva el rollback no
 checkpointable, cobra el coste aprendido y espera confirmación durable antes de explorar.
+
+La poda de rendimiento pasa a estar operativa cuando curvas terminadas identifican el error de
+endpoint, pero solo permite decisiones fuertes cuando los intervalos retrospectivos al 90 %, las
+probabilidades y la tasa de podas perjudiciales respaldan el umbral escrito. Dos curvas por sí solas
+no constituyen calibración. Anchors iniciales, evidencia de respuesta obligatoria, confirmación y
+continuaciones científicas están protegidos. Search coverage puede incluir intentos censurados;
+response coverage y conclusiones discretas de dominio completo exigen respuestas terminales. Los
+valores sin soporte quedan marcados como predictivos y la conclusión exacta sigue sin resolverse.
 
 `gpu_memory` es opcional. Si se declara conserva su semántica de suelo de seguridad mínimo para
 cada lanzamiento; el compromiso efectivo es el máximo entre ese suelo, la envolvente superior
@@ -1036,7 +1044,7 @@ y atómico. También puede calcularse o actualizarse expresamente:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.15.0"
+python -m pip install "lambdaforge[analysis-report]==0.16.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json

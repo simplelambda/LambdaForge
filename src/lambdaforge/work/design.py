@@ -277,23 +277,28 @@ class StudyConvergenceState:
     useful_action_available: bool
     confirmation_complete: bool
     evidence_events: int
-    version: str = "scientific-convergence-v1"
+    version: str = "scientific-convergence-v2"
+
+    @property
+    def screening_stable(self) -> bool:
+        """Whether optimization screening may hand priority to confirmation/science."""
+        return self.optimization_stable and self.contenders_stable
 
     @property
     def converged(self) -> bool:
         if self.useful_action_available or not self.confirmation_complete:
             return False
-        if self.goal == "optimize":
-            return self.optimization_stable and self.contenders_stable
-        if self.goal == "understand":
-            return self.optimization_stable and self.questions_resolved
-        return self.optimization_stable and self.contenders_stable and self.questions_resolved
+        # ``goal`` changes action priority, never the truth conditions for convergence.  Not all
+        # questions need a categorical answer: immaterial unresolved questions are represented by
+        # ``useful_action_available=False``.
+        return self.screening_stable
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
             "goal": self.goal,
             "converged": self.converged,
+            "screening_stable": self.screening_stable,
             "optimization_stable": self.optimization_stable,
             "optimization_converged": self.optimization_stable,
             "contenders_stable": self.contenders_stable,
@@ -332,7 +337,7 @@ class ResolvedStudyConfiguration:
             "policy_versions": {
                 "seed_stream": "project-sha256-v1",
                 "parameter_space": "parameter-space-v1",
-                "convergence": "scientific-convergence-v1",
+                "convergence": "scientific-convergence-v2",
                 "resource": "ari-v3.1",
             },
         }

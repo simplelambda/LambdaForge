@@ -23,7 +23,6 @@ _CANDIDATE_FIELDS = (
     "best_objective",
     "partially_censored",
     "pareto_optimal",
-    "latest_metrics",
     "cost",
     "feasibility",
     "confirmation_status",
@@ -42,7 +41,6 @@ _RUN_FIELDS = (
     "final_objective",
     "objective_status",
     "objective_censoring",
-    "latest_metrics",
     "latest_step",
     "best_step",
     "best_objective",
@@ -53,12 +51,22 @@ _RUN_FIELDS = (
     "prune_reason",
     "scientific_continuation",
     "evidence_requirement",
+    # Small owned references keep selected-Run detail lazy: the interactive index names the
+    # evidence, while JobService reads only the log/scalar file the user opens.  Contents and
+    # bulky failure diagnostics never belong in this projection.
+    "run_dir",
+    "log_path",
+    "metrics_path",
+    "training_metrics_path",
 )
 
 
 def interactive_study(value: Mapping[str, Any]) -> dict[str, Any]:
     """Project telemetry onto the complete but compact interactive Study index."""
-    if value.get("detail_level") == "interactive":
+    if (
+        value.get("detail_level") == "interactive"
+        and int(value.get("interactive_projection_version", 0) or 0) >= 2
+    ):
         return copy.deepcopy(dict(value))
     candidates: list[dict[str, Any]] = []
     raw_candidates = value.get("candidates", ())
@@ -130,6 +138,7 @@ def interactive_study(value: Mapping[str, Any]) -> dict[str, Any]:
         if field in value
     } | {
         "detail_level": "interactive",
+        "interactive_projection_version": 2,
         "candidates": candidates,
         "controller": projected_controller,
         # Admission history is diagnostic history.  The Study workspace needs only the latest

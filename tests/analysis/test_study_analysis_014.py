@@ -236,7 +236,7 @@ def test_persistence_is_idempotent_for_the_same_evidence(tmp_path: Path) -> None
     second = StudyAnalysis.persist(source, path)
     assert first == second
     assert path.read_bytes() == original_bytes
-    assert second["analysis_version"] == 5
+    assert second["analysis_version"] == 6
 
 
 def test_analysis_serializes_paths_embedded_in_failure_diagnostics(tmp_path: Path) -> None:
@@ -551,6 +551,25 @@ def test_interactive_curve_and_parameter_exports_use_optional_renderer(
                     "n": 3,
                     "objective_components": {"accuracy": 0.8},
                 },
+                {
+                    "trial": 3,
+                    "parameters": {"width": 256},
+                    "mean": None,
+                    "standard_error": None,
+                    "n": 0,
+                    "censored_observations": 1,
+                    "best_observed_objective": 0.69,
+                    "runs": [
+                        {
+                            "censored": True,
+                            "prune_step": 7,
+                            "prune_reason": "performance-pruned",
+                            "probability_competitive": 0.04,
+                            "pruning_threshold": 0.05,
+                            "reference_candidate": 2,
+                        }
+                    ],
+                },
             ],
             "parameter_importance": {"width": {"importance": 1.0}},
             "coverage": {"marginal": {"width": {"active_fraction": 1.0}}},
@@ -595,3 +614,8 @@ def test_interactive_curve_and_parameter_exports_use_optional_renderer(
     assert "save-study-chart" in study_html
     assert "panelHeights" in study_html
     assert "Complete reproducible analysis JSON" in study_html
+    assert "×" in study_html
+    assert "performance-pruned" in study_html
+    assert "0.69" in study_html
+    assert "final selection remains unavailable" in study_html
+    assert "<td>3</td><td>—</td>" in study_html

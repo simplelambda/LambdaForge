@@ -11,7 +11,11 @@ from lambdaforge.hpo.InitialDesign import CoverageState, InitialDesignPlanner
 from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.hpo.ScientificDesign import ExperimentalDesignPolicy
 from lambdaforge.hpo.SurvivalModel import SurvivalModel, SurvivalObservation
-from lambdaforge.work.runner import _adaptive_parallelism, _request_early_stops
+from lambdaforge.work.runner import (
+    _adaptive_parallelism,
+    _confirmation_backfill_room,
+    _request_early_stops,
+)
 
 
 def _pool(
@@ -363,6 +367,21 @@ def test_auto_concurrency_has_finite_host_ceiling_and_round_trips() -> None:
     assert policy.max_parallel is None
     assert policy.to_dict()["runs_per_gpu"] == "auto"
     assert _adaptive_parallelism(resources, policy) == 6
+
+
+def test_confirmation_leaves_third_lane_for_scientific_backfill() -> None:
+    assert _confirmation_backfill_room(
+        parallelism=3,
+        remaining_run_allowance=20,
+        pending_runs=2,
+        queued_confirmation_runs=0,
+    ) == 1
+    assert _confirmation_backfill_room(
+        parallelism=3,
+        remaining_run_allowance=20,
+        pending_runs=2,
+        queued_confirmation_runs=1,
+    ) == 0
 
 
 def test_survival_uses_log_and_conditional_parameter_space_geometry() -> None:
