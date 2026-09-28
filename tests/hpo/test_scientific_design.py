@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from lambdaforge.hpo.AdaptiveStatistics import AdaptiveSeedRacer
+from lambdaforge.hpo.ScientificConclusions import scientific_status
 from lambdaforge.hpo.ScientificDesign import (
     ExperimentalDesignPolicy,
     ScientificQuestionAnalyzer,
@@ -142,6 +143,7 @@ def test_incomplete_discrete_support_keeps_full_domain_conclusion_unresolved() -
     assert question["authored_values"] == [32, 64, 128, 256]
     assert question["observed_values"] == [32, 256]
     assert question["conclusion_kind"] == "UNRESOLVED"
+    assert question["exact_conclusion"]["kind"] == "UNRESOLVED"
     assert question["predictive_conclusion"]["kind"] in {
         "PREFERRED",
         "PREFERRED_REGION",
@@ -158,6 +160,58 @@ def test_incomplete_discrete_support_keeps_full_domain_conclusion_unresolved() -
         "censored_only": ["64"],
         "surrogate_only": ["128"],
     }
+    assert question["support_debt"] == pytest.approx(0.5)
+    assert question["entropy"] == pytest.approx(0.0)
+    assert question["predictive_information_value"] == pytest.approx(0.0)
+    assert question["remaining_information_value"] > 0
+
+    ranked = ExperimentalDesignPolicy(
+        pool,
+        mode="max",
+        practical_margin=0.02,
+        parameter_space={"width": {"values": [32, 64, 128, 256]}},
+    ).rank(
+        {1: {1: 0.40, 2: 0.41}, 4: {1: 0.80, 2: 0.81}},
+        selected=(1, 4),
+        scientific_state=analysis,
+    )
+    assert ranked[0].trial in {2, 3}
+    assert ranked[0].purpose == "COVER_PARAMETER_VALUE"
+
+
+def test_scientific_status_includes_only_material_unresolved_interactions() -> None:
+    resolved_parameter = {
+        "conclusion_kind": "PREFERRED",
+        "materiality": 1.0,
+        "remaining_information_value": 0.0,
+    }
+    material_interaction = {
+        "conclusion_kind": "UNRESOLVED",
+        "materiality": 0.8,
+        "remaining_information_value": 0.4,
+        "feasible": True,
+    }
+    immaterial_interaction = {
+        "conclusion_kind": "UNRESOLVED",
+        "materiality": 0.0,
+        "remaining_information_value": 0.0,
+        "feasible": True,
+    }
+
+    assert scientific_status(
+        {
+            "scientific_action_resolution": 0.1,
+            "parameter_questions": [resolved_parameter],
+            "interaction_questions": [material_interaction],
+        }
+    ) == "partially_resolved"
+    assert scientific_status(
+        {
+            "scientific_action_resolution": 0.1,
+            "parameter_questions": [resolved_parameter],
+            "interaction_questions": [immaterial_interaction],
+        }
+    ) == "resolved"
 
 
 def test_sparse_discrete_support_still_separates_censored_and_predictive_values() -> None:

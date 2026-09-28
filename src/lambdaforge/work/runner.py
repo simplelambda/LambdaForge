@@ -3438,6 +3438,7 @@ def _execute_adaptive_group(
         observed_trials: Sequence[int],
         *,
         deferred: Sequence[dict[str, Any]] = (),
+        enter_confirmation_when_stable: bool = False,
     ) -> None:
         limited = list(scheduled[: allowance()])
         if not limited:
@@ -3523,7 +3524,20 @@ def _execute_adaptive_group(
                         [],
                     ),
                 }
-            if search_converged and not confirmation_complete:
+            if search_converged and policy.convergence_patience > 0:
+                # A positive authored patience is an explicit record-level early-stop policy,
+                # not the automatic screening-stable hand-off. Preserve that deliberate hard
+                # stop after already-promised evidence has been discharged.
+                return "EXPLICIT_CONVERGENCE", [], {
+                    "reason": "authored convergence patience was reached",
+                    "convergence_state": convergence_state,
+                    "alternatives": [],
+                }
+            if (
+                enter_confirmation_when_stable
+                and search_converged
+                and not confirmation_complete
+            ):
                 return "AUTO_CONVERGED", [], {
                     "reason": "optimization screening is stable; confirmation has priority",
                     "convergence_state": convergence_state,
@@ -4186,6 +4200,7 @@ def _execute_adaptive_group(
                 recovered[:recovered_width],
                 proposed,
                 deferred=recovered[recovered_width:],
+                enter_confirmation_when_stable=True,
             )
     else:
         proposed.extend(startup)
@@ -4250,6 +4265,7 @@ def _execute_adaptive_group(
             initial_queue[:startup_width],
             startup,
             deferred=initial_queue[startup_width:],
+            enter_confirmation_when_stable=True,
         )
 
     estimates = racer.estimates(values_by_trial())

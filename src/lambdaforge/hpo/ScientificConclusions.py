@@ -37,6 +37,102 @@ SCIENTIFIC_RELATION_KINDS = frozenset(
     }
 )
 
+_RESOLVED_CONCLUSIONS = frozenset(
+    {
+        "PREFERRED",
+        "PREFERRED_REGION",
+        "PRACTICALLY_EQUIVALENT",
+        "PRACTICAL_TOP_SET",
+        "ALL_PRACTICALLY_EQUIVALENT",
+        "BETTER_THAN_REFERENCE",
+        "WORSE_THAN_REFERENCE",
+        "EQUIVALENT_TO_REFERENCE",
+        "PARTIALLY_ORDERED",
+        "FLAT",
+        "NO_MATERIAL_EFFECT",
+        "CONTEXT_DEPENDENT",
+        "MATERIAL_INTERACTION",
+        "WEAK_INTERACTION",
+        "ADDITIVE",
+    }
+)
+
+
+def scientific_status(scientific: Mapping[str, Any]) -> str:
+    """Summarize material parameter and interaction questions consistently.
+
+    An unresolved interaction is relevant only when its persisted materiality and remaining
+    information make another feasible action scientifically worthwhile.  Parameter questions
+    retain the conservative legacy behaviour when older records do not contain those fields.
+    """
+    resolution = _bounded_number(scientific.get("scientific_action_resolution"), default=0.0)
+    questions: list[tuple[Mapping[str, Any], bool]] = []
+    for key, interaction in (("parameter_questions", False), ("interaction_questions", True)):
+        raw = scientific.get(key, ())
+        if isinstance(raw, list | tuple):
+            questions.extend((value, interaction) for value in raw if isinstance(value, Mapping))
+    if not questions:
+        return "unresolved"
+
+    material_pending = 0
+    resolved = 0
+    considered = 0
+    for question, interaction in questions:
+        if question.get("feasible") is False or question.get("action_feasible") is False:
+            continue
+        kind = str(question.get("conclusion_kind", "UNRESOLVED"))
+        remaining_raw = question.get("remaining_information_value")
+        remaining_known = isinstance(remaining_raw, int | float) and not isinstance(
+            remaining_raw, bool
+        )
+        remaining = _bounded_number(remaining_raw, default=0.0)
+        materiality = _question_materiality(question, interaction=interaction)
+        unresolved = kind in {"UNRESOLVED", "NO_CLEAR_PREFERENCE"} or bool(
+            question.get("missing_evidence")
+        )
+        # Modern records explicitly state whether the pending interpretation is worth another
+        # action.  Legacy parameter records remain conservative; legacy interactions are ignored
+        # unless their own probability mass says they could be material.
+        pending = unresolved and materiality > 0.0 and (
+            remaining > resolution
+            or (not remaining_known and (not interaction or materiality > 0.0))
+        )
+        if pending:
+            material_pending += 1
+            considered += 1
+        elif kind in _RESOLVED_CONCLUSIONS or (unresolved and remaining_known):
+            resolved += 1
+            considered += 1
+
+    if material_pending:
+        return "partially_resolved" if resolved else "unresolved"
+    return "resolved" if considered else "unresolved"
+
+
+def _bounded_number(value: Any, *, default: float) -> float:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return default
+    return min(1.0, max(0.0, float(value)))
+
+
+def _question_materiality(question: Mapping[str, Any], *, interaction: bool) -> float:
+    raw = question.get("materiality")
+    if isinstance(raw, int | float) and not isinstance(raw, bool):
+        return min(1.0, max(0.0, float(raw)))
+    if not interaction:
+        return 1.0
+    probabilities = question.get("probabilities")
+    if not isinstance(probabilities, Mapping):
+        return 0.0
+    return min(
+        1.0,
+        max(
+            0.0,
+            float(probabilities.get("MATERIAL_INTERACTION", 0.0) or 0.0)
+            + 0.5 * float(probabilities.get("WEAK_INTERACTION", 0.0) or 0.0),
+        ),
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class ScientificRelation:
@@ -143,4 +239,5 @@ __all__ = [
     "ScientificConclusion",
     "ScientificQuestionState",
     "ScientificRelation",
+    "scientific_status",
 ]

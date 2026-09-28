@@ -948,11 +948,10 @@ if fingerprint==known:
  ))
  raise SystemExit
 with open(selected,encoding="utf-8") as stream:value=json.load(stream)
-if selected==summary:
- try:
-  from lambdaforge.study_projection import interactive_study
-  value=interactive_study(value)
- except (ImportError,AttributeError):
+try:
+ from lambdaforge.study_projection import interactive_study
+ value=interactive_study(value)
+except (ImportError,AttributeError):
   fields=(
    "study_telemetry_version","name","execution_id","strategy","design","objective",
    "planned_runs","planned_candidates","status","design_status","scientific_status",
@@ -962,7 +961,7 @@ if selected==summary:
   candidate_fields=(
    "trial","parameters","state","selection_objective","selection_seed_count",
    "selection_standard_error","current_objective","best_objective","partially_censored",
-   "pareto_optimal","cost","feasibility","confirmation_status"
+   "pareto_optimal","cost","feasibility","confirmation_status","diagnostic_metrics"
   )
   run_fields=(
    "key","seed","phase","purpose","target_questions","fidelity","state",
@@ -983,7 +982,7 @@ if selected==summary:
    for c in value.get("candidates",[]) if isinstance(c,dict)
   ]
   value={k:value[k] for k in fields if k in value}|{
-   "detail_level":"interactive","candidates":candidates
+   "detail_level":"interactive","interactive_projection_version":2,"candidates":candidates
   }
 print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":")))
 '''

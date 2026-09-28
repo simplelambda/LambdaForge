@@ -13,6 +13,7 @@ from threading import Lock
 from typing import Any
 
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility, aggregate_constraint, pareto_front
+from lambdaforge.hpo.ScientificConclusions import scientific_status
 from lambdaforge.hpo.StudyInsights import StudyInsightAnalyzer
 from lambdaforge.study_projection import interactive_study
 from lambdaforge.work.models import WorkResult, atomic_json
@@ -275,19 +276,9 @@ class StudyTelemetry:
         required = len(requirements)
         design_status = "complete" if not missing_keys else "incomplete"
         scientific = snapshot.get("hpo_analysis")
-        scientific_status = "unresolved"
-        if isinstance(scientific, Mapping):
-            questions = scientific.get("parameter_questions", ())
-            comparable = [value for value in questions if isinstance(value, Mapping)]
-            unresolved = [
-                value
-                for value in comparable
-                if value.get("conclusion_kind") in {"UNRESOLVED", "NO_CLEAR_PREFERENCE"}
-            ]
-            if comparable and not unresolved:
-                scientific_status = "resolved"
-            elif comparable and len(unresolved) < len(comparable):
-                scientific_status = "partially_resolved"
+        resolved_scientific_status = (
+            scientific_status(scientific) if isinstance(scientific, Mapping) else "unresolved"
+        )
         counts = snapshot.get("counts", {})
         terminal_status = (
             "incomplete"
@@ -312,7 +303,7 @@ class StudyTelemetry:
         completion = {
             "status": terminal_status,
             "design_status": design_status,
-            "scientific_status": scientific_status,
+            "scientific_status": resolved_scientific_status,
             "finish_reason": finish_reason,
             "required_runs": required,
             "required_completed": succeeded,
@@ -639,6 +630,14 @@ class StudyTelemetry:
             objective = objective if isinstance(objective, Mapping) else {}
             objective_metric = str(objective.get("metric", ""))
             objective_mode = str(objective.get("mode", "max"))
+            objective_required_metrics = (
+                {
+                    *ObjectiveUtility(objective).required_metrics,
+                    *(str(name) for name in objective.get("constraints", {})),
+                }
+                if "metric" in objective or isinstance(objective.get("metrics"), Mapping)
+                else set()
+            )
             completed = active = queued = paused = failed = pruned = cancelled = 0
             terminations: dict[str, int] = {}
             total_wall_seconds = 0.0
@@ -726,6 +725,7 @@ class StudyTelemetry:
                     "selection_standard_error",
                     "raw_metrics",
                     "objective_components",
+                    "diagnostic_metrics",
                 ):
                     candidate.pop(stale, None)
                 objective_summary = self._candidate_objective_summary(
@@ -739,6 +739,10 @@ class StudyTelemetry:
                     ),
                 )
                 candidate.update(objective_summary)
+                candidate["diagnostic_metrics"] = self._candidate_diagnostic_metrics(
+                    observed_runs,
+                    excluded=objective_required_metrics,
+                )
                 feasibility = objective_summary.get("feasibility", {})
                 feasibility = feasibility if isinstance(feasibility, Mapping) else {}
                 run_states = {str(run.get("state", "")) for run in observed_runs}
@@ -1088,6 +1092,38 @@ class StudyTelemetry:
                 if isinstance(value, int | float) and not isinstance(value, bool):
                     grouped.setdefault(str(name), []).append(float(value))
         return {name: sum(values) / len(values) for name, values in grouped.items() if values}
+
+    @staticmethod
+    def _candidate_diagnostic_metrics(
+        runs: Sequence[Mapping[str, Any]], *, excluded: set[str]
+    ) -> dict[str, Any]:
+        """Expose common terminal metrics without granting them selection authority."""
+        completed = [run for run in runs if run.get("state") == "succeeded"]
+        if not completed:
+            return {}
+        rows = [
+            {
+                str(name): float(value)
+                for name, value in dict(run.get("latest_metrics", {})).items()
+                if str(name) not in excluded
+                and isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            }
+            for run in completed
+        ]
+        common = set(rows[0]).intersection(*(set(row) for row in rows[1:]))
+        return {
+            name: {
+                "mean": statistics.fmean(row[name] for row in rows),
+                "standard_deviation": (
+                    statistics.stdev(row[name] for row in rows) if len(rows) > 1 else None
+                ),
+                "n": len(rows),
+                "role": "diagnostic-only",
+            }
+            for name in sorted(common)
+        }
 
     @staticmethod
     def _candidate_objective_summary(

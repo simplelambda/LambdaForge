@@ -76,6 +76,39 @@ def _artifact_size(value: Any) -> str:
     return f"{value} bytes"
 
 
+def _scientific_support_text(question: Mapping[str, Any]) -> str:
+    """Label exact support separately from predictive resampling stability."""
+    if not question:
+        return "Not available"
+    missing = question.get("missing_evidence", ())
+    missing = missing if isinstance(missing, Sequence) and not isinstance(missing, str | bytes) else ()
+    stability = question.get("descriptive_stability", question.get("confidence"))
+    stability_text = (
+        f"{float(stability):.0%}" if isinstance(stability, int | float) and not isinstance(stability, bool) else "—"
+    )
+    if missing:
+        return f"Incomplete · {len(missing)} gap(s) · predictive stability {stability_text}"
+    return f"Complete · descriptive stability {stability_text}"
+
+
+def _surrogate_leader_text(question: Mapping[str, Any]) -> str:
+    leader = question.get("point_estimate_leader")
+    frequencies = question.get("surrogate_best_frequency", {})
+    if not isinstance(frequencies, Mapping) or not frequencies:
+        return str(leader if leader is not None else "unavailable")
+    best = max(
+        frequencies.items(),
+        key=lambda item: float(item[1]) if isinstance(item[1], int | float) else -1.0,
+    )
+    frequency = best[1]
+    rendered = (
+        f"{float(frequency):.0%}"
+        if isinstance(frequency, int | float) and not isinstance(frequency, bool)
+        else "—"
+    )
+    return f"{leader if leader is not None else best[0]} · surrogate best {best[0]} ({rendered})"
+
+
 def _scroll_snapshot(screen: Screen[Any]) -> dict[str, tuple[float, float]]:
     """Capture stable scroll offsets before a live read model is redrawn."""
     snapshot: dict[str, tuple[float, float]] = {}
@@ -972,20 +1005,14 @@ class StudyWorkspace(ResearchWorkspace):
             "Observed",
             "Promising",
             "Conclusion",
-            "Confidence",
+            "Scientific support",
             "Region role",
         )
         for name in self._hpo_parameters:
             rule = space.get(name, {}) if isinstance(space, Mapping) else {}
             observed = marginal.get(name, {}) if isinstance(marginal, Mapping) else {}
             response = responses.get(name, {}) if isinstance(responses, Mapping) else {}
-            detail = importance.get(name, {}) if isinstance(importance, Mapping) else {}
             live_detail = conclusions_by_name.get(name, {})
-            confidence = live_detail.get("confidence")
-            confidence_label = live_detail.get(
-                "confidence_label",
-                detail.get("reliability", "low") if isinstance(detail, Mapping) else "low",
-            )
             table.add_row(
                 name.replace("_", " ").title(),
                 self._parameter_domain(rule),
@@ -996,11 +1023,7 @@ class StudyWorkspace(ResearchWorkspace):
                     live_detail=live_detail,
                 ),
                 str(live_detail.get("summary", "Still learning")),
-                (
-                    f"{float(confidence):.0%} · {str(confidence_label).title()}"
-                    if isinstance(confidence, int | float) and not isinstance(confidence, bool)
-                    else str(confidence_label).title()
-                ),
+                _scientific_support_text(live_detail),
                 str(
                     (
                         live_detail.get("practical_region", {})
@@ -2186,11 +2209,6 @@ class HpoParameterWorkspace(ResearchWorkspace):
         live_detail = self._live_detail()
         if not response:
             response = self._live_response(live_detail)
-        confidence = live_detail.get("confidence")
-        reliability = live_detail.get(
-            "confidence_label",
-            detail.get("reliability", "low") if isinstance(detail, Mapping) else "low",
-        )
         self.query_one("#hpo-detail-authored", Static).update(
             "[b]SEARCH SPACE[/b]\n"
             f"{StudyWorkspace._parameter_domain(rule)}\n"
@@ -2208,13 +2226,13 @@ class HpoParameterWorkspace(ResearchWorkspace):
             )
         )
         self.query_one("#hpo-detail-reliability", Static).update(
-            "[b]CONCLUSION STABILITY[/b]\n"
-            + (
-                f"{float(confidence):.0%} · {str(reliability).title()} · "
-                if isinstance(confidence, int | float) and not isinstance(confidence, bool)
-                else f"{str(reliability).title()} · "
-            )
-            + f"importance {format_value(detail.get('importance'))}"
+            "[b]SCIENTIFIC CONCLUSION & SUPPORT[/b]\n"
+            f"Exact conclusion: {live_detail.get('conclusion_kind', 'UNRESOLVED')}\n"
+            f"Support: {_scientific_support_text(live_detail)}\n"
+            f"Point / predictive leader: {_surrogate_leader_text(live_detail)}\n"
+            f"Missing evidence: "
+            f"{'; '.join(str(value) for value in live_detail.get('missing_evidence', ())) or 'none'}\n"
+            f"Predictive importance: {format_value(detail.get('importance'))}"
         )
         self.query_one("#hpo-parameter-dashboard", HpoParameterDashboard).show_parameter(
             self.parameter,
@@ -2242,9 +2260,9 @@ class HpoParameterWorkspace(ResearchWorkspace):
                 f"How to read {self.parameter}",
                 "Search space is what the YAML allowed. Observed coverage is what actually ran. "
                 "Promising region is a predictive association conditional on the sampled context, "
-                "not a causal rule. Confidence is the fraction of plausible evidence resamples that "
-                "preserve this exact qualitative conclusion (including which value is preferred); "
-                "coverage is reported separately. A flat response can therefore have high confidence. "
+                "not a causal rule. Exact scientific support, descriptive stability and surrogate "
+                "best frequency are separate quantities. With missing response evidence the exact "
+                "conclusion remains unresolved even when the predictive leader is stable. "
                 "Click terminal points or bars for exact values. The HTML report "
                 "adds hover labels, zoom, a real uncertainty band, heatmaps and numeric 3D surfaces.",
             )
@@ -2542,8 +2560,18 @@ class TrialWorkspace(ResearchWorkspace):
             f"{metric_display_name(name):32} {format_value(value)}"
             for name, value in sorted(latest.items())
         ]
+        diagnostics = candidate.get("diagnostic_metrics", {})
+        diagnostic_lines = [
+            f"{metric_display_name(name):32} {format_value(value.get('mean'))}"
+            f"  (n={value.get('n', '—')})"
+            for name, value in sorted(diagnostics.items())
+            if isinstance(value, Mapping)
+        ]
         self.query_one("#trial-metric-content", Static).update(
-            "LATEST AGGREGATED METRICS\n" + ("\n".join(metric_lines) or "No metrics yet.")
+            "TERMINAL DIAGNOSTIC METRICS · display only, never used for selection\n"
+            + ("\n".join(diagnostic_lines) or "No common completed-Run diagnostics yet.")
+            + "\n\nLATEST AGGREGATED METRICS\n"
+            + ("\n".join(metric_lines) or "No live metrics yet.")
         )
         cost = candidate.get("cost", candidate.get("resource_cost", {}))
         self.query_one("#trial-resource-content", Static).update(

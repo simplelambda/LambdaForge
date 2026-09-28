@@ -357,6 +357,11 @@ La fiabilidad combina soporte, calidad CV, cobertura y extrapolación. Indica si
 es observada/predicha y no atribuyas resolución a un pool no persistido. Confirmación usa el margen
 de equivalencia. Separa coste intrínseco por Run de gasto total del controlador y Pareto científico
 de Pareto de recursos. Todo sigue siendo predictivo/descriptivo, no causal.
+Un screening estable detiene optimización ordinaria, no trabajo científico: confirmation y deuda
+material/factible de soporte e interacciones continúan hasta agotarse o alcanzar un presupuesto
+duro. Calcula `scientific_status` con parámetros e interacciones materiales. Los
+`diagnostic_metrics` de un objective escalar son evidencia terminal solo visual y nunca afectan al
+HPO ni a la selección.
 
 `lf export SELECTOR --output PADRE` y **Export Study…** en la Consola usan un único servicio de
 dominio para exportar el Attempt más reciente en su estado actual. Una Execution exitosa final usa

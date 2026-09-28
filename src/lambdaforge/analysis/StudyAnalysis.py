@@ -24,6 +24,7 @@ from lambdaforge.analysis.Evidence import (
 )
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.hpo.ResourceReplay import ResourceSchedulerReplay
+from lambdaforge.hpo.ScientificConclusions import scientific_status
 from lambdaforge.hpo.ScientificDesign import ScientificQuestionAnalyzer
 from lambdaforge.work.atomic import atomic_write_json
 
@@ -194,11 +195,11 @@ class StudyAnalysis:
             if required_runs
             else "unknown"
         )
-        scientific_status = cls._scientific_status(scientific_understanding)
+        scientific_status_value = scientific_status(scientific_understanding)
         if isinstance(sweep_analysis, Mapping):
             exact = sweep_analysis.get("exact_conclusion", {})
             exact_kind = exact.get("kind") if isinstance(exact, Mapping) else None
-            scientific_status = (
+            scientific_status_value = (
                 "unresolved"
                 if exact_kind in {None, "UNRESOLVED", "NO_CLEAR_PREFERENCE"}
                 else "resolved"
@@ -239,11 +240,11 @@ class StudyAnalysis:
                     required_attempted / required_runs if required_runs else None
                 ),
                 "design_status": design_status,
-                "scientific_status": scientific_status,
+                "scientific_status": scientific_status_value,
             },
             "study_design": design or None,
             "design_status": design_status,
-            "scientific_status": scientific_status,
+            "scientific_status": scientific_status_value,
             "winner": winner,
             "candidates": aggregates,
             "candidate_comparisons": comparisons,
@@ -326,25 +327,6 @@ class StudyAnalysis:
             if isinstance(candidate, int) and not isinstance(candidate, bool):
                 output.setdefault(candidate, set()).add(value.get("seed"))
         return output
-
-    @staticmethod
-    def _scientific_status(scientific: Mapping[str, Any]) -> str:
-        questions = [
-            value
-            for value in scientific.get("parameter_questions", ())
-            if isinstance(value, Mapping)
-        ]
-        if not questions or all(
-            value.get("conclusion_kind") in {"UNRESOLVED", "NO_CLEAR_PREFERENCE"}
-            for value in questions
-        ):
-            return "unresolved"
-        if any(
-            value.get("conclusion_kind") in {"UNRESOLVED", "NO_CLEAR_PREFERENCE"}
-            for value in questions
-        ):
-            return "partially_resolved"
-        return "resolved"
 
     @classmethod
     def _sweep_analysis(

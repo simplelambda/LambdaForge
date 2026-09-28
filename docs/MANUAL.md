@@ -1186,6 +1186,18 @@ The console also prints declared outcome constraints and infeasible-candidate co
 is `overview` → `work.items[].study.hpo_analysis`; recent structured actions are in
 `.controller`, bounded to 25 events, and actual sampler diagnostics in `.surrogate_belief`.
 
+Scientific completion is separate from optimization screening. Stable screening stops ordinary
+`OPTIMIZE` proposals; confirmation and material response, parameter and interaction coverage may
+continue until no feasible action has material value or a hard budget is reached.
+`remaining_information_value` combines predictive uncertainty with explicit missing-support debt,
+so a confident surrogate cannot make an unsupported discrete value count as observed. The shared
+`scientific_status` includes parameter questions and material, feasible interaction debt.
+
+With a scalar objective, completed Runs may additionally expose `diagnostic_metrics`: terminal
+numeric metrics common to comparable seeds, including mean, dispersion and support. Trial views
+and the offline dashboard can inspect them and chart them against parameters. They remain
+display-only evidence and never become objective components, constraints or HPO inputs.
+
 Threshold-dependent metrics—F1, balanced accuracy, Cohen's kappa, accuracy, precision and
 recall—are consumed exactly as logged. LambdaForge does not optimize their classification
 threshold, select a per-candidate threshold or equate them with AUROC/AUPRC. Threshold selection is

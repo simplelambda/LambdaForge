@@ -507,7 +507,18 @@ class ScientificQuestionAnalyzer:
                     float(question.get("confidence", 0.0)), 0.25
                 )
             question["materiality"] = min(1.0, max(0.0, materiality))
-            question["remaining_information_value"] = entropy * question["materiality"]
+            predictive_value = entropy * question["materiality"]
+            support_debt = cls._support_debt(question)
+            support_value = support_debt * question["materiality"]
+            # Predictive uncertainty and missing response support are different reasons to run
+            # an experiment.  Their probabilistic union retains either reason without double
+            # counting and, crucially, does not let a deterministic surrogate erase exact
+            # support debt.
+            question["predictive_information_value"] = predictive_value
+            question["support_debt"] = support_debt
+            question["remaining_information_value"] = 1.0 - (
+                (1.0 - predictive_value) * (1.0 - support_value)
+            )
         uncertainty = (
             statistics.fmean(float(value["remaining_information_value"]) for value in questions)
             if questions
@@ -531,13 +542,17 @@ class ScientificQuestionAnalyzer:
                     "kind": value["kind"],
                     "confidence": value["confidence"],
                     "entropy": value["entropy"],
+                    "support_debt": value["support_debt"],
                     "remaining_information_value": value["remaining_information_value"],
                     "missing_evidence": value.get("missing_evidence", []),
                 }
                 for value in questions
                 if float(value.get("remaining_information_value", 0.0)) > 0
             ),
-            key=lambda value: (-float(value["entropy"]), str(value["question"])),
+            key=lambda value: (
+                -float(value["remaining_information_value"]),
+                str(value["question"]),
+            ),
         )
         result = {
             "scientific_question_version": 2,
@@ -586,6 +601,28 @@ class ScientificQuestionAnalyzer:
             while len(cls._cache) > cls._CACHE_LIMIT:
                 cls._cache.popitem(last=False)
         return result
+
+    @staticmethod
+    def _support_debt(question: Mapping[str, Any]) -> float:
+        """Return the unsupported share of an exact scientific question, without quotas."""
+        support = question.get("response_support")
+        if isinstance(support, Mapping):
+            direct = support.get("direct", ())
+            censored = support.get("censored_only", ())
+            surrogate = support.get("surrogate_only", ())
+            direct_count = len(direct) if isinstance(direct, Sequence) else 0
+            censored_count = len(censored) if isinstance(censored, Sequence) else 0
+            surrogate_count = len(surrogate) if isinstance(surrogate, Sequence) else 0
+            total = direct_count + censored_count + surrogate_count
+            if total:
+                return min(1.0, max(0.0, (censored_count + surrogate_count) / total))
+        missing = question.get("missing_evidence")
+        if isinstance(missing, Sequence) and not isinstance(missing, str | bytes) and missing:
+            # The exact conclusion explicitly says its support is incomplete.  If an older
+            # record lacks the finite support partition, preserve that debt rather than silently
+            # equating it with surrogate uncertainty.
+            return 1.0
+        return 0.0
 
     @classmethod
     def _design_basis(
@@ -1807,7 +1844,21 @@ class ExperimentalDesignPolicy:
         targets: list[tuple[float, str, str, float, float]] = []
         for question in questions:
             entropy = min(1.0, max(0.0, float(question.get("entropy", 0.0) or 0.0)))
-            if entropy <= 0:
+            support_debt = min(
+                1.0, max(0.0, float(question.get("support_debt", 0.0) or 0.0))
+            )
+            information_basis = max(
+                entropy,
+                support_debt,
+                min(
+                    1.0,
+                    max(
+                        0.0,
+                        float(question.get("remaining_information_value", 0.0) or 0.0),
+                    ),
+                ),
+            )
+            if information_basis <= 0:
                 continue
             raw_parameter = question.get("parameter")
             if raw_parameter is not None:
@@ -1839,7 +1890,7 @@ class ExperimentalDesignPolicy:
                 # therefore reduces novelty without making the information value disappear.
                 attempt_discount = math.sqrt((1 + support) / (1 + support + attempted_same))
                 information = (
-                    entropy
+                    information_basis
                     * (0.5 + 0.5 * diversity)
                     / math.sqrt(1 + support)
                     * attempt_discount
@@ -1850,7 +1901,7 @@ class ExperimentalDesignPolicy:
                         "coverage_parameter",
                         f"{name} = {_display_label(value)}",
                         diversity,
-                        entropy,
+                        information_basis,
                     )
                 )
                 continue
@@ -1874,7 +1925,9 @@ class ExperimentalDesignPolicy:
                 default=1.0,
             )
             support = len(observed_same)
-            information = entropy * (0.5 + 0.5 * diversity) / math.sqrt(1 + support)
+            information = (
+                information_basis * (0.5 + 0.5 * diversity) / math.sqrt(1 + support)
+            )
             targets.append(
                 (
                     information,
@@ -1884,7 +1937,7 @@ class ExperimentalDesignPolicy:
                         for name, value in zip(names, cell, strict=True)
                     ),
                     diversity,
-                    entropy,
+                    information_basis,
                 )
             )
         return targets

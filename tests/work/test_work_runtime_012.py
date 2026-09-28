@@ -237,7 +237,18 @@ def test_adaptive_process_returns_artifact_results_without_mappingproxy_failure(
     result = WorkRunner().run(config)
 
     assert result.status == "succeeded"
-    assert len(result.runs) == 2
+    # The adaptive controller deliberately purchases one extra shared-seed observation to
+    # calibrate seed noise.  Assert that semantic obligation rather than the obsolete exact Run
+    # count from the pre-calibration controller.
+    assert len(result.runs) >= 2
+    assert len({run.trial["index"] for run in result.runs if run.trial is not None}) == 2
+    decisions = [
+        json.loads(line)
+        for line in (result.execution_dir / "hpo-control" / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert sum(value.get("action") == "CALIBRATE_SEED_NOISE" for value in decisions) == 1
     assert all(run.artifacts and run.artifacts[0].name == "report" for run in result.runs)
 
 

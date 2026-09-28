@@ -64,6 +64,9 @@ def normalize_evidence(
                 "parameters": dict(candidate.get("parameters", {})),
                 "runs": normalized,
                 "state": candidate.get("state"),
+                "diagnostic_metrics": dict(candidate.get("diagnostic_metrics", {}))
+                if isinstance(candidate.get("diagnostic_metrics"), Mapping)
+                else {},
             }
         )
     return output_candidates, normalized_runs
@@ -115,6 +118,8 @@ def candidate_statistics(
                 "failed_runs": sum(run.get("state") == "failed" for run in runs),
                 "resource_cost": _resource_summary(runs),
                 "objective_components": _component_summary(screening),
+                "diagnostic_metrics": _diagnostic_metric_summary(screening)
+                or dict(candidate.get("diagnostic_metrics", {})),
                 "constraints": _constraint_summary(screening),
                 "runs": [dict(run) for run in runs],
             }
@@ -266,7 +271,13 @@ def _normalize_run(raw: Mapping[str, Any], evaluator: ObjectiveUtility) -> dict[
         final = best
     phase = str(raw.get("phase", raw.get("study_phase", "search")))
     raw_metrics = raw.get("metrics")
+    if not isinstance(raw_metrics, Mapping):
+        raw_metrics = raw.get("latest_metrics")
     metrics: Mapping[str, Any] = raw_metrics if isinstance(raw_metrics, Mapping) else {}
+    selection_metrics = {
+        *evaluator.required_metrics,
+        *(str(name) for name in evaluator.objective.get("constraints", {})),
+    }
     raw_termination = raw.get("termination")
     termination = dict(raw_termination) if isinstance(raw_termination, Mapping) else {}
     return {
@@ -291,6 +302,11 @@ def _normalize_run(raw: Mapping[str, Any], evaluator: ObjectiveUtility) -> dict[
         "pruning_threshold": termination.get("threshold"),
         "reference_candidate": termination.get("reference_candidate"),
         "metrics": dict(metrics),
+        "diagnostic_metrics": {
+            str(name): float(value)
+            for name, value in metrics.items()
+            if str(name) not in selection_metrics and _finite(value)
+        },
         "components": dict(observation.get("components", {}))
         if isinstance(observation.get("components"), Mapping)
         else {},
@@ -420,6 +436,34 @@ def _component_summary(runs: Sequence[Mapping[str, Any]]) -> dict[str, float]:
             if isinstance(detail, Mapping) and _finite(detail.get("raw")):
                 grouped.setdefault(str(name), []).append(float(detail["raw"]))
     return {name: statistics.fmean(values) for name, values in grouped.items()}
+
+
+def _diagnostic_metric_summary(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate only terminal numeric metrics shared by every comparable Run."""
+    if not runs:
+        return {}
+    rows = [
+        {
+            str(name): float(value)
+            for name, value in dict(run.get("diagnostic_metrics", {})).items()
+            if _finite(value)
+        }
+        for run in runs
+    ]
+    common = set(rows[0]).intersection(*(set(row) for row in rows[1:]))
+    output: dict[str, Any] = {}
+    for name in sorted(common):
+        values = [row[name] for row in rows]
+        output[name] = {
+            "mean": statistics.fmean(values),
+            "standard_deviation": statistics.stdev(values) if len(values) > 1 else None,
+            "standard_error": (
+                statistics.stdev(values) / math.sqrt(len(values)) if len(values) > 1 else None
+            ),
+            "n": len(values),
+            "role": "diagnostic-only",
+        }
+    return output
 
 
 def _constraint_summary(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

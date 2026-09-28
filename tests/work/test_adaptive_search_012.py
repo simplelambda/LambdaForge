@@ -684,6 +684,129 @@ def test_default_adaptive_search_consumes_candidate_budget_on_a_flat_objective(
     assert decisions[-1]["reason"] == "candidate-budget-reached"
 
 
+def test_stable_screening_chains_scientific_backfill_after_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three lanes may leave several support questions after screening and confirmation."""
+
+    def scientific_state(
+        _cls: type[Any],
+        candidates: Sequence[Mapping[str, Any]],
+        objective: Mapping[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        del objective
+        completed = {
+            int(candidate["trial"])
+            for candidate in candidates
+            if any(
+                isinstance(run, Mapping) and run.get("state") == "succeeded"
+                for run in candidate.get("runs", ())
+            )
+        }
+        authored = list(range(8))
+        observed_values = [
+            candidate.get("parameters", {}).get("quality")
+            for candidate in candidates
+            if int(candidate["trial"]) in completed
+        ]
+        missing = [value for value in authored if value not in observed_values]
+        debt = len(missing) / len(authored)
+        return {
+            "status": "available",
+            "natural_utility_scale": 1.0,
+            "optimization_opportunity": 0.0,
+            "scientific_uncertainty": debt,
+            "scientific_action_resolution": 0.05,
+            "optimization_weight": 0.0,
+            "information_weight": 1.0,
+            "phase": "evidence-dominant",
+            "parameter_questions": [
+                {
+                    "question": "What can we conclude about quality?",
+                    "parameter": "quality",
+                    "kind": "categorical",
+                    "authored_values": authored,
+                    "entropy": 0.0,
+                    "support_debt": debt,
+                    "remaining_information_value": debt,
+                    "materiality": 1.0,
+                    "confidence": 1.0,
+                    "descriptive_stability": 1.0,
+                    "conclusion_kind": "UNRESOLVED" if missing else "PREFERRED",
+                    "conclusion_distribution": {"PREFERRED:4": 1.0},
+                    "missing_evidence": [
+                        f"no terminal response for quality={value}" for value in missing
+                    ],
+                    "response_support": {
+                        "direct": [str(value) for value in observed_values],
+                        "censored_only": [],
+                        "surrogate_only": [str(value) for value in missing],
+                    },
+                    "support": {"completed_candidates": len(completed)},
+                }
+            ],
+            "interaction_questions": [],
+            "unresolved_questions": [],
+            "practical_optimal_region": {},
+            "evidence": {"resamples": 8},
+        }
+
+    monkeypatch.setattr(
+        "lambdaforge.work.runner.ScientificQuestionAnalyzer.analyze",
+        classmethod(scientific_state),
+    )
+    # This regression isolates support-coverage dispatch. Seed-racing actions are tested
+    # separately and would otherwise be equally valid scientific uses of every free lane.
+    monkeypatch.setattr(
+        "lambdaforge.work.runner.AdaptiveSeedRacer.decisions",
+        lambda _self, *_args, **_kwargs: (),
+    )
+    config = WorkConfig.from_mapping(
+        {
+            "name": "scientific-backfill-study",
+            "run": "tests.work_cases.AdaptiveScoreWork",
+            "search": {
+                "strategy": "adaptive",
+                "startup_trials": 1,
+                "proposal_pool_size": 8,
+                "max_parallel": 3,
+                "confirmation_seeds": [101],
+                "replication": {"minimum": 2},
+                "early_stopping": False,
+                "quality": {"values": list(range(8))},
+            },
+            "objective": {"metric": "score", "mode": "max", "practical_margin": 0.0},
+            "resources": {"cpu": 3},
+        },
+        source=tmp_path / "scientific-backfill.yaml",
+    )
+
+    result = WorkRunner().run(config)
+    decisions = [
+        json.loads(line)
+        for line in (result.execution_dir / "hpo-control" / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    confirmation_index = next(
+        index for index, value in enumerate(decisions) if value.get("action") == "CONFIRM"
+    )
+    scientific_dispatches = [
+        value
+        for value in decisions[confirmation_index + 1 :]
+        if value.get("action") in {"SCIENTIFIC_BACKFILL", "COVER_PARAMETER_VALUE"}
+    ]
+
+    assert result.status == "succeeded"
+    assert len(scientific_dispatches) >= 2
+    assert scientific_dispatches[0]["action"] == "SCIENTIFIC_BACKFILL"
+    assert scientific_dispatches[1]["action"] == "COVER_PARAMETER_VALUE"
+    assert decisions[-1]["action"] == "FINISH"
+    assert decisions[-1]["reason"] == "converged-balanced"
+
+
 def test_positive_convergence_patience_remains_an_explicit_early_stop(
     tmp_path: Path,
 ) -> None:

@@ -159,6 +159,116 @@ def test_interactive_projection_omits_metric_dictionaries_at_large_scale() -> No
     assert len(json.dumps(projected)) < len(json.dumps(source)) / 10
 
 
+def test_job_service_reprojects_a_large_legacy_interactive_index(tmp_path: Path) -> None:
+    work_root = tmp_path / "jobs" / "job-legacy" / "work"
+    study_root = work_root.parent / "study"
+    work_root.mkdir(parents=True)
+    study_root.mkdir()
+    legacy = {
+        "study_telemetry_version": 1,
+        "detail_level": "interactive",
+        "interactive_projection_version": 1,
+        "candidates": [
+            {
+                "trial": trial,
+                "parameters": {"width": trial},
+                "latest_metrics": {f"metric_{index}": index for index in range(100)},
+                "runs": [
+                    {
+                        "key": f"trial-{trial:05d}-seed-1",
+                        "state": "succeeded",
+                        "latest_metrics": {f"metric_{index}": index for index in range(100)},
+                    }
+                ],
+            }
+            for trial in range(50)
+        ],
+    }
+    (study_root / "interactive.json").write_text(json.dumps(legacy), encoding="utf-8")
+    now = datetime.now(timezone.utc).isoformat()
+    store = JobStore(tmp_path / "records")
+    store.write(
+        JobRecord(
+            "job-legacy",
+            "local",
+            "local",
+            "provider-legacy",
+            JobState.RUNNING,
+            ("python", "work.py"),
+            str(work_root),
+            {},
+            now,
+            now,
+            metadata={"name": "legacy-study"},
+            job_type="work",
+        )
+    )
+    service = JobService(
+        ClusterCatalog(
+            {
+                "local": ClusterProfile(
+                    "local",
+                    storage={
+                        "state_root": str(tmp_path / "state"),
+                        "cache_root": str(tmp_path / "cache"),
+                        "run_root": str(tmp_path / "runtime"),
+                    },
+                )
+            }
+        ),
+        store,
+    )
+
+    projected = service.study("job-legacy")
+
+    assert projected is not None
+    assert projected["interactive_projection_version"] == 2
+    assert "latest_metrics" not in projected["candidates"][0]
+    assert "latest_metrics" not in projected["candidates"][0]["runs"][0]
+    assert len(json.dumps(projected)) < len(json.dumps(legacy)) / 5
+
+
+def test_study_telemetry_exposes_common_terminal_diagnostics_only(tmp_path: Path) -> None:
+    study = StudyTelemetry(tmp_path / "study")
+    specifications = (_specification(1, 4), _specification(1, 7))
+    study.initialize(
+        name="diagnostics",
+        execution_id="execution-diagnostics",
+        strategy="adaptive",
+        objective={"metric": "score", "mode": "max"},
+        specifications=(),
+    )
+    study.schedule(specifications)
+    for seed, score, quality in ((4, 0.7, 0.4), (7, 0.8, 0.6)):
+        study._write_run(
+            f"trial-00001-seed-{seed}",
+            {
+                "trial": 1,
+                "seed": seed,
+                "state": "succeeded",
+                "termination_type": "completed",
+                "metrics": {"score": score, "surface_quality": quality},
+                "best_objective": score,
+                "objective_observation": {
+                    "metric": "score",
+                    "mode": "max",
+                    "current": score,
+                    "best": score,
+                    "best_step": 3,
+                },
+            },
+        )
+
+    snapshot = study.refresh()
+    diagnostic = snapshot["candidates"][0]["diagnostic_metrics"]
+    interactive = json.loads((tmp_path / "study" / "interactive.json").read_text())
+
+    assert "score" not in diagnostic
+    assert diagnostic["surface_quality"]["mean"] == pytest.approx(0.5)
+    assert diagnostic["surface_quality"]["n"] == 2
+    assert interactive["candidates"][0]["diagnostic_metrics"] == diagnostic
+
+
 def test_study_snapshot_exposes_initial_design_and_coverage_state(tmp_path: Path) -> None:
     root = tmp_path / "execution" / "study"
     control = tmp_path / "execution" / "hpo-control"

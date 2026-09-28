@@ -338,13 +338,21 @@ def _write_study_dashboard(
     parameter_names = sorted(
         {str(name) for candidate in candidates for name in candidate.get("parameters", {})}
     )
-    metric_names = sorted(
+    component_metric_names = sorted(
         {
             str(name)
             for candidate in candidates
             for name in candidate.get("objective_components", {})
         }
     )
+    diagnostic_metric_names = sorted(
+        {
+            str(name)
+            for candidate in candidates
+            for name in candidate.get("diagnostic_metrics", {})
+        }
+    )
+    metric_names = sorted(set(component_metric_names) | set(diagnostic_metric_names))
     objective_label = _objective_label(analysis)
     common_layout = {
         "template": "plotly_dark",
@@ -628,7 +636,9 @@ const fmt=value=>value===null||value===undefined||!Number.isFinite(Number(value)
 const baseLayout=(title,x='',y='')=>({template:'plotly_dark',paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(13,17,23,.72)',
 font:{family:'Inter, ui-sans-serif, system-ui',color:'#c9d1d9'},height:500,margin:{l:72,r:30,t:52,b:66},title,
 xaxis:{title:{text:x},autorange:true},yaxis:{title:{text:y},autorange:true}});
-function metricValue(candidate,metric){return metric==='__selection__'?candidate.mean:candidate.objective_components?.[metric]}
+function metricValue(candidate,metric){if(metric==='__selection__')return candidate.mean;
+ const component=candidate.objective_components?.[metric];if(Number.isFinite(Number(component)))return component;
+ const diagnostic=candidate.diagnostic_metrics?.[metric];return typeof diagnostic==='object'?diagnostic?.mean:diagnostic}
 function updateRanking(){const metric=document.getElementById('trial-metric').value;const chart=node('study-ranking');if(!chart)return;
  const rows=data.candidates.filter(row=>Number.isFinite(Number(metricValue(row,metric))));
  Plotly.react(chart,[{type:'bar',x:rows.map(row=>String(row.trial)),y:rows.map(row=>metricValue(row,metric)),
@@ -668,12 +678,13 @@ function renderComparison(){const selected=[...document.querySelectorAll('.trial
  document.querySelectorAll('.trial-compare').forEach(box=>{if(!selected.includes(Number(box.value))&&selected.length>=2)box.disabled=true;else box.disabled=false});
  const area=document.getElementById('trial-comparison');area.replaceChildren();for(const id of selected){const row=data.candidates.find(item=>Number(item.trial)===id);if(!row)continue;
   const card=document.createElement('section');card.className='compare-card';const title=document.createElement('h3');title.textContent='Trial '+id;card.appendChild(title);
-  const dl=document.createElement('dl');const fields=[['Selection objective',row.mean],['Standard error',row.standard_error],['Seeds',row.n],...Object.entries(row.parameters||{})];
+ const diagnostics=Object.entries(row.diagnostic_metrics||{}).map(([name,value])=>['Diagnostic · '+name,typeof value==='object'?value?.mean:value]);
+ const dl=document.createElement('dl');const fields=[['Selection objective',row.mean],['Standard error',row.standard_error],['Seeds',row.n],...diagnostics,...Object.entries(row.parameters||{})];
   for(const [name,value] of fields){const dt=document.createElement('dt');dt.textContent=name;const dd=document.createElement('dd');dd.textContent=typeof value==='number'?fmt(value):String(value??'—');dl.append(dt,dd)}card.appendChild(dl);area.appendChild(card)}
  save({trials:selected});}
 const resourcesByTrial=new Map(data.resources.map(row=>[Number(row.trial),row]));
 function studyField(candidate,field){if(field==='trial')return candidate.trial;if(field.startsWith('param:'))return candidate.parameters?.[field.slice(6)];
- if(field.startsWith('metric:')){const name=field.slice(7);return name==='__selection__'?candidate.mean:candidate.objective_components?.[name]}
+ if(field.startsWith('metric:')){return metricValue(candidate,field.slice(7))}
  if(field.startsWith('resource:'))return resourcesByTrial.get(Number(candidate.trial))?.[field.slice(9)];return null}
 function fieldLabel(field){if(field==='trial')return 'Trial';const [kind,name]=field.split(':',2);if(kind==='metric'&&name==='__selection__')return data.objective_label;
  return (kind==='param'?'Parameter · ':kind==='metric'?'Metric · ':'Resource · ')+name.replaceAll('_',' ')}
@@ -710,9 +721,16 @@ document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>
 updateRanking();updateParameter();updateInteraction();updateResources();renderComparison();if(prefs.tab&&document.getElementById(prefs.tab))activate(prefs.tab);
 })();
 """
-    metric_options = '<option value="__selection__">Selection objective</option>' + "".join(
-        f'<option value="{html.escape(name, quote=True)}">{html.escape(name)}</option>'
-        for name in metric_names
+    metric_options = (
+        '<option value="__selection__">Selection objective</option>'
+        + "".join(
+            f'<option value="{html.escape(name, quote=True)}">Objective component · {html.escape(name)}</option>'
+            for name in component_metric_names
+        )
+        + "".join(
+            f'<option value="{html.escape(name, quote=True)}">Diagnostic · {html.escape(name)}</option>'
+            for name in diagnostic_metric_names
+        )
     )
     parameter_options = "".join(
         f'<option value="{html.escape(name, quote=True)}">{html.escape(name)}</option>'

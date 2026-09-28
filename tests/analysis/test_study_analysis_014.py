@@ -164,6 +164,30 @@ def test_confirmation_is_separate_and_analysis_is_deterministic() -> None:
     assert first["findings"] == second["findings"]
 
 
+def test_scalar_objective_keeps_terminal_diagnostics_separate_from_selection() -> None:
+    source = _study([({"width": 32}, 0.7), ({"width": 64}, 0.8)])
+    for candidate in source["candidates"]:
+        for run in candidate["runs"]:
+            run["metrics"] = {
+                "score": run["objective_observation"]["best"],
+                "surface_quality": float(candidate["trial"]) / 10,
+                "coupling": 0.25 + float(run["seed"]) / 100,
+            }
+
+    analysis = StudyAnalysis.compute(source)
+    candidate = analysis["candidates"][0]
+
+    assert "score" not in candidate["diagnostic_metrics"]
+    assert candidate["diagnostic_metrics"]["surface_quality"] == {
+        "mean": pytest.approx(0.1),
+        "standard_deviation": pytest.approx(0.0),
+        "standard_error": pytest.approx(0.0),
+        "n": 3,
+        "role": "diagnostic-only",
+    }
+    assert candidate["mean"] == pytest.approx(0.7)
+
+
 def test_categorical_and_conditional_parameters_keep_inactivity_explicit() -> None:
     rows = []
     for index in range(24):

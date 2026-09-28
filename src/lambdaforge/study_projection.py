@@ -26,6 +26,7 @@ _CANDIDATE_FIELDS = (
     "cost",
     "feasibility",
     "confirmation_status",
+    "diagnostic_metrics",
 )
 
 _RUN_FIELDS = (

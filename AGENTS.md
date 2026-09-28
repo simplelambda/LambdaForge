@@ -417,6 +417,10 @@ must say observed or predicted; never imply an unpersisted proposal pool was mea
 uses the scientific equivalence margin. Keep per-comparable-Run intrinsic resources separate from
 total controller spend and scientific Pareto separate from resource Pareto. All effects remain
 descriptive/predictive, not causal. Live analysis is provisional; terminal analysis is final.
+Stable screening stops ordinary optimization, not scientific work: material feasible support and
+interaction debt plus confirmation continue until exhausted or hard-budgeted. Compute
+`scientific_status` from parameters and material interactions. Scalar-objective
+`diagnostic_metrics` are terminal display evidence only and never affect HPO or selection.
 
 `lf export SELECTOR --output PARENT` and the Research Console **Export Study…** action use one
 domain service to export the newest Attempt in its current state. A succeeded finalized Execution

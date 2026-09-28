@@ -1042,6 +1042,19 @@ candidatos no factibles. El mismo JSON está en `overview` →
 `work.items[].study.hpo_analysis`, las acciones recientes en `.controller` (25 eventos) y el
 sampler real en `.surrogate_belief`.
 
+La finalización científica es distinta de estabilizar el screening. Un screening estable detiene
+propuestas `OPTIMIZE` ordinarias; después pueden continuar confirmation y la cobertura material de
+respuestas, parámetros e interacciones hasta agotar las acciones factibles con valor material o un
+presupuesto duro. `remaining_information_value` combina incertidumbre predictiva y deuda explícita
+de soporte: un surrogate seguro no convierte un valor discreto sin observar en evidencia real. El
+`scientific_status` compartido incluye preguntas de parámetros y deuda de interacciones material y
+factible.
+
+Con un objective escalar, los Runs completados también pueden exponer `diagnostic_metrics`:
+métricas terminales numéricas comunes a las seeds comparables, con media, dispersión y soporte. Se
+pueden inspeccionar en Trial y en el dashboard offline, incluso frente a parámetros. Son evidencia
+solo diagnóstica: nunca se convierten en componentes del objective, constraints ni entradas HPO.
+
 F1, balanced accuracy, kappa de Cohen, accuracy, precision y recall dependen potencialmente de un
 threshold. LambdaForge usa exactamente el valor registrado: no optimiza ese threshold, no elige uno
 por candidato ni las equipara a AUROC/AUPRC. Esa política pertenece al protocolo del Work.
