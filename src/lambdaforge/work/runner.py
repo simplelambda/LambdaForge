@@ -2607,31 +2607,21 @@ def _execute_adaptive_group(
             )
         resolution = max(policy.scientific_margin or 0.0, noise_resolution)
         optimization_stable = bool(estimates) and opportunity <= resolution
-        action_resolution = float(
-            scientific.get("scientific_action_resolution", 0.0) or 0.0
-        )
-        remaining_values = [
-            float(value.get("remaining_information_value", value.get("entropy", 0.0)) or 0.0)
-            for value in questions
-        ]
-        meaningful_science = max(remaining_values, default=0.0) > action_resolution
         required_response_debt = any(
             anchor_states.get(trial) not in {"OBSERVED"} for trial in anchor_trials
         ) or any(
             bool(value.get("evidence_required")) for value in pending_actions.values()
         )
-        feasible_science = within_time() and allowance() > 0 and (
-            len(proposed) < candidate_budget
-            or any(
-                result.termination_type == "performance_pruned"
-                and _result_checkpoint_available(result)
-                for result in outcomes
-            )
+        _action, scientific_work, _evidence = next_event_action(
+            1,
+            preview=True,
+            scientific_only=True,
+            scientific_state=scientific,
         )
         useful = (
             not optimization_stable
             or required_response_debt
-            or (meaningful_science and feasible_science)
+            or bool(scientific_work)
         )
         return StudyConvergenceState(
             policy.goal,
@@ -2812,13 +2802,56 @@ def _execute_adaptive_group(
         current["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
         atomic_json(state_path, current)
 
-    def next_event_action(capacity: int) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    def next_event_action(
+        capacity: int,
+        *,
+        preview: bool = False,
+        scientific_only: bool = False,
+        scientific_state: Mapping[str, Any] | None = None,
+    ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+        """Plan the real frontier, optionally rolling back every planning mutation.
+
+        Automatic convergence uses the preview with ``scientific_only=True``.  It therefore
+        asks the same planner that dispatch uses, while ordinary optimization proposals are
+        excluded and provisional public Trial allocation is transactionally discarded.
+        """
+        if not preview:
+            return _next_event_action(
+                capacity,
+                scientific_only=scientific_only,
+                scientific_state=scientific_state,
+            )
+        if not scientific_only:
+            raise ValueError("A planning preview must be restricted to scientific actions.")
+        proposed_before = list(proposed)
+        proposal_numbers_before = dict(proposal_numbers)
+        pool_trials_before = dict(pool_trials_by_proposal)
+        try:
+            return _next_event_action(
+                capacity,
+                scientific_only=True,
+                scientific_state=scientific_state,
+            )
+        finally:
+            proposed[:] = proposed_before
+            proposal_numbers.clear()
+            proposal_numbers.update(proposal_numbers_before)
+            pool_trials_by_proposal.clear()
+            pool_trials_by_proposal.update(pool_trials_before)
+
+    def _next_event_action(
+        capacity: int,
+        *,
+        scientific_only: bool,
+        scientific_state: Mapping[str, Any] | None,
+    ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
         """Choose one action for a newly free slot from all currently useful action types."""
-        if capacity < 1 or not within_time():
+        if capacity < 1 or allowance() < 1 or not within_time():
             return "WAIT", [], {"reason": "budget-or-time-exhausted"}
+        screening_stable = search_converged or scientific_only
         if (
             policy.candidate_budget is None
-            and not search_converged
+            and not screening_stable
             and len(proposed) >= candidate_budget
         ):
             extend_candidate_window()
@@ -2882,7 +2915,11 @@ def _execute_adaptive_group(
         ]
         default_cost = statistics.fmean(durations) if durations else None
         options: list[tuple[float, int, str, dict[str, Any], dict[str, Any]]] = []
-        scientific = scientific_snapshot()
+        scientific = (
+            dict(scientific_state)
+            if isinstance(scientific_state, Mapping)
+            else scientific_snapshot()
+        )
         optimization_weight = float(scientific["optimization_weight"])
         information_weight = float(scientific["information_weight"])
         # Goal is a priority preference, not a Boolean science gate.  Automatic normalization
@@ -3214,7 +3251,7 @@ def _execute_adaptive_group(
             )
 
         proposal: tuple[int, ...] = ()
-        if len(proposed) < candidate_budget and not search_converged:
+        if len(proposed) < candidate_budget and not screening_stable:
             proposal = propose(1)
         if len(proposed) < candidate_budget and provisional_values:
             costs_by_trial = {
@@ -3252,7 +3289,7 @@ def _execute_adaptive_group(
             # backfill work whenever the nominal winner is resource-blocked.
             frontier_width = min(8, max(4, capacity), candidate_budget - len(proposed))
             candidates_to_value = list(designed[:frontier_width])
-            if search_converged:
+            if screening_stable:
                 candidates_to_value = [
                     value for value in candidates_to_value if value.purpose != "OPTIMIZE"
                 ]
@@ -3641,10 +3678,10 @@ def _execute_adaptive_group(
                             best_objective=best_value,
                             minimum_improvement=policy.min_improvement,
                         )
-            if policy.candidate_budget is None and policy.automatic_stop and not search_converged:
+            if policy.candidate_budget is None and policy.automatic_stop:
                 evaluated = evaluate_automatic_convergence()
                 convergence_state = evaluated.to_dict()
-                if evaluated.screening_stable:
+                if evaluated.screening_stable and not search_converged:
                     search_converged = True
                     record_decision(
                         "STOP_PROPOSING",

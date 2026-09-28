@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import itertools
 import json
 from collections.abc import Mapping, Sequence
@@ -38,6 +39,59 @@ from lambdaforge.work.runner import (
     _retry_failed_result,
     _validate_gpu_memory_capacity,
 )
+
+
+def _stable_scientific_snapshot(
+    _cls: type[Any],
+    _candidates: Sequence[Mapping[str, Any]],
+    _objective: Mapping[str, Any],
+    **_kwargs: Any,
+) -> dict[str, Any]:
+    """Resolved scientific read model used to isolate planner/convergence consistency."""
+    return {
+        "status": "available",
+        "natural_utility_scale": 1.0,
+        "optimization_opportunity": 0.0,
+        "scientific_uncertainty": 0.0,
+        "scientific_action_resolution": 0.05,
+        "optimization_weight": 0.5,
+        "information_weight": 0.5,
+        "phase": "balanced",
+        "parameter_questions": [
+            {
+                "parameter": "quality",
+                "conclusion_kind": "PREFERRED",
+                "descriptive_stability": 1.0,
+                "remaining_information_value": 0.0,
+                "materiality": 1.0,
+                "missing_evidence": [],
+            }
+        ],
+        "interaction_questions": [],
+        "unresolved_questions": [],
+        "practical_optimal_region": {},
+        "evidence": {"resamples": 8},
+    }
+
+
+def _capture_convergence_states(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Record immutable convergence values without changing controller behavior."""
+    runner_module = importlib.import_module("lambdaforge.work.runner")
+    original = runner_module.StudyConvergenceState
+    captured: list[Any] = []
+
+    def recording_state(*args: Any, **kwargs: Any) -> Any:
+        value = original(*args, **kwargs)
+        captured.append(value)
+        return value
+
+    monkeypatch.setattr(runner_module, "StudyConvergenceState", recording_state)
+    monkeypatch.setattr(
+        runner_module.ScientificQuestionAnalyzer,
+        "analyze",
+        classmethod(_stable_scientific_snapshot),
+    )
+    return captured
 
 
 def _completed_pruner_calibration(tmp_path: Path) -> tuple[WorkResult, ...]:
@@ -569,6 +623,138 @@ def test_multi_fidelity_resumes_only_a_competitive_configuration(
     )
     assert state["completed_runs"] == len(result.runs)
     assert any(run["fidelity"].get("target") == 3 for run in state["runs"])
+
+
+def test_convergence_preview_keeps_valid_shared_seed_action_and_has_no_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_convergence_states(monkeypatch)
+    config = WorkConfig.from_mapping(
+        {
+            "name": "shared-seed-convergence",
+            "run": "tests.work_cases.AdaptiveScoreWork",
+            "seeds": [11, 22],
+            "search": {
+                "strategy": "adaptive",
+                "startup_trials": 2,
+                "confirmation_seeds": [],
+                "early_stopping": False,
+                "quality": {"values": [1.0, 2.0]},
+            },
+            "objective": {"metric": "score", "mode": "max", "practical_margin": 0.0},
+            "resources": {"cpu": 2},
+        },
+        source=tmp_path / "shared-seed-convergence.yaml",
+    )
+
+    result = WorkRunner().run(config)
+    decisions = [
+        json.loads(line)
+        for line in (result.execution_dir / "hpo-control" / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    state = json.loads(
+        (result.execution_dir / "hpo-control" / "state.json").read_text(encoding="utf-8")
+    )
+
+    assert any(
+        value.optimization_stable
+        and value.evidence_events >= 2
+        and value.useful_action_available
+        and not value.converged
+        for value in captured
+    ), [value.to_dict() for value in captured]
+    assert sum(value.get("action") == "CALIBRATE_SEED_NOISE" for value in decisions) == 1
+    assert [value["decision"] for value in decisions] == list(range(1, len(decisions) + 1))
+    assert len(result.runs) == 3
+    assert sorted(run.seed for run in result.runs if run.seed is not None) == [11, 11, 22]
+    assert len(
+        {
+            (int(run.trial["index"]), run.seed, run.study_phase)
+            for run in result.runs
+            if run.trial is not None
+        }
+    ) == len(result.runs)
+    assert {int(run.trial["index"]) for run in result.runs if run.trial is not None} == {1, 2}
+    assert state["pending_actions"] == []
+
+
+def test_convergence_preview_keeps_valid_fidelity_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_convergence_states(monkeypatch)
+    config = WorkConfig.from_mapping(
+        {
+            "name": "fidelity-convergence",
+            "run": "tests.work_cases.FidelityScoreWork",
+            "seeds": [7],
+            "search": {
+                "strategy": "adaptive",
+                "startup_trials": 2,
+                "max_parallel": 1,
+                "confirmation_seeds": [],
+                "early_stopping": False,
+                "fidelity": {"min": 1, "max": 3, "reduction_factor": 3},
+                "quality": {"values": [1.0, 1.0001]},
+            },
+            "objective": {"metric": "score", "mode": "max", "practical_margin": 1.0},
+            "resources": {"cpu": 1},
+        },
+        source=tmp_path / "fidelity-convergence.yaml",
+    )
+
+    result = WorkRunner().run(config)
+    decisions = [
+        json.loads(line)
+        for line in (result.execution_dir / "hpo-control" / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert any(
+        value.evidence_events >= 2
+        and value.useful_action_available
+        and not value.converged
+        for value in captured
+    ), [value.to_dict() for value in captured]
+    assert sum(value.get("action") == "PROMOTE_FIDELITY" for value in decisions) == 1
+
+
+def test_convergence_preview_allows_convergence_only_when_frontier_is_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_convergence_states(monkeypatch)
+    config = WorkConfig.from_mapping(
+        {
+            "name": "empty-scientific-frontier",
+            "run": "tests.work_cases.AdaptiveScoreWork",
+            "seeds": [11, 22],
+            "search": {
+                "strategy": "adaptive",
+                "startup_trials": 2,
+                "replication": {"minimum": 2},
+                "confirmation_seeds": [],
+                "early_stopping": False,
+                "quality": {"values": [1.0, 2.0]},
+            },
+            "objective": {"metric": "score", "mode": "max", "practical_margin": 0.0},
+            "resources": {"cpu": 2},
+        },
+        source=tmp_path / "empty-scientific-frontier.yaml",
+    )
+
+    result = WorkRunner().run(config)
+    final_state = captured[-1]
+
+    assert result.status == "succeeded"
+    assert final_state.optimization_stable
+    assert final_state.contenders_stable
+    assert final_state.confirmation_complete
+    assert final_state.useful_action_available is False
+    assert final_state.converged is True
 
 
 def test_adaptive_search_allocates_more_seeds_only_to_promising_candidates(
