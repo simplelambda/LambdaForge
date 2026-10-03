@@ -71,6 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--wait-for-submit", action="store_true")
     run.add_argument("--rerun", action="store_true")
     run.add_argument("--restart", action="store_true")
+    run.add_argument("--resume-execution", type=Path, help=argparse.SUPPRESS)
+    run.add_argument("--resume-study-path", type=Path, help=argparse.SUPPRESS)
+    run.add_argument(
+        "--accept-code-change",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     run.add_argument("--allow-duplicate", action="store_true")
     run.add_argument("--json", action="store_true")
 
@@ -253,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
     retry = job_commands.add_parser("retry")
     retry.add_argument("job_id")
     retry.add_argument("--dry-run", action="store_true")
+    retry.add_argument("--accept-code-change", action="store_true")
     reconcile = job_commands.add_parser("reconcile")
     reconcile.add_argument("--cluster")
     reconcile.add_argument("--all", action="store_true")
@@ -269,6 +277,12 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--follow", action="store_true")
         item.add_argument("--dry-run", action="store_true")
         item.add_argument("--json", action="store_true")
+        if operation == "retry":
+            item.add_argument(
+                "--accept-code-change",
+                action="store_true",
+                help="Reuse earlier evidence after an explicitly compatible consumer-code fix.",
+            )
         if operation in {"show", "logs"}:
             item.add_argument(
                 "--run",

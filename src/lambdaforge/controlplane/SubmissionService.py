@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -40,6 +40,7 @@ class SubmissionService:
         group_id: str | None = None,
         retry_of: str | None = None,
         allow_duplicate: bool = False,
+        metadata: Mapping[str, Any] | None = None,
     ) -> JobHandle:
         """Persist and launch preparation without blocking on the selected execution target."""
         source = Path(config).expanduser().resolve()
@@ -80,6 +81,7 @@ class SubmissionService:
                 "submission_phase": "queued-locally",
                 "submission_mode": "asynchronous",
                 "run_arguments": list(run_arguments),
+                **dict(metadata or {}),
             },
             job_type=descriptor.job_type,
             group_id=group_id,

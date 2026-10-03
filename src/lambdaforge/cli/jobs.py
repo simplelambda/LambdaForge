@@ -133,7 +133,9 @@ def run_job_command(arguments: argparse.Namespace) -> int:
         )
         print(json.dumps(group_payload, indent=2))
         return 0
-    handle = jobs.retry(selected_job_id, dry_run=arguments.dry_run)
+    handle = jobs.retry(
+        selected_job_id, dry_run=arguments.dry_run, accept_code_change=arguments.accept_code_change
+    )
     print(json.dumps(handle.to_dict(), indent=2))
     return 0
 

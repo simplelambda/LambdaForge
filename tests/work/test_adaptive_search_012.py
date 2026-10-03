@@ -575,7 +575,7 @@ def test_incomplete_confirmation_is_explicit_and_cannot_select_survivors(
     assert state["controller"]["confirmation_complete"] is False
 
 
-def test_multi_fidelity_resumes_only_a_competitive_configuration(
+def test_multi_fidelity_distinguishes_competitive_and_calibration_continuations(
     tmp_path: Path,
 ) -> None:
     config = WorkConfig.from_mapping(
@@ -600,11 +600,10 @@ def test_multi_fidelity_resumes_only_a_competitive_configuration(
     result = WorkRunner().run(config)
 
     assert result.status == "succeeded"
-    assert len(result.runs) == 3
+    assert len(result.runs) == 4
     continued = [run for run in result.runs if run.fidelity["target"] == 3]
-    assert len(continued) == 1
-    assert continued[0].resumed_from_checkpoint
-    assert continued[0].trial["parameters"] == {"quality": 2.0}
+    assert len(continued) == 2
+    assert all(run.resumed_from_checkpoint for run in continued)
     assert result.summary["best"]["parameters"] == {"quality": 2.0}
     decisions = [
         json.loads(line)
@@ -615,13 +614,18 @@ def test_multi_fidelity_resumes_only_a_competitive_configuration(
     assert {decision["action"] for decision in decisions} >= {
         "INITIALIZE",
         "START_NEW",
-        "PROMOTE_FIDELITY",
+        "PRUNER_CALIBRATION_EVIDENCE",
         "FINISH",
     }
     state = json.loads(
         (result.execution_dir / "hpo-control" / "state.json").read_text(encoding="utf-8")
     )
     assert state["completed_runs"] == len(result.runs)
+    assert state["pruner_calibration"]["strong_pruning_ready"] is False
+    calibration = next(
+        value for value in decisions if value["action"] == "PRUNER_CALIBRATION_EVIDENCE"
+    )
+    assert "endpoint" in calibration["reason"]
     assert any(run["fidelity"].get("target") == 3 for run in state["runs"])
 
 
@@ -714,9 +718,7 @@ def test_convergence_preview_keeps_valid_fidelity_action(
         .splitlines()
     ]
     assert any(
-        value.evidence_events >= 2
-        and value.useful_action_available
-        and not value.converged
+        value.evidence_events >= 2 and value.useful_action_available and not value.converged
         for value in captured
     ), [value.to_dict() for value in captured]
     assert sum(value.get("action") == "PROMOTE_FIDELITY" for value in decisions) == 1

@@ -117,11 +117,16 @@ class WorkService:
         )
         if active:
             raise ValueError(f"Cannot delete active work; cancel it first: {active}.")
+        deleting_jobs = tuple(record.job_id for record in records)
+        for record in records:
+            if set(self.jobs.recovery_dependents(record.job_id)) - set(deleting_jobs):
+                raise ValueError("Another Study still references this history's recovery state.")
         workspace_plans = [
             self.storage.delete_job(
                 record.cluster,
                 record.job_id,
                 apply=apply,
+                deleting_jobs=deleting_jobs,
                 local_run_root=(
                     self.jobs.job_root(record)
                     if self.catalog.get(record.cluster).transport == "local"
@@ -135,9 +140,9 @@ class WorkService:
             self._write_deletion_receipt(work.to_dict(), tuple(record.job_id for record in records))
             for record in records:
                 if record.state.value == "unknown":
-                    self.jobs.delete(record.job_id, allow_unknown=True)
+                    self.jobs.delete(record.job_id, allow_unknown=True, deleting_jobs=deleting_jobs)
                 else:
-                    self.jobs.delete(record.job_id)
+                    self.jobs.delete(record.job_id, deleting_jobs=deleting_jobs)
         unknown_ids = [record.job_id for record in unknown]
         return {
             "work": work.to_dict(),

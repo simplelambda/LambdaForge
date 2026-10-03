@@ -7,6 +7,7 @@ import os
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from lambdaforge.cli.clusters import run_cluster_command
@@ -223,6 +224,9 @@ class CommandLineInterface:
                 dry_run=arguments.dry_run,
                 rerun=arguments.rerun,
                 restart=arguments.restart,
+                resume_execution=getattr(arguments, "resume_execution", None),
+                resume_study_path=getattr(arguments, "resume_study_path", None),
+                accept_code_change=getattr(arguments, "accept_code_change", False),
             )
             payload = outcome.to_dict()
             if arguments.json:
@@ -233,6 +237,11 @@ class CommandLineInterface:
                     f"({payload['execution_id']})"
                 )
             return 0 if payload.get("status", "succeeded") == "succeeded" else 4
+        if any(
+            getattr(arguments, option, None)
+            for option in ("resume_execution", "resume_study_path", "accept_code_change")
+        ):
+            raise ValueError("Use 'lf retry SELECTOR' to recover a managed Study.")
         run_arguments = tuple(
             flag
             for enabled, flag in (
@@ -371,9 +380,33 @@ class CommandLineInterface:
                         "A successful local Work is not retryable; use 'lf run CONFIG --rerun' "
                         "for a deliberate new Execution."
                     )
+                try:
+                    managed = works.show(arguments.selector)
+                except KeyError:
+                    managed = None
+                if managed is not None:
+                    payload = (
+                        JobService(catalog)
+                        .retry(
+                            managed.primary_job_id,
+                            dry_run=arguments.dry_run,
+                            accept_code_change=arguments.accept_code_change,
+                        )
+                        .to_dict()
+                    )
+                    print(json.dumps(payload, indent=2))
+                    return 0
                 outcome = WorkRunner().run(
                     local.configuration(arguments.selector),
                     dry_run=arguments.dry_run,
+                    resume_execution=(
+                        Path(str(local_record["execution_dir"]))
+                        if (
+                            Path(str(local_record["execution_dir"])) / "hpo-control" / "state.json"
+                        ).is_file()
+                        else None
+                    ),
+                    accept_code_change=arguments.accept_code_change,
                 )
                 payload = outcome.to_dict()
             else:
@@ -413,7 +446,11 @@ class CommandLineInterface:
                     else:
                         print(report["text"], end="")
                     return 0
-                payload = jobs.retry(job_id, dry_run=arguments.dry_run).to_dict()
+                payload = jobs.retry(
+                    job_id,
+                    dry_run=arguments.dry_run,
+                    accept_code_change=arguments.accept_code_change,
+                ).to_dict()
         else:
             payload = works.cancel(arguments.selector)
         print(json.dumps(payload, indent=2) if arguments.json else json.dumps(payload, indent=2))

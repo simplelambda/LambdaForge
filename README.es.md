@@ -183,6 +183,14 @@ usa `self.resume_map(..., key=...)`; la forma antigua `map(..., key=...)` sigue 
 
 ## Infraestructura científica gestionada
 
+Los estudios adaptativos conservan su configuración científica al margen de la lista de acciones
+recientes. Consola e informes mantienen margen práctico, escalas log y dominios condicionales.
+El ruido de seeds sigue siendo provisional con un único candidato repetido; las seeds compartidas
+compiten con probes de parámetros/interacciones por evidencia útil por coste. El predictor conserva
+picos NVML muestreados completos sin llamarlos exactos y las tasas de progreso permiten aprender
+cuándo más Runs en una GPU mejoran el throughput agregado. Consola e HTML explican el soporte de
+estabilidad y calibración. Véase [la guía de política de estudios](docs/MANUAL.es.md#7-secuencia-paralelismo-seeds-y-búsqueda).
+
 Hay tres almacenamientos con responsabilidades diferentes:
 
 - `self.cache.put(clave, contenido)` y `get(clave, default=None)` guardan/recuperan bytes, texto o
@@ -947,6 +955,24 @@ lf export ESTUDIO --output ./exportaciones
 lf clean                    # vista previa de limpieza segura
 ```
 
+Para continuar un Study adaptativo fallido, cancelado o con timeout, ábrelo en la consola y pulsa
+**Resume Study…**, o ejecuta `lf retry STUDY` desde el proyecto original. Se prepara un nuevo Job
+en el mismo clúster con el código actual y se reconecta a la Execution HPO exacta: conserva resultados
+válidos, podas, candidatos, seeds asignadas y decisiones. Las Runs fallidas o interrumpidas crean
+otro Attempt: un checkpoint compatible activa `self.resuming`; sin checkpoint esa Run empieza de
+nuevo. Las Runs completadas y las podadas por rendimiento no se repiten. Los presupuestos de tiempo
+y Runs ya gastados siguen gastados: retry no concede presupuesto extra.
+
+Si has corregido el código consumidor, usa `lf retry STUDY --accept-code-change` **solo** cuando
+las métricas anteriores y los formatos de checkpoints sigan siendo científicamente válidos. La
+consola ofrece la misma casilla explícita de compatibilidad. Configuración, entradas, streams de
+seeds y objetivo deben seguir coincidiendo; cambiar el protocolo científico requiere otro Study.
+El manifest original no se sobrescribe y `recovery-history.jsonl` registra las revisiones reales.
+Conserva el workspace del Job original: la limpieza lo protege mientras una recuperación lo
+referencie. Un estado HPO ausente/corrupto falla visiblemente en lugar de reiniciar silenciosamente
+el estudio. Esta recuperación cubre un único Study adaptativo, no composiciones de varios Works,
+y no traslada el estado entre clústeres.
+
 La Consola es la interfaz humana para Work, Studies, Clusters, Datasets y Results. Overview separa
 Clusters, Work ordinarios y Studies en tres paneles: un Study no se mezcla con Work ni desaparece
 al fallar. Al seleccionar un clúster aparecen historiales vivos de CPU/RAM/GPU, capacidad total,
@@ -1110,10 +1136,28 @@ overview, evidencia y comparación de dos Trials, respuestas y estadísticos por
 interacciones como mapa de calor/3D, cobertura, eficiencia de recursos y findings. Los selectores
 de métrica, parámetro, pareja, representación y color consumen exclusivamente `analysis.json`: el
 navegador no ajusta otro modelo ni altera conclusiones HPO. Sus paneles redimensionables y
-`My charts` guardan gráficas bar/line/scatter con ejes elegidos entre Trial, parámetros declarados,
-componentes del objetivo o recursos. Las preferencias pertenecen solo a ese HTML generado. Plotly
+`Explore` guarda gráficas frente a valores de hiperparámetros, no solo epochs: elige **X axis** =
+un parámetro e **Y axis** = cualquier métrica numérica registrada. Los cambios se previsualizan
+automáticamente; **Save chart** solo conserva la vista. **Add another Y metric (2D)** tiene
+casillas con buscador para añadir series. **Parameters → Y metric** cambia la gráfica observada
+y su tabla; las respuestas modeladas siguen identificadas como relativas al objetivo de selección.
+En **3D scatter**, **Observed heatmap** o **Observed 3D surface**, elige dos parámetros
+como X/Y y una métrica en **Z / cell metric**, y pulsa **Save chart**. Combinaciones no probadas
+quedan vacías y las categorías mantienen sus nombres. La agrupación opcional por valor muestra
+media y desviación entre Trials, no intervalos de confianza entre seeds. Datos parciales/podados
+son opcionales y nunca sustituyen evidencia final ausente. Las preferencias pertenecen solo a ese HTML generado. Plotly
 no forma parte de las dependencias base: sin el extra siguen funcionando la
 ejecución, el JSON y la Consola.
+
+El informe empieza en **Research**, con hallazgos priorizados que enlazan a su evidencia y gráficas.
+**Metrics & health** organiza etiquetas, categorías, unidades, alias, constantes, soporte ausente
+y redundancia; **Ctrl/⌘ K** busca métricas, familias, parámetros, Trials y vistas guardadas.
+`Work.analysis_profile` o YAML `analysis` declaran significado y preguntas antes de ejecutar.
+El descubrimiento es determinista, acotado y retrospectivo, sin cambiar HPO. Evidencia de test no
+puede gobernar objetivo/restricciones ni discovery provisional. Unidades distintas/desconocidas
+usan gráficas separadas; normalizar es visual y opcional. Las vistas admiten notas y export/import
+JSON. Véase la [guía del espacio de investigación](docs/RESEARCH_ANALYSIS.es.md) para declaraciones,
+familias, métodos, controles, límites estadísticos y Studies antiguos.
 
 La admisión de recursos también queda estructurada: capacidad GPU/CPU/RAM, Runs activas/en cola,
 VRAM libre y requerida por GPU y motivo concreto de espera. `runs_per_gpu` es un máximo, no una

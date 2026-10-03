@@ -2169,7 +2169,7 @@ def test_live_study_hpo_parameters_do_not_require_a_final_execution() -> None:
             row = [str(value) for value in table.get_row_at(0)]
             assert "Learning Rate" in row
             assert "Near 0.001 (observed)" in row
-            assert "64% · Medium" in row
+            assert any("descriptive stability 64%" in cell for cell in row)
 
             table.focus()
             await pilot.press("enter")

@@ -7,6 +7,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.hpo.ScientificDesign import SeedNoiseModel
 
 
@@ -40,6 +41,8 @@ class SeedRaceDecision:
     recommended_seed: int | None = None
     comparison_trials: tuple[int, ...] = ()
     information_value: float = 0.0
+    global_calibration_value: float = 0.0
+    affected_questions: int = 0
 
 
 class AdaptiveSeedRacer:
@@ -73,10 +76,14 @@ class AdaptiveSeedRacer:
         self.variance_floor = float(variance_floor)
 
     def estimates(
-        self, outcomes: Mapping[int, Mapping[int | None, float]]
+        self,
+        outcomes: Mapping[int, Mapping[int | None, float]],
+        *,
+        parameters: Mapping[int, Mapping[str, object]] | None = None,
+        parameter_space: ParameterSpace | None = None,
     ) -> dict[int, CandidateEstimate]:
         """Estimate candidates with pooled *within-candidate* seed variance only."""
-        noise = SeedNoiseModel.fit(outcomes)
+        noise = SeedNoiseModel.fit(outcomes, parameters=parameters, parameter_space=parameter_space)
         estimates: dict[int, CandidateEstimate] = {}
         for trial, values_by_seed in outcomes.items():
             values = tuple(float(value) for value in values_by_seed.values())
@@ -86,7 +93,10 @@ class AdaptiveSeedRacer:
             estimates[int(trial)] = CandidateEstimate(
                 statistics.fmean(values),
                 (
-                    math.sqrt(max(variance, self.variance_floor) / len(values))
+                    math.sqrt(
+                        max(variance, noise.predictive_variance or 0.0, self.variance_floor)
+                        / len(values)
+                    )
                     if variance is not None
                     else math.inf
                 ),
@@ -101,9 +111,13 @@ class AdaptiveSeedRacer:
         *,
         eligible: Sequence[int] | None = None,
         available_seeds: Mapping[int, Sequence[int]] | None = None,
+        scientific: Mapping[str, object] | None = None,
+        parameters: Mapping[int, Mapping[str, object]] | None = None,
+        parameter_space: ParameterSpace | None = None,
     ) -> tuple[SeedRaceDecision, ...]:
         """Rank extra seeds by uncertainty reduction in incumbent/challenger comparisons."""
-        estimates = self.estimates(outcomes)
+        estimates = self.estimates(outcomes, parameters=parameters, parameter_space=parameter_space)
+        noise = SeedNoiseModel.fit(outcomes, parameters=parameters, parameter_space=parameter_space)
         if not estimates:
             return ()
         incumbent = (
@@ -112,9 +126,9 @@ class AdaptiveSeedRacer:
             else min(estimates, key=lambda trial: estimates[trial].mean)
         )
         allowed = set(estimates) if eligible is None else set(eligible)
-        if not any(estimate.seed_noise_calibrated for estimate in estimates.values()):
-            # A single within-candidate repeat is enough to calibrate the initial seed-noise
-            # model.  Make that obligation deterministic and scientifically relevant: prefer
+        if noise.variance is None:
+            # Identify a first within-candidate scale, without declaring it globally calibrated.
+            # Make this first observation deterministic and scientifically relevant: prefer
             # the current incumbent when it still has an authored seed available, otherwise the
             # best eligible candidate.  Returning one calibration option also prevents tiny,
             # noisy wall-time differences from spending the first repeat on an inferior trial.
@@ -143,9 +157,51 @@ class AdaptiveSeedRacer:
                 )
             )
         decisions: list[SeedRaceDecision] = []
+        raw_questions = (scientific or {}).get("unresolved_questions", ())
+        questions = (
+            [item for item in raw_questions if isinstance(item, Mapping)]
+            if isinstance(raw_questions, Sequence)
+            else []
+        )
         for trial in sorted(allowed & estimates.keys()):
             probability = competitor_probabilities[trial]
-            if probability < self.probability_threshold:
+            context_novelty = (
+                1.0 if len(outcomes[trial]) < 2 else 1.0 / max(1, noise.repeated_candidates)
+            )
+            # Calibrating noise affects many conclusions at once. Its marginal value decays with
+            # residual information and already repeated contexts rather than a fixed seed quota.
+            df = noise.residual_degrees_of_freedom
+            noise_scale = (
+                math.sqrt(noise.predictive_variance)
+                if noise.predictive_variance is not None
+                else None
+            )
+            raw_scale = (scientific or {}).get("natural_utility_scale")
+            reference_scale = self.margin or (
+                float(raw_scale) if isinstance(raw_scale, int | float) else 0.0
+            )
+            practical_impact = (
+                min(1.0, noise_scale / reference_scale)
+                if noise_scale is not None and reference_scale > 0
+                else 1.0
+            )
+            variance_reduction = noise.relative_uncertainty * practical_impact / (df + 1.0)
+            relevance = max(probability, context_novelty * (1.0 - noise.context_coverage))
+            global_value = 1.0 - math.prod(
+                1.0
+                - min(
+                    1.0,
+                    variance_reduction
+                    * relevance
+                    * float(question.get("remaining_information_value", 0.0) or 0.0),
+                )
+                for question in questions
+            )
+            raw_resolution = (scientific or {}).get("scientific_action_resolution")
+            resolution = float(raw_resolution) if isinstance(raw_resolution, int | float) else 0.0
+            if global_value <= resolution:
+                global_value = 0.0
+            if probability < self.probability_threshold and global_value <= 0:
                 continue
             estimate = estimates[trial]
             comparisons = tuple(
@@ -170,6 +226,7 @@ class AdaptiveSeedRacer:
                 for other in comparisons
             ]
             information = 1.0 - math.prod(1.0 - min(1.0, max(0.0, value)) for value in pair_values)
+            information = 1.0 - (1.0 - information) * (1.0 - global_value)
             reduction = information * (
                 estimate.standard_error if math.isfinite(estimate.standard_error) else 1.0
             )
@@ -182,7 +239,7 @@ class AdaptiveSeedRacer:
             )
             purpose = (
                 "CALIBRATE_SEED_NOISE"
-                if not estimate.seed_noise_calibrated
+                if not noise.calibrated and global_value > 0 or noise.variance is None
                 else "ADD_SHARED_SEED"
                 if recommended_seed is not None
                 else "REPLICATE_INCUMBENT"
@@ -200,6 +257,8 @@ class AdaptiveSeedRacer:
                     recommended_seed,
                     comparisons,
                     information,
+                    global_value,
+                    len(questions),
                 )
             )
         return tuple(

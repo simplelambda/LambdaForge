@@ -213,8 +213,11 @@ class ConsoleServices:
     def delete_work(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
         return self.works.delete(selector, apply=apply)
 
-    def retry_job(self, job_id: str) -> dict[str, Any]:
-        return self.jobs.retry(job_id).to_dict()
+    def retry_preview(self, job_id: str) -> dict[str, Any]:
+        return self.jobs.retry_preview(job_id)
+
+    def retry_job(self, job_id: str, *, accept_code_change: bool = False) -> dict[str, Any]:
+        return self.jobs.retry(job_id, accept_code_change=accept_code_change).to_dict()
 
     def dataset_describe(self, selector: str) -> dict[str, Any]:
         return self.datasets.describe(selector)

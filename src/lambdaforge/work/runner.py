@@ -86,6 +86,7 @@ from lambdaforge.hpo.SurvivalModel import (
 from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
 from lambdaforge.reproducibility.SeedProvider import ProjectSeedStream
+from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 from lambdaforge.work.atomic import atomic_write_text
 from lambdaforge.work.cache import WorkCache
 from lambdaforge.work.checkpoints import CheckpointCollection
@@ -107,9 +108,10 @@ from lambdaforge.work.models import (
     atomic_json,
 )
 from lambdaforge.work.paths import WorkPathContext
+from lambdaforge.work.recovery import latest_outcomes, read_owned_json, validate_execution
 from lambdaforge.work.retention import compact_attempt
 from lambdaforge.work.runtime import WorkRuntime
-from lambdaforge.work.study import StudyTelemetry
+from lambdaforge.work.study import StudyTelemetry, study_run_key
 
 _GPU_ADMISSION_POLL_SECONDS = 1.0
 _GPU_LAUNCH_STAGGER_SECONDS = 5.0
@@ -258,16 +260,12 @@ class WorkRunner:
             if not path.is_absolute():
                 raise ValueError(f"Invalid shared-input identity file: {marker}")
             try:
-                algorithm = str(
-                    value.get("fingerprint_algorithm", LEGACY_FINGERPRINT_ALGORITHM)
-                )
+                algorithm = str(value.get("fingerprint_algorithm", LEGACY_FINGERPRINT_ALGORITHM))
                 if algorithm not in {
                     LEGACY_FINGERPRINT_ALGORITHM,
                     CANONICAL_FINGERPRINT_ALGORITHM,
                 }:
-                    raise ValueError(
-                        f"unsupported fingerprint algorithm {algorithm!r}"
-                    )
+                    raise ValueError(f"unsupported fingerprint algorithm {algorithm!r}")
                 digest, size = (
                     canonical_fingerprint(path)
                     if algorithm == CANONICAL_FINGERPRINT_ALGORITHM
@@ -298,12 +296,74 @@ class WorkRunner:
         dry_run: bool = False,
         rerun: bool = False,
         restart: bool = False,
+        resume_execution: Path | None = None,
+        resume_study_path: Path | None = None,
+        accept_code_change: bool = False,
     ) -> WorkExecutionPlan | WorkExecutionResult:
         """Execute sequential levels and process-isolated parallel Work Runs."""
         plan = self.plan(config, rerun=rerun)
+        execution_dir = self._execution_root(plan.source, config.name) / plan.execution_id
+        if resume_execution is not None:
+            if (
+                len(config.levels) != 1
+                or len(config.levels[0].runs) != 1
+                or config.levels[0].runs[0].search_policy is None
+            ):
+                raise ValueError("HPO recovery requires one adaptive Study, not a composed Work.")
+            if rerun or restart:
+                raise ValueError("Study recovery cannot be combined with --rerun or --restart.")
+            execution_dir = Path(resume_execution).expanduser().absolute()
+            manifest = validate_execution(execution_dir)
+            origin_code = manifest.get("code_identity")
+            if not isinstance(origin_code, Mapping) or self._study_identity(
+                config, code_identity=origin_code
+            ) != manifest.get("scientific_fingerprint"):
+                raise ValueError(
+                    "Study recovery requires unchanged configuration, inputs and seed policy."
+                )
+            previous_identity = manifest.get("scientific_fingerprint")
+            current_revision = execution_dir / "current-code.json"
+            if current_revision.exists():
+                previous_identity = read_owned_json(current_revision).get(
+                    "scientific_fingerprint", previous_identity
+                )
+            if plan.scientific_fingerprint != previous_identity and not accept_code_change:
+                raise ValueError(
+                    "Consumer code changed. Use --accept-code-change only if previous metrics "
+                    "and checkpoints remain scientifically compatible; otherwise start a new Study."
+                )
+            plan = replace(plan, execution_id=str(manifest["execution_id"]), reuse=False)
+        elif accept_code_change or resume_study_path is not None:
+            raise ValueError("Recovery options require an existing Study execution.")
         if dry_run:
             return plan
-        execution_dir = self._execution_root(plan.source, config.name) / plan.execution_id
+        with CrossProcessFileLock(
+            execution_dir / ".controller.lock",
+            shared=False,
+            timeout_seconds=0.1,
+            poll_interval_seconds=0.01,
+        ):
+            return self._run_plan(
+                config,
+                plan,
+                execution_dir,
+                rerun=rerun,
+                restart=restart,
+                recovering=resume_execution is not None,
+                resume_study_path=resume_study_path,
+            )
+
+    def _run_plan(
+        self,
+        config: WorkConfig,
+        plan: WorkExecutionPlan,
+        execution_dir: Path,
+        *,
+        rerun: bool,
+        restart: bool,
+        recovering: bool,
+        resume_study_path: Path | None,
+    ) -> WorkExecutionResult:
         existing = execution_dir / "result.json"
         if existing.is_file() and not rerun:
             prior_execution = self._read_execution(existing)
@@ -312,6 +372,69 @@ class WorkRunner:
                 self._compact_outcomes(prior_execution.runs)
                 return prior_execution
         execution_dir.mkdir(parents=True, exist_ok=True)
+        atomic_json(
+            execution_dir / "current-code.json",
+            {
+                "code_identity": _code_identity(self._project_root(plan.source.parent)),
+                "scientific_fingerprint": plan.scientific_fingerprint,
+            },
+        )
+        if recovering:
+            self._restore_study_telemetry(resume_study_path)
+            with (execution_dir / "recovery-history.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                            "job_id": os.environ.get("LAMBDAFORGE_JOB_ID"),
+                            "scientific_fingerprint": plan.scientific_fingerprint,
+                            "code_identity": _code_identity(self._project_root(plan.source.parent)),
+                            "compatible_evidence_reuse": True,
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+        self._write_execution_manifest(config, plan, execution_dir, recovering=recovering)
+        return self._run_levels(config, plan, execution_dir, restart=restart, recovering=recovering)
+
+    @staticmethod
+    def _restore_study_telemetry(source: Path | None) -> None:
+        telemetry = StudyTelemetry.from_environment()
+        if source is None or telemetry is None or source == telemetry.root:
+            return
+        if source.resolve() != source or source.is_symlink():
+            raise ValueError("Recovery telemetry source must not contain symlinks.")
+        telemetry.root.mkdir(parents=True, exist_ok=True)
+        # References only: no scalar histories, checkpoints, artifacts or heavyweight copies.
+        for name in ("index.json", "controller.json", "controller-history.jsonl"):
+            path = source / name
+            if path.is_file() and not path.is_symlink():
+                target = telemetry.root / name
+                if target.exists():
+                    continue
+                shutil.copyfile(path, target)
+        for directory in ("runs", "observations"):
+            records = source / directory
+            if records.is_dir() and not records.is_symlink():
+                for path in records.glob("*.json"):
+                    target = telemetry.root / directory / path.name
+                    if path.is_file() and not path.is_symlink() and not target.exists():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(path, target)
+
+    def _write_execution_manifest(
+        self,
+        config: WorkConfig,
+        plan: WorkExecutionPlan,
+        execution_dir: Path,
+        *,
+        recovering: bool,
+    ) -> None:
+        if recovering:
+            return  # The original scientific identity is immutable; revisions are audited above.
         atomic_json(
             execution_dir / "execution.json",
             {
@@ -344,6 +467,14 @@ class WorkRunner:
         # Retry must use the exact materialized authoring document that created this
         # Execution, even when the researcher later edits or removes the source YAML.
         atomic_json(execution_dir / "configuration.json", config.raw)
+        atomic_json(
+            execution_dir / "analysis-semantics.json",
+            {
+                definition.name: definition.analysis_semantics
+                for level in config.levels
+                for definition in level.runs
+            },
+        )
         atomic_json(execution_dir / "resolved-configuration.json", config.resolved_configuration())
         try:
             (execution_dir / "authored.yaml").write_text(
@@ -351,6 +482,17 @@ class WorkRunner:
             )
         except OSError:
             pass
+
+    def _run_levels(
+        self,
+        config: WorkConfig,
+        plan: WorkExecutionPlan,
+        execution_dir: Path,
+        *,
+        restart: bool,
+        recovering: bool,
+    ) -> WorkExecutionResult:
+        existing = execution_dir / "result.json"
         outcomes: list[WorkResult] = []
         named_outputs: dict[str, Mapping[str, Any]] = {}
         for level in config.levels:
@@ -380,6 +522,7 @@ class WorkRunner:
                         else None
                     ),
                     "study_expected": definition.study_expected,
+                    "analysis_semantics_path": str(execution_dir / "analysis-semantics.json"),
                 }
                 specifications: list[dict[str, Any]] = []
                 for trial_index, variant, seed in self._expanded(definition):
@@ -395,6 +538,7 @@ class WorkRunner:
                             "execution_dir": execution_dir,
                             "source": plan.source,
                             "restart": restart,
+                            "study_recovery": recovering,
                         }
                     )
                 groups.append(specifications)
@@ -462,6 +606,16 @@ class WorkRunner:
                 from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
 
                 analysis_source = execution_result.to_dict()
+                frozen_semantics = (
+                    json.loads(
+                        (execution_dir / "analysis-semantics.json").read_text(encoding="utf-8")
+                    )
+                    if (execution_dir / "analysis-semantics.json").is_file()
+                    else {}
+                )
+                analysis_source["analysis_semantics"] = frozen_semantics.get(
+                    study_definitions[0].name, {}
+                )
                 analysis_source["resource_conditioning"] = _resource_conditioning_summary(
                     execution_dir / "hpo-control" / "resources"
                 )
@@ -485,11 +639,7 @@ class WorkRunner:
     @staticmethod
     def _seed_metadata(definition: RunDefinition, seed: int | None) -> dict[str, Any] | None:
         return next(
-            (
-                dict(value)
-                for value in definition.seed_metadata
-                if value.get("value") == seed
-            ),
+            (dict(value) for value in definition.seed_metadata if value.get("value") == seed),
             None,
         )
 
@@ -571,9 +721,7 @@ class WorkRunner:
                 "required_completed": completed,
                 "required_attempted": attempted,
                 "required_missing": max(0, len(required) - attempted),
-                "evidence_completion_fraction": (
-                    completed / len(required) if required else 1.0
-                ),
+                "evidence_completion_fraction": (completed / len(required) if required else 1.0),
                 "design_status": "complete" if attempted == len(required) else "incomplete",
             }
         adaptive_definitions = [
@@ -850,13 +998,17 @@ class WorkRunner:
         return tuple(output)
 
     @staticmethod
-    def _study_identity(config: WorkConfig) -> str:
+    def _study_identity(
+        config: WorkConfig, *, code_identity: Mapping[str, Any] | None = None
+    ) -> str:
         source = WorkRunner._source(config)
         source_dir = source.parent
         payload = {
             "identity_version": 1,
             "name": config.name,
-            "source": _code_identity(WorkRunner._project_root(source.parent)),
+            "source": dict(code_identity)
+            if code_identity is not None
+            else _code_identity(WorkRunner._project_root(source.parent)),
             "levels": [
                 [
                     {
@@ -1001,9 +1153,7 @@ def _execute_fixed_evidence_group(
         max_runs=execution.max_runs,
         max_time_seconds=execution.max_time_seconds,
         parameter_space={
-            str(name): dict(value)
-            for name, value in space.items()
-            if isinstance(value, Mapping)
+            str(name): dict(value) for name, value in space.items() if isinstance(value, Mapping)
         },
     )
     resources = ResourceRequest.from_mapping(definition["resources"])
@@ -1027,9 +1177,7 @@ def _execute_fixed_evidence_group(
             or raw_seed_source.get("kind") != "project-stream"
         ):
             raise ValueError("Automatic sweep replication requires the project replicate stream.")
-        replicate_stream = ProjectSeedStream.from_mapping(
-            {**raw_seed_source, "role": "replicate"}
-        )
+        replicate_stream = ProjectSeedStream.from_mapping({**raw_seed_source, "role": "replicate"})
         raw_reference = design.get("reference")
         reference_trial = (
             next(
@@ -1056,9 +1204,7 @@ def _execute_fixed_evidence_group(
                 else None
             ),
             reference=reference_trial,
-            alpha=float(
-                (design.get("replication_policy") or {}).get("family_alpha", 0.05)
-            ),
+            alpha=float((design.get("replication_policy") or {}).get("family_alpha", 0.05)),
         )
     telemetry = StudyTelemetry.from_environment()
     prepared = [dict(value) for value in specifications]
@@ -1068,9 +1214,7 @@ def _execute_fixed_evidence_group(
         if isinstance(value, Mapping)
     }
     for value in prepared:
-        requirement = requirement_by_identity.get(
-            (int(value["trial_index"]), value.get("seed"))
-        )
+        requirement = requirement_by_identity.get((int(value["trial_index"]), value.get("seed")))
         if requirement is not None:
             value["evidence_requirement"] = dict(requirement)
             value["evidence_required"] = bool(requirement.get("required", False))
@@ -1091,15 +1235,10 @@ def _execute_fixed_evidence_group(
     terminal_results: list[WorkResult] = []
     sequential_finish_reason: str | None = None
     sequential_path = (
-        Path(str(specifications[0]["execution_dir"]))
-        / "hpo-control"
-        / "sweep-sequential.json"
+        Path(str(specifications[0]["execution_dir"])) / "hpo-control" / "sweep-sequential.json"
     )
     block_progress_path = sequential_path.with_name("sweep-blocks.json")
-    templates = {
-        int(value["trial_index"]): dict(value)
-        for value in prepared
-    }
+    templates = {int(value["trial_index"]): dict(value) for value in prepared}
     committed_lookahead: int | None = None
 
     def block_ordinal(value: Mapping[str, Any]) -> int | None:
@@ -1210,9 +1349,7 @@ def _execute_fixed_evidence_group(
             return retained
         assert sequential_analyzer is not None
         assert replicate_stream is not None
-        by_candidate: dict[int, dict[int, float]] = {
-            trial: {} for trial in templates
-        }
+        by_candidate: dict[int, dict[int, float]] = {trial: {} for trial in templates}
         completed_cells: dict[int, set[int]] = {}
         observed_ordinals: set[int] = set()
         permanent_failure = False
@@ -1419,18 +1556,14 @@ def _evidence_requirement_record(
 ) -> dict[str, Any]:
     """Return one transport-safe evidence identity for telemetry and restart."""
     raw_fidelity = specification.get("hpo_fidelity")
-    fidelity = (
-        int(raw_fidelity.get("target", 0)) if isinstance(raw_fidelity, Mapping) else None
-    )
+    fidelity = int(raw_fidelity.get("target", 0)) if isinstance(raw_fidelity, Mapping) else None
     candidate = int(specification["trial_index"])
     seed = specification.get("seed")
     phase = str(specification.get("hpo_phase", "search"))
     seed_token = "none" if seed is None else str(seed)
     fidelity_token = "none" if fidelity is None else str(fidelity)
     return {
-        "key": (
-            f"candidate-{candidate}:seed-{seed_token}:{phase}:fidelity-{fidelity_token}"
-        ),
+        "key": (f"candidate-{candidate}:seed-{seed_token}:{phase}:fidelity-{fidelity_token}"),
         "candidate": candidate,
         "seed": seed,
         "phase": phase,
@@ -1494,6 +1627,15 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
     run_id = f"run-{identity.removeprefix('sha256:')[:20]}"
     run_root = execution_dir / "runs" / run_id
     checkpoint_root = run_root / "checkpoints"
+    recovery_checkpoint = specification.get("recovery_checkpoint_root")
+    if recovery_checkpoint is not None:
+        checkpoint_root = Path(str(recovery_checkpoint))
+        if (
+            not checkpoint_root.is_relative_to(execution_dir / "runs")
+            or checkpoint_root.resolve() != checkpoint_root
+            or checkpoint_root.is_symlink()
+        ):
+            raise ValueError("Recovery checkpoint is outside the owned execution.")
     if specification["restart"] and checkpoint_root.exists():
         if checkpoint_root.is_symlink() or not checkpoint_root.is_dir():
             raise RuntimeError(f"Unsafe checkpoint root: {checkpoint_root}")
@@ -1700,6 +1842,8 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         ),
         target_step=fidelity.target if fidelity is not None else None,
     )
+    if specification.get("study_recovery"):
+        termination = {**dict(termination), "recovery_checkpoint_root": str(checkpoint_root)}
     if specification.get("hpo_scientific_continuation"):
         termination = {
             **dict(termination),
@@ -1933,6 +2077,9 @@ def _execute_adaptive_group(
         search_seed_budget=seed_count,
         slots_total=parallelism,
         policy=policy.to_dict(),
+        objective=objective,
+        seed_stream_metadata=seed_source,
+        control_state_path=str(state_path),
         controller_value_policy={
             "meaning": "automatic-performance-and-scientific-value-per-observed-cost",
             "manual_weights": False,
@@ -2011,6 +2158,7 @@ def _execute_adaptive_group(
             reason="scientific planning requested candidates beyond the materialized prefix",
         )
         return True
+
     proposed: list[int] = []
     proposal_numbers: dict[int, int] = {}
     pool_trials_by_proposal: dict[int, int] = {}
@@ -2019,8 +2167,25 @@ def _execute_adaptive_group(
     pending_observations: list[tuple[int, float]] = []
     scheduled_run_keys: set[tuple[int, int | None, str, int]] = set()
     pending_actions: dict[tuple[int, int | None, str, int], dict[str, Any]] = {}
+    recovering = bool(specifications[0].get("study_recovery"))
+    recovery_runs: list[tuple[int, WorkResult]] = []
 
     if restored_state:
+        required_prefix = max(
+            [
+                *restored_state.get("proposed_pool_trials", ()),
+                *(int(key) for key in restored_state.get("public_trial_map", {})),
+                *(
+                    int(value["candidate_pool_index"])
+                    for value in restored_state.get("pending_actions", ())
+                    if isinstance(value, Mapping) and value.get("candidate_pool_index") is not None
+                ),
+            ],
+            default=0,
+        )
+        while required_prefix > len(all_trials):
+            if not extend_candidate_window():
+                raise ValueError("Cannot reconstruct the persisted candidate generator prefix.")
         raw_proposed = restored_state.get("proposed_pool_trials", ())
         proposed.extend(
             int(value)
@@ -2101,6 +2266,13 @@ def _execute_adaptive_group(
                 continue
             completed[pool_trial].append(result)
             outcomes.append(result)
+        if recovering:
+            for pool_trial, results in completed.items():
+                completed[pool_trial] = list(latest_outcomes(results))
+                recovery_runs.extend(
+                    (pool_trial, result) for result in completed[pool_trial] if not result.ok
+                )
+                completed[pool_trial] = [result for result in completed[pool_trial] if result.ok]
 
     def scheduling_key(specification: Mapping[str, Any]) -> tuple[int, int | None, str, int]:
         raw_fidelity = specification.get("hpo_fidelity")
@@ -2203,10 +2375,7 @@ def _execute_adaptive_group(
             if raw.get("seed") not in attempted and scheduling_key(value) not in scheduled_run_keys:
                 return value
         if replicate_stream is not None:
-            used = {
-                value.get("seed")
-                for value in by_trial[pool_trial]
-            } | attempted
+            used = {value.get("seed") for value in by_trial[pool_trial]} | attempted
             ordinal = 0
             while True:
                 identity = replicate_stream.at(ordinal)
@@ -2537,9 +2706,7 @@ def _execute_adaptive_group(
     )
     stale_events = int(restored_controller.get("stale_events", 0) or 0)
     search_converged = bool(restored_controller.get("search_converged", False))
-    default_confirmation_complete = not bool(
-        policy.confirmation_auto or policy.confirmation_seeds
-    )
+    default_confirmation_complete = not bool(policy.confirmation_auto or policy.confirmation_seeds)
     raw_confirmation_complete = restored_controller.get("confirmation_complete")
     confirmation_complete = (
         raw_confirmation_complete
@@ -2578,16 +2745,12 @@ def _execute_adaptive_group(
         }
         questions_resolved = bool(questions) and all(
             value.get("conclusion_kind") in stable_kinds
-            and float(
-                value.get("descriptive_stability", value.get("confidence", 0.0))
-            )
+            and float(value.get("descriptive_stability", value.get("confidence", 0.0)))
             >= policy.conclusion_stability
             for value in questions
         )
         best = (
-            (max if mode == "max" else min)(
-                estimates, key=lambda trial: estimates[trial].mean
-            )
+            (max if mode == "max" else min)(estimates, key=lambda trial: estimates[trial].mean)
             if estimates
             else None
         )
@@ -2609,20 +2772,14 @@ def _execute_adaptive_group(
         optimization_stable = bool(estimates) and opportunity <= resolution
         required_response_debt = any(
             anchor_states.get(trial) not in {"OBSERVED"} for trial in anchor_trials
-        ) or any(
-            bool(value.get("evidence_required")) for value in pending_actions.values()
-        )
+        ) or any(bool(value.get("evidence_required")) for value in pending_actions.values())
         _action, scientific_work, _evidence = next_event_action(
             1,
             preview=True,
             scientific_only=True,
             scientific_state=scientific,
         )
-        useful = (
-            not optimization_stable
-            or required_response_debt
-            or bool(scientific_work)
-        )
+        useful = not optimization_stable or required_response_debt or bool(scientific_work)
         return StudyConvergenceState(
             policy.goal,
             optimization_stable,
@@ -2773,6 +2930,7 @@ def _execute_adaptive_group(
             ),
             "trial_index": int(specification["trial_index"]),
             "seed": specification.get("seed"),
+            "seed_metadata": dict(specification.get("seed_metadata") or {}),
             "phase": str(specification.get("hpo_phase", "search")),
             "fidelity": dict(specification.get("hpo_fidelity", {})),
             "startup_anchor": bool(specification.get("hpo_startup_anchor")),
@@ -2870,10 +3028,10 @@ def _execute_adaptive_group(
                     kind="MINIMUM_REPLICATION",
                     required=True,
                 )
-                if (
-                    pool_trial in anchor_trials
-                    and anchor_states.get(pool_trial) not in {"OBSERVED", "CENSORED"}
-                ):
+                if pool_trial in anchor_trials and anchor_states.get(pool_trial) not in {
+                    "OBSERVED",
+                    "CENSORED",
+                }:
                     mark_startup_anchor(value)
                 if seed in terminal_seeds or scheduling_key(value) in scheduled_run_keys:
                     continue
@@ -2956,18 +3114,22 @@ def _execute_adaptive_group(
                     ]
                     for trial in eligible
                 },
+                scientific=scientific,
+                parameters=candidate_parameters,
+                parameter_space=parameter_space,
             )
             if len(provisional_values) >= 2 or not pending_observations
             else ()
         )
         seed_noise = SeedNoiseModel.fit(provisional_values)
-        calibration_inflight = not seed_noise.calibrated and any(
+        calibration_inflight = seed_noise.variance is None and any(
             inflight_by_trial.get(trial, 0) > 0 and bool(values)
             for trial, values in provisional_values.items()
         )
         for decision in seed_decisions:
-            # One repeated candidate is sufficient to identify the initial within-candidate noise
-            # scale.  If that calibration is already running, do not spend another slot repeating
+            # Serialize initial scale identification only; provisional calibration can still
+            # request informative shared seeds in other contexts while evidence arrives.
+            # If initial identification is already running, do not repeat
             # an arbitrary (possibly poor) candidate before its evidence arrives.
             if decision.purpose == "CALIBRATE_SEED_NOISE" and calibration_inflight:
                 continue
@@ -3018,6 +3180,9 @@ def _execute_adaptive_group(
                         "cost_ratio": cost_ratio,
                         "completed_seeds": decision.completed_seeds,
                         "recommended_shared_seed": decision.recommended_seed,
+                        "global_seed_calibration_value": decision.global_calibration_value,
+                        "affected_scientific_questions": decision.affected_questions,
+                        "seed_noise_model": seed_noise.to_dict(),
                         "comparison_trials": list(decision.comparison_trials),
                         "target_questions": [
                             f"Which of Trial {decision.trial} and its challengers is "
@@ -3088,8 +3253,33 @@ def _execute_adaptive_group(
                     latest_by_seed[key] = result
                 if result.termination_type == "scheduler_preempted":
                     competitive.add(trial)
+        pruner_calibration = (
+            _pruner_calibration(
+                outcomes,
+                objective_evaluator,
+                min_step=policy.early_stopping_min_step,
+                confirmations=policy.early_stopping_confirmations,
+                probability_threshold=policy.early_stopping_probability_threshold,
+                margin=policy.early_stopping_equivalence_margin,
+            )
+            if policy.early_stopping
+            else {}
+        )
+        observed_coverage = pruner_calibration.get("interval_coverage_90")
+        calibration_value = (
+            max(
+                0.0,
+                float(pruner_calibration.get("advertised_interval_coverage", 0.9))
+                - float(observed_coverage or 0.0),
+            )
+            / (1.0 + int(pruner_calibration.get("endpoint_residual_count", 0) or 0))
+            if pruner_calibration
+            and not pruner_calibration.get("strong_pruning_ready")
+            and (len(proposed) < candidate_budget or scientific.get("scientific_uncertainty", 0))
+            else 0.0
+        )
         for (trial, _seed), result in latest_by_seed.items():
-            if trial not in competitive:
+            if trial not in competitive and calibration_value <= 0:
                 continue
             specification = resume_specification(result)
             if specification is None:
@@ -3101,11 +3291,20 @@ def _execute_adaptive_group(
             cost = max(1e-9, base_cost * incremental_fraction) if base_cost is not None else None
             maximum = max(1, int(fidelity["maximum"]))
             fidelity_gain = max(0.0, min(1.0, (target - current) / maximum))
+            calibration_probe = trial not in competitive and calibration_value > 0
             information_value = min(
                 1.0,
-                float(scientific["scientific_uncertainty"]) * math.sqrt(fidelity_gain),
+                (
+                    calibration_value
+                    if calibration_probe
+                    else max(calibration_value, float(scientific["scientific_uncertainty"]))
+                )
+                * math.sqrt(fidelity_gain),
             )
-            optimization_value = min(1.0, math.sqrt(fidelity_gain))
+            optimization_value = min(1.0, math.sqrt(fidelity_gain)) if trial in competitive else 0.0
+            if calibration_probe:
+                specification["hpo_pruner_calibration"] = True
+                specification["hpo_probe_purpose"] = "PRUNER_CALIBRATION_EVIDENCE"
             combined_value = (
                 optimization_weight * optimization_value + information_weight * information_value
             )
@@ -3120,7 +3319,9 @@ def _execute_adaptive_group(
                     combined_value / max(cost_ratio, 1e-9),
                     2,
                     (
-                        "RESUME_PREEMPTED"
+                        "PRUNER_CALIBRATION_EVIDENCE"
+                        if calibration_probe
+                        else "RESUME_PREEMPTED"
                         if specification.get("hpo_resume_preempted")
                         else "PROMOTE_FIDELITY"
                     ),
@@ -3134,10 +3335,16 @@ def _execute_adaptive_group(
                         "cost_ratio": cost_ratio,
                         "current": current,
                         "target": target,
-                        "purpose": "PROMOTE_FIDELITY",
+                        "purpose": "PRUNER_CALIBRATION_EVIDENCE"
+                        if calibration_probe
+                        else "PROMOTE_FIDELITY",
+                        "pruner_calibration_value": calibration_value,
                         "target_questions": [],
                         "reason": (
-                            "higher-fidelity evidence remains competitive per incremental cost"
+                            "complete a checkpointed curve to reduce endpoint "
+                            "calibration uncertainty"
+                            if calibration_probe
+                            else "higher-fidelity evidence remains competitive per incremental cost"
                         ),
                     },
                 )
@@ -3511,6 +3718,7 @@ def _execute_adaptive_group(
                     or (result.pruned and not value.get("evidence_required"))
                     for result in completed[trial]
                 ):
+                    pending_actions.pop(scheduling_key(value), None)
                     continue
                 retained.append(value)
             deferred_queue.clear()
@@ -3520,20 +3728,12 @@ def _execute_adaptive_group(
             # part of the authored space whereas another seed only deepens an already observed
             # candidate.  This priority is independent of queue insertion order.
             protected_index = next(
-                (
-                    i
-                    for i, value in enumerate(deferred_queue)
-                    if value.get("hpo_startup_anchor")
-                ),
+                (i for i, value in enumerate(deferred_queue) if value.get("hpo_startup_anchor")),
                 None,
             )
             if protected_index is None:
                 protected_index = next(
-                    (
-                        i
-                        for i, value in enumerate(deferred_queue)
-                        if value.get("evidence_required")
-                    ),
+                    (i for i, value in enumerate(deferred_queue) if value.get("evidence_required")),
                     None,
                 )
             if protected_index is not None:
@@ -3541,45 +3741,53 @@ def _execute_adaptive_group(
                 del deferred_queue[protected_index]
                 is_anchor = bool(protected.get("hpo_startup_anchor"))
                 action = "STARTUP_ANCHOR" if is_anchor else "MINIMUM_REPLICATION"
-                return action, [protected], {
-                    "reason": (
-                        "protected initial-design coverage obligation remains unresolved"
-                        if is_anchor
-                        else "required minimum-replication evidence remains unresolved"
-                    ),
-                    "controller_value": None,
-                    "value_basis": "protected-initial-design-debt",
-                    "expected_cost_seconds": None,
-                    "score": None,
-                    "alternatives": [],
-                    "obligations": next(
-                        (
-                            list(anchor.obligations)
-                            for anchor in initial_design.anchors
-                            if anchor.trial == int(protected["candidate_pool_index"])
+                return (
+                    action,
+                    [protected],
+                    {
+                        "reason": (
+                            "protected initial-design coverage obligation remains unresolved"
+                            if is_anchor
+                            else "required minimum-replication evidence remains unresolved"
                         ),
-                        [],
-                    ),
-                }
+                        "controller_value": None,
+                        "value_basis": "protected-initial-design-debt",
+                        "expected_cost_seconds": None,
+                        "score": None,
+                        "alternatives": [],
+                        "obligations": next(
+                            (
+                                list(anchor.obligations)
+                                for anchor in initial_design.anchors
+                                if anchor.trial == int(protected["candidate_pool_index"])
+                            ),
+                            [],
+                        ),
+                    },
+                )
             if search_converged and policy.convergence_patience > 0:
                 # A positive authored patience is an explicit record-level early-stop policy,
                 # not the automatic screening-stable hand-off. Preserve that deliberate hard
                 # stop after already-promised evidence has been discharged.
-                return "EXPLICIT_CONVERGENCE", [], {
-                    "reason": "authored convergence patience was reached",
-                    "convergence_state": convergence_state,
-                    "alternatives": [],
-                }
-            if (
-                enter_confirmation_when_stable
-                and search_converged
-                and not confirmation_complete
-            ):
-                return "AUTO_CONVERGED", [], {
-                    "reason": "optimization screening is stable; confirmation has priority",
-                    "convergence_state": convergence_state,
-                    "alternatives": [],
-                }
+                return (
+                    "EXPLICIT_CONVERGENCE",
+                    [],
+                    {
+                        "reason": "authored convergence patience was reached",
+                        "convergence_state": convergence_state,
+                        "alternatives": [],
+                    },
+                )
+            if enter_confirmation_when_stable and search_converged and not confirmation_complete:
+                return (
+                    "AUTO_CONVERGED",
+                    [],
+                    {
+                        "reason": "optimization screening is stable; confirmation has priority",
+                        "convergence_state": convergence_state,
+                        "alternatives": [],
+                    },
+                )
             action, specifications, evidence = next_event_action(capacity)
             if not specifications and deferred_queue:
                 specifications = [deferred_queue.popleft()]
@@ -3767,9 +3975,7 @@ def _execute_adaptive_group(
                 # A scientific backfill completion must not invalidate queued confirmation
                 # identities. Refill only genuinely spare lanes and leave the confirmation block
                 # intact so shared-seed semantics remain auditable.
-                retained_during_confirmation = [
-                    dict(value) for value in queued_specifications
-                ]
+                retained_during_confirmation = [dict(value) for value in queued_specifications]
                 room = _confirmation_backfill_room(
                     parallelism=parallelism,
                     remaining_run_allowance=allowance(),
@@ -3824,6 +4030,7 @@ def _execute_adaptive_group(
                                 "candidate received a candidate-level performance-prune decision"
                             ),
                         )
+                    pending_actions.pop(scheduling_key(deferred_value), None)
                     record_decision(
                         "CANCEL_PLANNED_DISPATCH",
                         reason="candidate-level-performance-prune",
@@ -4148,8 +4355,34 @@ def _execute_adaptive_group(
 
     startup = initial_design.trials
     if restored_state:
+        if recovering and telemetry is not None:
+            # Rebuild compact references if an older worker never published a usable index.
+            restored_records = []
+            for pool_trial, results in completed.items():
+                for result in results:
+                    restored_specification = prepared(
+                        pool_trial,
+                        {**dict(by_trial[pool_trial][0]), "seed": result.seed},
+                        phase=result.study_phase or "search",
+                    )
+                    restored_specification["hpo_fidelity"] = dict(result.fidelity or {})
+                    restored_records.append((restored_specification, result))
+            telemetry.schedule([item for item, _result in restored_records])
+            for restored_specification, result in restored_records:
+                token = study_run_key(restored_specification)
+                retained_path = telemetry.root / "runs" / f"{token}.json"
+                retained = read_owned_json(retained_path) if retained_path.exists() else {}
+                expected_state = "pruned" if result.pruned else result.status
+                if (
+                    retained.get("run_dir") != str(result.run_dir)
+                    or retained.get("state") != expected_state
+                ):
+                    telemetry.run_finished(restored_specification, result)
+            telemetry.resume()
         for pool_trial, results in completed.items():
             for result in results:
+                if recovering and not result.ok:
+                    continue
                 scheduled_run_keys.add(
                     (
                         pool_trial,
@@ -4170,7 +4403,12 @@ def _execute_adaptive_group(
             seed = raw_action.get("seed")
             raw = next((value for value in by_trial[raw_pool] if value.get("seed") == seed), None)
             if raw is None:
-                return None
+                # A generated shared/confirmation seed is durable identity, not a new draw.
+                raw = {
+                    **dict(by_trial[raw_pool][0]),
+                    "seed": seed,
+                    "seed_metadata": raw_action.get("seed_metadata", {}),
+                }
             value = prepared(raw_pool, raw, phase=str(raw_action.get("phase", "search")))
             fidelity = raw_action.get("fidelity")
             if isinstance(fidelity, Mapping) and fidelity:
@@ -4191,15 +4429,92 @@ def _execute_adaptive_group(
                 if persisted in raw_action and raw_action[persisted] is not None:
                     value[runtime] = raw_action[persisted]
             value["hpo_controller_restart"] = True
+            # Recover the exact interrupted child checkpoint even after a compatible code fix.
+            token = (
+                f"trial-{public_trial(raw_pool):05d}-seed-{seed if seed is not None else 'none'}"
+            )
+            manifest_path = control_root / f"{token}.checkpoint.json"
+            if manifest_path.is_file() and not manifest_path.is_symlink():
+                checkpoint_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if checkpoint_manifest.get("checkpoint_root"):
+                    checkpoint_root = Path(str(checkpoint_manifest["checkpoint_root"]))
+                    if recovering and (
+                        checkpoint_root.resolve() != checkpoint_root
+                        or not checkpoint_root.is_relative_to(
+                            Path(str(specifications[0]["execution_dir"])) / "runs"
+                        )
+                    ):
+                        raise ValueError("Interrupted checkpoint is outside the owned execution.")
+                    value["recovery_checkpoint_root"] = str(checkpoint_root)
+                result_path = Path(str(checkpoint_manifest.get("run_dir", ""))) / "result.json"
+                if recovering and result_path.is_file():
+                    owned = Path(str(specifications[0]["execution_dir"])) / "runs"
+                    if result_path.resolve() != result_path or not result_path.is_relative_to(
+                        owned
+                    ):
+                        raise ValueError("Interrupted Run result is outside the owned execution.")
+                    result = _work_result_from_mapping(read_owned_json(result_path))
+                    target = int((result.fidelity or {}).get("target", 0))
+                    if (
+                        result.execution_id != study_execution_id
+                        or result.seed != seed
+                        or (result.trial or {}).get("index") != public_trial(raw_pool)
+                        or (result.study_phase or "search")
+                        != str(raw_action.get("phase", "search"))
+                        or target != scheduling_key(value)[3]
+                    ):
+                        raise ValueError(
+                            "Interrupted Run result does not match its persisted action."
+                        )
+                    if not any(previous.run_dir == result.run_dir for previous in outcomes):
+                        outcomes.append(result)
+                        if result.ok:
+                            completed[raw_pool].append(result)
+                    if result.ok:
+                        scheduled_run_keys.add(scheduling_key(value))
             return value
 
-        recovered = [
+        recovered: list[dict[str, Any]] = []
+        for pool_trial, result in recovery_runs:
+            value = restore_action(
+                {
+                    "candidate_pool_index": pool_trial,
+                    "seed": result.seed,
+                    "seed_metadata": dict(result.seed_metadata or {}),
+                    "phase": result.study_phase or "search",
+                    "fidelity": dict(result.fidelity or {}),
+                    "startup_anchor": pool_trial in anchor_trials,
+                    "evidence_required": True,
+                }
+            )
+            if value is not None:
+                value["recovery_checkpoint_root"] = str(
+                    result.termination.get(
+                        "recovery_checkpoint_root",
+                        value.get(
+                            "recovery_checkpoint_root", result.run_dir.parent.parent / "checkpoints"
+                        ),
+                    )
+                )
+                value["hpo_scheduler_action"] = "RECOVER_FAILED_RUN"
+                recovered.append(value)
+                record_decision(
+                    "RECOVER_FAILED_RUN",
+                    pool_trial=pool_trial,
+                    public_trial=public_trial(pool_trial),
+                    seed=result.seed,
+                    previous_attempt=result.attempt_id,
+                    result_path=str(result.run_dir / "result.json"),
+                    reason="explicit Study retry after terminal failure",
+                )
+        recovered.extend(
             specification
             for value in restored_state.get("pending_actions", ())
             if isinstance(value, Mapping)
             for specification in [restore_action(value)]
             if specification is not None and scheduling_key(specification) not in scheduled_run_keys
-        ]
+        )
+        recovered = list({scheduling_key(value): value for value in recovered}.values())
         recovered_keys = {scheduling_key(value) for value in recovered}
         for anchor_trial in sorted(anchor_trials):
             if anchor_states.get(anchor_trial) in {"OBSERVED", "CENSORED"}:
@@ -4229,6 +4544,11 @@ def _execute_adaptive_group(
             completed_runs=len(outcomes),
             proposed_candidates=len(proposed),
             pending_actions=len(recovered),
+        )
+        # Preserve the whole recovered queue before publishing a new state snapshot. A second
+        # controller interruption must not lose deferred shared seeds/fidelity identities.
+        pending_actions.update(
+            (scheduling_key(value), pending_record(value)) for value in recovered
         )
         persist_state()
         if recovered:
@@ -4340,17 +4660,31 @@ def _execute_adaptive_group(
             if value.get("seed") is not None
         }
         confirmation_values: dict[int, dict[int | None, float]] = {
-            trial: {} for trial in active
+            trial: {
+                result.seed: objective_value
+                for result in completed[trial]
+                if result.study_phase == "confirmation"
+                and result.termination_type == "completed"
+                and (objective_value := _result_objective(result, metric)) is not None
+            }
+            for trial in active
         }
+        used_seeds.update(result.seed for result in outcomes if result.seed is not None)
         confirmation_racer = AdaptiveSeedRacer(
             mode=mode,
             margin=policy.scientific_margin or 0.0,
             probability_threshold=policy.seed_probability_threshold,
         )
         ordinal = 0
-        blocks = 0
+        blocks = len(set.intersection(*(set(values) for values in confirmation_values.values())))
+        restored_decisions = confirmation_racer.decisions(confirmation_values, eligible=active)
+        confirmation_complete = blocks >= 2 and (
+            not restored_decisions
+            or max(value.information_value for value in restored_decisions)
+            <= 1.0 - policy.conclusion_stability
+        )
         confirmation_reason = "Fresh confirmation evidence has not yet been calibrated."
-        while within_time() and allowance() >= len(active):
+        while not confirmation_complete and within_time() and allowance() >= len(active):
             identity = confirmation_stream.at(ordinal)
             ordinal += 1
             if identity.value in used_seeds:
@@ -4439,7 +4773,7 @@ def _execute_adaptive_group(
                     complete_blocks=blocks,
                 )
                 break
-        else:
+        if not confirmation_complete and (not within_time() or allowance() < len(active)):
             record_decision(
                 "STOP_CONFIRMATION",
                 reason=(
@@ -4463,7 +4797,8 @@ def _execute_adaptive_group(
                         "target": policy.fidelity.maximum,
                         "maximum": policy.fidelity.maximum,
                     }
-                explicit_confirmation.append(value)
+                if scheduling_key(value) not in scheduled_run_keys:
+                    explicit_confirmation.append(value)
         print(
             f"[hpo] CONFIRM contenders={len(active)} with {len(confirmation_seeds)} fresh seed(s)",
             flush=True,
@@ -4480,9 +4815,8 @@ def _execute_adaptive_group(
         execute(explicit_confirmation, active)
         expected_confirmation_runs = len(active) * len(confirmation_seeds)
         completed_confirmation_runs = sum(
-            result.study_phase == "confirmation"
-            and result.termination_type == "completed"
-            for result in outcomes
+            result.study_phase == "confirmation" and result.termination_type == "completed"
+            for result in latest_outcomes(outcomes)
         )
         confirmation_complete = (
             expected_confirmation_runs > 0
@@ -4496,9 +4830,7 @@ def _execute_adaptive_group(
         and within_time()
         and allowance() > 0
     ):
-        action, scientific_backfill, evidence = next_event_action(
-            min(parallelism, allowance())
-        )
+        action, scientific_backfill, evidence = next_event_action(min(parallelism, allowance()))
         if scientific_backfill:
             record_decision(
                 "SCIENTIFIC_BACKFILL",
@@ -4584,7 +4916,7 @@ def _execute_adaptive_group(
             finished=True,
             finish_reason=finish_reason,
         )
-    return tuple(outcomes)
+    return latest_outcomes(outcomes) if recovering else tuple(outcomes)
 
 
 def _execute_adaptive_dispatch(
@@ -4651,6 +4983,13 @@ def _execute_adaptive_dispatch(
             or (isinstance(raw_fidelity, Mapping) and int(raw_fidelity.get("current", 0)) > 0)
             or bool(specification.get("hpo_controller_restart"))
         )
+        if specification.get("study_recovery"):
+            continuing = False
+            if specification.get("recovery_checkpoint_root"):
+                root = Path(str(specification["recovery_checkpoint_root"]))
+                continuing = any(
+                    path.is_file() and not path.is_symlink() for path in root.rglob("*")
+                )
         if not continuing:
             metrics.unlink(missing_ok=True)
             checkpoint_manifest.unlink(missing_ok=True)
@@ -4659,6 +4998,7 @@ def _execute_adaptive_dispatch(
         stop.unlink(missing_ok=True)
         prune_evidence.unlink(missing_ok=True)
         value = dict(specification)
+        value["hpo_fresh_recovery"] = bool(specification.get("study_recovery") and not continuing)
         definition = dict(value["definition"])
         definition["resources"] = per_run.to_dict()
         value.update(
@@ -5250,8 +5590,7 @@ def _execute_gpu_admitted_runs(
                     # evidence of revocation and therefore continues through the ordinary path.
                     failure_grant = _current_gpu_grant(visible_gpus)
                     allocation_revoked = (
-                        failure_grant is not None
-                        and visible_gpus[slot] not in failure_grant
+                        failure_grant is not None and visible_gpus[slot] not in failure_grant
                     )
                 if allocation_revoked:
                     retry = dict(value)
@@ -5489,9 +5828,7 @@ def _execute_gpu_admitted_runs(
                             "revoked_tokens": [
                                 visible_gpus[index] for index in sorted(revoked_slots)
                             ],
-                            "visibility_command": list(
-                                _configured_gpu_visibility_command() or ()
-                            ),
+                            "visibility_command": list(_configured_gpu_visibility_command() or ()),
                             "reason": (
                                 "authoritative ownership probe no longer reported these "
                                 "initially granted tokens"
@@ -5522,9 +5859,7 @@ def _execute_gpu_admitted_runs(
                             "restored_tokens": [
                                 visible_gpus[index] for index in sorted(restored_slots)
                             ],
-                            "visibility_command": list(
-                                _configured_gpu_visibility_command() or ()
-                            ),
+                            "visibility_command": list(_configured_gpu_visibility_command() or ()),
                         },
                     )
                     print(
@@ -6298,6 +6633,10 @@ def _resource_runtime_fingerprints(control_root: Path | None) -> tuple[str, str]
         except (OSError, json.JSONDecodeError):
             pass
     code = execution.get("code_identity", {})
+    if control_root is not None:
+        revision = control_root.parent / "current-code.json"
+        if revision.is_file() and not revision.is_symlink():
+            code = read_owned_json(revision).get("code_identity", code)
     code_fingerprint = _stable_resource_digest(code if isinstance(code, Mapping) else {})
     try:
         torch_version = metadata.version("torch")
@@ -6394,6 +6733,11 @@ def _read_live_resource_snapshot(specification: Mapping[str, Any]) -> dict[str, 
                 (Path(run_dir) / "metric-progress.json").read_text(encoding="utf-8")
             )
             metric_step = _optional_int(metric_progress.get("step"))
+            if snapshot.get("throughput") is None and isinstance(
+                metric_progress.get("throughput"), int | float
+            ):
+                snapshot["throughput"] = metric_progress["throughput"]
+                snapshot["throughput_unit"] = metric_progress.get("throughput_unit")
             if metric_step is not None and metric_step >= 0:
                 snapshot["step"] = max(metric_step, _optional_int(snapshot.get("step")) or 0)
                 if snapshot.get("phase") in {None, "startup"}:
@@ -6405,6 +6749,11 @@ def _read_live_resource_snapshot(specification: Mapping[str, Any]) -> dict[str, 
             value = json.loads(progress.read_text(encoding="utf-8"))
             if isinstance(value, Mapping):
                 completed = value.get("completed")
+                if snapshot.get("throughput") is None and isinstance(
+                    value.get("throughput"), int | float
+                ):
+                    snapshot["throughput"] = value["throughput"]
+                    snapshot["throughput_unit"] = value.get("throughput_unit")
                 if isinstance(completed, int) and not isinstance(completed, bool):
                     snapshot.setdefault("step", completed)
                 if snapshot.get("phase") in {None, "startup"} and value.get("message"):
@@ -6534,25 +6883,23 @@ def _persist_host_resource_snapshot(
         host_ram = resources.ram_bytes
         available_ram = None
     payload = {
-            "host_telemetry_version": 1,
-            "captured_at_utc": datetime.now(timezone.utc).isoformat(),
-            "capacity": {
-                "cpu": resources.cpu_cores,
-                "ram_bytes": resources.ram_bytes or host_ram,
-                "available_ram_bytes": available_ram,
-                "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
-            },
-            "active_runs": runs,
-            "summary": {
-                "process_tree_rss_bytes": sum(
-                    int(value.get("rss_bytes") or 0) for value in runs
-                ),
-                "process_tree_cpu_utilization_percent": sum(
-                    float(value.get("cpu_utilization_percent") or 0.0) for value in runs
-                ),
-                "child_processes": sum(int(value.get("child_count") or 0) for value in runs),
-            },
-        }
+        "host_telemetry_version": 1,
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+        "capacity": {
+            "cpu": resources.cpu_cores,
+            "ram_bytes": resources.ram_bytes or host_ram,
+            "available_ram_bytes": available_ram,
+            "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
+        },
+        "active_runs": runs,
+        "summary": {
+            "process_tree_rss_bytes": sum(int(value.get("rss_bytes") or 0) for value in runs),
+            "process_tree_cpu_utilization_percent": sum(
+                float(value.get("cpu_utilization_percent") or 0.0) for value in runs
+            ),
+            "child_processes": sum(int(value.get("child_count") or 0) for value in runs),
+        },
+    }
     atomic_json(path, payload)
     history = path.with_name("host-history.jsonl")
     history.parent.mkdir(parents=True, exist_ok=True)
@@ -6710,6 +7057,43 @@ def _update_active_resource_commitments(
                 provenance = "aggregate-inferred"
             specification = pending[future][0]
             details = metadata.get(future, {})
+            prior_progress = details.get("progress_rate_sample")
+            progress_step = _optional_int(snapshot.get("step"))
+            if progress_step is not None:
+                if isinstance(prior_progress, Mapping):
+                    elapsed_progress = now - float(prior_progress["at"])
+                    delta_progress = progress_step - int(prior_progress["step"])
+                    if delta_progress > 0 and elapsed_progress > 0:
+                        if snapshot.get("throughput") is None:
+                            snapshot["throughput"] = delta_progress / elapsed_progress
+                        details["progress_rate_sample"] = {"at": now, "step": progress_step}
+                else:
+                    details["progress_rate_sample"] = {"at": now, "step": progress_step}
+            if provenance == "nvml-process-exact":
+                details["nvml_peak_bytes"] = max(current, int(details.get("nvml_peak_bytes", 0)))
+                details["nvml_samples"] = int(details.get("nvml_samples", 0)) + 1
+                prior_poll = details.get("nvml_last_poll")
+                if isinstance(prior_poll, int | float):
+                    details["nvml_max_interval"] = max(
+                        float(details.get("nvml_max_interval", 0)), now - prior_poll
+                    )
+                details["nvml_last_poll"] = now
+                allocated_now = _optional_int(snapshot.get("cuda_allocated_bytes"))
+                if allocated_now is not None:
+                    details["nvml_allocator_overhead"] = max(
+                        int(details.get("nvml_allocator_overhead", 0)),
+                        current
+                        - max(
+                            allocated_now, _optional_int(snapshot.get("cuda_reserved_bytes")) or 0
+                        ),
+                    )
+            for source, target in (
+                ("cuda_max_allocated_bytes", "allocated_peak_bytes"),
+                ("cuda_max_reserved_bytes", "reserved_peak_bytes"),
+            ):
+                amount = _optional_int(snapshot.get(source))
+                if amount is not None:
+                    details[target] = max(amount, int(details.get(target, 0)))
             trajectory = trajectories.setdefault(future, BoundedResourceTrajectory())
             phase = str(snapshot.get("phase")) if snapshot.get("phase") else None
             step = _optional_int(snapshot.get("step"))
@@ -6887,6 +7271,16 @@ def _update_active_resource_commitments(
             if state == "RESOURCE_STABLE":
                 details.setdefault("time_to_stable_seconds", elapsed)
             details["measurement_provenance"] = provenance
+            if isinstance(snapshot.get("throughput"), int | float):
+                rate_identity = (
+                    snapshot.get("step"),
+                    snapshot.get("throughput"),
+                    snapshot.get("throughput_unit"),
+                )
+                if rate_identity != details.get("throughput_identity"):
+                    details["throughput"] = float(snapshot["throughput"])
+                    details["throughput_concurrency"] = len(futures)
+                    details["throughput_identity"] = rate_identity
             if promoted:
                 details["resource_packing_promoted"] = True
             evidence.append(
@@ -7030,13 +7424,26 @@ def _resource_observation_for_result(
 ) -> ResourceProfileObservation:
     """Convert one terminal Run into exact or explicitly censored resource evidence."""
     peaks = _resource_metric_evidence(result.run_dir / "training-metrics.jsonl")
-    allocated = peaks.get("allocated_peak_bytes")
-    reserved = peaks.get("reserved_peak_bytes")
+    allocated = (
+        max(int(peaks.get("allocated_peak_bytes", 0)), int(metadata.get("allocated_peak_bytes", 0)))
+        or None
+    )
+    reserved = (
+        max(int(peaks.get("reserved_peak_bytes", 0)), int(metadata.get("reserved_peak_bytes", 0)))
+        or None
+    )
     raw_trajectory = metadata.get("trajectory")
     trajectory = (
         raw_trajectory.values if isinstance(raw_trajectory, BoundedResourceTrajectory) else ()
     )
-    physical_peak = max((sample.physical_bytes for sample in trajectory), default=0)
+    physical_samples = int(metadata.get("nvml_samples", len(trajectory)))
+    physical_peak = max(
+        max((sample.physical_bytes for sample in trajectory), default=0),
+        int(metadata.get("nvml_peak_bytes", 0)),
+        raw_trajectory.statistics.running_peak_bytes
+        if isinstance(raw_trajectory, BoundedResourceTrajectory)
+        else 0,
+    )
     # Physical device delta is the packing target. Allocator peaks remain separate features: in
     # particular, reserved bytes are not relabelled as scientific working-set or a request.
     observed = max(
@@ -7148,13 +7555,40 @@ def _resource_observation_for_result(
         and bool(phases_seen)
         and trajectory_statistics.cycles_since_material_peak >= 1
     )
-    exact = (
+    sampled_complete = (
         state in {"completed", "pruned"}
         and observed > 0
-        and metadata.get("measurement_provenance") == "nvml-process-exact"
-        and allocated is not None
+        and physical_samples >= 2
+        and (
+            metadata.get("measurement_provenance") == "nvml-process-exact"
+            or int(metadata.get("nvml_samples", 0)) > 0
+        )
         and (phase_complete or state == "completed")
     )
+    # NVML is exact per PID at each sample, not an exact lifetime peak. Keep sampling
+    # uncertainty and allocator high-water marks rather than discarding the entire trajectory.
+    exact = False
+    sampling_gap = float(metadata.get("nvml_max_interval", 0)) or None
+    changes = [
+        max(0, right.physical_bytes - left.physical_bytes)
+        for left, right in zip(trajectory, trajectory[1:], strict=False)
+    ]
+    intervals = [
+        right.elapsed_seconds - left.elapsed_seconds
+        for left, right in zip(trajectory, trajectory[1:], strict=False)
+        if right.elapsed_seconds > left.elapsed_seconds
+    ]
+    cadence_uncertainty = (
+        max(1.0, sampling_gap / statistics.median(intervals))
+        if sampling_gap is not None and intervals
+        else 1.0
+    )
+    sampled_upper = max(
+        physical_peak,
+        (allocated or 0) + int(metadata.get("nvml_allocator_overhead", 0)),
+    ) + int(max(changes, default=0) * cadence_uncertainty)
+    if int(metadata.get("total_bytes", 0)) > 0:
+        sampled_upper = min(sampled_upper, int(metadata["total_bytes"]))
     return ResourceProfileObservation(
         candidate_key=candidate,
         compatibility_key=compatibility,
@@ -7167,6 +7601,11 @@ def _resource_observation_for_result(
         state=state,
         observed_peak_bytes=observed,
         peak_is_exact=exact,
+        observation_version=3,
+        physical_peak_bytes=physical_peak,
+        sampled_peak_upper_bytes=sampled_upper if sampled_complete else None,
+        sampling_interval_seconds=sampling_gap,
+        sampled_complete=sampled_complete,
         duration_seconds=result.duration_seconds,
         trial=(
             int(result.trial["index"])
@@ -7201,13 +7640,20 @@ def _resource_observation_for_result(
         code_fingerprint=str(metadata.get("code_fingerprint", "")),
         environment_fingerprint=str(metadata.get("environment_fingerprint", "")),
         co_runners=co_runners,
+        throughput_concurrency=_optional_int(metadata.get("throughput_concurrency")),
         throughput=(
-            float(peaks["throughput"]) if isinstance(peaks.get("throughput"), int | float) else None
+            float(throughput)
+            if isinstance(
+                throughput := peaks.get("throughput", metadata.get("throughput")), int | float
+            )
+            else None
         ),
         trajectory=tuple(sample.to_dict() for sample in trajectory),
         measurement_quality=(
             "terminal-high-quality"
             if exact and metadata.get("measurement_provenance") == "nvml-process-exact"
+            else "sampled-physical"
+            if sampled_complete
             else "allocator-peak-supported"
             if allocated is not None
             else "sampled-physical"
@@ -7217,9 +7663,9 @@ def _resource_observation_for_result(
         scientific_termination=state,
         resource_profile_quality=(
             "PHASE_COMPLETE"
-            if exact and phase_complete
+            if sampled_complete and phase_complete
             else "HIGH_QUALITY"
-            if exact
+            if sampled_complete
             else "CENSORED"
         ),
         phases_seen=phases_seen,
@@ -7397,9 +7843,7 @@ def _resource_admission_diagnostics(
 ) -> dict[str, Any]:
     """Expose the exact backend placement read model without frontend inference."""
     currently_granted = tuple(
-        value.token
-        for value in devices
-        if granted_slots is None or value.index in granted_slots
+        value.token for value in devices if granted_slots is None or value.index in granted_slots
     )
 
     def idle_reason(device: GPUResourceState) -> str | None:
@@ -7447,9 +7891,9 @@ def _resource_admission_diagnostics(
             ),
             "initial_cuda_visible_devices": [value.token for value in devices],
             "currently_granted_tokens": list(currently_granted),
-            "admission_slots": sorted(granted_slots or ()) if granted_slots is not None else [
-                value.index for value in devices
-            ],
+            "admission_slots": sorted(granted_slots or ())
+            if granted_slots is not None
+            else [value.index for value in devices],
             "visibility_command": list(_configured_gpu_visibility_command() or ()),
             "visibility_probe_available": allocation_probe_available,
             "visibility_semantics": (
@@ -7705,8 +8149,10 @@ def _configured_gpu_visibility_command() -> tuple[str, ...] | None:
         decoded = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         return None
-    if not isinstance(decoded, list) or not decoded or not all(
-        isinstance(value, str) and value for value in decoded
+    if (
+        not isinstance(decoded, list)
+        or not decoded
+        or not all(isinstance(value, str) and value for value in decoded)
     ):
         return None
     return tuple(decoded)
@@ -8255,9 +8701,7 @@ def _request_early_stops(
         if not trial_specifications:
             continue
         candidate_current = statistics.fmean(current_by_trial.get(trial, (mean,)))
-        reference_current = statistics.fmean(
-            current_by_trial.get(incumbent_trial, (incumbent[0],))
-        )
+        reference_current = statistics.fmean(current_by_trial.get(incumbent_trial, (incumbent[0],)))
         # A candidate that remains competitive at the exact common checkpoint must not be killed
         # solely because a short noisy slope projects poorly. Wait for another comparable step.
         if sign * (candidate_current - reference_current) >= -margin:
@@ -8354,10 +8798,7 @@ def _cancel_queued_pruned_candidates(
     while queued:
         specification = queued.popleft()
         trial = int(specification["trial_index"])
-        if (
-            trial not in pruned_trials
-            or _performance_pruning_protected(specification)
-        ):
+        if trial not in pruned_trials or _performance_pruning_protected(specification):
             retained.append(specification)
             continue
         if telemetry is not None:
@@ -8378,6 +8819,7 @@ def _performance_pruning_protected(specification: Mapping[str, Any]) -> bool:
     )
     return bool(
         specification.get("hpo_startup_anchor")
+        or specification.get("hpo_pruner_calibration")
         or specification.get("hpo_scientific_continuation")
         or specification.get("hpo_phase") in {"confirmation", "scientific_continuation"}
         or explicitly_required
@@ -8443,8 +8885,7 @@ def _pruner_calibration(
     )
     calibration_error = report.get("curve_rmse")
     operational = bool(
-        int(report.get("calibration_candidates", 0) or 0)
-        >= _PRUNER_MIN_CALIBRATION_CANDIDATES
+        int(report.get("calibration_candidates", 0) or 0) >= _PRUNER_MIN_CALIBRATION_CANDIDATES
         and isinstance(calibration_error, int | float)
         and not isinstance(calibration_error, bool)
         and math.isfinite(float(calibration_error))
@@ -8460,8 +8901,7 @@ def _pruner_calibration(
     # represent p.  This is derived from the advertised interval, not an arbitrary candidate
     # quota.  Coverage, discrimination and harmful-prune evidence must all support strong use.
     finite_sample_support = (
-        residual_count > 0
-        and residual_count / (residual_count + 1) >= advertised_coverage
+        residual_count > 0 and residual_count / (residual_count + 1) >= advertised_coverage
     )
     interval_calibrated = bool(
         isinstance(empirical_coverage, int | float)

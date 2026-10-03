@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 from lambdaforge.work.cache import WorkCache
 from lambdaforge.work.checkpoints import CheckpointCollection
@@ -37,6 +37,9 @@ class Work:
     """
 
     __slots__ = ("_runtime",)
+
+    # Declarative defaults resolved before execution. Never consulted by HPO.
+    analysis_profile: ClassVar[Mapping[str, Any]] = {}
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 
@@ -55,9 +56,17 @@ class Metric(ABC):
     implementation.
     """
 
-    def __init__(self, name: str, higher_is_better: bool = True) -> None:
+    def __init__(
+        self, name: str, higher_is_better: bool = True, *, metadata: Mapping[str, Any] | None = None
+    ) -> None:
         self.name = name
         self.higher_is_better = higher_is_better
+        self._analysis_metadata = deepcopy(dict(metadata or {}))
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Optional analysis declaration; callers may reuse it in Work.analysis_profile."""
+        return {"direction": self.direction, **deepcopy(self._analysis_metadata)}
 
     def __call__(
         self,

@@ -296,3 +296,14 @@ class MissingManagedOutputWork(lf.Work):
     def run(self) -> dict[str, bool]:
         self.outputs.file("missing", filename="missing.txt")
         return {"declared": True}
+
+
+class RecoverableStudyWork(lf.Work):
+    """A consumer failure after a durable checkpoint, isolated to one candidate."""
+
+    def run(self, choice: int) -> dict[str, float]:
+        if choice == 0 and not self.resuming:
+            self.checkpoints.save_json("progress.json", {"epoch": 3})
+            raise RuntimeError("consumer bug after checkpoint")
+        self.metrics.log("score", 0.5 + choice / 10, step=4)
+        return {"score": 0.5 + choice / 10}

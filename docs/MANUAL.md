@@ -468,6 +468,58 @@ requires an authored `practical_margin`. The default family alpha is `0.05`; the
 `sweep.sequential_alpha` override must be in `(0,1)` and is invalid with fixed `replicates`. Sweep
 HPO pruning and per-cell seed racing stay disabled.
 
+Long Studies retain their immutable scientific initialization in `study/controller.json` →
+`initialization`. This includes the complete objective, practical margin, authored parameter space
+(types, log scales and conditional `when` rules), resolved policy and seed-stream metadata.
+`recent` is only a 25-action display tail. Older Studies recover initialization once from their
+append-only controller history when available; missing required metadata produces an explicit
+error. Live summaries reuse the controller's persisted scientific snapshot, so opening the console
+cannot reinterpret the equivalence margin or turn a log search dimension into a linear one.
+
+Seed variability is learned from repeated candidates, never from differences between architectures.
+`unresolved` means no within-candidate scale; `provisional` means a scale is identified but its
+variance or contextual support remains uncertain. `calibrated` requires the sampling uncertainty
+of variance to be smaller than the supported contextual coverage. A single candidate with two seeds
+remains provisional. The model retains deterministic scaled-inverse-chi-square variance
+realizations, conditional on the normal within-candidate approximation, and reports a sigma range,
+residual degrees of freedom, shared-seed support, context coverage and possible heterogeneous noise.
+The range is model uncertainty, not a distribution-free guarantee. Common seed effects remain part
+of population uncertainty even when paired comparisons cancel them. The conservative predictive
+fallback also retains noisy-context variance instead of treating a pooled scale as homogeneous.
+The normal-model variance uncertainty follows the degrees-of-freedom relationship explained in
+the [NIST statistical handbook](https://www.itl.nist.gov/div898/handbook/prc/section2/prc231.htm).
+
+Another seed competes with parameter and interaction probes using the same cost-normalized planner.
+Its value includes the uncertainty reduction it can provide across unresolved scientific questions.
+Contenders and under-repeated contexts can therefore justify shared seeds after initial coverage;
+no universal seeds-per-candidate quota is imposed. This global calibration value decays with
+additional evidence. Fresh confirmation seeds remain disjoint. A checkpointed fidelity continuation
+may instead carry `PRUNER_CALIBRATION_EVIDENCE`: completing that curve can improve endpoint
+calibration. These Runs are protected from competitive pruning; poor calibration still disables
+strong pruning. No diagnostic metric becomes a hidden selection objective.
+
+Resource observations distinguish an exact peak from a complete sampled physical trajectory and
+an interrupted lower bound. NVML readings retain their physical high-water mark across worker exit,
+alongside allocator peaks, sampling cadence and an uncertainty envelope. A completed sampled
+envelope can train memory prediction without claiming an exact lifetime peak; incomplete Runs stay
+censored. `exact_history_count` and `sampled_history_count` expose the distinction. The safety floor
+and live free VRAM still constrain every new placement. Repeated blocked decisions are coalesced
+in `hpo-control/resources/blocked-summary.json`; raw replay evidence remains factual.
+
+Stepped metrics expose `step/sec`, while `progress.update(completed=...)` exposes progress-unit/sec.
+These bounded signals feed generic throughput learning without application-specific metric names.
+ARI separates memory feasibility from usefulness: it compares aggregate throughput at measured
+concurrency levels, and can leave safe capacity unused when another Run would reduce evidence per
+time. Configured parallelism is a ceiling, not a target process count.
+
+Live scientific inference uses 32 evidence realizations. Human Study Analysis/report generation uses
+the cached higher-precision budget (up to 256) outside the scheduling heartbeat. Both retain the
+same objective, margin and authored geometry. Parameter views and HTML report the realization count,
+Monte Carlo resolution, direct/censored/predictive support and seed-noise diagnostics. Stability
+means agreement of a qualitative conclusion across those realizations, **not** the probability that
+the conclusion is true. Sampling precision can change a close stability estimate without changing
+the scientific configuration.
+
 Sequence and parallel groups are the whole composition language:
 
 ```yaml
@@ -625,8 +677,8 @@ convergence detection, bounded failure recovery and fresh-seed confirmation. Unl
 `min_seeds` is one available search seed and three deterministic disjoint confirmation seeds are
 generated; use `confirmation_seeds: []` only to deliberately disable final confirmation.
 Search and seed evidence are interleaved. For candidate \(i\), seed outcomes estimate a
-random-effects mean \(\hat\mu_i\). Seed noise is calibrated only from repeated outcomes within a
-candidate, after estimating effects of seeds shared by several candidates; spread between
+random-effects mean \(\hat\mu_i\). Seed noise is identified only from repeated outcomes within a
+candidate, retaining common seed effects for population uncertainty; spread between
 candidates is never relabelled as random seed noise. Before that calibration, a one-seed estimate
 remains explicitly uncertain. Shared seed order
 allows the paired differences
@@ -643,8 +695,9 @@ $$
 
 where the canonical `objective.practical_margin` is \(\epsilon\) and
 `seed_racing.probability_threshold` is \(\delta\). Clearly
-dominated candidates stop receiving seeds; uncertainty near the decision boundary receives them
-first, divided by observed Run duration. `replication.minimum` (`min_seeds` in legacy YAML) is a
+dominated candidates stop receiving purely competitive seeds; a representative repeat can still
+be valuable for global noise calibration. Uncertainty near the decision boundary and unresolved
+scientific questions compete per observed Run duration. `replication.minimum` (`min_seeds` in legacy YAML) is a
 strict obligation once a candidate is proposed: those distinct seeds cannot be removed by
 replanning. A performance-pruned seed satisfies attempted/censored evidence, but not completed
 response evidence; infrastructure failures count only after retries are exhausted. Seeds beyond
@@ -1317,6 +1370,39 @@ checkpoint tree. `--rerun` creates a deliberately distinct Execution even for th
 Remote control-plane submission also refuses an active same-fingerprint/same-target duplicate unless
 `--allow-duplicate` is explicit.
 
+### Recover an interrupted adaptive Study
+
+`lf retry STUDY` and the Study workspace's **Resume Study…** button use the same recovery service.
+The selector identifies a failed/cancelled/timed-out attempt on the original cluster. The service
+reads an exact bounded recovery preview on that host, stages current code in a new Job and reconnects
+the runner to the original owned Execution directory. It never copies weights or bulk artifacts
+merely to retry: only compact console indexes and decision references move to the new Job. Original
+logs, scalar files, checkpoints and evidence remain referenced in place.
+
+The runner restores proposed candidates/public Trial numbers, deterministic generator expansion,
+seed identities, pending actions, initial-design obligations, convergence and confirmation state.
+Completed and performance-pruned outcomes remain evidence. Failed Runs and interrupted pending
+actions are requeued once as new Attempts, using a compatible checkpoint when one exists and
+starting fresh otherwise. A terminal result published just before a controller crash is collected
+rather than repeated. Physical failures stay in controller history and spent Run/time budgets are
+not reset. Aggregate status uses the latest Attempt of each logical Run so a recovered failure does
+not poison success; exhausted recovery still reports failure honestly.
+
+`lf retry STUDY --accept-code-change` explicitly acknowledges a compatible code fix: the researcher
+must know that earlier metrics and checkpoint formats remain valid. The console exposes the same
+unchecked-by-default acknowledgement. It does not waive checks on configuration, inputs, objective,
+seed streams or search policy. If the fix invalidates earlier results, launch a new Study instead.
+The original `execution.json` stays immutable; `current-code.json`, per-Run provenance and append-only
+`recovery-history.jsonl` expose actual revisions instead of pretending the code never changed.
+
+A cross-process controller lock prevents concurrent writers. Recovery dependencies protect original
+Job workspaces from GC and individual deletion while referenced; deleting the entire terminal Work
+history previews and removes the chain together. Missing/corrupt state or foreign/symlinked paths
+fail closed. Recovery currently supports one adaptive Study per Execution on the same cluster;
+ordinary preparation failures with no Study state can still retry submission normally. Automatic Run
+retries remain bounded infrastructure recovery; consumer exceptions are retried only by this
+deliberate user action, never in an endless automatic loop.
+
 ## 9. Results and metadata
 
 Each Attempt writes `result.json`, `environment.json`, `work.log`, metrics JSONL, optional progress,
@@ -1874,9 +1960,45 @@ and selectable accessible heatmap palettes. Study reports provide tabbed Trial c
 parameter response and exact-value summaries, pair heatmap/3D views, coverage, resource and finding
 views. Browser analysis remains descriptive over persisted evidence and never refits the HPO
 model. The Run sidebar and analysis panels are drag-resizable. Run reports can create custom metric
-categories and save plots from the current metric selection; Study reports save bar/line/scatter
-views with candidate parameter, objective-component and resource axes. Preferences persist for that
+categories and save plots from the current metric selection; Study reports save observed 2D/3D
+views with candidate parameter, recorded numeric metric and resource axes. Preferences persist for that
 generated file; regenerating creates a clean preference scope.
+
+To compare metrics against hyperparameters across an adaptive search or sweep:
+
+1. In the console open **Study → Analysis → Interactive HTML**, or generate a local report with
+   `lf results report EXECUTION --output study-report.html`.
+2. Open **Explore**. Expand **Advanced visualization options** to choose a plot type. For a scatter, line or bar chart, choose a parameter such as `hidden_dim`
+   as **X axis** and a recorded metric such as `val_accuracy` as **Y axis**. The chart previews
+   automatically as controls change; saving is optional persistence, not required to draw it.
+   **Add another Y metric (2D)** offers searchable checkboxes; check each additional curve without
+   Ctrl/Cmd-click. These are Trial summaries, not epoch curves.
+3. For **3D scatter** or **Observed heatmap**, choose two parameters (e.g. `hidden_dim` and
+   `dropout`) as X/Y and select the metric under **Z / cell metric**. **Observed 3D surface**
+   requires numeric parameter axes; scatter and heatmaps also support categories/booleans with
+   their actual labels. Choose a palette/reversal, name the view and select **Save chart**.
+4. Leave **One point per trial** to retain distinct tested combinations. **Mean per exact X
+   value + SD** groups equal X values with equal weight per Trial; dispersion is empirical SD
+   across Trials, not a seed confidence interval or a controlled parameter effect. Heatmap/
+   surface cells likewise average observed Trial summaries at each exact X/Y pair. Untested
+   pairs stay blank, including missing levels in an authored finite domain; no model is fitted
+   or missing response interpolated. Very large grids request a 3D scatter instead.
+5. By default only completed evidence is displayed. Enable **Include partial / pruned
+   observations** to inspect recorded partial values; their marks/hover identify censored
+   evidence. Choose **Best observed objective** or **Current observed objective** explicitly
+   when desired. A missing final selection remains missing even if a partial best exists.
+
+Selection/objective-component summaries preserve their persisted semantics. Other numeric metrics
+use persisted diagnostic summaries or the latest recorded values from comparable screening Runs
+at one fidelity rung, not newly computed per-metric optima. Hover exposes exact values, Trial IDs
+and cell support. Saved views and palettes survive reopening the same HTML in the same browser;
+they do not change HPO, authored YAML or evidence. Regenerate the report to include newer results.
+If a preview is empty, its inline explanation distinguishes missing parameter values, missing
+final selection and metric/evidence-filter gaps. It never substitutes a partial best for selection.
+In **Parameters**, choose **Y metric** to plot any recorded numeric metric and update the
+exact-value table. The observed chart also works for sweeps without model response curves.
+The separate collapsible **Persisted adjusted selection response** remains objective-only:
+changing the diagnostic metric must not relabel the persisted objective model as an accuracy model.
 
 ### 16.1 Evidence semantics
 
@@ -1932,6 +2054,23 @@ short-lived and do not consume scientific slots. A transient probe error is an o
 not a scientific failure: new admission pauses, active child processes remain untouched and the
 probe retries. Its bounded stdout/stderr is preserved for diagnosis. A persistent outage becomes
 terminal only after there are no active Runs and the bounded retry budget is exhausted.
+
+### 16.4 Research workspace and declarations
+
+The offline report now opens a **Research** inbox, with **Metrics & health**, a shared searchable
+picker (**Ctrl/⌘ K**), family plots and **Explore**. The Python domain layer persists metric profiles,
+bounded exploratory relationships, multiplicity diagnostics and inspection findings; browser code
+only filters/presents recorded evidence. Declare optional YAML `analysis` or class-level
+`Work.analysis_profile` for metric labels/units/lineage, families and questions. Declarations and
+known registry defaults are frozen in `analysis-semantics.json` before execution and travel with
+recovery/export. Schema version 8 adds `research` while retaining prior scientific fields.
+
+Test metrics, including derived/composite components, cannot govern objective/constraints.
+Provisional discovery excludes test evidence, while terminal reports may inspect it. Unknown
+semantics remain explicit; discovery is not causal inference or new HPO confidence. Distinct Y
+units use small multiples; visual normalization is opt-in. Saved views support notes and validated
+JSON import/export. [The full research guide](RESEARCH_ANALYSIS.md) contains numbered instructions,
+YAML examples, algorithm limits, statistical caveats and legacy behavior.
 
 ## 17. Research Console
 

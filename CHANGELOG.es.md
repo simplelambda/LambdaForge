@@ -9,6 +9,39 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+### Corregido
+
+- HTML de Study previsualiza ejes/métricas sin guardar, explica vistas vacías y ofrece casillas
+  buscables para varias series. Parameters permite cualquier métrica numérica registrada sin
+  confundir resúmenes observados del sweep con respuestas modeladas del objetivo.
+- Conservada la inicialización científica inmutable fuera de la cola de 25 acciones: el resumen
+  vivo reutiliza conclusiones del controlador e informes mantienen margen práctico y geometría
+  log/condicional al recargar y exportar.
+- El ruido de seeds escasamente observado sigue provisional, con incertidumbre de varianza y
+  soporte contextual; la asignación pareada valora su impacto sobre preguntas científicas globales.
+- Conservados máximos físicos de GPU muestreados por proceso al salir el worker, sin llamarlos
+  exactos. El progreso genérico alimenta el aprendizaje de eficiencia del packing y los bloqueos
+  repetidos tienen un resumen compacto con contadores.
+
+### Añadido
+
+- Espacio de investigación: catálogo/perfil inmutable, familias y preguntas declaradas;
+  perfiles, redundancia, permutaciones/BY exploratorias y hallazgos de inspección acotados.
+  Análisis v8 conserva semántica científica y congela declaraciones antes de ejecutar.
+  HTML offline con Research, salud/búsqueda de métricas, gráficas separadas por unidades,
+  familias, coordenadas paralelas y vistas con import/export validado. Test y derivaciones
+  se rechazan para objetivo/restricciones y se excluyen del discovery provisional;
+  no se modifica la lógica de planificación ni decisiones HPO.
+- Gráficas observadas parámetro/métrica en HTML de Study: superposición 2D, puntos 3D, mapas
+  de calor y superficies numéricas con categorías reales, celdas ausentes vacías, datos
+  parciales/podados visuales opcionales y vistas guardadas por fichero. La lógica HPO no cambia.
+- Retry inteligente de Studies adaptativos mediante `lf retry` y Resume Study en la consola:
+  restaura estado/decisiones/seeds HPO, conserva evidencia válida completa/podada y recupera Runs
+  fallidas/interrumpidas desde checkpoints. Cambios de código compatibles requieren reconocimiento
+  explícito con revisiones auditadas; GC/borrado y bloqueo entre procesos protegen la evidencia original.
+- Continuaciones de fidelidad protegidas para aportar calibración al pruner, sin debilitar sus
+  requisitos, y diagnósticos explícitos de estabilidad/ruido de seeds en consola e HTML.
+
 ## [0.16.0] - 2026-09-28
 
 ### Añadido

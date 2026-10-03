@@ -22,13 +22,15 @@ from lambdaforge.analysis.Evidence import (
     normalize_evidence,
     winner_summary,
 )
+from lambdaforge.analysis.MetricCatalog import resolve_semantics
+from lambdaforge.analysis.ResearchAnalysis import ResearchAnalysis
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.hpo.ResourceReplay import ResourceSchedulerReplay
 from lambdaforge.hpo.ScientificConclusions import scientific_status
 from lambdaforge.hpo.ScientificDesign import ScientificQuestionAnalyzer
 from lambdaforge.work.atomic import atomic_write_json
 
-ANALYSIS_VERSION = 6
+ANALYSIS_VERSION = 8
 
 
 class StudyAnalysis:
@@ -44,21 +46,27 @@ class StudyAnalysis:
         status: str | None = None,
         provisional_bootstrap_replicates: int = 500,
     ) -> dict[str, Any]:
+        policy = cls._search_policy(source)
+        if authored_space is None and isinstance(policy.get("parameter_space"), Mapping):
+            authored_space = dict(policy["parameter_space"])
         normalized_objective = cls.objective(source, objective)
         mode = str(normalized_objective["mode"])
         candidates, runs = normalize_evidence(source, normalized_objective)
+        semantics = source.get("analysis_semantics")
+        if not isinstance(semantics, Mapping) or not semantics.get("semantics_version"):
+            semantics = resolve_semantics()
         stable_input = {
             "execution_id": source.get("execution_id"),
             "objective": normalized_objective,
             "candidates": candidates,
             "authored_space": dict(authored_space or {}),
+            "scientific_policy": policy,
         }
         fingerprint = evidence_fingerprint(stable_input)
         resolved_status = status or cls._status(source, runs)
         bootstrap_replicates = (
             2000 if resolved_status == "final" else provisional_bootstrap_replicates
         )
-        policy = cls._search_policy(source)
         equivalence_margin = (
             float(normalized_objective["practical_margin"])
             if isinstance(normalized_objective.get("practical_margin"), int | float)
@@ -130,7 +138,8 @@ class StudyAnalysis:
             normalized_objective,
             practical_margin=equivalence_margin,
             fingerprint=fingerprint,
-            final=resolved_status == "final",
+            # This service is human/post-hoc analysis, outside the admission heartbeat.
+            final=True,
             parameter_space=authored_space,
         )
         generated_findings = findings(
@@ -167,10 +176,7 @@ class StudyAnalysis:
                     run.get("seed")
                     for run in candidate.get("runs", ())
                     if isinstance(run, Mapping)
-                    and (
-                        run.get("final_objective") is not None
-                        or bool(run.get("censored"))
-                    )
+                    and (run.get("final_objective") is not None or bool(run.get("censored")))
                 }
             )
             for candidate in aggregates
@@ -211,6 +217,7 @@ class StudyAnalysis:
                 "study_fingerprint": source.get("scientific_fingerprint"),
                 "evidence_fingerprint": fingerprint,
                 "status": resolved_status,
+                "analysis_semantics_identity": semantics.get("identity"),
             },
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "objective": normalized_objective,
@@ -279,6 +286,16 @@ class StudyAnalysis:
             "pareto": pareto,
             "constraints": constraint_summary,
             "findings": generated_findings,
+            "research": ResearchAnalysis.compute(
+                aggregates,
+                fingerprint=fingerprint,
+                semantics=semantics,
+                status=resolved_status,
+                parameter_names=tuple(sorted(space)),
+                parameter_space=space,
+                existing_findings=generated_findings,
+                objective=normalized_objective,
+            ),
             "methodology": {
                 "bootstrap_replicates": bootstrap_replicates,
                 "effects": "mixed-space k-NN functional predictions; descriptive, not causal",
@@ -347,9 +364,7 @@ class StudyAnalysis:
         evidence_rows: list[dict[str, Any]] = []
         for candidate in candidates:
             trial = int(candidate.get("trial", 0))
-            candidate_runs = [
-                run for run in candidate.get("runs", ()) if isinstance(run, Mapping)
-            ]
+            candidate_runs = [run for run in candidate.get("runs", ()) if isinstance(run, Mapping)]
             values = {
                 run.get("seed"): float(run["final_objective"])
                 for run in candidate_runs
@@ -481,15 +496,19 @@ class StudyAnalysis:
             }
 
         trials = sorted(seed_values)
-        pairs = [
-            comparison(trial, reference_trial)
-            for trial in trials
-            if reference_trial is not None and trial != reference_trial
-        ] if reference_trial is not None else [
-            comparison(left, right)
-            for index, left in enumerate(trials)
-            for right in trials[index + 1 :]
-        ][:100]
+        pairs = (
+            [
+                comparison(trial, reference_trial)
+                for trial in trials
+                if reference_trial is not None and trial != reference_trial
+            ]
+            if reference_trial is not None
+            else [
+                comparison(left, right)
+                for index, left in enumerate(trials)
+                for right in trials[index + 1 :]
+            ][:100]
+        )
         common_seeds = sorted(
             set.intersection(*(set(values) for values in seed_values.values()))
             if seed_values and all(seed_values.values())
@@ -549,9 +568,11 @@ class StudyAnalysis:
             str(trial): count / resamples if resamples else None
             for trial, count in winner_counts.items()
         }
-        distribution = {
-            token: count / resamples for token, count in sorted(conclusion_counts.items())
-        } if resamples else {"UNRESOLVED": 1.0}
+        distribution = (
+            {token: count / resamples for token, count in sorted(conclusion_counts.items())}
+            if resamples
+            else {"UNRESOLVED": 1.0}
+        )
         modal_token = max(distribution, key=distribution.__getitem__)
         modal_probability = distribution[modal_token]
         kind, separator, encoded = modal_token.partition(":")
@@ -583,9 +604,7 @@ class StudyAnalysis:
             "reference_trial": reference_trial,
             "cells": rows,
             "evidence_matrix": {
-                "seeds": sorted(
-                    {seed for values in required.values() for seed in values}, key=str
-                ),
+                "seeds": sorted({seed for values in required.values() for seed in values}, key=str),
                 "rows": evidence_rows,
             },
             "comparisons": pairs,
@@ -600,13 +619,16 @@ class StudyAnalysis:
             "practical_margin": practical_margin,
             "formal_sequential_evidence": dict(sequential) if sequential is not None else None,
             "sequential_decision": (
-                "RESOLVED" if sequential is not None and sequential.get("stop") is True
+                "RESOLVED"
+                if sequential is not None and sequential.get("stop") is True
                 else "UNRESOLVED"
             ),
             "sequential_coverage_level": (
-                ((sequential.get("formal_sequential_evidence") or {}).get(
-                    "simultaneous_coverage_level"
-                ))
+                (
+                    (sequential.get("formal_sequential_evidence") or {}).get(
+                        "simultaneous_coverage_level"
+                    )
+                )
                 if sequential is not None
                 and isinstance(sequential.get("formal_sequential_evidence"), Mapping)
                 else None
@@ -618,9 +640,7 @@ class StudyAnalysis:
         if len(values) < 2:
             return None
         rng = random.Random(int(fingerprint.replace("sha256:", "")[:16], 16))
-        samples = sorted(
-            statistics.fmean(rng.choice(values) for _ in values) for _ in range(1000)
-        )
+        samples = sorted(statistics.fmean(rng.choice(values) for _ in values) for _ in range(1000))
         return [samples[24], samples[974]]
 
     @staticmethod
@@ -669,6 +689,8 @@ class StudyAnalysis:
                 and cached.get("analysis_version") == ANALYSIS_VERSION
                 and cached.get("source", {}).get("evidence_fingerprint")
                 == computed["source"]["evidence_fingerprint"]
+                and cached.get("source", {}).get("analysis_semantics_identity")
+                == computed["source"]["analysis_semantics_identity"]
             ):
                 return cached
         atomic_write_json(target, computed)
@@ -850,6 +872,13 @@ class StudyAnalysis:
         controller = source.get("controller")
         if not isinstance(controller, Mapping):
             return {}
+        initialization = controller.get("initialization")
+        if isinstance(initialization, Mapping) and isinstance(
+            initialization.get("policy"), Mapping
+        ):
+            return dict(initialization["policy"])
+        if controller.get("scientific_configuration_required"):
+            raise ValueError("Study scientific INITIALIZE configuration is missing.")
         recent = controller.get("recent", ())
         if isinstance(recent, Sequence) and not isinstance(recent, str | bytes):
             for event in reversed(recent):

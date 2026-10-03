@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import PurePosixPath
 from typing import Any
@@ -54,6 +55,11 @@ class StorageService:
         assert profile.storage is not None
         records = self.jobs.list(cluster=cluster, refresh=False)
         active = tuple(record for record in records if not record.state.terminal)
+        retained = {
+            job_id
+            for record in records
+            for job_id in record.metadata.get("recovery_dependencies", ())
+        }
         references = {
             "bundles": [record.bundle_id for record in active if record.bundle_id],
             "environments": [
@@ -70,7 +76,9 @@ class StorageService:
             "terminal_jobs": [
                 record.job_id
                 for record in records
-                if record.state.terminal and record.state.value != "planned"
+                if record.state.terminal
+                and record.state.value != "planned"
+                and record.job_id not in retained
             ],
         }
         payload = self._invoke(
@@ -140,8 +148,13 @@ class StorageService:
         *,
         apply: bool = False,
         local_run_root: str | None = None,
+        deleting_jobs: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Preview or delete one exact job workspace without touching shared state."""
+        if set(self.jobs.recovery_dependents(job_id)) - set(deleting_jobs):
+            raise ValueError(
+                "Workspace is retained by a recovered Study; delete its latest history first."
+            )
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
         descriptor = profile.storage.to_dict()

@@ -39,6 +39,17 @@ remotos devuelven control tras crear el registro durable de preparación salvo q
 
 ## Contrato Work
 
+Un Study adaptativo se recupera con `lf retry STUDY` o **Resume Study…** en su ventana. Se prepara
+otro Job conectado a la Execution original exacta del mismo clúster: conserva evidencia completa/
+podada, decisiones HPO, seeds y presupuestos gastados. Runs fallidas/interrumpidas crean Attempts
+desde checkpoints compatibles o empiezan de nuevo si no existen. `--accept-code-change` reconoce
+explícitamente validez de métricas/checkpoints previos, no omite controles de configuración,
+entradas, seeds u objetivo. Mantén inmutable `execution.json`, registra revisiones reales en
+`recovery-history.jsonl`/`current-code.json`, protege Jobs referenciados de limpieza y usa el bloqueo
+entre procesos existente. Nunca reinicies silenciosamente un estado ausente/corrupto, reintentes
+automáticamente excepciones consumidoras, repitas seeds de confirmación válidas ni borres coste/
+historial de Attempts fallidos. Cubre un único Study adaptativo por Execution y no migra entre clústeres.
+
 La firma y el docstring de `run()` son la verdad de parámetros. Los únicos marcadores especiales
 son `{file: ...}`, `{dataset: NOMBRE@VERSION}` y `{from: PASO.SALIDA}`. Las vistas inmutables son
 `name`, `config`, `inputs`, `resources`, `seed`, `trial`, `source_dir` y `resuming`. Los servicios
@@ -343,6 +354,18 @@ tensorial preciso y pruebas focalizadas.
 
 ## Análisis de estudios y consola
 
+`study/controller.json.initialization` es autoridad científica inmutable y durable; `recent` solo
+es una cola visual. Conserva objetivo, margen, geometría/condiciones, política y streams al
+refrescar/exportar/releer. La migración antigua lee el historial durable una vez. Los insights vivos
+reutilizan el snapshot del controlador. Seed noise v2 distingue unresolved/provisional/calibrated
+y conserva incertidumbre de varianza y soporte contextual: una arquitectura repetida es provisional.
+La replicación valora su efecto sobre preguntas pendientes, además de comparaciones con incumbent.
+Las continuaciones `PRUNER_CALIBRATION_EVIDENCE` siguen protegidas. Los intervalos NVML muestreados
+completos son historial útil sin ser picos vitales exactos; conserva censura e informa
+`sampled_history_count`. Tasas genéricas de step/progreso alimentan throughput; optimiza evidencia
+agregada por tiempo, no número de procesos. El análisis humano puede remuestrear con mayor precisión
+fuera del heartbeat; muestra acuerdo entre realizaciones, resolución y diagnóstico de seeds.
+
 `lambdaforge.analysis.StudyAnalysis` analiza evidencia a posteriori; nunca es otro controlador HPO.
 Los estudios terminales persisten `analysis.json` versionado y atómico; `lf results analyze SELECTOR
 [--recompute] [--json]` usa el mismo núcleo y `results report` solo añade Plotly offline opcional.
@@ -450,7 +473,31 @@ interacciones, cobertura, recursos y findings sin ajustar otro surrogate. Los he
 paletas con centro neutral explícito. Las preferencias usan una clave local única por fichero:
 reabrir conserva y regenerar reinicia. Paneles redimensionables, categorías de métricas propias y
 especificaciones de gráficas guardadas son solo presentación: conservan las claves y consumen la
-evidencia persistida embebida sin recalcularla. La cobertura usa tarjetas/gráficas/tablas
+evidencia persistida embebida sin recalcularla. **Explore** de Study admite métricas frente a
+parámetros en 2D con superposición y puntos 3D/mapas de calor/superficies numéricas con X/Y
+parámetros y Z métrica. Conserva categorías y huecos del dominio finito: ausente es null, nunca
+cero/predicción. Datos parciales/podados son visuales opcionales, no sustituyen selección final;
+SD por valor describe Trials, no incertidumbre de seeds. Incluye el renderer offline
+`analysis/assets/study-charts.js` en las wheels. Los controles previsualizan inmediatamente:
+guardar solo persiste. Series Y adicionales usan casillas buscables; Parameters comparte el
+renderer observado con selector Y. Mantén separada la respuesta modelada del objetivo, sin
+renombrarla como otra métrica. Vistas vacías explican datos/filtros/selección ausentes sin inventarlos.
+
+Study Analysis v8 añade el read model determinista `research`. `MetricCatalog` es la autoridad
+semántica; `AnalysisProfile` valida declaraciones de clase/YAML; `ResearchAnalysis` y
+`ResearchDiagnostics` producen perfiles/hallazgos acotados. Los assets offline solo representan:
+nunca ejecutan estos diagnósticos en el heartbeat del HPO ni ajustan ciencia en JavaScript.
+Congela declaraciones y defaults conocidos en `analysis-semantics.json` antes de ejecutar; los
+hijos referencian ese fichero sin copiar el catálogo por Run. Identidad semántica y científica son
+independientes. Métricas test/derivadas de test no gobiernan objetivo ni restricciones y no entran
+en discovery provisional. Candidatos censurados no son evidencia final exacta. Permutaciones
+exploratorias ajustadas BY no son inferencia formal adaptativa ni confianza científica.
+Conserva constantes, datos ausentes, dimensiones/linaje y unidades desconocidas. Métricas Y con
+unidades diferentes/desconocidas usan ejes separados salvo normalización visual explícita.
+Inbox, búsqueda, catálogo y vistas guardadas validadas consumen datos persistidos. Rutas y límites:
+`docs/RESEARCH_ANALYSIS.es.md` (con equivalente inglés).
+
+La cobertura usa tarjetas/gráficas/tablas
 acotadas, no JSON crudo, y la ayuda
 contextual explica términos estadísticos. Las decisiones se añaden a
 `study/controller-history.jsonl`: conserva `controller.json.recent` acotado, carga el historial

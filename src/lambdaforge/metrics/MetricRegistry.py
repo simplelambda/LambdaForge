@@ -37,5 +37,15 @@ class MetricRegistry:
             result["range"] = list(bounds)
         return result
 
+    @classmethod
+    def catalog_defaults(cls) -> dict[str, dict[str, Any]]:
+        """Snapshot known directions/ranges for immutable analysis provenance."""
+        return {
+            name: definition
+            for prefix in ("", "train_", "val_", "validation_", "test_")
+            for base in cls._STANDARD
+            if (definition := cls.resolve(name := prefix + base)) is not None
+        }
+
 
 __all__ = ["MetricRegistry"]

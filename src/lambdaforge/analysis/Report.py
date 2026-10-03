@@ -10,9 +10,12 @@ import json
 import math
 import secrets
 from collections.abc import Mapping, Sequence
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.analysis.MetricCatalog import MetricCatalog, resolve_semantics
+from lambdaforge.analysis.ResearchWorkspace import workspace_html
 from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.scientific_format import format_parameter_vector
 from lambdaforge.work.atomic import atomic_write_text
@@ -48,277 +51,13 @@ def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
     return _write_study_dashboard(analysis, output, go=go, plot=plot)
 
 
-def _legacy_write_html(analysis: Mapping[str, Any], output: str | Path, *, go: Any, plot: Any) -> Path:
-    """Build the former linear report; kept as a compact compatibility reference."""
-
-    sections: list[str] = []
-    candidates = [value for value in analysis.get("candidates", ()) if isinstance(value, Mapping)]
-    if candidates:
-        figure = go.Figure(
-            data=[
-                go.Bar(
-                    x=[str(value.get("trial")) for value in candidates],
-                    y=[value.get("mean") for value in candidates],
-                    error_y={
-                        "type": "data",
-                        "array": [value.get("standard_error") or 0 for value in candidates],
-                    },
-                )
-            ]
-        )
-        figure.update_layout(
-            title="Candidate ranking", xaxis_title="Trial", yaxis_title="Objective"
-        )
-        sections.append(plot(figure, include_plotlyjs="inline", output_type="div"))
-    importance = analysis.get("parameter_importance", {})
-    if isinstance(importance, Mapping) and importance:
-        figure = go.Figure(
-            data=[
-                go.Bar(
-                    x=list(importance),
-                    y=[value.get("importance", 0) for value in importance.values()],
-                )
-            ]
-        )
-        figure.update_layout(title="Global functional parameter importance")
-        sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
-    top = analysis.get("top_region_importance", {})
-    if isinstance(top, Mapping) and top:
-        figure = go.Figure(
-            data=[
-                go.Bar(
-                    x=list(top),
-                    y=[
-                        value.get("importance", 0) if isinstance(value, Mapping) else 0
-                        for value in top.values()
-                    ],
-                )
-            ]
-        )
-        figure.update_layout(title="Observed top-region importance")
-        sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
-    responses = analysis.get("response_curves", {})
-    if isinstance(responses, Mapping):
-        for name, response in responses.items():
-            if not isinstance(response, Mapping):
-                continue
-            points = [value for value in response.get("points", ()) if isinstance(value, Mapping)]
-            x = [value.get("x", value.get("category")) for value in points]
-            y = [value.get("effect") for value in points]
-            if x:
-                figure = go.Figure(data=[go.Scatter(x=x, y=y, mode="lines+markers")])
-                figure.update_layout(title=f"Response: {name}")
-                sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
-    interactions = analysis.get("interactions", {})
-    matrix = interactions.get("matrix", {}) if isinstance(interactions, Mapping) else {}
-    if isinstance(matrix, Mapping) and matrix:
-        names = list(matrix)
-        figure = go.Figure(
-            data=[
-                go.Heatmap(
-                    z=[[matrix[left].get(right, 0) for right in names] for left in names],
-                    x=names,
-                    y=names,
-                )
-            ]
-        )
-        figure.update_layout(title="Interaction matrix")
-        sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
-    surfaces = interactions.get("surfaces", {}) if isinstance(interactions, Mapping) else {}
-    if isinstance(surfaces, Mapping):
-        for name, surface in list(surfaces.items())[:6]:
-            if not isinstance(surface, Mapping):
-                continue
-            x_values, y_values = list(surface.get("x", ())), list(surface.get("y", ()))
-            cells = [value for value in surface.get("cells", ()) if isinstance(value, Mapping)]
-            lookup = {(str(value.get("x")), str(value.get("y"))): value for value in cells}
-            z_values = [
-                [
-                    lookup.get((str(x_value), str(y_value)), {}).get("predicted_objective")
-                    for x_value in x_values
-                ]
-                for y_value in y_values
-            ]
-            if x_values and y_values:
-                heatmap = go.Figure(data=[go.Heatmap(z=z_values, x=x_values, y=y_values)])
-                heatmap.update_layout(title=f"Pairwise predictive heatmap: {name}")
-                sections.append(plot(heatmap, include_plotlyjs=False, output_type="div"))
-                if all(isinstance(value, int | float) for value in (*x_values, *y_values)):
-                    surface_3d = go.Figure(data=[go.Surface(z=z_values, x=x_values, y=y_values)])
-                    surface_3d.update_layout(title=f"Pairwise predictive surface: {name}")
-                    sections.append(plot(surface_3d, include_plotlyjs=False, output_type="div"))
-    if candidates:
-        parameter_names = sorted(
-            {str(name) for candidate in candidates for name in candidate.get("parameters", {})}
-        )
-        dimensions = []
-        for name in parameter_names:
-            values = [candidate.get("parameters", {}).get(name) for candidate in candidates]
-            numeric = all(isinstance(value, int | float) for value in values if value is not None)
-            if numeric:
-                dimensions.append({"label": name, "values": values})
-            else:
-                levels = sorted({str(value) for value in values if value is not None})
-                encoded = {level: index for index, level in enumerate(levels)}
-                dimensions.append(
-                    {
-                        "label": name,
-                        "values": [encoded.get(str(value), -1) for value in values],
-                        "tickvals": list(encoded.values()),
-                        "ticktext": levels,
-                    }
-                )
-        if dimensions:
-            figure = go.Figure(data=[go.Parcoords(dimensions=dimensions)])
-            figure.update_layout(title="Candidate parallel coordinates")
-            sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
-    coverage = analysis.get("coverage", {})
-    marginal = coverage.get("marginal", {}) if isinstance(coverage, Mapping) else {}
-    if isinstance(marginal, Mapping) and marginal:
-        figure = go.Figure(
-            data=[
-                go.Bar(
-                    x=list(marginal),
-                    y=[
-                        value.get("transformed_range_coverage", value.get("active_fraction", 0))
-                        if isinstance(value, Mapping)
-                        else 0
-                        for value in marginal.values()
-                    ],
-                )
-            ]
-        )
-        figure.update_layout(title="Marginal search-space coverage")
-        sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
-    boundaries = analysis.get("boundaries", {})
-    if isinstance(boundaries, Mapping) and boundaries:
-        figure = go.Figure(
-            data=[
-                go.Bar(
-                    x=list(boundaries),
-                    y=[
-                        value.get("boundary_enrichment", 0) if isinstance(value, Mapping) else 0
-                        for value in boundaries.values()
-                    ],
-                )
-            ]
-        )
-        figure.update_layout(title="Boundary enrichment", yaxis_title="top/global")
-        sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
-    resources = analysis.get("resources", {})
-    resource_rows = resources.get("targets", ()) if isinstance(resources, Mapping) else ()
-    resource_rows = [value for value in resource_rows if isinstance(value, Mapping)]
-    for target in ("gpu_seconds", "duration_seconds", "peak_vram"):
-        valid = [value for value in resource_rows if isinstance(value.get(target), int | float)]
-        if valid:
-            figure = go.Figure(
-                data=[
-                    go.Scatter(
-                        x=[value[target] for value in valid],
-                        y=[value.get("objective") for value in valid],
-                        mode="markers+text",
-                        text=[f"trial {value.get('trial')}" for value in valid],
-                    )
-                ]
-            )
-            figure.update_layout(title=f"Objective / {target}", xaxis_title=target)
-            sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
-    component_pareto = analysis.get("pareto", {})
-    component_names = (
-        list(component_pareto.get("objective_components", ()))
-        if isinstance(component_pareto, Mapping)
-        else []
-    )
-    if len(component_names) >= 2:
-        left, right = component_names[:2]
-        valid = [
-            value
-            for value in candidates
-            if left in value.get("objective_components", {})
-            and right in value.get("objective_components", {})
-        ]
-        if valid:
-            figure = go.Figure(
-                data=[
-                    go.Scatter(
-                        x=[value["objective_components"][left] for value in valid],
-                        y=[value["objective_components"][right] for value in valid],
-                        mode="markers+text",
-                        text=[f"trial {value.get('trial')}" for value in valid],
-                    )
-                ]
-            )
-            figure.update_layout(
-                title="Scientific component Pareto", xaxis_title=left, yaxis_title=right
-            )
-            sections.append(plot(figure, include_plotlyjs=False, output_type="div"))
-    findings = analysis.get("findings", ())
-    finding_html = "".join(
-        "<article><h3>"
-        + html.escape(str(value.get("title", "Finding")))
-        + "</h3><p>"
-        + html.escape(str(value.get("statement", "")))
-        + "</p><p><b>Recommendation:</b> "
-        + html.escape(str(value.get("recommendation", "")))
-        + "</p></article>"
-        for value in findings
-        if isinstance(value, Mapping)
-    )
-    raw = html.escape(json.dumps(analysis, indent=2, default=str))
-    status = html.escape(str(analysis.get("source", {}).get("status", "unknown")))
-    objective_label = html.escape(_objective_label(analysis))
-    seed_analysis = analysis.get("seed_analysis", {})
-    seed_warning = ""
-    if isinstance(seed_analysis, Mapping) and seed_analysis.get("status") == "insufficient":
-        seed_warning = (
-            '<article class="warning"><h3>Empirical seed stability unavailable</h3><p>'
-            + html.escape(
-                str(
-                    seed_analysis.get(
-                        "interpretation",
-                        "Leading candidates do not have enough repeated-seed evidence.",
-                    )
-                )
-            )
-            + "</p><p>A one-seed bootstrap is not presented as empirical stability.</p></article>"
-        )
-    diagnostic = html.escape(
-        json.dumps(
-            {
-                "surrogate": analysis.get("surrogate"),
-                "pruning": analysis.get("pruning"),
-                "candidate_pool_resolution": analysis.get("candidate_pool_resolution"),
-                "seed_stability": analysis.get("seed_analysis"),
-                "winner": analysis.get("winner"),
-            },
-            indent=2,
-            default=str,
-        )
-    )
-    document = (
-        '<!doctype html><html><head><meta charset="utf-8">'
-        "<title>LambdaForge Study Analysis</title><style>"
-        "body{font:16px system-ui;max-width:1200px;margin:auto;padding:2rem;color:#20242b}"
-        "article{border-left:4px solid #d19a00;padding:.2rem 1rem;margin:1rem 0}"
-        "details{margin-top:2rem}"
-        "pre{white-space:pre-wrap;background:#f5f6f8;padding:1rem}"
-        "</style></head><body><h1>LambdaForge Study Analysis</h1>"
-        f"<p>Status: {status} · Objective: {objective_label}</p>"
-        f"{seed_warning}{''.join(sections)}<h2>Diagnostics</h2>"
-        f"<pre>{diagnostic}</pre><h2>Findings</h2>{finding_html}"
-        "<details><summary>Complete reproducible analysis JSON</summary>"
-        f"<pre>{raw}</pre></details></body></html>"
-    )
-    path = Path(output).expanduser().resolve()
-    atomic_write_text(path, document)
-    return path
-
-
 def _write_study_dashboard(
     analysis: Mapping[str, Any], output: str | Path, *, go: Any, plot: Any
 ) -> Path:
     """Render persisted Study Analysis as one navigable offline dashboard."""
-    candidates = [dict(value) for value in analysis.get("candidates", ()) if isinstance(value, Mapping)]
+    candidates = [
+        dict(value) for value in analysis.get("candidates", ()) if isinstance(value, Mapping)
+    ]
     comparable_candidates = [
         value for value in candidates if isinstance(value.get("mean"), int | float)
     ]
@@ -346,14 +85,29 @@ def _write_study_dashboard(
         }
     )
     diagnostic_metric_names = sorted(
-        {
-            str(name)
-            for candidate in candidates
-            for name in candidate.get("diagnostic_metrics", {})
-        }
+        {str(name) for candidate in candidates for name in candidate.get("diagnostic_metrics", {})}
     )
-    metric_names = sorted(set(component_metric_names) | set(diagnostic_metric_names))
+    observed_metric_names = {
+        str(name)
+        for candidate in candidates
+        for run in candidate.get("runs", ())
+        if isinstance(run, Mapping)
+        if isinstance(run.get("metrics"), Mapping)
+        for name, value in run.get("metrics", {}).items()
+        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+    }
+    metric_names = sorted(
+        set(component_metric_names) | set(diagnostic_metric_names) | observed_metric_names
+    )
     objective_label = _objective_label(analysis)
+    research = analysis.get("research")
+    if not isinstance(research, Mapping):
+        # Legacy documents have no persisted discovery: expose names, not new conclusions.
+        research = {
+            "metric_catalog": MetricCatalog.resolve(
+                resolve_semantics(), set(metric_names) | {"selection_objective"}
+            )
+        }
     common_layout = {
         "template": "plotly_dark",
         "paper_bgcolor": "rgba(0,0,0,0)",
@@ -369,9 +123,7 @@ def _write_study_dashboard(
                 y=[value.get("mean") for value in comparable_candidates],
                 error_y={
                     "type": "data",
-                    "array": [
-                        value.get("standard_error") or 0 for value in comparable_candidates
-                    ],
+                    "array": [value.get("standard_error") or 0 for value in comparable_candidates],
                 },
                 marker={"color": "#58a6ff"},
                 hovertemplate="trial=%{x}<br>selection objective=%{y:.6g}<extra></extra>",
@@ -486,6 +238,9 @@ def _write_study_dashboard(
             output_type="div",
             config=plot_config,
         ),
+        "observed": plot(
+            study_custom_figure, include_plotlyjs=False, output_type="div", config=plot_config
+        ),
     }
     completed = len(comparable_candidates)
     censored = sum(int(value.get("censored_observations") or 0) for value in candidates)
@@ -509,44 +264,49 @@ def _write_study_dashboard(
     scientific = analysis.get("scientific_understanding", {})
     scientific = scientific if isinstance(scientific, Mapping) else {}
     parameter_questions = [
-        value
-        for value in scientific.get("parameter_questions", ())
-        if isinstance(value, Mapping)
+        value for value in scientific.get("parameter_questions", ()) if isinstance(value, Mapping)
     ]
     interpretation_html = "".join(
         '<article class="finding"><span class="badge">'
         + html.escape(str(value.get("conclusion_kind", "UNRESOLVED")))
         + " · stability "
-        + html.escape(
-            f"{100 * float(value.get('descriptive_stability', 0.0) or 0.0):.0f}%"
-        )
+        + html.escape(f"{100 * float(value.get('descriptive_stability', 0.0) or 0.0):.0f}%")
         + "</span><h3>"
         + html.escape(str(value.get("parameter", "Parameter")))
         + "</h3><p>"
         + html.escape(str(value.get("summary", "The question remains unresolved.")))
         + "</p><p><b>Direct support:</b> "
         + html.escape(
-            ", ".join(map(str, value.get("response_support", {}).get("direct", ())))
-            or "none"
+            ", ".join(map(str, value.get("response_support", {}).get("direct", ()))) or "none"
         )
         + " · <b>Censored only:</b> "
         + html.escape(
-            ", ".join(
-                map(str, value.get("response_support", {}).get("censored_only", ()))
-            )
+            ", ".join(map(str, value.get("response_support", {}).get("censored_only", ())))
             or "none"
         )
         + " · <b>Predictive only:</b> "
         + html.escape(
-            ", ".join(
-                map(str, value.get("response_support", {}).get("surrogate_only", ()))
-            )
+            ", ".join(map(str, value.get("response_support", {}).get("surrogate_only", ())))
             or "none"
         )
         + '</p><p class="muted"><b>Missing evidence:</b> '
+        + html.escape("; ".join(map(str, value.get("missing_evidence", ()))) or "none identified")
+        + '</p><p class="muted">Stability is evidence-realization agreement, not truth probability. '
+        + html.escape(str(value.get("stability_diagnostics", {}).get("realizations", "unknown")))
+        + " realizations; Monte Carlo resolution "
         + html.escape(
-            "; ".join(map(str, value.get("missing_evidence", ()))) or "none identified"
+            str(value.get("stability_diagnostics", {}).get("monte_carlo_resolution", "unknown"))
         )
+        + ". Seed noise: "
+        + html.escape(str(scientific.get("seed_noise_model", {}).get("status", "unresolved")))
+        + "; repeated candidates "
+        + html.escape(str(scientific.get("seed_noise_model", {}).get("repeated_candidates", 0)))
+        + "; df "
+        + html.escape(
+            str(scientific.get("seed_noise_model", {}).get("residual_degrees_of_freedom", 0))
+        )
+        + "; sigma range "
+        + html.escape(str(scientific.get("seed_noise_model", {}).get("sigma_range", "unknown")))
         + "</p></article>"
         for value in parameter_questions
     )
@@ -573,10 +333,18 @@ def _write_study_dashboard(
             "objective_label": objective_label,
             "candidates": candidates,
             "parameters": parameter_names,
+            "parameter_space": parameter_space.to_schema() if parameter_space is not None else {},
             "metrics": metric_names,
             "responses": analysis.get("response_curves", {}),
             "interactions": interactions,
             "resources": resource_rows,
+            "research": research,
+            "research_status": {
+                "scientific_status": analysis.get("scientific_status"),
+                "winner": analysis.get("winner", {}),
+                "seed_analysis": analysis.get("seed_analysis", {}),
+                "coverage": analysis.get("coverage", {}).get("joint", {}),
+            },
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -616,7 +384,13 @@ color:#d2a8ff}.raw{white-space:pre-wrap;overflow:auto;max-height:650px;backgroun
 38px;color:var(--muted);text-align:center}@media(max-width:900px){.shell{padding:15px}.cards,.grid{grid-template-columns:
 1fr}.wide{grid-column:auto}.compare{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}}
 .panel .js-plotly-plot,.panel .plotly-graph-div{max-width:100%}.custom-builder{display:grid;
-grid-template-columns:minmax(170px,1fr) repeat(3,minmax(145px,auto)) auto;gap:10px;align-items:end}
+grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;align-items:end}
+.custom-builder label{align-items:flex-start;flex-direction:column}.custom-builder select{width:100%;min-width:0}
+.custom-builder [hidden]{display:none}.custom-builder details{grid-column:1/-1}
+.custom-builder summary{cursor:pointer;color:var(--muted)}
+.metric-checklist{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px;
+max-height:160px;overflow:auto;margin-top:10px}.custom-builder .metric-checklist label{flex-direction:row;
+align-items:center;overflow-wrap:anywhere}.custom-builder input[type=checkbox]{width:auto}
 .custom-builder input{width:100%;border:1px solid var(--line);border-radius:7px;background:#0d1117;
 color:var(--text);padding:8px 10px}.saved-charts{display:flex;gap:7px;flex-wrap:wrap;padding:11px 16px;
 border-bottom:1px solid var(--line)}.saved-chart.active{border-color:var(--accent);color:#79c0ff}
@@ -636,11 +410,13 @@ const fmt=value=>value===null||value===undefined||!Number.isFinite(Number(value)
 const baseLayout=(title,x='',y='')=>({template:'plotly_dark',paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(13,17,23,.72)',
 font:{family:'Inter, ui-sans-serif, system-ui',color:'#c9d1d9'},height:500,margin:{l:72,r:30,t:52,b:66},title,
 xaxis:{title:{text:x},autorange:true},yaxis:{title:{text:y},autorange:true}});
+const finite=value=>typeof value==='number'&&Number.isFinite(value);
 function metricValue(candidate,metric){if(metric==='__selection__')return candidate.mean;
- const component=candidate.objective_components?.[metric];if(Number.isFinite(Number(component)))return component;
+ const recorded=data.research?.rows?.find(row=>row.trial===candidate.trial)?.values?.[metric];if(finite(recorded))return recorded;
+ const component=candidate.objective_components?.[metric];if(finite(component))return component;
  const diagnostic=candidate.diagnostic_metrics?.[metric];return typeof diagnostic==='object'?diagnostic?.mean:diagnostic}
 function updateRanking(){const metric=document.getElementById('trial-metric').value;const chart=node('study-ranking');if(!chart)return;
- const rows=data.candidates.filter(row=>Number.isFinite(Number(metricValue(row,metric))));
+ const rows=data.candidates.filter(row=>finite(metricValue(row,metric)));
  Plotly.react(chart,[{type:'bar',x:rows.map(row=>String(row.trial)),y:rows.map(row=>metricValue(row,metric)),
   error_y:metric==='__selection__'?{type:'data',array:rows.map(row=>row.standard_error||0)}:undefined,
   marker:{color:'#58a6ff'},customdata:rows.map(row=>row.n||0),hovertemplate:'trial=%{x}<br>value=%{y:.6g}<br>seeds=%{customdata}<extra></extra>'}],
@@ -654,11 +430,7 @@ function updateParameter(){const name=document.getElementById('parameter-select'
   traces.push({type:'scatter',x,y,mode:'lines+markers',name:'persisted response',customdata:points.map(p=>p.support_count??p.support??null),
   hovertemplate:name+'=%{x}<br>response=%{y:.6g}<br>support=%{customdata}<extra></extra>'});
   Plotly.react(chart,traces,baseLayout('Persisted adjusted response',name,data.objective_label),config);}
- const values=new Map();for(const candidate of data.candidates){const value=candidate.parameters?.[name],score=candidate.mean;
-  if(value===undefined||!Number.isFinite(Number(score)))continue;const id=JSON.stringify(value),row=values.get(id)||{value,scores:[]};row.scores.push(Number(score));values.set(id,row)}
- const body=document.querySelector('#parameter-values tbody');body.replaceChildren();for(const row of values.values()){
-  const mean=row.scores.reduce((a,b)=>a+b,0)/row.scores.length;const variance=row.scores.length>1?row.scores.reduce((a,b)=>a+(b-mean)**2,0)/(row.scores.length-1):null;
-  const tr=document.createElement('tr');for(const value of [row.value,row.scores.length,mean,variance===null?null:Math.sqrt(variance)]){const td=document.createElement('td');td.textContent=typeof value==='string'?value:fmt(value);tr.appendChild(td)}body.appendChild(tr)}
+ customCharts.updateParameter();
  save({parameter:name});}
 function updateInteraction(){const pair=document.getElementById('pair-select').value,surface=data.interactions?.surfaces?.[pair]||{};
  const x=surface.x||[],y=surface.y||[],lookup=new Map((surface.cells||[]).map(cell=>[String(cell.x)+'\u0000'+String(cell.y),cell.predicted_objective]));
@@ -676,7 +448,7 @@ function updateResources(){const target=document.getElementById('resource-select
  baseLayout('Objective / '+target,target,data.objective_label),config);save({resource:target});}
 function renderComparison(){const selected=[...document.querySelectorAll('.trial-compare:checked')].map(box=>Number(box.value)).slice(0,2);
  document.querySelectorAll('.trial-compare').forEach(box=>{if(!selected.includes(Number(box.value))&&selected.length>=2)box.disabled=true;else box.disabled=false});
- const area=document.getElementById('trial-comparison');area.replaceChildren();for(const id of selected){const row=data.candidates.find(item=>Number(item.trial)===id);if(!row)continue;
+ const area=document.getElementById('trial-comparison');area.replaceChildren();if(window.lfResearchComparison){window.lfResearchComparison(selected,area);save({trials:selected});return;}for(const id of selected){const row=data.candidates.find(item=>Number(item.trial)===id);if(!row)continue;
   const card=document.createElement('section');card.className='compare-card';const title=document.createElement('h3');title.textContent='Trial '+id;card.appendChild(title);
  const diagnostics=Object.entries(row.diagnostic_metrics||{}).map(([name,value])=>['Diagnostic · '+name,typeof value==='object'?value?.mean:value]);
  const dl=document.createElement('dl');const fields=[['Selection objective',row.mean],['Standard error',row.standard_error],['Seeds',row.n],...diagnostics,...Object.entries(row.parameters||{})];
@@ -686,57 +458,55 @@ const resourcesByTrial=new Map(data.resources.map(row=>[Number(row.trial),row]))
 function studyField(candidate,field){if(field==='trial')return candidate.trial;if(field.startsWith('param:'))return candidate.parameters?.[field.slice(6)];
  if(field.startsWith('metric:')){return metricValue(candidate,field.slice(7))}
  if(field.startsWith('resource:'))return resourcesByTrial.get(Number(candidate.trial))?.[field.slice(9)];return null}
-function fieldLabel(field){if(field==='trial')return 'Trial';const [kind,name]=field.split(':',2);if(kind==='metric'&&name==='__selection__')return data.objective_label;
+function fieldLabel(field){if(field==='trial')return 'Trial';const colon=field.indexOf(':'),kind=field.slice(0,colon),name=field.slice(colon+1);if(kind==='metric'&&name==='__selection__')return data.objective_label;
+ if(kind==='metric'&&data.research?.metric_catalog?.metrics?.[name])return data.research.metric_catalog.metrics[name].label;
+ if(kind==='metric'&&name==='__best_observed__')return 'Best observed '+data.objective_label+' (partial)';
+ if(kind==='metric'&&name==='__current_observed__')return 'Current observed '+data.objective_label;
  return (kind==='param'?'Parameter · ':kind==='metric'?'Metric · ':'Resource · ')+name.replaceAll('_',' ')}
-function renderStudyCustom(spec){const chart=node('study-custom-chart');if(!chart||!spec)return;const rows=data.candidates.map(candidate=>({candidate,x:studyField(candidate,spec.x),y:studyField(candidate,spec.y)}))
- .filter(row=>row.x!==null&&row.x!==undefined&&row.y!==null&&row.y!==undefined);const mode=spec.kind==='line'?'lines+markers':'markers';
- const trace=spec.kind==='bar'?{type:'bar',x:rows.map(row=>row.x),y:rows.map(row=>row.y),customdata:rows.map(row=>row.candidate.trial),marker:{color:'#58a6ff'},
-  hovertemplate:'x=%{x}<br>y=%{y}<br>trial=%{customdata}<extra></extra>'}:{type:'scatter',mode,x:rows.map(row=>row.x),y:rows.map(row=>row.y),
-  customdata:rows.map(row=>row.candidate.trial),marker:{size:10,color:rows.map(row=>Number(row.candidate.trial)),colorscale:'Viridis',showscale:true,colorbar:{title:'Trial'}},
-  hovertemplate:'x=%{x}<br>y=%{y}<br>trial=%{customdata}<extra></extra>'};Plotly.react(chart,[trace],baseLayout(spec.name,fieldLabel(spec.x),fieldLabel(spec.y)),config)}
-function showStudyCustom(id){const charts=Array.isArray(prefs.customCharts)?prefs.customCharts:[],spec=charts.find(item=>item.id===id)||charts[0];
- document.querySelectorAll('.saved-study-chart').forEach(button=>button.classList.toggle('active',button.dataset.id===spec?.id));if(spec){save({customChartId:spec.id});renderStudyCustom(spec)}}
-function renderStudyCharts(){const target=document.getElementById('study-saved-charts');target.replaceChildren();const charts=Array.isArray(prefs.customCharts)?prefs.customCharts:[];
- for(const spec of charts){const button=document.createElement('button');button.className='saved-chart saved-study-chart';button.dataset.id=spec.id;button.textContent=spec.name;button.addEventListener('click',()=>showStudyCustom(spec.id));
-  const remove=document.createElement('button');remove.textContent='×';remove.title='Delete '+spec.name;remove.addEventListener('click',()=>{const remaining=charts.filter(item=>item.id!==spec.id);save({customCharts:remaining,customChartId:remaining[0]?.id});renderStudyCharts()});
-  const wrap=document.createElement('span');wrap.append(button,remove);target.appendChild(wrap)}if(!charts.length){const empty=document.createElement('span');empty.className='muted';empty.textContent='No saved charts yet.';target.appendChild(empty)}showStudyCustom(prefs.customChartId)}
+const customCharts=LambdaForgeStudyCharts({data,node,config,baseLayout,studyField,fieldLabel,metricValue,
+ save,getPrefs:()=>prefs,palettes});
 const panelHeights=prefs.panelHeights||{};document.querySelectorAll('.panel').forEach((panel,index)=>{const view=panel.closest('.view'),id=(view?.id||'root')+':'+index;panel.dataset.resizeKey=id;
  if(Number.isFinite(Number(panelHeights[id])))panel.style.height=panelHeights[id]+'px'});
 const studyResizeObserver=new ResizeObserver(entries=>{const heights={...(prefs.panelHeights||{})};for(const entry of entries){if(entry.target.closest('.view')?.hidden)continue;
  heights[entry.target.dataset.resizeKey]=Math.round(entry.contentRect.height);entry.target.querySelectorAll('.js-plotly-plot,.plotly-graph-div').forEach(chart=>Plotly.Plots.resize(chart))}save({panelHeights:heights})});
-document.querySelectorAll('.panel').forEach(panel=>studyResizeObserver.observe(panel));renderStudyCharts();
+document.querySelectorAll('.panel').forEach(panel=>studyResizeObserver.observe(panel));customCharts.mount();
 document.querySelectorAll('.trial-compare').forEach(box=>box.addEventListener('change',renderComparison));
 if(Array.isArray(prefs.trials))document.querySelectorAll('.trial-compare').forEach(box=>box.checked=prefs.trials.includes(Number(box.value)));
-for(const [id,value] of [['trial-metric',prefs.metric],['parameter-select',prefs.parameter],['pair-select',prefs.pair],['interaction-kind',prefs.kind],['study-palette',prefs.palette],['resource-select',prefs.resource]])if(value!==undefined&&[...document.getElementById(id).options].some(o=>o.value===value))document.getElementById(id).value=value;
+for(const [id,value] of [['trial-metric',prefs.metric],['parameter-select',prefs.parameter],['parameter-metric',prefs.parameterMetric],['pair-select',prefs.pair],['interaction-kind',prefs.kind],['study-palette',prefs.palette],['resource-select',prefs.resource]])if(value!==undefined&&[...document.getElementById(id).options].some(o=>o.value===value))document.getElementById(id).value=value;
 document.getElementById('study-reverse').checked=Boolean(prefs.reverse);
 document.getElementById('trial-metric').addEventListener('change',updateRanking);document.getElementById('parameter-select').addEventListener('change',updateParameter);
+document.getElementById('parameter-metric').addEventListener('change',updateParameter);
 for(const id of ['pair-select','interaction-kind','study-palette','study-reverse'])document.getElementById(id).addEventListener('change',updateInteraction);
 document.getElementById('resource-select').addEventListener('change',updateResources);
-document.getElementById('save-study-chart').addEventListener('click',()=>{const charts=Array.isArray(prefs.customCharts)?prefs.customCharts:[],input=document.getElementById('study-chart-name');
- const spec={id:(globalThis.crypto?.randomUUID?.()||String(Date.now())),name:input.value.trim()||'Chart '+(charts.length+1),kind:document.getElementById('study-chart-kind').value,
-  x:document.getElementById('study-chart-x').value,y:document.getElementById('study-chart-y').value};save({customCharts:[...charts,spec],customChartId:spec.id});input.value='';renderStudyCharts()});
 function activate(target){document.querySelectorAll('.tab').forEach(tab=>tab.setAttribute('aria-selected',String(tab.dataset.target===target)));
  document.querySelectorAll('.view').forEach(view=>view.hidden=view.id!==target);save({tab:target});document.querySelectorAll('#'+target+' .js-plotly-plot').forEach(chart=>requestAnimationFrame(()=>Plotly.Plots.resize(chart)))}
 document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>activate(tab.dataset.target)));
 updateRanking();updateParameter();updateInteraction();updateResources();renderComparison();if(prefs.tab&&document.getElementById(prefs.tab))activate(prefs.tab);
+window.lfResearchServices={customCharts,save,getPrefs:()=>prefs,config,baseLayout};
 })();
 """
     metric_options = (
         '<option value="__selection__">Selection objective</option>'
         + "".join(
             f'<option value="{html.escape(name, quote=True)}">Objective component · {html.escape(name)}</option>'
-            for name in component_metric_names
+            for name in component_metric_names[:16]
         )
         + "".join(
             f'<option value="{html.escape(name, quote=True)}">Diagnostic · {html.escape(name)}</option>'
-            for name in diagnostic_metric_names
+            for name in sorted(
+                set(diagnostic_metric_names) | observed_metric_names - set(component_metric_names)
+            )[:16]
         )
     )
     parameter_options = "".join(
         f'<option value="{html.escape(name, quote=True)}">{html.escape(name)}</option>'
         for name in parameter_names
     )
-    pair_names = list(interactions.get("surfaces", {})) if isinstance(interactions.get("surfaces"), Mapping) else []
+    pair_names = (
+        list(interactions.get("surfaces", {}))
+        if isinstance(interactions.get("surfaces"), Mapping)
+        else []
+    )
     pair_options = "".join(
         f'<option value="{html.escape(str(name), quote=True)}">{html.escape(str(name))}</option>'
         for name in pair_names
@@ -750,9 +520,9 @@ updateRanking();updateParameter();updateInteraction();updateResources();renderCo
             if value.get("censored_observations")
             else "·"
         )
-        + "</td><td><input class=\"trial-compare\" type=\"checkbox\" value=\""
+        + '</td><td><input class="trial-compare" type="checkbox" value="'
         + html.escape(str(value.get("trial")), quote=True)
-        + "\"></td><td>"
+        + '"></td><td>'
         + html.escape(str(value.get("trial")))
         + "</td><td>"
         + html.escape(_display(value.get("mean")))
@@ -791,9 +561,7 @@ updateRanking();updateParameter();updateInteraction();updateResources();renderCo
         + "</td><td>"
         + html.escape(_display(_pruned_run(value).get("reference_candidate")))
         + "</td><td>"
-        + html.escape(
-            format_parameter_vector(value.get("parameters", {}), parameter_space)
-        )
+        + html.escape(format_parameter_vector(value.get("parameters", {}), parameter_space))
         + "</td></tr>"
         for value in candidates
     )
@@ -804,9 +572,11 @@ updateRanking();updateParameter();updateInteraction();updateResources();renderCo
             for name in parameter_names
         )
         + '<option value="metric:__selection__">Metric · selection objective</option>'
+        + '<option value="metric:__best_observed__">Metric · best observed objective (partial)</option>'
+        + '<option value="metric:__current_observed__">Metric · current observed objective</option>'
         + "".join(
             f'<option value="metric:{html.escape(name, quote=True)}">Metric · {html.escape(name)}</option>'
-            for name in metric_names
+            for name in metric_names[:16]
         )
         + "".join(
             f'<option value="resource:{name}">Resource · {label}</option>'
@@ -827,32 +597,42 @@ updateRanking();updateParameter();updateInteraction();updateResources();renderCo
         'content="width=device-width,initial-scale=1"><title>LambdaForge Study Analysis</title><style>'
         + style
         + '</style></head><body><div class="shell"><header><div><h1>Study Analysis dashboard</h1>'
-        '<p>Explore persisted evidence; every association remains descriptive or predictive.</p></div>'
+        "<p>Explore persisted evidence; every association remains descriptive or predictive.</p></div>"
         f'<span class="status">{status}</span></header><div class="cards"><div class="card"><small>Candidates</small><strong>{len(candidates)}</strong></div>'
         f'<div class="card"><small>Complete candidates</small><strong>{completed}</strong></div><div class="card"><small>Censored Runs</small><strong>{censored}</strong></div>'
         f'<div class="card"><small>Leading trial</small><strong>{html.escape(str(winning_trial or "—"))}</strong></div></div>'
-        '<nav class="tabs"><button class="tab" data-target="study-overview" aria-selected="true">Overview</button>'
+        '<nav class="tabs"><button class="tab" data-target="study-research" aria-selected="false">Research</button>'
+        '<button class="tab" data-target="study-metrics" aria-selected="false">Metrics & health</button>'
+        '<button class="tab" data-target="study-overview" aria-selected="true">Overview</button>'
         '<button class="tab" data-target="study-trials" aria-selected="false">Trials</button><button class="tab" data-target="study-parameters" aria-selected="false">Parameters</button>'
         '<button class="tab" data-target="study-interactions" aria-selected="false">Interactions</button><button class="tab" data-target="study-coverage" aria-selected="false">Coverage</button>'
         '<button class="tab" data-target="study-resources" aria-selected="false">Resources</button><button class="tab" data-target="study-findings" aria-selected="false">Findings & evidence</button>'
-        '<button class="tab" data-target="study-custom" aria-selected="false">My charts</button></nav>'
-        '<section class="view" id="study-overview"><div class="grid"><article class="panel wide"><h2>Candidate ranking</h2><div class="tools"><label>Displayed metric <select id="trial-metric">'
+        '<button class="tab" data-target="study-custom" aria-selected="false">Explore</button></nav>'
+        + workspace_html()
+        + '<section class="view" id="study-overview"><div class="grid"><article class="panel wide"><h2>Candidate ranking</h2><div class="tools"><label>Displayed metric <select id="trial-metric">'
         + metric_options
         + '</select></label></div><div class="plot" id="study-ranking">'
         + figure_html["ranking"]
         + '</div></article><article class="panel"><h2>Predictive importance</h2><div class="plot">'
         + figure_html["importance"]
         + '</div></article><article class="panel"><h2>Interpretation</h2><p class="note">Associations describe persisted evidence and fitted predictions; they are not causal. Predictive importance is meaningful only with the support and reliability shown below.</p>'
-        + (interpretation_html or '<div class="empty">No parameter conclusion is available yet.</div>')
-        + '</article></div></section>'
+        + (
+            interpretation_html
+            or '<div class="empty">No parameter conclusion is available yet.</div>'
+        )
+        + "</article></div></section>"
         '<section class="view" id="study-trials" hidden><div class="panel"><div class="tools"><span class="muted">Select at most two candidates to compare. Comparable ranking contains terminal selection evidence only. This ledger retains every attempted candidate; × means performance-pruned and its final selection remains unavailable.</span></div><div class="table-wrap"><table><thead><tr><th>State</th><th>Compare</th><th>Trial</th><th>Final selection</th><th>SE</th><th>Seeds</th><th>Censored</th><th>Partial best</th><th>Prune step</th><th>Prune reason</th><th>P(competitive)</th><th>Threshold</th><th>Reference</th><th>Parameters</th></tr></thead><tbody>'
         + trial_rows
         + '</tbody></table></div><div class="compare" id="trial-comparison"></div></div></section>'
         '<section class="view" id="study-parameters" hidden><div class="tools"><label>Parameter <select id="parameter-select">'
         + parameter_options
-        + '</select></label></div><div class="grid"><article class="panel wide"><h2>Adjusted response and uncertainty</h2><div class="plot" id="parameter-response">'
+        + '</select></label><label>Y metric <select id="parameter-metric">'
+        + metric_options
+        + '</select></label></div><div class="grid"><article class="panel wide"><h2>Observed metric by parameter value</h2><div class="plot" id="parameter-observed">'
+        + figure_html["observed"]
+        + '</div><p class="note" id="parameter-observed-status" role="status"></p></article><details class="panel wide"><summary class="tools">Persisted adjusted selection response and uncertainty (model evidence)</summary><div class="plot" id="parameter-response">'
         + figure_html["response"]
-        + '</div><p class="note">This is the response persisted by Study Analysis; it is not fitted again in the browser.</p></article><article class="panel wide"><h2>Observed exact-value summary</h2><div class="table-wrap"><table id="parameter-values"><thead><tr><th>Value</th><th>Complete candidates</th><th>Mean selection</th><th>Empirical SD</th></tr></thead><tbody></tbody></table></div></article></div></section>'
+        + '</div><p class="note">This model response describes the selection objective only. Changing Y metric updates the observed chart and table, not this persisted model.</p></details><article class="panel wide"><h2>Observed exact-value summary</h2><div class="table-wrap"><table id="parameter-values"><thead><tr><th>Value</th><th>Complete candidates</th><th id="parameter-value-metric">Mean metric</th><th>Empirical SD</th></tr></thead><tbody></tbody></table></div></article></div></section>'
         '<section class="view" id="study-interactions" hidden><div class="panel"><div class="tools"><label>Pair <select id="pair-select">'
         + pair_options
         + '</select></label><label>View <select id="interaction-kind"><option value="heatmap">Heatmap</option><option value="surface">3D surface</option></select></label><label>Colour scale <select id="study-palette"><option>Blue ↔ red</option><option>Purple ↔ green</option><option>Brown ↔ teal</option><option>Accessible</option></select></label><label><input id="study-reverse" type="checkbox"> Reverse</label></div><div class="plot" id="interaction-chart">'
@@ -873,20 +653,52 @@ updateRanking();updateParameter();updateInteraction();updateResources();renderCo
         '<div class="tools custom-builder"><label>Chart name <input id="study-chart-name" '
         'placeholder="My candidate view"></label><label>Type <select id="study-chart-kind">'
         '<option value="scatter">Scatter</option><option value="line">Line</option>'
-        '<option value="bar">Bar</option></select></label><label>X axis <select id="study-chart-x">'
+        '<option value="bar">Bar</option><option value="scatter3d">3D scatter</option>'
+        '<option value="parallel">Parallel coordinates</option>'
+        '<option value="heatmap">Observed heatmap</option><option value="surface">Observed 3D surface</option>'
+        '</select></label><label>X axis <select id="study-chart-x">'
         + study_field_options
         + '</select></label><label>Y axis <select id="study-chart-y">'
         + study_y_field_options
-        + '</select></label><button id="save-study-chart">Save chart</button></div>'
+        + '</select></label><label id="study-chart-z-control" hidden>Z / cell metric <select id="study-chart-z">'
+        + study_y_field_options
+        + '</select></label><label>Grouping <select id="study-chart-aggregate">'
+        '<option value="points">One point per trial</option><option value="mean">Mean per exact X value + SD</option>'
+        '</select></label><label>Colour scale <select id="study-chart-palette"><option>Accessible</option>'
+        "<option>Blue ↔ red</option><option>Purple ↔ green</option><option>Brown ↔ teal</option></select></label>"
+        '<label><input id="study-chart-reverse" type="checkbox">Reverse colours</label>'
+        '<label><input id="study-chart-partial" type="checkbox">Include partial / pruned observations</label>'
+        '<details id="study-chart-extra-control" open><summary>Add another Y metric (2D)</summary>'
+        '<label>Find metrics <input id="study-chart-metric-search" type="search" placeholder="accuracy, loss…"></label>'
+        '<div id="study-chart-extra-metrics" class="metric-checklist" role="group" aria-label="Additional Y metrics">'
+        + "".join(
+            f'<label><input type="checkbox" value="metric:{html.escape(name, quote=True)}">{html.escape(name)}</label>'
+            for name in metric_names[:16]
+        )
+        + '</div></details><button id="save-study-chart">Save chart</button>'
+        '<span class="muted">Live preview · Save chart keeps this view for reopening.</span></div>'
         '<div class="saved-charts" id="study-saved-charts"></div><div class="plot" '
         'id="study-custom-chart">'
         + figure_html["custom"]
-        + '</div><p class="note">Saved views are local presentation preferences over persisted '
-        'candidate evidence. They do not refit or control HPO.</p></div></section></div>'
+        + '</div><p class="note" id="study-chart-status" role="status" aria-live="polite"></p>'
+        '<p class="note">Axes use recorded hyperparameter values, not epochs. Metrics are persisted '
+        "trial/seed summaries, not new metric optima. Exact-value grouping averages trials equally, "
+        "with other parameters uncontrolled. Heatmap/surface cells are observed means, never model "
+        "predictions; untested combinations stay blank. Partial values are descriptive only. Saved "
+        "views stay in this HTML’s browser preferences; they do not refit or control HPO.</p></div></section></div>"
         '<script id="lf-study-data" type="application/json">'
         + payload
         + "</script><script>"
+        + files("lambdaforge.analysis")
+        .joinpath("assets/study-charts.js")
+        .read_text(encoding="utf-8")
+        + "</script><script>"
+        + files("lambdaforge.analysis")
+        .joinpath("assets/research-workspace.js")
+        .read_text(encoding="utf-8")
+        + "</script><script>"
         + script
+        + "</script><script>LambdaForgeResearchWorkspace({data:JSON.parse(document.getElementById('lf-study-data').textContent),...window.lfResearchServices}).mount();"
         + "</script></body></html>"
     )
     path = Path(output).expanduser().resolve()
@@ -1202,8 +1014,7 @@ def _metric_label(name: str, aliases: Mapping[str, Any]) -> str:
 def _metric_group(name: str) -> str:
     lowered = name.lower()
     if any(
-        token in lowered
-        for token in ("gpu", "cpu", "memory", "ram", "duration", "time", "seconds")
+        token in lowered for token in ("gpu", "cpu", "memory", "ram", "duration", "time", "seconds")
     ):
         return "Resources & timing"
     if lowered.startswith(("val_", "validation_")):
@@ -1313,7 +1124,7 @@ def _write_metric_dashboard(
             + html.escape(str(value["color"]), quote=True)
             + '"></span><span><strong>'
             + html.escape(str(value["label"]))
-            + '</strong><small>'
+            + "</strong><small>"
             + html.escape(str(value["name"]))
             + "</small></span></label>"
             for value in members
@@ -1323,13 +1134,11 @@ def _write_metric_dashboard(
             + html.escape(group, quote=True)
             + '" open><summary><span>'
             + html.escape(group)
-            + f'</span><small>{len(members)}</small></summary>{options}</details>'
+            + f"</span><small>{len(members)}</small></summary>{options}</details>"
         )
 
     all_steps = [float(step) for value in series for step in value.get("x", ())]
-    epoch_summary = (
-        f"{min(all_steps):g}–{max(all_steps):g}" if all_steps else "No observations"
-    )
+    epoch_summary = f"{min(all_steps):g}–{max(all_steps):g}" if all_steps else "No observations"
     context = " · ".join(
         value
         for value in (
@@ -1620,13 +1429,13 @@ if(preferences.tab&&document.getElementById(preferences.tab))activate(preference
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         "<title>LambdaForge metric dashboard</title><style>"
         + style
-        + "</style></head><body><div class=\"shell\"><header><div>"
+        + '</style></head><body><div class="shell"><header><div>'
         "<h1>Run metric dashboard</h1><p>Explore exact persisted scalar observations without "
-        "changing the scientific result.</p></div><div class=\"context\">"
+        'changing the scientific result.</p></div><div class="context">'
         + html.escape(context or "Interactive offline report")
-        + "</div></header><div class=\"cards\"><div class=\"card\"><small>Available metrics</small>"
-        f"<strong>{len(series)}</strong></div><div class=\"card\"><small>Observed epochs</small>"
-        f"<strong>{html.escape(epoch_summary)}</strong></div><div class=\"card\">"
+        + '</div></header><div class="cards"><div class="card"><small>Available metrics</small>'
+        f'<strong>{len(series)}</strong></div><div class="card"><small>Observed epochs</small>'
+        f'<strong>{html.escape(epoch_summary)}</strong></div><div class="card">'
         "<small>Selected metrics</small>"
         f'<strong id="selected-count">{len(defaults)}</strong></div></div>'
         '<div class="dashboard"><aside class="sidebar"><div class="sidebar-head"><h2>Metrics</h2>'
@@ -1660,21 +1469,21 @@ if(preferences.tab&&document.getElementById(preferences.tab))activate(preference
         "double-click to restore automatic limits.</p></section>"
         '<section class="view resizable" id="view-normalized" hidden><div class="plot-wrap">'
         + figures["normalized"]
-        + "</div><p class=\"note\">Each selected metric is independently mapped to 0–1 "
+        + '</div><p class="note">Each selected metric is independently mapped to 0–1 '
         "over its observed "
         "range. This compares trajectory shape, not absolute scientific magnitude.</p></section>"
         '<section class="view resizable" id="view-snapshot" hidden><div class="plot-wrap">'
         + figures["snapshot"]
-        + "</div><p class=\"note\">Latest persisted value and change from the first observation. "
+        + '</div><p class="note">Latest persisted value and change from the first observation. '
         "Metrics may "
         "use different units, so compare magnitudes carefully.</p></section>"
         '<section class="view resizable" id="view-correlation" hidden><div class="view-tools">'
         '<label>Colour scale <select id="correlation-palette"><option>Blue ↔ red</option>'
-        '<option>Purple ↔ green</option><option>Brown ↔ teal</option><option>Accessible</option>'
+        "<option>Purple ↔ green</option><option>Brown ↔ teal</option><option>Accessible</option>"
         '</select></label><label><input id="correlation-reverse" type="checkbox"> Reverse</label>'
         '</div><div class="plot-wrap">'
         + figures["correlation"]
-        + "</div><p class=\"note\">Pearson correlation uses only epochs shared by each pair. "
+        + '</div><p class="note">Pearson correlation uses only epochs shared by each pair. '
         "Association is "
         "descriptive and does not imply causality.</p></section>"
         '<section class="view resizable" id="view-relationship" hidden><div class="view-tools">'
@@ -1701,14 +1510,14 @@ if(preferences.tab&&document.getElementById(preferences.tab))activate(preference
         '<div class="saved-charts" id="saved-charts"></div><div class="plot-wrap" id="custom-chart">'
         + figures["custom"]
         + '</div><p class="note">Saved charts are presentation preferences in this HTML only. '
-        'They never alter persisted observations.</p></section></main></div></div>'
+        "They never alter persisted observations.</p></section></main></div></div>"
         '<dialog id="category-dialog"><div class="dialog-head">'
-        '<strong>Organize metric categories</strong><button data-close-category>Close</button></div>'
+        "<strong>Organize metric categories</strong><button data-close-category>Close</button></div>"
         '<div class="dialog-body"><p class="muted">Create presentation-only categories and assign '
         'any metric. Original names and evidence remain unchanged.</p><div class="category-create">'
         '<input id="new-category-name" placeholder="New category"><button id="add-category">Add</button>'
         '</div><div id="category-assignments"></div></div><div class="dialog-foot">'
-        '<button data-close-category>Done</button></div></dialog>'
+        "<button data-close-category>Done</button></div></dialog>"
         f'<script id="lf-metric-data" type="application/json">{payload}</script>'
         f"<script>{script}</script>"
         "</body></html>"

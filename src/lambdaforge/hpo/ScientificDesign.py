@@ -47,14 +47,57 @@ class SeedNoiseEstimate:
     repeated_candidates: int
     residual_degrees_of_freedom: int
     shared_seed_comparisons: int
+    variance_samples: tuple[float, ...] = ()
+    context_coverage: float = 0.0
+    context_variances: tuple[float, ...] = ()
+
+    @property
+    def relative_uncertainty(self) -> float:
+        if self.variance is None or self.residual_degrees_of_freedom <= 0:
+            return 1.0
+        sampling = math.sqrt(2.0 / self.residual_degrees_of_freedom)
+        heterogeneity = (
+            statistics.pstdev(self.context_variances)
+            / max(self.variance, 1e-12)
+            / math.sqrt(self.repeated_candidates)
+            if len(self.context_variances) > 1
+            else 0.0
+        )
+        return min(1.0, max(sampling, 1.0 - self.context_coverage, heterogeneity))
 
     @property
     def calibrated(self) -> bool:
-        return self.variance is not None and self.residual_degrees_of_freedom > 0
+        # Resolve variance more accurately than the contextual support it is extrapolated to.
+        # A single architecture cannot validate a global noise model, regardless of its sigma.
+        return (
+            self.variance is not None
+            and self.context_coverage > 0
+            and math.sqrt(2.0 / max(1, self.residual_degrees_of_freedom)) < self.context_coverage
+            and self.relative_uncertainty < self.context_coverage
+        )
+
+    @property
+    def predictive_variance(self) -> float | None:
+        if not self.variance_samples:
+            return self.variance
+        pooled = self.variance_samples[int(0.9 * (len(self.variance_samples) - 1))]
+        # Do not make a visibly noisy architecture artificially precise because most repeated
+        # contexts are quiet. This is a conservative pooled fallback, not a conditional model.
+        contexts = sorted(self.context_variances)
+        contextual = contexts[math.ceil(0.9 * (len(contexts) - 1))] if contexts else 0.0
+        return max(pooled, contextual)
+
+    def draw_variance(self, rng: random.Random) -> float | None:
+        return rng.choice(self.variance_samples) if self.variance_samples else self.variance
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "status": "calibrated" if self.calibrated else "unresolved",
+            "seed_noise_version": 2,
+            "status": "calibrated"
+            if self.calibrated
+            else "provisional"
+            if self.variance is not None
+            else "unresolved",
             "variance": self.variance,
             "standard_deviation": math.sqrt(self.variance) if self.variance is not None else None,
             "shared_seed_effects": {
@@ -63,6 +106,27 @@ class SeedNoiseEstimate:
             "repeated_candidates": self.repeated_candidates,
             "residual_degrees_of_freedom": self.residual_degrees_of_freedom,
             "shared_seed_comparisons": self.shared_seed_comparisons,
+            "relative_uncertainty": self.relative_uncertainty,
+            "predictive_variance": self.predictive_variance,
+            "context_coverage": self.context_coverage,
+            "sigma_range": (
+                [
+                    math.sqrt(self.variance_samples[int(p * (len(self.variance_samples) - 1))])
+                    for p in (0.05, 0.95)
+                ]
+                if self.variance_samples
+                else None
+            ),
+            "variance_uncertainty_method": (
+                "deterministic-scaled-inverse-chi-square-realizations; "
+                "conditional-on-normal-within-candidate-model"
+            ),
+            "heterogeneity_status": "unresolved"
+            if len(self.context_variances) < 2
+            else "possible"
+            if self.context_variances
+            and statistics.pstdev(self.context_variances) > (self.variance or 0)
+            else "pooled-provisional",
             "method": "pooled-within-candidate-residuals-with-shared-seed-effects",
             "between_candidate_spread_used_as_seed_noise": False,
         }
@@ -233,10 +297,15 @@ class _ScientificDesignBasis:
 
 
 class SeedNoiseModel:
-    """Fit ``y[c,s] = f(x_c) + b_s + epsilon[c,s]`` by pooled demeaning."""
+    """Fit pooled seed variability, paired shared effects and variance uncertainty."""
 
     @staticmethod
-    def fit(outcomes: Mapping[int, Mapping[int | None, float]]) -> SeedNoiseEstimate:
+    def fit(
+        outcomes: Mapping[int, Mapping[int | None, float]],
+        *,
+        parameters: Mapping[int, Mapping[str, Any]] | None = None,
+        parameter_space: ParameterSpace | None = None,
+    ) -> SeedNoiseEstimate:
         repeated = {
             int(trial): {seed: float(value) for seed, value in values.items()}
             for trial, values in outcomes.items()
@@ -260,20 +329,46 @@ class SeedNoiseModel:
         residuals: list[float] = []
         degrees = 0
         for _trial, values in repeated.items():
-            adjusted = [
-                value - (shared_effects.get(seed, 0.0) if seed is not None else 0.0)
-                for seed, value in values.items()
-            ]
+            adjusted = [value for seed, value in values.items()]
             center = statistics.fmean(adjusted)
             residuals.extend(value - center for value in adjusted)
             degrees += len(adjusted) - 1
+        # Seed effects are part of uncertainty in a population mean, even when they cancel in
+        # paired differences. Fitting their point values must not manufacture zero global noise.
         variance = sum(value * value for value in residuals) / degrees if degrees > 0 else None
+        shared_df = max(1, len(shared_effects) - 1)
+        effective_df = min(degrees, shared_df) if shared_effects else degrees
+        coverage = 1.0 - 1.0 / len(repeated)
+        if parameters and parameter_space and repeated:
+            references = sorted(set(parameters) & set(outcomes))
+            references = references[:: max(1, math.ceil(len(references) / 32))]
+            contexts = sorted(set(repeated) & set(parameters))[:32]
+            if contexts and references:
+                coverage *= 1.0 - statistics.fmean(
+                    min(
+                        parameter_space.distance(parameters[trial], parameters[other])
+                        for other in contexts
+                    )
+                    for trial in references
+                )
+        rng = random.Random(f"seed-variance-v2:{effective_df}")
+        draws = tuple(
+            sorted(
+                max(variance or 0.0, 1e-12)
+                * effective_df
+                / max(rng.gammavariate(effective_df / 2.0, 2.0), 1e-12)
+                for _ in range(256)
+            )
+        )
         return SeedNoiseEstimate(
             max(variance, 0.0) if variance is not None else None,
             shared_effects,
             len(repeated),
-            degrees,
-            sum(len(values) for values in residuals_by_seed.values() if len(values) >= 2),
+            effective_df,
+            sum(len(values) * (len(values) - 1) // 2 for values in residuals_by_seed.values()),
+            draws,
+            max(0.0, coverage),
+            tuple(statistics.variance(values.values()) for values in repeated.values()),
         )
 
 
@@ -380,13 +475,10 @@ class ScientificQuestionAnalyzer:
             schema = geometry.to_schema()
             inferred_schema = inferred.to_schema()
             schema.update(
-                {
-                    name: inferred_schema[name]
-                    for name in sorted(pool_names - set(geometry.names))
-                }
+                {name: inferred_schema[name] for name in sorted(pool_names - set(geometry.names))}
             )
             geometry = ParameterSpace.from_schema(schema, tuple(pool.values()))
-        noise = SeedNoiseModel.fit(outcomes)
+        noise = SeedNoiseModel.fit(outcomes, parameters=parameters, parameter_space=geometry)
         natural_scale = cls._natural_scale(rows, objective)
         resamples = cls._resample_count(
             rows,
@@ -503,8 +595,10 @@ class ScientificQuestionAnalyzer:
                     else 0.0
                 )
             else:
-                materiality = 1.0 if question.get("missing_evidence") else max(
-                    float(question.get("confidence", 0.0)), 0.25
+                materiality = (
+                    1.0
+                    if question.get("missing_evidence")
+                    else max(float(question.get("confidence", 0.0)), 0.25)
                 )
             question["materiality"] = min(1.0, max(0.0, materiality))
             predictive_value = entropy * question["materiality"]
@@ -519,6 +613,38 @@ class ScientificQuestionAnalyzer:
             question["remaining_information_value"] = 1.0 - (
                 (1.0 - predictive_value) * (1.0 - support_value)
             )
+            question["stability_diagnostics"] = {
+                "meaning": (
+                    "agreement across plausible evidence realizations, not truth probability"
+                ),
+                "realizations": resamples,
+                "monte_carlo_resolution": 1.0 / resamples,
+                "seed_noise": {
+                    key: value
+                    for key, value in noise.to_dict().items()
+                    if key
+                    in {
+                        "status",
+                        "repeated_candidates",
+                        "residual_degrees_of_freedom",
+                        "sigma_range",
+                        "context_coverage",
+                        "relative_uncertainty",
+                    }
+                },
+                "response_support": question.get("response_support"),
+                "missing_evidence": question.get("missing_evidence", []),
+                "remaining_information_value": question["remaining_information_value"],
+                "uncertainty_sources": [
+                    source
+                    for source, present in (
+                        ("seed variance and context extrapolation", not noise.calibrated),
+                        ("insufficient direct response support", support_debt > 0),
+                        ("candidate/context/predictive instability", entropy > 0),
+                    )
+                    if present
+                ],
+            }
         uncertainty = (
             statistics.fmean(float(value["remaining_information_value"]) for value in questions)
             if questions
@@ -555,7 +681,7 @@ class ScientificQuestionAnalyzer:
             ),
         )
         result = {
-            "scientific_question_version": 2,
+            "scientific_question_version": 3,
             "status": "available" if rows else "insufficient",
             "objective": dict(objective),
             "practical_margin": margin,
@@ -740,6 +866,7 @@ class ScientificQuestionAnalyzer:
         realizations: list[dict[int, float]] = []
         trials = tuple(sorted(outcomes))
         for _ in range(count):
+            variance_draw = noise.draw_variance(rng)
             selected_seed = rng.choice(seed_labels) if seed_labels else None
             realization: dict[int, float] = {}
             # Candidate is the experimental unit.  Perturbing only seed values would make a
@@ -759,12 +886,16 @@ class ScientificQuestionAnalyzer:
                     if selected_seed not in values:
                         continue
                     sampled = values[selected_seed]
+                    # A sparse shared-seed block is not evidence that unseen seeds are identical.
+                    # Retain uncertainty in the candidate mean while preserving block pairing.
+                    if variance_draw is not None and not noise.calibrated:
+                        sampled += rng.gauss(0.0, math.sqrt(variance_draw / len(values)))
                 elif len(values) > 1:
                     sampled = rng.choice(tuple(values.values()))
                 else:
                     sampled = next(iter(values.values()))
                     sigma = (
-                        math.sqrt(noise.variance) if noise.variance is not None else fallback_sigma
+                        math.sqrt(variance_draw) if variance_draw is not None else fallback_sigma
                     )
                     sampled += rng.gauss(0.0, sigma)
                 realization[trial] = float(sampled)
@@ -850,8 +981,7 @@ class ScientificQuestionAnalyzer:
                 "surrogate_only": [
                     _display_label(value)
                     for value in levels
-                    if _label(value) not in direct_labels
-                    and _label(value) not in censored_labels
+                    if _label(value) not in direct_labels and _label(value) not in censored_labels
                 ],
             }
             return result
@@ -983,13 +1113,9 @@ class ScientificQuestionAnalyzer:
         result["best_value_probability"] = predictive_best
         result["best_value_probability_semantics"] = "surrogate-resampling-frequency"
         result["response_support"] = {
-            "direct": [
-                _display_label(value) for value in levels if _label(value) in direct_labels
-            ],
+            "direct": [_display_label(value) for value in levels if _label(value) in direct_labels],
             "censored_only": [
-                _display_label(value)
-                for value in levels
-                if _label(value) in censored_values
+                _display_label(value) for value in levels if _label(value) in censored_values
             ],
             "surrogate_only": [
                 _display_label(value)
@@ -1019,10 +1145,14 @@ class ScientificQuestionAnalyzer:
                 predictive_exact.descriptive_stability,
             )
             result["predictive_conclusion"] = predictive_exact.to_dict()
-        result["modal_hypothesis"] = {
-            "token": max(token_distribution, key=lambda value: token_distribution[value]),
-            "probability": max(token_distribution.values()),
-        } if token_distribution else {"token": "UNRESOLVED", "probability": 1.0}
+        result["modal_hypothesis"] = (
+            {
+                "token": max(token_distribution, key=lambda value: token_distribution[value]),
+                "probability": max(token_distribution.values()),
+            }
+            if token_distribution
+            else {"token": "UNRESOLVED", "probability": 1.0}
+        )
         result["exact_conclusion"] = exact.to_dict()
         result["conclusion_kind"] = exact.kind
         result["descriptive_stability"] = exact.descriptive_stability
@@ -1098,9 +1228,7 @@ class ScientificQuestionAnalyzer:
     ) -> dict[str, Any]:
         dominant = max(probabilities, key=lambda key: probabilities[key])
         exact_kind = (
-            "UNRESOLVED"
-            if dominant in {"NO_CLEAR_PREFERENCE", "WEAK_PREFERENCE"}
-            else dominant
+            "UNRESOLVED" if dominant in {"NO_CLEAR_PREFERENCE", "WEAK_PREFERENCE"} else dominant
         )
         stable_confidence = (
             float(confidence) if confidence is not None else float(probabilities[dominant])
@@ -1195,9 +1323,7 @@ class ScientificQuestionAnalyzer:
         response = [item for item in value.get("response", ()) if isinstance(item, Mapping)]
         exact = value.get("exact_conclusion")
         exact_values = (
-            [str(item) for item in exact.get("values", ())]
-            if isinstance(exact, Mapping)
-            else []
+            [str(item) for item in exact.get("values", ())] if isinstance(exact, Mapping) else []
         )
         if kind == "CONTEXT_DEPENDENT":
             interactions = value.get("main_interactions", ())
@@ -1213,8 +1339,7 @@ class ScientificQuestionAnalyzer:
         if kind == "PRACTICALLY_EQUIVALENT":
             values = f" ({', '.join(exact_values)})" if exact_values else ""
             return (
-                f"{name} values{values} are practically equivalent on the authored objective "
-                "scale."
+                f"{name} values{values} are practically equivalent on the authored objective scale."
             )
         if kind == "FLAT":
             return (
@@ -1844,9 +1969,7 @@ class ExperimentalDesignPolicy:
         targets: list[tuple[float, str, str, float, float]] = []
         for question in questions:
             entropy = min(1.0, max(0.0, float(question.get("entropy", 0.0) or 0.0)))
-            support_debt = min(
-                1.0, max(0.0, float(question.get("support_debt", 0.0) or 0.0))
-            )
+            support_debt = min(1.0, max(0.0, float(question.get("support_debt", 0.0) or 0.0)))
             information_basis = max(
                 entropy,
                 support_debt,
@@ -1883,8 +2006,7 @@ class ExperimentalDesignPolicy:
                 )
                 support = len(observed_same)
                 attempted_same = sum(
-                    self.candidates[trial].get(name, _INACTIVE) == value
-                    for trial in search_covered
+                    self.candidates[trial].get(name, _INACTIVE) == value for trial in search_covered
                 )
                 # A censored attempt resolves geometry/search debt but not response debt.  It
                 # therefore reduces novelty without making the information value disappear.
@@ -1925,9 +2047,7 @@ class ExperimentalDesignPolicy:
                 default=1.0,
             )
             support = len(observed_same)
-            information = (
-                information_basis * (0.5 + 0.5 * diversity) / math.sqrt(1 + support)
-            )
+            information = information_basis * (0.5 + 0.5 * diversity) / math.sqrt(1 + support)
             targets.append(
                 (
                     information,
@@ -2123,7 +2243,7 @@ class _MixedKnnModel:
             else 0.0
         )
         seed = (
-            math.sqrt(self.noise.variance)
+            math.sqrt(self.noise.predictive_variance or 0.0)
             if self.noise is not None and self.noise.variance is not None
             else 0.0
         )

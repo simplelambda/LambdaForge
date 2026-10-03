@@ -218,9 +218,7 @@ class ResourceTrajectoryStatistics:
 
         first_step = self.last_step is None and sample.step is not None
         step_changed = (
-            self.last_step is not None
-            and sample.step is not None
-            and sample.step != self.last_step
+            self.last_step is not None and sample.step is not None and sample.step != self.last_step
         )
         phase_changed = self.last_phase is not None and phase != self.last_phase
         if self.last_phase is None or phase_changed:
@@ -643,12 +641,10 @@ class ActiveResourceEvidence:
                 **{
                     key: item
                     for key, item in sample.items()
-                    if key in ResourceTrajectorySample.__dataclass_fields__
-                    and key != "phases_seen"
+                    if key in ResourceTrajectorySample.__dataclass_fields__ and key != "phases_seen"
                 },
                 phases_seen=tuple(
-                    str(item) for item in sample.get("phases_seen", ())
-                    if isinstance(item, str)
+                    str(item) for item in sample.get("phases_seen", ()) if isinstance(item, str)
                 ),
             )
             for sample in value.get("trajectory", ())
@@ -760,6 +756,11 @@ class ResourceProfileObservation:
     checkpoint_duration_seconds: float | None = None
     trajectory_statistics: Mapping[str, Any] = field(default_factory=dict)
     observation_version: int = 2
+    physical_peak_bytes: int = 0
+    sampled_peak_upper_bytes: int | None = None
+    sampling_interval_seconds: float | None = None
+    sampled_complete: bool = False
+    throughput_concurrency: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -812,6 +813,7 @@ class ResourcePrediction:
     sample_weights: tuple[float, ...] = ()
     duration_samples: tuple[float, ...] = ()
     duration_source: str = "unknown"
+    sampled_history_count: int = 0
 
     @property
     def commitment_bytes(self) -> int:
@@ -862,8 +864,7 @@ class ResourceDemandModel:
             for value in self.observations
             if value.predicted_fit_probability is not None
             and value.placement_succeeded is not None
-            and int(float(value.predicted_fit_probability) * 10)
-            == min(9, int(probability * 10))
+            and int(float(value.predicted_fit_probability) * 10) == min(9, int(probability * 10))
         ]
         if not comparable:
             return probability
@@ -871,9 +872,7 @@ class ResourceDemandModel:
         # Beta prior centred on the model probability; evidence widens/corrects naturally.
         return (successes + 2.0 * probability) / (len(comparable) + 2.0)
 
-    def checkpoint_duration(
-        self, compatibility_key: str, hardware: str
-    ) -> float | None:
+    def checkpoint_duration(self, compatibility_key: str, hardware: str) -> float | None:
         """Return a compatible observed checkpoint cost, or unknown when absent."""
         values = [
             float(value.checkpoint_duration_seconds)
@@ -982,16 +981,14 @@ class ResourceDemandModel:
         provisional_bounds = [value.running_peak_bytes for value in active_matches]
         known_lower = max([user_minimum_bytes, observed_prefix_peak_bytes, *bounds], default=0)
         provisional_lower = max([known_lower, *provisional_bounds], default=known_lower)
-        exact_peaks = [value.observed_peak_bytes for value in evidence if value.peak_is_exact]
+        exact_peaks = [peak for value in evidence if (peak := _profile_peak(value)) is not None]
         censored = [
             max(value.observed_peak_bytes, value.lower_bound_bytes)
             for value in evidence
-            if not value.peak_is_exact
+            if _profile_peak(value) is None
         ]
         exact_durations = [
-            value.duration_seconds
-            for value in candidate_matches
-            if value.duration_seconds > 0
+            value.duration_seconds for value in candidate_matches if value.duration_seconds > 0
         ]
         nearby_durations = [
             value.duration_seconds for value in evidence if value.duration_seconds > 0
@@ -1030,8 +1027,10 @@ class ResourceDemandModel:
                 active_weights: list[float] = []
                 for value in active_near:
                     distance = _mixed_distance(parameters, value.parameters, self.parameter_space)
-                    proximity = 1.0 if value in active_matches else math.exp(
-                        -distance / max(support_scale, 1e-12)
+                    proximity = (
+                        1.0
+                        if value in active_matches
+                        else math.exp(-distance / max(support_scale, 1e-12))
                     )
                     weights = _normalized_weights(
                         value.future_peak_weights, len(value.future_peak_samples)
@@ -1141,12 +1140,11 @@ class ResourceDemandModel:
                 max(value.observed_peak_bytes, value.lower_bound_bytes)
                 * max(
                     0.0,
-                    1.0
-                    - _mixed_distance(parameters, value.parameters, self.parameter_space),
+                    1.0 - _mixed_distance(parameters, value.parameters, self.parameter_space),
                 )
             )
             for value in evidence
-            if not value.peak_is_exact
+            if _profile_peak(value) is None
             and max(value.observed_peak_bytes, value.lower_bound_bytes) > 0
         ]
         if censored_tail:
@@ -1173,7 +1171,7 @@ class ResourceDemandModel:
             validation = [
                 value.observed_peak_bytes
                 for value in evidence
-                if value.peak_is_exact and value.peak_phase == "validation"
+                if _profile_peak(value) is not None and value.peak_phase == "validation"
             ]
             upper = max(upper, max(validation, default=0))
         return remember(
@@ -1204,7 +1202,7 @@ class ResourceDemandModel:
                     if all(
                         value.measurement_quality == "terminal-high-quality"
                         for value in evidence
-                        if value.peak_is_exact
+                        if _profile_peak(value) is not None
                     )
                     else "sampled-physical"
                 ),
@@ -1212,6 +1210,7 @@ class ResourceDemandModel:
                 _normalized_weights((), len(calibrated)),
                 tuple(float(value) for value in durations),
                 duration_source,
+                sum(value.sampled_complete for value in evidence),
             )
         )
 
@@ -1220,7 +1219,7 @@ class ResourceDemandModel:
             value.throughput
             for value in self.observations
             if value.compatibility_key == compatibility_key
-            and value.co_runners + 1 == concurrency
+            and (value.throughput_concurrency or value.co_runners + 1) == concurrency
             and value.throughput is not None
             and value.throughput > 0
         ]
@@ -1269,7 +1268,7 @@ class ResourceDemandModel:
             value.throughput
             for value in self.observations
             if value.compatibility_key == compatibility_key
-            and value.co_runners == 0
+            and (value.throughput_concurrency or value.co_runners + 1) == 1
             and value.throughput is not None
             and value.throughput > 0
         ]
@@ -1277,7 +1276,7 @@ class ResourceDemandModel:
             value.throughput
             for value in self.observations
             if value.compatibility_key == compatibility_key
-            and value.co_runners + 1 == concurrency
+            and (value.throughput_concurrency or value.co_runners + 1) == concurrency
             and value.throughput is not None
             and value.throughput > 0
         ]
@@ -1520,9 +1519,11 @@ class WaitRegretTracker:
         if previous is not None and previous.get("time") is not None:
             # Close the previous physical integration segment at its previous rate. A changing
             # frontier/hazard/checkpoint starts a new segment but never erases sunk idle loss.
-            regret += max(0.0, now - float(previous["time"])) * float(
-                previous.get("usable", 0.0)
-            ) * float(previous.get("rate", 0.0))
+            regret += (
+                max(0.0, now - float(previous["time"]))
+                * float(previous.get("usable", 0.0))
+                * float(previous.get("rate", 0.0))
+            )
         reset_reason = None
         if not actions:
             regret, reset_reason = 0.0, "no-pending-scientific-work"
@@ -1554,11 +1555,7 @@ class WaitRegretTracker:
         return {
             "wait_regret_version": 1,
             "states": {
-                str(gpu): {
-                    key: value
-                    for key, value in state.items()
-                    if key != "time"
-                }
+                str(gpu): {key: value for key, value in state.items() if key != "time"}
                 for gpu, state in self._states.items()
             },
         }
@@ -1637,10 +1634,10 @@ class GPUPlacementPlanner:
                 state, reason = self._fit_state(action, device)
                 probability = _fit_probability(prediction, device.admission_headroom_bytes)
                 adjusted_duration = self.model.adjusted_duration(
-                        _action_compatibility(action, device),
-                        prediction.predicted_duration_seconds,
-                        len(device.active) + 1,
-                    )
+                    _action_compatibility(action, device),
+                    prediction.predicted_duration_seconds,
+                    len(device.active) + 1,
+                )
                 duration = adjusted_duration if adjusted_duration is not None else math.inf
                 slack = device.admission_headroom_bytes - prediction.commitment_bytes
                 if state == "ADMITTED" and self._hurts_throughput(action, device):
@@ -1778,9 +1775,7 @@ class GPUPlacementPlanner:
             )
             self.wait_regret.reset(
                 device.index,
-                reason=(
-                    "baseline-progress-admitted" if baseline_lane else "safe-work-admitted"
-                ),
+                reason=("baseline-progress-admitted" if baseline_lane else "safe-work-admitted"),
             )
         # Conservative upper envelopes are deliberately broad at cold start.  Once live evidence
         # exists, evaluate one incremental co-location experiment rather than waiting for a long
@@ -1959,9 +1954,7 @@ class GPUPlacementPlanner:
         # but allow different resource questions to be explored in parallel on larger grants.
         # One sibling always remains outside an unvalidated packing as the protected progress
         # lane; this is a structural invariant rather than a configurable GPU count.
-        interchangeable = tuple(
-            other for other in all_devices if other.hardware == device.hardware
-        )
+        interchangeable = tuple(other for other in all_devices if other.hardware == device.hardware)
         exploring = tuple(
             value
             for other in interchangeable
@@ -2017,9 +2010,7 @@ class GPUPlacementPlanner:
         expected_growth = sum(value.expected_residual_growth_bytes for value in device.active)
         physical_margin = max(
             0,
-            device.free_bytes
-            - prediction.known_lower_bound_bytes
-            - expected_growth,
+            device.free_bytes - prediction.known_lower_bound_bytes - expected_growth,
         )
         pressure = 1.0 - physical_margin / max(1, device.free_bytes)
         probability *= max(0.0, 1.0 - peak_hazard * max(0.0, pressure))
@@ -2045,9 +2036,7 @@ class GPUPlacementPlanner:
         # scheduling decision is still a coherent value-of-information unit; this replaces the
         # former and highly distorting fiction that every unknown Run lasts one second.
         scheduling_window_value = (
-            opportunity_rate * horizon
-            if opportunity_rate > 0 and horizon is not None
-            else 1.0
+            opportunity_rate * horizon if opportunity_rate > 0 and horizon is not None else 1.0
         )
         information = (
             entropy
@@ -2057,9 +2046,7 @@ class GPUPlacementPlanner:
             * (device.free_bytes / max(1, device.total_bytes))
         )
         science_completed = (
-            probability
-            * scientific_rate
-            * min(candidate_duration, horizon)
+            probability * scientific_rate * min(candidate_duration, horizon)
             if scientific_rate is not None
             and candidate_duration is not None
             and horizon is not None
@@ -2254,10 +2241,7 @@ class GPUPlacementPlanner:
             _action_compatibility(action, device), max(1, current - 1)
         )
         already_saturated = (
-            current > 1
-            and previous is not None
-            and before is not None
-            and before <= previous
+            current > 1 and previous is not None and before is not None and before <= previous
         )
         predicted_regression = before is not None and after is not None and after <= before
         return already_saturated or predicted_regression
@@ -2308,8 +2292,17 @@ class ResourceHistoryStore:
         self._last_ledger_signature: str | None = None
         self._last_exploration_signature: str | None = None
         self._last_trace_signature: str | None = None
+        self._blocked_summary: dict[str, Any] = {}
         if self.study_root is not None:
             self.study_root.mkdir(parents=True, exist_ok=True)
+            summary_path = self.study_root / "blocked-summary.json"
+            if summary_path.is_file() and not summary_path.is_symlink():
+                try:
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                    if isinstance(summary, dict):
+                        self._blocked_summary = summary
+                except (OSError, ValueError):
+                    pass
 
     def load(self) -> tuple[ResourceProfileObservation, ...]:
         records = list(self._memory)
@@ -2359,11 +2352,7 @@ class ResourceHistoryStore:
             return ()
         try:
             decoded = json.loads(path.read_text(encoding="utf-8"))
-            items = (
-                decoded.get("items", ())
-                if isinstance(decoded, Mapping)
-                else decoded
-            )
+            items = decoded.get("items", ()) if isinstance(decoded, Mapping) else decoded
             if not isinstance(items, list):
                 return ()
             return tuple(
@@ -2419,17 +2408,36 @@ class ResourceHistoryStore:
     def record_decisions(self, decisions: Sequence[AdmissionDecision]) -> None:
         if self.study_root is None:
             return
-        signature = _digest(
-            {
-                "decisions": [
-                    {
-                        key: value
-                        for key, value in decision.to_dict().items()
-                        if key != "timestamp_utc"
-                    }
-                    for decision in decisions
-                ]
+        now = datetime.now(timezone.utc).isoformat()
+        for decision in decisions:
+            if decision.state != "RESOURCE_BLOCKED":
+                continue
+            key = decision.candidate_key
+            previous = self._blocked_summary.get(key, {})
+            self._blocked_summary[key] = {
+                "blocked_count": int(previous.get("blocked_count", 0)) + 1,
+                "first_seen": previous.get("first_seen", now),
+                "last_seen": now,
+                "representative": decision.to_dict(),
             }
+
+        # Diagnostic precision coalesces numeric polling jitter; authoritative trace and safety
+        # calculations retain the exact bytes. Replace compact counters, never append poll spam.
+        atomic_write_json(self.study_root / "blocked-summary.json", self._blocked_summary)
+
+        def presentation(value: Any) -> Any:
+            if isinstance(value, Mapping):
+                return {
+                    key: presentation(item) for key, item in value.items() if key != "timestamp_utc"
+                }
+            if isinstance(value, list | tuple):
+                return [presentation(item) for item in value]
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                return format(value, ".2g")
+            return value
+
+        signature = _digest(
+            {"decisions": [presentation(decision.to_dict()) for decision in decisions]}
         )
         if signature == self._last_decision_signature:
             return
@@ -2437,9 +2445,7 @@ class ResourceHistoryStore:
         for decision in decisions:
             self._append_mapping(self.study_root / "admission-decisions.jsonl", decision.to_dict())
 
-    def record_exploration_evaluations(
-        self, evaluations: Sequence[ExplorationEvaluation]
-    ) -> None:
+    def record_exploration_evaluations(self, evaluations: Sequence[ExplorationEvaluation]) -> None:
         """Persist changed WHY-WAIT/WHY-EXPLORE evidence without poll-cycle spam."""
         if self.study_root is None or not evaluations:
             return
@@ -2461,8 +2467,7 @@ class ResourceHistoryStore:
                             else 0
                         ),
                         "delta_sign": (
-                            value.final_delta_value is not None
-                            and value.final_delta_value > 0
+                            value.final_delta_value is not None and value.final_delta_value > 0
                         ),
                     }
                     for value in bounded
@@ -2473,16 +2478,12 @@ class ResourceHistoryStore:
             return
         self._last_exploration_signature = signature
         for value in bounded:
-            self._append_mapping(
-                self.study_root / "exploration-evaluations.jsonl", value.to_dict()
-            )
+            self._append_mapping(self.study_root / "exploration-evaluations.jsonl", value.to_dict())
         if not any(value.accepted for value in bounded):
             leading = max(
                 bounded,
                 key=lambda value: (
-                    value.final_delta_value
-                    if value.final_delta_value is not None
-                    else -math.inf
+                    value.final_delta_value if value.final_delta_value is not None else -math.inf
                 ),
             )
             self.record_event("RESOURCE_WAIT", leading.to_dict())
@@ -2540,15 +2541,9 @@ class ResourceHistoryStore:
                     "resource_states": [item.resource_state for item in value.active],
                     "active_candidates": [item.candidate_key for item in value.active],
                     "active_current_bytes": [item.current_bytes for item in value.active],
-                    "active_remaining_seconds": [
-                        item.remaining_seconds for item in value.active
-                    ],
-                    "active_throughputs": [
-                        item.throughput for item in value.active
-                    ],
-                    "growth_hazards": [
-                        _commitment_growth_hazard(item) for item in value.active
-                    ],
+                    "active_remaining_seconds": [item.remaining_seconds for item in value.active],
+                    "active_throughputs": [item.throughput for item in value.active],
+                    "growth_hazards": [_commitment_growth_hazard(item) for item in value.active],
                 }
                 for value in devices
             ],
@@ -2650,16 +2645,12 @@ def _analysis_from_statistics(
     """Derive one posterior from mergeable progress evidence, never poll count."""
     peak = value.running_peak_bytes
     spare = max(0, total_bytes - peak)
-    noise = _robust_upper_scale(
-        (*value.noise_distribution, *value.allocator_residual_distribution)
-    )
+    noise = _robust_upper_scale((*value.noise_distribution, *value.allocator_residual_distribution))
     growth_history = [item for item in value.growth_distribution if item > 0]
     midpoint = max(1, len(growth_history) // 2)
-    converging = (
-        len(growth_history) >= 4
-        and statistics.median(growth_history[midpoint:])
-        < statistics.median(growth_history[:midpoint])
-    )
+    converging = len(growth_history) >= 4 and statistics.median(
+        growth_history[midpoint:]
+    ) < statistics.median(growth_history[:midpoint])
     converged_tail = (
         sum(
             item <= statistics.median(growth_history[midpoint:])
@@ -2674,9 +2665,7 @@ def _analysis_from_statistics(
         value.progress_cycles_seen if converging else converged_tail,
     )
     latest_material = (
-        value.material_peak_count > 0
-        and value.cycles_since_material_peak == 0
-        and not converging
+        value.material_peak_count > 0 and value.cycles_since_material_peak == 0 and not converging
     )
     # Jeffreys prior over a material peak in the next progress interval. Repeated identical NVML
     # observations do not enter either term.
@@ -2698,9 +2687,7 @@ def _analysis_from_statistics(
 
     growth = growth_history
     expected = (
-        int(statistics.median(growth[-max(1, math.isqrt(len(growth))) :]))
-        if growth
-        else noise
+        int(statistics.median(growth[-max(1, math.isqrt(len(growth))) :])) if growth else noise
     )
     expected = min(spare, int(expected * hazard))
     empirical = [max(0, min(spare, int(item))) for item in historical_residuals]
@@ -2715,11 +2702,7 @@ def _analysis_from_statistics(
         body_mass * (1.0 - hazard),
         body_mass * hazard - empirical_share,
     ]
-    weights.extend(
-        (empirical_share / len(empirical) for _ in empirical)
-        if empirical
-        else ()
-    )
+    weights.extend((empirical_share / len(empirical) for _ in empirical) if empirical else ())
     # Normalize below: exact tail mass is retained regardless of support resolution.
     weights.append(tail_probability)
     residuals, residual_weights = _coalesce_weighted_samples(support, weights)
@@ -2738,16 +2721,13 @@ def _analysis_from_statistics(
         for left, right in zip(value.checkpoint_times, value.checkpoint_times[1:], strict=False)
         if right > left
     ]
-    checkpoint_cadence = (
-        statistics.median(checkpoint_intervals) if checkpoint_intervals else None
-    )
+    checkpoint_cadence = statistics.median(checkpoint_intervals) if checkpoint_intervals else None
     checkpoint_uncertainty = _median_absolute_deviation(checkpoint_intervals)
     until_checkpoint = None
     if checkpoint_cadence is not None and value.checkpoint_times:
         until_checkpoint = max(
             0.0,
-            checkpoint_cadence
-            - max(0.0, value.last_elapsed_seconds - value.checkpoint_times[-1]),
+            checkpoint_cadence - max(0.0, value.last_elapsed_seconds - value.checkpoint_times[-1]),
         )
     next_events = [
         (estimate, uncertainty)
@@ -2789,9 +2769,7 @@ def _analysis_from_statistics(
         measurement_noise_bytes=noise,
         critical_phases_seen=observed,
         next_decision_seconds=next_event[0] if next_event is not None else None,
-        next_decision_uncertainty_seconds=(
-            next_event[1] if next_event is not None else None
-        ),
+        next_decision_uncertainty_seconds=(next_event[1] if next_event is not None else None),
         evidence_cycles=value.progress_cycles_seen,
         phase_hazards=phase_hazards,
         tail_probability=tail_probability,
@@ -2841,11 +2819,12 @@ def _weighted_peaks(
 ) -> list[int]:
     values: list[int] = []
     for observation in observations:
-        if not observation.peak_is_exact:
+        peak = _profile_peak(observation)
+        if peak is None:
             continue
         distance = _mixed_distance(parameters, observation.parameters, schema)
         repeats = max(1, int(round(4 / (1 + 4 * distance))))
-        values.extend([observation.observed_peak_bytes] * repeats)
+        values.extend([peak] * repeats)
     return values
 
 
@@ -2864,17 +2843,26 @@ def _loo_underprediction_residuals(
     schema: Mapping[str, Any] | ParameterSpace | None = None,
 ) -> tuple[int, ...]:
     """Calibrate false-safe error using the same local mixed-space model leave-one-out."""
-    exact = [value for value in observations if value.peak_is_exact]
+    exact = [value for value in observations if _profile_peak(value) is not None]
     if len(exact) < 2:
-        peaks = [value.observed_peak_bytes for value in exact]
+        peaks = [_profile_peak(value) or 0 for value in exact]
         return (0, max(peaks, default=0) - min(peaks, default=0))
     residuals: list[int] = []
     for index, observation in enumerate(exact):
         peers = [value for offset, value in enumerate(exact) if offset != index]
         local = _weighted_peaks(observation.parameters, peers, schema)
         predicted = int(statistics.median(local)) if local else 0
-        residuals.append(max(0, observation.observed_peak_bytes - predicted))
+        residuals.append(max(0, (_profile_peak(observation) or 0) - predicted))
     return tuple(sorted(residuals)) or (0,)
+
+
+def _profile_peak(observation: ResourceProfileObservation) -> int | None:
+    """Use terminal sampled envelopes without relabelling them as exact measurements."""
+    if observation.peak_is_exact:
+        return observation.observed_peak_bytes
+    if observation.sampled_complete and observation.sampled_peak_upper_bytes is not None:
+        return max(observation.observed_peak_bytes, observation.sampled_peak_upper_bytes)
+    return None
 
 
 def _mixed_distance(
@@ -2955,15 +2943,11 @@ def _coalesce_weighted_samples(
 def _weighted_cdf(samples: Sequence[int], weights: Sequence[float], limit: int) -> float:
     normalized = _normalized_weights(weights, len(samples))
     return sum(
-        weight
-        for sample, weight in zip(samples, normalized, strict=True)
-        if sample <= limit
+        weight for sample, weight in zip(samples, normalized, strict=True) if sample <= limit
     )
 
 
-def _weighted_quantile(
-    samples: Sequence[int], weights: Sequence[float], quantile: float
-) -> int:
+def _weighted_quantile(samples: Sequence[int], weights: Sequence[float], quantile: float) -> int:
     if not samples:
         return 0
     pairs = sorted(zip(samples, _normalized_weights(weights, len(samples)), strict=True))
@@ -3054,9 +3038,7 @@ def _joint_fit_probability(prediction: ResourcePrediction, device: GPUResourceSt
         ],
     ]
     candidate_samples, candidate_weights = distributions[0]
-    candidate_physical_fit = _weighted_cdf(
-        candidate_samples, candidate_weights, device.free_bytes
-    )
+    candidate_physical_fit = _weighted_cdf(candidate_samples, candidate_weights, device.free_bytes)
     if candidate_physical_fit <= 0:
         return 0.0
 
@@ -3085,12 +3067,9 @@ def _joint_fit_probability(prediction: ResourcePrediction, device: GPUResourceSt
         if right <= left:
             continue
         quantile = (left + right) / 2.0
-        candidate_value = _weighted_quantile(
-            candidate_samples, candidate_weights, quantile
-        )
+        candidate_value = _weighted_quantile(candidate_samples, candidate_weights, quantile)
         used = device.external_bytes + sum(
-            _weighted_quantile(samples, weights, quantile)
-            for samples, weights in distributions
+            _weighted_quantile(samples, weights, quantile) for samples, weights in distributions
         )
         if used <= device.total_bytes and candidate_value <= device.free_bytes:
             shared += right - left
@@ -3149,9 +3128,7 @@ def _commitment_growth_hazard(value: ActiveResourceCommitment) -> float:
     }.get(value.resource_state, 0.5)
 
 
-def _candidate_duration(
-    prediction: ResourcePrediction, device: GPUResourceState
-) -> float | None:
+def _candidate_duration(prediction: ResourcePrediction, device: GPUResourceState) -> float | None:
     if prediction.predicted_duration_seconds is not None:
         return prediction.predicted_duration_seconds
     if prediction.duration_samples:

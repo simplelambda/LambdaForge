@@ -101,7 +101,16 @@ def interactive_study(value: Mapping[str, Any]) -> dict[str, Any]:
     admission = admission if isinstance(admission, Mapping) else {}
     projected_controller = {
         field: copy.deepcopy(controller[field])
-        for field in ("last", "recent", "history_count", "surrogate_belief", "scheduler")
+        for field in (
+            "last",
+            "recent",
+            "history_count",
+            "surrogate_belief",
+            "scheduler",
+            "initialization",
+            "controller_telemetry_version",
+            "scientific_configuration_required",
+        )
         if field in controller
     }
     return {

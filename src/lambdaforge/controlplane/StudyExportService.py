@@ -63,6 +63,22 @@ class StudyExportService:
         # Refresh only the selected Attempt: its captured state must be current, while probing
         # every historical retry would add unnecessary provider traffic and failure modes.
         record = self.jobs.get(record.job_id, refresh=True)
+        recovery_arguments: tuple[str, ...] = ()
+        recovery = record.metadata.get("recovery_execution_dir")
+        owner_id = record.metadata.get("recovery_owner_job")
+        if isinstance(recovery, str) and isinstance(owner_id, str):
+            owner = self.jobs.get(owner_id, refresh=False)
+            if owner.cluster != record.cluster or owner_id not in record.metadata.get(
+                "recovery_dependencies", ()
+            ):
+                raise ValueError("Invalid Study recovery evidence owner.")
+            owner_root = owner.work_dir
+            if self.catalog.get(owner.cluster).transport == "local":
+                from lambdaforge.work.runner import WorkRunner
+
+                source = Path(str(owner.metadata.get("source_config_path") or owner.config_path))
+                owner_root = str(WorkRunner._project_root(source.parent) / ".lambdaforge" / "runs")
+            recovery_arguments = (recovery, owner_root)
         expected_execution = self._expected_execution(record)
         export_profile = profile
         cluster_profile = self.catalog.get(record.cluster)
@@ -93,6 +109,7 @@ class StudyExportService:
                         expected_execution or "-",
                         record.job_id,
                         export_profile,
+                        *recovery_arguments,
                     ),
                     timeout=3600.0,
                 )
@@ -225,9 +242,7 @@ class StudyExportService:
                 continue
             if isinstance(value, Mapping):
                 planned.append(value)
-        if expected is not None and any(
-            value.get("execution_id") == expected for value in planned
-        ):
+        if expected is not None and any(value.get("execution_id") == expected for value in planned):
             return expected
         records = store.list()
         if expected is not None and any(value.get("execution_id") == expected for value in records):
@@ -410,8 +425,7 @@ def _export_pre_execution_snapshot(
 
 def _portable_name(value: str) -> str:
     selected = "".join(
-        character if character.isalnum() or character in "._-" else "-"
-        for character in value
+        character if character.isalnum() or character in "._-" else "-" for character in value
     )
     return selected.strip(".-")[:120] or "study"
 
@@ -476,9 +490,7 @@ def _extract_safe(archive: Path, destination: Path) -> None:
                 )
             target = (root / path).resolve()
             if not target.is_relative_to(root):
-                raise ValueError(
-                    f"Study export entry escaped its destination: {member.filename}"
-                )
+                raise ValueError(f"Study export entry escaped its destination: {member.filename}")
         for member in package.infolist():
             target = root / member.filename
             if member.is_dir():
@@ -530,6 +542,15 @@ executions=[] if not runs.is_dir() else [
  candidate for candidate in sorted(runs.glob("*/execution-*"))
  if candidate.is_dir() and not candidate.is_symlink()
 ]
+if len(sys.argv)>6:
+ recovered=Path(sys.argv[6]); owner_work=Path(sys.argv[7])
+ if (not recovered.is_absolute() or recovered.resolve()!=recovered
+     or not recovered.is_relative_to(owner_work)):
+  raise SystemExit("invalid recovered Execution owner")
+ metadata=json.loads((recovered/"execution.json").read_text())
+ if metadata.get("execution_id")!=recovered.name:
+  raise SystemExit("recovered Execution identity mismatch")
+ executions=[recovered]
 selected=[]
 if expected:
  for execution in executions:

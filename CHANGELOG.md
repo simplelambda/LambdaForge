@@ -10,6 +10,39 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+### Fixed
+
+- Study HTML charts preview axis/metric changes before saving, explain empty evidence and offer
+  searchable multi-series checkboxes. Parameters can display any recorded numeric metric while
+  keeping persisted objective-model responses separate from observed sweep summaries.
+- Preserve immutable Study scientific initialization beyond the recent 25-action tail; live
+  summaries reuse controller conclusions and reports retain practical margins and authored log/
+  conditional parameter geometry across reload/export.
+- Keep sparse seed-noise estimates provisional with variance uncertainty and contextual support;
+  shared-seed allocation now values its impact across unresolved scientific questions.
+- Retain sampled per-process physical GPU peaks across worker exit and learn terminal uncertainty
+  envelopes without mislabelling them exact. Generic progress throughput feeds existing packing
+  efficiency decisions; repeated resource blocks have a compact counted summary.
+
+### Added
+
+- Study research workspace: immutable metric catalogs/profiles, families and declared questions;
+  deterministic bounded profiling, redundancy, exploratory permutation/BY diagnostics and
+  inspection findings. Analysis v8 retains prior scientific semantics and freezes declarations
+  before execution. Offline Research inbox, metric health/search, small multiples, family plots,
+  parallel coordinates and validated named-view import/export replace flat metric browsing.
+  Test and derived test metrics are rejected for objective/constraints and excluded from
+  provisional discovery; no scheduling or HPO decision logic is changed.
+- Study HTML observed hyperparameter/metric charts: multi-metric 2D overlays, 3D scatter,
+  heatmaps and numeric surfaces with exact categorical labels, missing-cell gaps, optional
+  descriptive partial/pruned observations and per-file saved views. HPO logic is unchanged.
+- Intelligent adaptive Study retry through `lf retry` and the console's Resume Study action:
+  restore exact HPO state/decisions/seeds, retain valid completed/pruned evidence and recover failed
+  or interrupted Runs from owned checkpoints. Compatible code fixes require explicit acknowledgement
+  with audited revisions; original evidence stays protected from GC/deletion and concurrent writers.
+- Protected fidelity continuations for endpoint-pruner calibration evidence, without weakening
+  strong-pruning requirements, and explicit stability/seed-noise diagnostics in console and HTML.
+
 ## [0.16.0] - 2026-09-28
 
 ### Added

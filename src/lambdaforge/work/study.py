@@ -61,6 +61,13 @@ class StudyTelemetry:
                 },
             )
         self.root.mkdir(parents=True, exist_ok=True)
+        definition = specifications[0].get("definition", {}) if specifications else {}
+        semantics_path = definition.get("analysis_semantics_path")
+        semantics = (
+            self._read(Path(semantics_path)).get(str(definition.get("name")), {})
+            if isinstance(semantics_path, str)
+            else {}
+        )
         atomic_json(
             self.root / "index.json",
             {
@@ -69,6 +76,7 @@ class StudyTelemetry:
                 "execution_id": execution_id,
                 "strategy": strategy,
                 "objective": dict(objective or {}),
+                "analysis_semantics": dict(semantics),
                 "planned_runs": len(specifications) if planned_runs is None else planned_runs,
                 "planned_candidates": (
                     len(candidates) if planned_candidates is None else planned_candidates
@@ -269,9 +277,7 @@ class StudyTelemetry:
         pruned = sum(states.get(key) == "pruned" for key in requirements)
         failed = sum(states.get(key) in {"failed", "infeasible"} for key in requirements)
         missing_keys = sorted(
-            key
-            for key in requirements
-            if states.get(key) not in {"succeeded", "pruned"}
+            key for key in requirements if states.get(key) not in {"succeeded", "pruned"}
         )
         required = len(requirements)
         design_status = "complete" if not missing_keys else "incomplete"
@@ -311,9 +317,7 @@ class StudyTelemetry:
             "required_failed": failed,
             "required_missing": len(missing_keys),
             "evidence_completion_fraction": (succeeded / required if required else 1.0),
-            "attempted_completion_fraction": (
-                (succeeded + pruned) / required if required else 1.0
-            ),
+            "attempted_completion_fraction": ((succeeded + pruned) / required if required else 1.0),
             "missing_requirement_keys": missing_keys[:100],
             "active_runs": int(counts.get("active_runs", 0) or 0),
             "queued_runs": 0,
@@ -322,6 +326,33 @@ class StudyTelemetry:
         index["finished"] = True
         atomic_json(self.root / "index.json", index)
         return self.refresh()
+
+    def resume(self) -> None:
+        """Reopen a recovered read model without erasing its candidate/Run history."""
+        with self._lock:
+            index = self._index()
+            index["finished"] = False
+            for field in (
+                "status",
+                "design_status",
+                "scientific_status",
+                "finish_reason",
+                "finish_reason_hint",
+                "required_runs",
+                "required_completed",
+                "required_pruned",
+                "required_failed",
+                "required_missing",
+                "evidence_completion_fraction",
+                "attempted_completion_fraction",
+                "missing_requirement_keys",
+                "active_runs",
+                "queued_runs",
+            ):
+                index.pop(field, None)
+            index["updated_at_utc"] = _now()
+            atomic_json(self.root / "index.json", index)
+        self.refresh()
 
     def candidates_observed(self, trials: Sequence[int]) -> None:
         """Mark proposed candidates whose initial evidence is now terminal."""
@@ -376,6 +407,20 @@ class StudyTelemetry:
         self._write_run(
             key,
             {
+                **(
+                    {
+                        "metrics": {},
+                        "objective_observation": None,
+                        "latest_step": None,
+                        "best_step": None,
+                        "best_objective": None,
+                        "termination_type": None,
+                        "termination": {},
+                        "duration_seconds": 0.0,
+                    }
+                    if specification.get("hpo_fresh_recovery")
+                    else {}
+                ),
                 "state": "running",
                 "trial": int(specification["trial_index"]),
                 "seed": specification.get("seed"),
@@ -414,6 +459,8 @@ class StudyTelemetry:
                 "updated_at_utc": _now(),
             },
         )
+        if specification.get("hpo_fresh_recovery"):
+            (self.root / "observations" / f"{key}.json").unlink(missing_ok=True)
 
     def run_finished(self, specification: Mapping[str, Any], result: WorkResult) -> None:
         """Finalize one Run state while retaining only compact scalar summaries."""
@@ -570,6 +617,24 @@ class StudyTelemetry:
             current = self._read(self.root / "controller.json")
             recent = [value for value in current.get("recent", ()) if isinstance(value, dict)]
             persisted_event = dict(event)
+            initialization = current.get("initialization")
+            if event.get("action") == "INITIALIZE":
+                if isinstance(initialization, Mapping):
+                    previous_policy = initialization.get("policy", {})
+                    next_policy = event.get("policy", {})
+                    if isinstance(previous_policy, Mapping) and isinstance(next_policy, Mapping):
+                        for key in ("parameter_space", "practical_equivalence_margin"):
+                            if previous_policy.get(key) != next_policy.get(key):
+                                raise ValueError(
+                                    f"Immutable Study scientific configuration changed: {key}."
+                                )
+                    for key in ("objective", "seed_stream_metadata"):
+                        if key in initialization and initialization[key] != event.get(key):
+                            raise ValueError(
+                                f"Immutable Study scientific configuration changed: {key}."
+                            )
+                else:
+                    initialization = persisted_event
             self._append_controller_event(persisted_event)
             recent.append(persisted_event)
             belief = event.get("surrogate_belief")
@@ -578,7 +643,10 @@ class StudyTelemetry:
             atomic_json(
                 self.root / "controller.json",
                 {
-                    "controller_telemetry_version": 1,
+                    "controller_telemetry_version": 2,
+                    "initialization": initialization,
+                    "scientific_configuration_required": isinstance(initialization, Mapping)
+                    and isinstance(initialization.get("policy"), Mapping),
                     "last": dict(event),
                     "recent": recent[-25:],
                     "history_count": int(current.get("history_count", 0)) + 1,
@@ -770,7 +838,7 @@ class StudyTelemetry:
             recent_decisions = [
                 value for value in controller.get("recent", ()) if isinstance(value, Mapping)
             ]
-            initialization = next(
+            initialization = controller.get("initialization") or next(
                 (
                     value
                     for value in reversed(recent_decisions)
@@ -778,6 +846,27 @@ class StudyTelemetry:
                 ),
                 {},
             )
+            if not initialization and controller.get("history_count"):
+                # Upgrade an old Study once from its durable append-only history, never from
+                # the lossy display tail. Subsequent refreshes use the retained authority.
+                history = self.root / "controller-history.jsonl"
+                if history.is_file() and not history.is_symlink():
+                    with history.open(encoding="utf-8") as stream:
+                        for line in stream:
+                            event = json.loads(line)
+                            if isinstance(event, dict) and event.get("action") == "INITIALIZE":
+                                initialization = event
+                                controller["initialization"] = event
+                                controller["controller_telemetry_version"] = 2
+                                atomic_json(self.root / "controller.json", controller)
+                                break
+            if controller.get("scientific_configuration_required") and not initialization:
+                raise ValueError("Study scientific INITIALIZE configuration is missing.")
+            # Provider telemetry lives in Job/study, whereas the scientific state belongs to
+            # Execution/hpo-control. The retained initializer links those existing stores.
+            state_location = initialization.get("control_state_path")
+            if isinstance(state_location, str):
+                control_state = self._read(Path(state_location))
             retained_belief = controller.get("surrogate_belief")
             surrogate_belief = (
                 dict(retained_belief)
@@ -852,6 +941,12 @@ class StudyTelemetry:
                         objective,
                         practical_margin=_practical_margin(initialization),
                         parameter_space=_parameter_space(initialization),
+                        fingerprint=str(index["execution_id"]),
+                        scientific_understanding=(
+                            control_state["scientific_understanding"]
+                            if isinstance(control_state.get("scientific_understanding"), Mapping)
+                            else None
+                        ),
                     )
                     if str(index.get("strategy", "")) == "adaptive"
                     else None
@@ -1256,6 +1351,10 @@ class StudyTelemetry:
 
 def _practical_margin(initialization: Mapping[str, Any]) -> float | None:
     policy = initialization.get("policy", {})
+    if initialization.get("event_version", 0) >= 2 and (
+        not isinstance(policy, Mapping) or "practical_equivalence_margin" not in policy
+    ):
+        raise ValueError("Study scientific practical-margin metadata is missing.")
     if not isinstance(policy, Mapping):
         return None
     value = policy.get("practical_equivalence_margin")
@@ -1270,6 +1369,10 @@ def _practical_margin(initialization: Mapping[str, Any]) -> float | None:
 
 def _parameter_space(initialization: Mapping[str, Any]) -> Mapping[str, Any] | None:
     policy = initialization.get("policy", {})
+    if initialization.get("event_version", 0) >= 2 and (
+        not isinstance(policy, Mapping) or not isinstance(policy.get("parameter_space"), Mapping)
+    ):
+        raise ValueError("Study authored parameter-space metadata is missing.")
     if not isinstance(policy, Mapping):
         return None
     value = policy.get("parameter_space")

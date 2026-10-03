@@ -416,6 +416,59 @@ y estado/cobertura secuencial formal. Se exige objetivo acotado y la equivalenci
 `sweep.sequential_alpha` debe estar en `(0,1)` y es inválido con `replicates` fijo. En sweep no
 existe pruning HPO ni carrera por celda.
 
+Los Studies largos conservan su inicialización científica inmutable en
+`study/controller.json` → `initialization`: objetivo completo, margen práctico, espacio declarado
+(tipos, escalas log y condiciones `when`), política resuelta y metadatos de streams de seeds.
+`recent` es solo una cola visual de 25 acciones. Los estudios antiguos recuperan la inicialización
+una vez desde su historial append-only cuando existe; si falta metadata obligatoria se muestra un
+error explícito. El resumen vivo reutiliza el snapshot científico del controlador, por lo que abrir
+la consola no reinterpreta el margen de equivalencia ni convierte una dimensión log en lineal.
+
+La variabilidad de seeds se aprende de candidatos repetidos, nunca de diferencias entre
+arquitecturas. `unresolved` significa que no hay escala interna identificada; `provisional`, que hay
+una estimación pero sigue incierta su varianza o su soporte contextual. `calibrated` exige que la
+incertidumbre muestral de la varianza sea menor que la cobertura contextual respaldada. Un candidato
+con dos seeds permanece provisional. El modelo conserva realizaciones deterministas de varianza
+mediante chi-cuadrado inversa escalada, condicionadas a la aproximación normal interna, y muestra
+rango de sigma, grados de libertad residuales, soporte pareado, cobertura contextual y posible
+heterogeneidad. El rango expresa incertidumbre del modelo, no una garantía libre de supuestos.
+Los efectos comunes de seed siguen formando parte de la incertidumbre poblacional aunque se
+cancelen en diferencias pareadas. El fallback predictivo conservador también conserva la varianza
+de contextos ruidosos, sin tratar la escala pooled como homogénea. La incertidumbre normal de la
+varianza sigue la relación con grados de libertad explicada en el
+[manual estadístico de NIST](https://www.itl.nist.gov/div898/handbook/prc/section2/prc231.htm).
+
+Una seed adicional compite con probes de parámetros e interacciones mediante el mismo planner y
+valor por coste. Su valor incluye cuánto puede reducir la incertidumbre de muchas preguntas
+científicas a la vez. Contenders y contextos poco repetidos pueden justificar nuevas seeds
+compartidas después de la cobertura inicial; no hay cuota universal por candidato. Ese valor global
+disminuye con la evidencia adicional. Las seeds frescas de confirmación siguen separadas. Una
+continuación de fidelidad desde checkpoint puede llevar `PRUNER_CALIBRATION_EVIDENCE`: completar
+esa curva permite mejorar la calibración del endpoint. Estas Runs están protegidas del pruning
+competitivo; la mala calibración sigue desactivando el pruning fuerte. Las métricas diagnósticas no
+se convierten en objetivos de selección ocultos.
+
+La evidencia de recursos distingue un pico exacto, una trayectoria física completa muestreada y un
+límite inferior interrumpido. Las lecturas NVML conservan su máximo físico aunque el worker salga,
+junto con máximos del allocator, cadencia e intervalo de incertidumbre. Una trayectoria completa
+muestreada puede enseñar al predictor sin afirmar un pico vital exacto; las Runs incompletas siguen
+censuradas. `exact_history_count` y `sampled_history_count` muestran la diferencia. El mínimo de
+seguridad y la VRAM libre actual siguen limitando cada nueva colocación. Los bloqueos repetidos se
+agregan en `hpo-control/resources/blocked-summary.json`; el replay conserva evidencia factual.
+
+Las métricas con `step` publican `step/sec`; `progress.update(completed=...)`, unidades de
+progreso/segundo. Estas señales acotadas alimentan el aprendizaje genérico de throughput sin nombres
+específicos de una aplicación. ARI separa seguridad de utilidad: compara throughput agregado entre
+concurrencias observadas y puede dejar capacidad segura libre cuando otra Run reduciría evidencia
+por tiempo. La concurrencia configurada es un techo, no un objetivo de número de procesos.
+
+La inferencia científica viva usa 32 realizaciones. Study Analysis y los informes humanos usan un
+presupuesto cacheado de mayor precisión (hasta 256) fuera del heartbeat de planificación. Ambos
+conservan objetivo, margen y geometría declarada. Los paneles e HTML muestran realizaciones,
+resolución Monte Carlo, soporte directo/censurado/predictivo y diagnóstico de seeds. Estabilidad
+significa acuerdo de una conclusión cualitativa entre realizaciones, **no** la probabilidad de que
+sea verdadera. La precisión puede cambiar una estimación cercana sin cambiar la configuración.
+
 ```yaml
 name: comparacion
 steps:
@@ -529,8 +582,8 @@ diagnóstico permanecen visibles sin convertirse en una segunda política oculta
 
 Por defecto se inicia con una seed declarada por candidato y se generan tres seeds de confirmación
 deterministas y disjuntas. Puede cambiarse cada valor y `confirmation_seeds: []` desactiva
-expresamente la confirmación. El ruido de seed se calibra solo con resultados repetidos dentro de
-cada candidato, tras estimar efectos de seeds comunes a varios candidatos; la dispersión entre
+expresamente la confirmación. El ruido de seed se identifica solo con resultados repetidos dentro de
+cada candidato, conservando efectos comunes de seed en la incertidumbre poblacional; la dispersión entre
 candidatos nunca se rebautiza como ruido aleatorio. Antes de esa calibración una estimación de una
 sola seed conserva incertidumbre explícita. El orden compartido permite diferencias pareadas
 
@@ -546,8 +599,9 @@ $$
 
 donde `objective.practical_margin` es la autoridad canónica para \(\epsilon\) y
 `seed_racing.probability_threshold` es \(\delta\). Los
-candidatos dominados dejan de recibir seeds y la reducción de incertidumbre se divide por el coste
-temporal observado. `replication.minimum` (`min_seeds` en YAML legacy) es una obligación estricta
+candidatos dominados dejan de recibir seeds puramente competitivas, pero una repetición representativa
+todavía puede aportar calibración global. La incertidumbre competitiva y las preguntas científicas
+pendientes compiten por coste temporal observado. `replication.minimum` (`min_seeds` en YAML legacy) es una obligación estricta
 tras proponer un candidato: el replanning no puede eliminar esas seeds. Una seed podada satisface
 evidencia intentada/censurada, no respuesta completa; un fallo de infraestructura solo cuenta tras
 agotar sus reintentos. Las seeds posteriores siguen siendo adaptativas. La selección final usa una
@@ -1171,6 +1225,39 @@ compatibles activan `resuming`. `--restart` elimina checkpoints del Run. `--reru
 Execution deliberada. El control plane rechaza un duplicado activo de misma identidad/destino salvo
 `--allow-duplicate`.
 
+### Recuperar un Study adaptativo interrumpido
+
+`lf retry STUDY` y **Resume Study…** en su ventana usan el mismo servicio de recuperación.
+El selector identifica un Attempt fallido/cancelado/con timeout del clúster original. Se consulta
+un plan acotado en ese host, se prepara el código actual en otro Job y el runner se reconecta a la
+Execution original bajo propiedad del framework. No se copian pesos ni artefactos pesados para
+reintentar: solo índices pequeños de consola y referencias a decisiones. Logs, métricas,
+checkpoints y evidencia siguen referenciados en su ubicación original.
+
+Se restauran candidatos propuestos, números de Trial, expansión determinista, seeds, acciones
+pendientes, obligaciones del diseño inicial, convergencia y confirmación. Resultados completos y
+podados conservan su evidencia. Runs fallidas y acciones interrumpidas se reencolan una vez como
+nuevos Attempts: usan un checkpoint compatible cuando existe y empiezan de nuevo si no existe.
+Un resultado publicado justo antes de caer el controlador se recoge, no se repite. Los fallos
+físicos quedan en el historial y los presupuestos gastados de Runs/tiempo no se reinician.
+El estado agregado considera el último Attempt de cada Run lógica: recuperar un fallo permite
+éxito, mientras un fallo que persiste sigue siendo un fallo real.
+
+`lf retry STUDY --accept-code-change` permite reconocer explícitamente una corrección compatible:
+el investigador debe saber que métricas anteriores y formatos de checkpoints siguen siendo válidos.
+La consola ofrece la misma casilla, desmarcada por defecto. Esto no omite comprobaciones de
+configuración científica, contenido de entradas, objetivo, streams de seeds ni política de búsqueda.
+Si la corrección invalida resultados previos, crea otro Study. `execution.json` permanece inmutable;
+`current-code.json`, procedencia de cada Run y `recovery-history.jsonl` muestran las revisiones reales.
+
+Un bloqueo entre procesos impide escribir simultáneamente el mismo controlador. Las dependencias
+de recuperación protegen los Jobs originales de GC y borrado individual; borrar todo el historial
+terminal del Work previsualiza y elimina la cadena junta. Estado ausente/corrupto y rutas ajenas o
+con enlaces fallan de forma segura. La recuperación cubre un único Study adaptativo por Execution
+en el mismo clúster; un fallo de preparación sin estado de Study permite el retry normal del envío.
+Los reintentos automáticos siguen limitados a infraestructura: errores consumidores solo vuelven
+a intentarse por esta acción deliberada del usuario, nunca en un bucle automático infinito.
+
 ## 9. Resultados y metadata
 
 Cada Attempt escribe `result.json`, `environment.json`, `work.log`, JSONL de métricas, progreso,
@@ -1627,7 +1714,44 @@ heatmap/3D, cobertura, recursos y findings. El navegador solo describe evidencia
 vuelve a ajustar el modelo HPO. Las preferencias se conservan para ese fichero; regenerarlo crea
 un ámbito limpio. La barra lateral de Run y los paneles de análisis se redimensionan arrastrando.
 Run permite crear categorías de métricas y guardar gráficas de la selección actual; Study guarda
-vistas bar/line/scatter con ejes de parámetro, componente del objetivo o recursos por candidato.
+vistas observadas 2D/3D con ejes de parámetro, métrica numérica registrada o recursos por candidato.
+
+Para comparar métricas frente a hiperparámetros de un search adaptativo o sweep:
+
+1. En la consola abre **Study → Analysis → Interactive HTML**, o genera un informe local con
+   `lf results report EXECUTION --output study-report.html`.
+2. Abre **Explore**. Despliega **Advanced visualization options** para elegir representación. Para puntos, líneas o barras, elige un parámetro como `hidden_dim` en
+   **X axis** y una métrica registrada como `val_accuracy` en **Y axis**. La gráfica se
+   previsualiza al cambiar controles: guardar es opcional para conservarla, no para dibujarla.
+   **Add another Y metric (2D)** tiene casillas buscables para añadir curvas sin Ctrl/Cmd-click.
+   Son resúmenes por Trial, no por epoch.
+3. En **3D scatter** u **Observed heatmap**, elige dos parámetros (por ejemplo `hidden_dim` y
+   `dropout`) en X/Y y la métrica en **Z / cell metric**. **Observed 3D surface** requiere ejes
+   numéricos; puntos 3D y mapas de calor también aceptan categorías/booleanos con sus nombres.
+   Elige paleta/inversión, pon nombre a la vista y pulsa **Save chart**.
+4. **One point per trial** conserva las combinaciones probadas distintas. **Mean per exact X
+   value + SD** agrupa valores X iguales dando el mismo peso a cada Trial: la desviación es
+   empírica entre Trials, no un intervalo de confianza entre seeds ni un efecto controlado del
+   parámetro. Las celdas del mapa/superficie también promedian resúmenes observados por pareja
+   X/Y exacta. Parejas no probadas quedan vacías, incluidos niveles pendientes de un dominio
+   finito declarado; no se ajusta un modelo ni se interpolan respuestas ausentes. Si la rejilla
+   es demasiado grande se pide usar puntos 3D.
+5. Por defecto se muestra evidencia completada. Activa **Include partial / pruned observations**
+   para inspeccionar datos parciales, identificados mediante marcas/hover. Elige explícitamente
+   **Best observed objective** o **Current observed objective** si eso es lo que buscas. Una
+   selección final ausente sigue ausente aunque exista un mejor valor parcial.
+
+Los resúmenes de selección/componentes conservan su semántica persistida. Otras métricas numéricas
+usan resúmenes diagnósticos persistidos o los últimos valores registrados de Runs de screening
+comparables de una misma fidelidad, no nuevos óptimos por métrica. El hover muestra valores exactos,
+IDs de Trial y soporte de cada celda. Vistas y paletas se conservan al reabrir el mismo HTML en el
+mismo navegador; no modifican HPO, YAML ni evidencia. Regenera el informe para incluir resultados nuevos.
+Si la vista está vacía, el mensaje distingue parámetro sin datos, selección final ausente y falta
+de métrica/evidencia para el filtro. Nunca sustituye selección por un mejor valor parcial.
+En **Parameters**, elige **Y metric** para graficar cualquier métrica numérica registrada y
+actualizar la tabla por valor. La gráfica observada también funciona en sweeps sin curvas modeladas.
+La sección plegable **Persisted adjusted selection response** sigue ligada al objetivo: cambiar
+la métrica diagnóstica no convierte ni renombra el modelo persistido como un modelo de accuracy.
 
 ### 16.1 Semántica de evidencia
 
@@ -1674,6 +1798,22 @@ slots científicos. Un error transitorio del probe es una caída de observación
 científico: se pausa la admisión, no se tocan los hijos activos y se reintenta. Su salida acotada se
 conserva para diagnóstico. Solo pasa a terminal si persiste, no quedan Runs activas y se agota el
 presupuesto acotado de reintentos.
+
+### 16.4 Espacio de investigación y declaraciones
+
+El HTML offline empieza en **Research**, con **Metrics & health**, buscador compartido
+(**Ctrl/⌘ K**), familias y **Explore**. Python persiste perfiles, relaciones exploratorias acotadas,
+diagnósticos de multiplicidad y hallazgos de inspección; JavaScript solo presenta/filtra evidencia.
+YAML `analysis` o `Work.analysis_profile` declaran etiquetas/unidades/derivación, familias y
+preguntas. Antes de ejecutar se congelan en `analysis-semantics.json`, junto con defaults conocidos
+del registro; recuperación/export los conservan. El esquema 8 añade `research` sin eliminar campos.
+
+Test, incluidas derivaciones/componentes compuestos, no puede gobernar objetivo/restricciones ni
+discovery provisional; el análisis terminal sí permite inspeccionarlo. Semántica desconocida
+sigue explícita; discovery no es causalidad ni confianza nueva del HPO. Unidades Y diferentes
+usan gráficas separadas, normalización visual opcional y vistas con notas/export/import JSON
+validado. La [guía completa](RESEARCH_ANALYSIS.es.md) reúne pasos numerados, YAML, límites de
+algoritmos, cautelas estadísticas y comportamiento de Studies antiguos.
 
 ## 17. Consola de investigación
 

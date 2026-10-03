@@ -16,6 +16,7 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
+from lambdaforge.analysis.AnalysisProfile import AnalysisProfile
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveSearch import SEARCH_POLICY_FIELDS, AdaptiveSearchPolicy
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
@@ -44,6 +45,7 @@ _TOP_FIELDS = frozenset(
         "sweep",
         "execution",
         "objective",
+        "analysis",
         "steps",
     }
 )
@@ -59,6 +61,7 @@ _RUN_FIELDS = frozenset(
         "sweep",
         "execution",
         "objective",
+        "analysis",
     }
 )
 
@@ -148,8 +151,10 @@ class RunDefinition:
     # Last on purpose: older internal callers constructed this dataclass
     # positionally before seed provenance existed.
     seed_metadata: tuple[Mapping[str, Any], ...] = ()
+    analysis_semantics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "analysis_semantics", immutable_mapping(self.analysis_semantics))
         object.__setattr__(self, "parameters", immutable_mapping(self.parameters))
         object.__setattr__(
             self,
@@ -248,6 +253,10 @@ class WorkConfig:
                 ),
             )
         else:
+            if "analysis" in data:
+                raise ValueError(
+                    "For a steps composition, declare analysis on each Work step or on its class."
+                )
             steps = data.get("steps")
             if not isinstance(steps, Sequence) or isinstance(steps, str | bytes) or not steps:
                 raise TypeError("steps must be a non-empty list.")
@@ -467,6 +476,7 @@ class WorkConfig:
                         "resources": definition.resources.to_dict(),
                         "runs": definition.run_count,
                         "objective": dict(definition.objective or {}),
+                        "analysis_semantics": dict(definition.analysis_semantics),
                         "search": (
                             definition.search_policy.to_dict()
                             if definition.search_policy is not None
@@ -603,6 +613,9 @@ def _run_definition(
         else inherited_resources or ResourceRequest()
     )
     objective = _objective(data.get("objective"))
+    semantics = AnalysisProfile.resolve(
+        import_work_class(work_class).analysis_profile, data.get("analysis"), objective=objective
+    ).document
     raw_search = data.get("search")
     raw_sweep = data.get("sweep")
     if raw_search is not None and raw_sweep is not None:
@@ -634,9 +647,7 @@ def _run_definition(
         ),
         "namespace": project.project_id,
         "role": "replicate" if automatic_seed_source else "explicit",
-        "stream_version": (
-            "project-sha256-v1" if automatic_seed_source else "authored-v1"
-        ),
+        "stream_version": ("project-sha256-v1" if automatic_seed_source else "authored-v1"),
         "extendable": automatic_seed_source,
         "resolved": [value.to_dict() for value in seed_identities],
     }
@@ -741,6 +752,7 @@ def _run_definition(
         execution_policy=execution,
         study_design=design,
         study_expected=design is not None,
+        analysis_semantics=semantics,
     )
 
 
@@ -817,9 +829,7 @@ def _normalize_search(
         raise TypeError("search must be a non-empty mapping.")
     raw = copy.deepcopy(dict(value))
     normalized = {
-        str(name): item
-        for name, item in raw.items()
-        if name not in _STRUCTURED_SEARCH_FIELDS
+        str(name): item for name, item in raw.items() if name not in _STRUCTURED_SEARCH_FIELDS
     }
     raw_space = raw.get("space")
     if raw_space is not None:
@@ -911,9 +921,7 @@ def _normalize_search(
             )
         )
     pruning = normalized.get("early_stopping")
-    if isinstance(pruning, Mapping) and isinstance(
-        pruning.get("equivalence_margin"), int | float
-    ):
+    if isinstance(pruning, Mapping) and isinstance(pruning.get("equivalence_margin"), int | float):
         authored_margins.append(
             (
                 "search.early_stopping.equivalence_margin",

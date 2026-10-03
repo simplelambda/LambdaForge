@@ -1538,7 +1538,8 @@ def test_scientifically_pruned_run_can_publish_phase_complete_resource_evidence(
     assert observed.state == "pruned"
     assert observed.scientific_termination == "pruned"
     assert observed.resource_profile_quality == "PHASE_COMPLETE"
-    assert observed.peak_is_exact is True
+    assert observed.peak_is_exact is False
+    assert observed.sampled_complete is True
     predicted = ResourceDemandModel((observed,)).predict(
         candidate_key="candidate",
         compatibility_key="compatible",
@@ -1546,7 +1547,9 @@ def test_scientifically_pruned_run_can_publish_phase_complete_resource_evidence(
         hardware="H100-80",
         total_bytes=80 * GIB,
     )
-    assert predicted.exact_history_count == 1
+    assert predicted.exact_history_count == 0
+    assert predicted.sampled_history_count == 1
+    assert predicted.upper_bytes < 80 * GIB
 
 
 def test_many_phase_complete_pruned_runs_end_permanent_cold_start() -> None:

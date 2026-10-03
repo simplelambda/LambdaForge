@@ -48,6 +48,7 @@ class MetricCollection:
         self._count = 0
         self._progress_path = run_dir / "metric-progress.json"
         self._progress_step: int | None = None
+        self._progress_at = time.monotonic()
         mirror = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
         self._mirror = Path(mirror).resolve() if mirror else None
         raw_objective = os.environ.get("LAMBDAFORGE_HPO_OBJECTIVE_CONFIG")
@@ -119,7 +120,18 @@ class MetricCollection:
             if step is not None and (self._progress_step is None or step > self._progress_step):
                 # Generic Works need no Lightning callback to expose real progress to admission.
                 # One bounded write per advancing step, never one per scalar or full-history scan.
-                atomic_json(self._progress_path, {"step": step})
+                now = time.monotonic()
+                delta = step - (self._progress_step or 0)
+                elapsed = now - self._progress_at
+                atomic_json(
+                    self._progress_path,
+                    {
+                        "step": step,
+                        "throughput": delta / elapsed if elapsed > 0 and delta > 0 else None,
+                        "throughput_unit": "step/sec",
+                    },
+                )
+                self._progress_at = now
                 self._progress_step = step
 
     def log_many(
@@ -150,6 +162,9 @@ class ProgressReporter:
         self._path = Path(configured).resolve() if configured else run_dir / "progress.json"
         self._lock = Lock()
 
+        self._progress_at = time.monotonic()
+        self._completed = 0
+
     def update(
         self,
         *,
@@ -163,10 +178,22 @@ class ProgressReporter:
         if total is not None and (isinstance(total, bool) or total < completed):
             raise ValueError("Progress total must be an integer >= completed or null.")
         with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._progress_at
+            delta = completed - self._completed
             atomic_json(
                 self._path,
-                {"completed": completed, "total": total, "message": message},
+                {
+                    "completed": completed,
+                    "total": total,
+                    "message": message,
+                    "throughput": delta / elapsed if delta > 0 and elapsed > 0 else None,
+                    "throughput_unit": "progress-unit/sec",
+                },
             )
+            if delta > 0:
+                self._completed = completed
+                self._progress_at = now
 
 
 class WorkLog:

@@ -23,6 +23,7 @@ from textual.events import MouseDown, MouseMove, MouseUp, Resize
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
+    Checkbox,
     DataTable,
     DirectoryTree,
     Footer,
@@ -81,10 +82,14 @@ def _scientific_support_text(question: Mapping[str, Any]) -> str:
     if not question:
         return "Not available"
     missing = question.get("missing_evidence", ())
-    missing = missing if isinstance(missing, Sequence) and not isinstance(missing, str | bytes) else ()
+    missing = (
+        missing if isinstance(missing, Sequence) and not isinstance(missing, str | bytes) else ()
+    )
     stability = question.get("descriptive_stability", question.get("confidence"))
     stability_text = (
-        f"{float(stability):.0%}" if isinstance(stability, int | float) and not isinstance(stability, bool) else "—"
+        f"{float(stability):.0%}"
+        if isinstance(stability, int | float) and not isinstance(stability, bool)
+        else "—"
     )
     if missing:
         return f"Incomplete · {len(missing)} gap(s) · predictive stability {stability_text}"
@@ -364,6 +369,7 @@ class StudyWorkspace(ResearchWorkspace):
         self._logs_loading = False
         self._logs_loaded_at = 0.0
         self._cancel_running = False
+        self._retry_running = False
         self._delete_running = False
         self._export_running = False
         self._export_task_id: str | None = None
@@ -380,6 +386,7 @@ class StudyWorkspace(ResearchWorkspace):
         yield Static(id="study-header", classes="workspace-header")
         with Horizontal(id="study-control-bar"):
             yield Button("Cancel Study", id="study-cancel", variant="warning")
+            yield Button("Resume Study…", id="study-retry", variant="success")
             yield Button("Export Study…", id="study-export", variant="success")
             yield Button("Delete Study History…", id="study-delete", variant="error")
             yield Static("", id="study-action-status", classes="freshness-line")
@@ -533,6 +540,11 @@ class StudyWorkspace(ResearchWorkspace):
             "timeout",
         }
         self.query_one("#study-cancel", Button).disabled = terminal or not bool(self._selector)
+        self.query_one("#study-retry", Button).disabled = str(self.work.get("state")) not in {
+            "failed",
+            "cancelled",
+            "timeout",
+        }
         self.query_one("#study-export", Button).disabled = not bool(self._selector)
         self.query_one("#study-delete", Button).disabled = not bool(self._selector)
         self.query_one("#study-loading").display = not bool(self.study)
@@ -556,6 +568,12 @@ class StudyWorkspace(ResearchWorkspace):
             self._load_action_history()
 
     def _render_workspace(self) -> None:
+        if not self._retry_running:
+            self.query_one("#study-retry", Button).disabled = str(self.work.get("state")) not in {
+                "failed",
+                "cancelled",
+                "timeout",
+            }
         if not self.study:
             self.query_one("#study-header", Static).update(
                 f"{self.work.get('name', 'Study')}  ·  "
@@ -598,9 +616,7 @@ class StudyWorkspace(ResearchWorkspace):
             attention.append(f"★ Trial {best_candidate.get('trial')} currently leads selection")
         attention.append(f"† {counts.get('pruned_runs', 0)} censored/pruned Runs retained")
         if self.study.get("required_missing"):
-            attention.append(
-                f"⚠ {self.study['required_missing']} required Run(s) remain missing"
-            )
+            attention.append(f"⚠ {self.study['required_missing']} required Run(s) remain missing")
         self.query_one("#study-overview-state", Static).update(
             "[b]STATE[/b]\n"
             f"Execution: {str(self.study.get('status', self.work.get('state', 'unknown'))).upper()}\n"
@@ -807,7 +823,9 @@ class StudyWorkspace(ResearchWorkspace):
         seed_source = seed_source if isinstance(seed_source, Mapping) else {}
         evidence = design.get("evidence", {})
         evidence = evidence if isinstance(evidence, Mapping) else {}
-        sweep = self.analysis.get("sweep_analysis", {}) if isinstance(self.analysis, Mapping) else {}
+        sweep = (
+            self.analysis.get("sweep_analysis", {}) if isinstance(self.analysis, Mapping) else {}
+        )
         sweep = sweep if isinstance(sweep, Mapping) else {}
         conclusion = sweep.get("exact_conclusion", {})
         conclusion = conclusion if isinstance(conclusion, Mapping) else {}
@@ -866,6 +884,11 @@ class StudyWorkspace(ResearchWorkspace):
             f"Uncertainty K        {format_value(understanding.get('scientific_uncertainty'))}\n"
             f"Observational phase  {str(understanding.get('phase', 'learning')).replace('-', ' ')}\n"
             f"Priority question    {top_question}\n\n"
+            f"Evidence realizations {understanding.get('evidence', {}).get('resamples', '—')} · agreement, not truth probability\n"
+            f"Seed noise           {understanding.get('seed_noise_model', {}).get('status', 'unresolved')} · "
+            f"{understanding.get('seed_noise_model', {}).get('repeated_candidates', 0)} repeated candidates · "
+            f"df {understanding.get('seed_noise_model', {}).get('residual_degrees_of_freedom', 0)}\n"
+            f"Sigma range          {understanding.get('seed_noise_model', {}).get('sigma_range', '—')}\n\n"
             "The controller view exposes exact persisted state. Action history is shown in its "
             "own table; parameter effects are predictive associations, not causal claims."
         )
@@ -1761,6 +1784,8 @@ class StudyWorkspace(ResearchWorkspace):
     def _apply_refresh(self, value: Mapping[str, Any]) -> None:
         scrolls = _scroll_snapshot(self)
         self.study = dict(value)
+        if value.get("job_state"):
+            self.work["state"] = value["job_state"]
         self._last_refresh_error = None
         if not self._cancel_running:
             self.query_one("#study-action-status", Static).update("Live · updated just now")
@@ -1843,6 +1868,8 @@ class StudyWorkspace(ResearchWorkspace):
                 "will_preserve": "logs, partial results, checkpoints and published datasets",
             }
             self.app.push_screen(ExactConfirmation("Cancel Study", preview), self._apply_cancel)
+        elif event.button.id == "study-retry":
+            self._preview_retry()
         elif event.button.id == "study-delete":
             self._preview_delete()
         elif event.button.id == "study-export":
@@ -2026,6 +2053,70 @@ class StudyWorkspace(ResearchWorkspace):
             f"Cancellation complete · {stopped} active Job(s) stopped"
         )
         self._render_workspace()
+
+    def _preview_retry(self) -> None:
+        if self._retry_running:
+            return
+        self._retry_running = True
+        self.query_one("#study-retry", Button).disabled = True
+        self.query_one("#study-action-status", Static).update(
+            "Inspecting persisted recovery state…"
+        )
+
+        def preview() -> None:
+            try:
+                value = self.services.retry_preview(self.job_id)
+            except Exception as error:
+                self.app.call_from_thread(self._retry_failed, error)
+            else:
+                self.app.call_from_thread(self._confirm_retry, value)
+
+        Thread(target=preview, daemon=True, name="lambdaforge-study-retry-preview").start()
+
+    def _confirm_retry(self, preview: Mapping[str, Any]) -> None:
+        self.query_one("#study-action-status", Static).update(
+            "Recovery plan ready · confirmation required"
+        )
+        self.app.push_screen(StudyRetryConfirmation(preview), self._apply_retry)
+
+    def _apply_retry(self, compatibility: bool | None) -> None:
+        if compatibility is None:
+            self._retry_running = False
+            self.query_one("#study-retry", Button).disabled = False
+            self.query_one("#study-action-status", Static).update(
+                "Recovery cancelled · nothing submitted"
+            )
+            return
+        self.query_one("#study-action-status", Static).update("Submitting recovered Study…")
+
+        def retry() -> None:
+            try:
+                result = self.services.retry_job(self.job_id, accept_code_change=compatibility)
+            except Exception as error:
+                self.app.call_from_thread(self._retry_failed, error)
+            else:
+                self.app.call_from_thread(self._retry_complete, result)
+
+        Thread(target=retry, daemon=True, name="lambdaforge-study-retry").start()
+
+    def _retry_failed(self, error: Exception) -> None:
+        self._retry_running = False
+        self.query_one("#study-retry", Button).disabled = False
+        self.query_one("#study-action-status", Static).update(
+            f"Recovery failed · {type(error).__name__}: {error}"
+        )
+
+    def _retry_complete(self, result: Mapping[str, Any]) -> None:
+        self._retry_running = False
+        self.work["primary_job_id"] = result["job_id"]
+        self.work["study_job_id"] = result["job_id"]
+        self.work["state"] = "preparing"
+        self.query_one("#study-action-status", Static).update(
+            "Recovery accepted · background preparation started; previous evidence is preserved"
+        )
+        self.query_one("#study-retry", Button).disabled = True
+        self.query_one("#study-cancel", Button).disabled = False
+        self._refresh_study(force=True)
 
     def _preview_delete(self) -> None:
         """Resolve the exact owned state before asking for destructive confirmation."""
@@ -2233,6 +2324,11 @@ class HpoParameterWorkspace(ResearchWorkspace):
             f"Missing evidence: "
             f"{'; '.join(str(value) for value in live_detail.get('missing_evidence', ())) or 'none'}\n"
             f"Predictive importance: {format_value(detail.get('importance'))}"
+            f"\nStability: agreement across {live_detail.get('stability_diagnostics', {}).get('realizations', '—')} evidence realizations, not truth probability"
+            f"\nSeed noise: {live_detail.get('stability_diagnostics', {}).get('seed_noise', {}).get('status', 'unresolved')} · "
+            f"{live_detail.get('stability_diagnostics', {}).get('seed_noise', {}).get('repeated_candidates', 0)} contexts · "
+            f"df {live_detail.get('stability_diagnostics', {}).get('seed_noise', {}).get('residual_degrees_of_freedom', 0)}"
+            f"\nUncertainty: {', '.join(live_detail.get('stability_diagnostics', {}).get('uncertainty_sources', ())) or 'see support and predictive evidence'}"
         )
         self.query_one("#hpo-parameter-dashboard", HpoParameterDashboard).show_parameter(
             self.parameter,
@@ -3223,6 +3319,39 @@ class CredentialDialog(ModalScreen[str | None]):
         else:
             secret = self.query_one("#credential-secret", Input).value
             self.dismiss(secret or None)
+
+
+class StudyRetryConfirmation(ModalScreen[bool | None]):
+    """An explicit scientific compatibility acknowledgement, never inferred from a code fix."""
+
+    def __init__(self, preview: Mapping[str, Any]) -> None:
+        super().__init__()
+        self.preview = dict(preview)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-card wide-modal"):
+            yield Label("Resume Study", classes="modal-title")
+            with VerticalScroll():
+                yield Static(confirmation_text(self.preview), markup=False)
+                yield Static(
+                    "Completed and pruned Runs will not be repeated. Failed/interrupted Runs use "
+                    "their checkpoints when available, otherwise start again. Spent budgets remain spent. "
+                    "If the code fix changes the meaning of earlier metrics or checkpoint structure, "
+                    "cancel this dialog and start a new Study."
+                )
+                yield Checkbox(
+                    "I changed code, but earlier evidence and checkpoints remain valid",
+                    id="retry-compatible-code",
+                )
+            with Horizontal(classes="modal-actions"):
+                yield Button("Cancel", id="retry-cancel")
+                yield Button("Resume Study", id="retry-confirm", variant="success")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "retry-confirm":
+            self.dismiss(self.query_one("#retry-compatible-code", Checkbox).value)
+        else:
+            self.dismiss(None)
 
 
 class ExactConfirmation(ModalScreen[bool]):

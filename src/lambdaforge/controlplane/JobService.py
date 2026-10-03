@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
@@ -261,7 +261,11 @@ class JobService:
             if record.job_id != exclude_job_id
             and record.cluster == cluster
             and not record.state.terminal
-            and record.metadata.get("scientific_identity") == scientific_identity
+            and scientific_identity
+            in {
+                record.metadata.get("scientific_identity"),
+                record.metadata.get("recovery_work_identity"),
+            }
         )
 
     def refuse_active_execution(
@@ -575,7 +579,8 @@ class JobService:
         """Return one bounded live/terminal study snapshot for machine clients and the TUI."""
         record = self.get(job_id, refresh=False)
         _profile, transport, _scheduler = self._provider(record)
-        return self._load_study_summary(record, transport)
+        value = self._load_study_summary(record, transport)
+        return {**value, "job_state": record.state.value} if value is not None else None
 
     def study_actions(self, job_id: str) -> tuple[dict[str, Any], ...]:
         """Read the complete append-only HPO decision history on explicit demand."""
@@ -610,7 +615,7 @@ class JobService:
         transport: Any, path: PurePosixPath, *, offset: int, limit: int
     ) -> tuple[Sequence[Any], int, bool]:
         """Read one byte-bounded JSONL page without rescanning earlier remote records."""
-        script = r'''
+        script = r"""
 import json,os,sys
 p,start,count,max_bytes=sys.argv[1],int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4])
 rows=[]; used=0
@@ -631,7 +636,7 @@ with open(p,"rb") as f:
  next_offset=f.tell()
  eof=next_offset>=os.fstat(f.fileno()).st_size
 json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separators=(",",":"))
-'''
+"""
         result = transport.run(
             (
                 "python3",
@@ -934,7 +939,7 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
         cached_fingerprint = cached[0] if cached is not None else ""
         # Selection, symlink validation, fingerprinting and projection happen in one bounded
         # host-side read.  An unchanged refresh returns only a tiny marker.
-        script = r'''
+        script = r"""
 import json,os,sys
 interactive,summary,known=sys.argv[1:]
 known="" if known=="-" else known
@@ -985,7 +990,7 @@ except (ImportError,AttributeError):
    "detail_level":"interactive","interactive_projection_version":2,"candidates":candidates
   }
 print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":")))
-'''
+"""
         loaded = transport.run(
             ("python3", "-c", script, interactive_path, path, cached_fingerprint or "-"),
             timeout=30.0,
@@ -998,9 +1003,7 @@ print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":"))
         try:
             envelope = json.loads(loaded.stdout)
         except (json.JSONDecodeError, TypeError) as error:
-            raise RuntimeError(
-                f"Corrupt study telemetry for {record.job_id}."
-            ) from error
+            raise RuntimeError(f"Corrupt study telemetry for {record.job_id}.") from error
         if not isinstance(envelope, Mapping) or envelope.get("missing"):
             return None
         if envelope.get("unchanged"):
@@ -1014,8 +1017,7 @@ print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":"))
             self._study_projection_cache.pop(next(iter(self._study_projection_cache)))
         return value
 
-    @staticmethod
-    def _owned_study_path(record: JobRecord, value: Any) -> PurePosixPath | None:
+    def _owned_study_path(self, record: JobRecord, value: Any) -> PurePosixPath | None:
         if not isinstance(value, str) or not value:
             return None
         root = PurePosixPath(record.work_dir)
@@ -1025,6 +1027,31 @@ print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":"))
         try:
             path.relative_to(root)
         except ValueError as error:
+            recovery = record.metadata.get("recovery_execution_dir")
+            owner_id = record.metadata.get("recovery_owner_job")
+            if isinstance(recovery, str) and isinstance(owner_id, str):
+                owner = self.get(owner_id, refresh=False)
+                if owner.cluster != record.cluster:
+                    raise RuntimeError("Recovery evidence belongs to another cluster.") from error
+                owner_root = PurePosixPath(owner.work_dir)
+                if self.catalog.get(owner.cluster).transport == "local":
+                    from lambdaforge.work.runner import WorkRunner
+
+                    source = Path(
+                        str(owner.metadata.get("source_config_path") or owner.config_path)
+                    )
+                    owner_root = PurePosixPath(
+                        str(WorkRunner._project_root(source.parent) / ".lambdaforge" / "runs")
+                    )
+                recovery_root = PurePosixPath(recovery)
+                if (
+                    owner_id in record.metadata.get("recovery_dependencies", ())
+                    and recovery_root.is_absolute()
+                    and ".." not in recovery_root.parts
+                    and recovery_root.is_relative_to(owner_root)
+                    and path.is_relative_to(recovery_root / "runs")
+                ):
+                    return path
             raise RuntimeError(
                 f"Study evidence escaped the Job work root for {record.job_id}."
             ) from error
@@ -1311,16 +1338,20 @@ print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":"))
         """Resume only when the authoritative scheduler advertises support."""
         return self._lifecycle(job_id, "resume", JobState.RUNNING)
 
-    def delete(self, job_id: str, *, allow_unknown: bool = False) -> None:
+    def delete(
+        self, job_id: str, *, allow_unknown: bool = False, deleting_jobs: Sequence[str] = ()
+    ) -> None:
         """Delete local metadata, optionally forgetting an unverifiable UNKNOWN record.
 
         ``allow_unknown`` never touches a scheduler or remote workspace.  It exists
         for the explicit preview/apply history operation in :class:`WorkService`.
         """
         record = self.get(job_id, refresh=False)
-        if not record.state.terminal and not (
-            allow_unknown and record.state is JobState.UNKNOWN
-        ):
+        if set(self.recovery_dependents(job_id)) - set(deleting_jobs):
+            raise ValueError(
+                "Job state is retained by a recovered Study; delete its latest history first."
+            )
+        if not record.state.terminal and not (allow_unknown and record.state is JobState.UNKNOWN):
             raise ValueError("Only terminal job metadata can be deleted.")
         self.store.delete(job_id)
 
@@ -1600,7 +1631,94 @@ print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":"))
         state = str(value.get("state", "unknown"))
         return f"[{timestamp}] [{phase}] {state}: {value.get('message', '')}"
 
-    def retry(self, job_id: str, *, dry_run: bool = False) -> JobHandle:
+    def retry_preview(self, job_id: str) -> dict[str, Any]:
+        """Read a bounded recovery plan on its execution host; never copy scientific bytes."""
+        previous = self.get(job_id)
+        if previous.state not in {JobState.FAILED, JobState.CANCELLED, JobState.TIMEOUT}:
+            raise ValueError("Retry requires a failed, cancelled or timed-out Job.")
+        owner_id = str(previous.metadata.get("recovery_owner_job") or previous.job_id)
+        owner = self.get(owner_id, refresh=False)
+        _profile, transport, _scheduler = self._provider(previous)
+        owned_root = owner.work_dir
+        if _profile.transport == "local":
+            from lambdaforge.work.runner import WorkRunner
+
+            source = Path(str(owner.metadata.get("source_config_path") or owner.config_path))
+            owned_root = str(WorkRunner._project_root(source.parent) / ".lambdaforge" / "runs")
+        script = r"""
+import json,sys
+from pathlib import Path
+work,known,result,controller=map(Path,sys.argv[1:])
+def read(p):
+ if not p.is_file() or p.is_symlink(): return {}
+ return json.loads(p.read_text())
+paths=[]
+if str(known)!=".": paths=[known]
+else:
+ value=read(result)
+ if value.get("execution_dir"): paths=[Path(value["execution_dir"])]
+ if not paths:
+  value=read(controller).get("initialization",{})
+  if value.get("control_state_path"): paths=[Path(value["control_state_path"]).parent.parent]
+ if not paths:
+  paths=list((work/".lambdaforge"/"runs").glob("*/execution-*/hpo-control/state.json"))[:65]
+  paths=[p.parent.parent for p in paths]
+if paths and any(not (p/"hpo-control"/"state.json").is_file() for p in paths):
+ raise SystemExit("Persisted Study recovery state is missing; refusing a silent restart")
+if len(paths)>1: raise SystemExit("Ambiguous persisted Study execution; refusing guessed recovery")
+out={"resumable":False}
+if paths:
+ p=paths[0]
+ if not p.is_absolute() or p.resolve()!=p or not p.is_relative_to(work):
+  raise SystemExit("Recovery state is outside the recorded owner Job workspace")
+ manifest=read(p/"execution.json"); state=read(p/"hpo-control"/"state.json")
+ if manifest.get("execution_id")!=p.name or state.get("execution_id")!=p.name:
+  raise SystemExit("Recovery execution identity mismatch")
+ out={"resumable":True,"execution_dir":str(p),"execution_id":p.name,
+      "completed_attempts":sum(r.get("status")=="succeeded" for r in state.get("runs",[])),
+      "failed_attempts":sum(r.get("status")=="failed" for r in state.get("runs",[])),
+      "pending_actions":len(state.get("pending_actions",[])),
+      "proposed_candidates":len(state.get("proposed_pool_trials",[]))}
+json.dump(out,sys.stdout)
+"""
+        observed = transport.run(
+            (
+                "python3",
+                "-c",
+                script,
+                owned_root,
+                str(previous.metadata.get("recovery_execution_dir") or "."),
+                str(PurePosixPath(previous.work_dir).parent / "result.json"),
+                str(PurePosixPath(previous.work_dir).parent / "study" / "controller.json"),
+            ),
+            timeout=30.0,
+        )
+        if observed.returncode:
+            raise ValueError(f"Cannot inspect Study recovery: {observed.stderr.strip()[-1000:]}")
+        plan = json.loads(observed.stdout)
+        plan.update(
+            {
+                "job_id": job_id,
+                "cluster": previous.cluster,
+                "owner_job_id": owner_id,
+                "will_preserve": "valid evidence, assigned seeds, HPO decisions and spent budgets",
+                "will_retry": "failed and interrupted Runs; checkpoints when available",
+                "code_change_policy": "explicit compatibility acknowledgement required",
+            }
+        )
+        return cast(dict[str, Any], plan)
+
+    def recovery_dependents(self, job_id: str) -> tuple[str, ...]:
+        """History owners cannot be cleaned while a recovery still references their bytes."""
+        return tuple(
+            record.job_id
+            for record in self.store.records()
+            if job_id in record.metadata.get("recovery_dependencies", ())
+        )
+
+    def retry(
+        self, job_id: str, *, dry_run: bool = False, accept_code_change: bool = False
+    ) -> JobHandle:
         """Create a new auditable job from one terminal job's exact request."""
         previous = self.get(job_id)
         if previous.state not in {JobState.FAILED, JobState.CANCELLED, JobState.TIMEOUT}:
@@ -1612,7 +1730,9 @@ print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":"))
         retry_metadata.pop("failure_phase", None)
         retry_metadata.pop("failure_category", None)
         retry_metadata["attempt"] = self._attempt_number(previous.job_id)
-        if previous.metadata.get("submission_mode") == "asynchronous":
+        if previous.metadata.get("submission_mode") == "asynchronous" or (
+            previous.metadata.get("study_expected") and self._retry_source_config(previous)
+        ):
             source_config = self._retry_source_config(previous)
             if source_config is None:
                 raise ValueError("The asynchronous submission has no source configuration path.")
@@ -1623,6 +1743,56 @@ print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":"))
                 raise TypeError("Persisted asynchronous run_arguments are invalid.")
             request = ResourceRequest.from_mapping(previous.resources)
             run_arguments = tuple(str(item) for item in arguments)
+            # Never replay stale recovery arguments when retrying a retry.
+            cleaned: list[str] = []
+            skip = False
+            for argument in run_arguments:
+                if skip:
+                    skip = False
+                    continue
+                if argument in {"--resume-execution", "--resume-study-path"}:
+                    skip = True
+                elif argument != "--accept-code-change":
+                    cleaned.append(argument)
+            preview = self.retry_preview(job_id) if previous.metadata.get("study_expected") else {}
+            recovery_metadata: dict[str, Any] = {}
+            if preview.get("resumable"):
+                cleaned = [
+                    argument for argument in cleaned if argument not in {"--rerun", "--restart"}
+                ]
+                cleaned.extend(
+                    (
+                        "--resume-execution",
+                        str(preview["execution_dir"]),
+                        "--resume-study-path",
+                        str(PurePosixPath(previous.work_dir).parent / "study"),
+                    )
+                )
+                if accept_code_change:
+                    cleaned.append("--accept-code-change")
+                recovery_identity = str(
+                    previous.metadata.get("recovery_work_identity")
+                    or previous.metadata.get("scientific_identity")
+                    or job_id
+                )
+                self.refuse_active_execution(
+                    recovery_identity,
+                    previous.cluster,
+                    name=str(previous.metadata.get("name", job_id)),
+                )
+                recovery_metadata = {
+                    "recovery_execution_dir": preview["execution_dir"],
+                    "recovery_owner_job": preview["owner_job_id"],
+                    "recovery_work_identity": recovery_identity,
+                    "recovery_dependencies": sorted(
+                        {
+                            previous.job_id,
+                            str(preview["owner_job_id"]),
+                            *previous.metadata.get("recovery_dependencies", ()),
+                        }
+                    ),
+                }
+            run_arguments = tuple(cleaned)
             if dry_run:
                 from lambdaforge.controlplane.ControlPlane import ControlPlane
 
@@ -1644,6 +1814,7 @@ print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":"))
                 run_arguments=run_arguments,
                 group_id=previous.group_id,
                 retry_of=previous.job_id,
+                metadata=recovery_metadata,
             )
         return self.submit(
             previous.command,

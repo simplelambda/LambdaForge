@@ -224,6 +224,14 @@ for live messages; prefer `self.log()` when a consistent timestamp and severity 
 
 ## Managed scientific infrastructure
 
+Adaptive Studies retain their scientific configuration independently of the recent action list.
+The console and reports preserve the authored practical margin, log scales and conditional domains.
+Seed-noise calibration remains provisional after a single repeated candidate; shared seeds compete
+with parameter/interactions probes for useful evidence per cost. Memory learning keeps completed
+sampled NVML peaks without calling them exact, and generic progress rates help ARI learn when more
+co-located Runs improve aggregate throughput. The console/HTML exposes the evidence behind stability
+and seed calibration. See [the Study policy guide](docs/MANUAL.md#7-sequence-parallelism-seeds-and-search).
+
 Use cache for reproducible bytes that can always be rebuilt, checkpoints for state needed to resume
 the same Run, and outputs for durable scientific evidence:
 
@@ -1056,6 +1064,23 @@ lf clean                     # preview only
 lf clean --apply
 ```
 
+To continue a failed, cancelled or timed-out adaptive Study, open it in the console and choose
+**Resume Study…**, or run `lf retry STUDY` from the original project. It submits a new Job on the
+same cluster with current project code, reconnects to the exact persisted HPO execution and keeps
+completed/pruned evidence, candidate identities, seed assignments and decisions. Failed and
+interrupted Runs create new Attempts: compatible checkpoints enable `self.resuming`; without a
+checkpoint that Run starts again. Valid completed Runs and performance-pruned Runs are not repeated.
+Already spent Run/time budgets stay spent; retry does not grant more budget.
+
+After fixing consumer code, use `lf retry STUDY --accept-code-change` **only** if previous metrics
+and checkpoint formats remain scientifically valid. The console offers the same explicit
+compatibility checkbox. Configuration, inputs, seed streams and objective must still match; a
+different scientific protocol requires a new Study. The original manifest remains immutable and
+`recovery-history.jsonl` records actual code revisions. Keep the original Job workspace: cleanup
+protects it while a recovered Study references its evidence. Missing/corrupt recovery state fails
+visibly rather than silently restarting an existing Study. This recovery targets one adaptive Study,
+not a composed multi-Work execution, and does not move state between clusters.
+
 The Research Console is the human interface for live Work, Studies, Clusters, Datasets and Results.
 Its Overview answers what is running, waiting or unhealthy; contextual screens progressively reveal
 Attempts, Runs, logs, resource admission, study evidence and completed results. `Ctrl+P` opens the
@@ -1201,11 +1226,30 @@ The optional Plotly report is self-contained and works offline. Its Study dashbo
 overview, candidate evidence and two-Trial comparison, parameter responses and exact-value
 summaries, pairwise heatmap/3D interactions, coverage, resource efficiency and findings. Metric,
 parameter, pair, plot-kind and colour controls use only persisted `analysis.json` evidence; the
-browser does not fit another model or change HPO conclusions. Its resizable panels and `My charts`
-view can persist custom bar/line/scatter plots whose axes are Trial, authored parameters, objective
-components or resource observations. Preferences are local to that
+browser does not fit another model or change HPO conclusions. Its resizable panels and `Explore`
+view saves plots against hyperparameter values, not just epochs: choose **X axis** = a parameter
+and **Y axis** = any recorded numeric metric. Changes preview immediately; **Save chart** only
+keeps the view. **Add another Y metric (2D)** provides searchable checkboxes for multiple series.
+The **Parameters → Y metric** selector updates the observed chart and exact-value table;
+persisted adjusted/model responses remain explicitly tied to the selection objective. For
+**3D scatter**, **Observed heatmap** or **Observed 3D surface**, choose two parameters as X/Y and
+a metric as **Z / cell metric**, then **Save chart**. Untested combinations stay blank; categorical
+axes retain their labels. Optional exact-value grouping shows means and SD across Trials, not
+seed confidence intervals. Partial/pruned observations are opt-in and never replace missing final
+selection evidence. Preferences are local to that
 generated HTML. Plotly is not a base dependency: without the extra, execution, JSON analysis and
 the Research Console remain fully functional.
+
+The report opens in **Research**: a prioritized inbox links findings to their evidence and charts.
+**Metrics & health** organizes labels, categories, units, aliases, constants, missing support and
+redundancy; **Ctrl/⌘ K** searches metrics, families, parameters, Trials and saved views. Optional
+Work `analysis_profile` or YAML `analysis` declarations preserve metric meaning and research
+questions before execution. Discovery is deterministic, bounded and retrospective; it does not
+change HPO. Test evidence cannot govern objective/constraints and is excluded from provisional
+automatic discovery. Different/unknown Y units use small multiples; normalization is visual and
+opt-in. Save views with notes and export/import their JSON specifications.
+See the [research workspace guide](docs/RESEARCH_ANALYSIS.md) for declarations, families,
+methods, statistical caveats, controls and compatibility with older Studies.
 
 Resource admission is evidence too. Each study persists the current GPU/CPU/RAM admission state,
 including active capacity, queued Runs, per-GPU free/required VRAM and the concrete wait reason.

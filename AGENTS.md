@@ -45,6 +45,18 @@ tracebacks. Local and remote run both return after durable asynchronous preparat
 
 ## Writing Work
 
+Adaptive Study recovery is `lf retry STUDY` or **Resume Study…** in its console workspace. It
+reconnects a freshly prepared Job to the exact original owned Execution on the same cluster;
+valid completed/pruned evidence, HPO decisions, seeds and spent budgets remain intact. Failed and
+interrupted Runs create new Attempts from compatible checkpoints or start fresh when absent.
+`--accept-code-change` is an explicit researcher acknowledgement of valid prior metrics/checkpoints,
+not a waiver of configuration/input/seed/objective identity checks. Preserve immutable origin
+`execution.json`, audit actual revisions in `recovery-history.jsonl`/`current-code.json`, protect
+referenced owner Jobs from cleanup and use the existing cross-process lock. Never silently start
+over if persisted recovery state is missing/corrupt, automatically retry consumer exceptions,
+repeat valid confirmation seeds, or remove physical failed Attempt cost/history. Recovery currently
+requires one adaptive Study per Execution; it does not migrate state between clusters.
+
 ```python
 from pathlib import Path
 import lambdaforge as lf
@@ -401,6 +413,18 @@ Exhaustive seed/search is serial; adaptive search owns its allocation and schedu
 
 ## Study Analysis and console
 
+`study/controller.json.initialization` is durable immutable scientific authority; `recent` is only
+a display tail. Preserve objective, practical margin, authored geometry/conditions, policy and seed
+streams across refresh/export/reload. Legacy migration reads the durable history once. Live insight
+views reuse the controller scientific snapshot. Seed noise v2 distinguishes unresolved/provisional/
+calibrated variance and contextual support; one repeated architecture is provisional. Replication
+value includes its effect across unresolved questions, not only incumbent comparisons. Endpoint
+calibration continuations carry `PRUNER_CALIBRATION_EVIDENCE` and remain protected. Sampled completed
+NVML envelopes are usable resource history but never exact lifetime peaks; keep incomplete data
+censored and persist `sampled_history_count`. Generic step/progress rates supply throughput; optimize
+aggregate evidence/time rather than process count. Human analysis may use higher resampling precision
+outside the controller heartbeat; display realization agreement, resolution and noise diagnostics.
+
 `lambdaforge.analysis.StudyAnalysis` is post-hoc evidence analysis, never a second HPO controller.
 Terminal studies persist atomic versioned `analysis.json`; `lf results analyze SELECTOR
 [--recompute] [--json]` uses the same core, while `results report` is an optional offline Plotly
@@ -506,6 +530,28 @@ per-generated-file local-storage key: reopening preserves them and regeneration 
 Resizable panels, custom metric categories and saved chart specifications are presentation-only;
 they must keep stable metric keys and consume embedded persisted observations without recomputing
 scientific evidence.
+Study **Explore** supports observed parameter/metric 2D overlays, arbitrary X/Y parameter + Z
+metric 3D scatter, heatmaps and numeric surfaces. Keep authored categorical labels and finite
+domain gaps; missing values are null, never zero/predicted. Partial/pruned observations are opt-in
+display evidence and cannot replace final selection. Exact-value SD is descriptive across Trials,
+not seed uncertainty. Package the offline `analysis/assets/study-charts.js` renderer in wheels.
+Chart controls preview immediately; Save only persists a view. Additional Y series use searchable
+checkboxes. Parameters uses the same observed-metric renderer and a Y selector; keep persisted
+adjusted objective/model evidence separate and never relabel it as another metric. Empty plots
+must explain absent selection/parameter/filter data without fabricated fallback values.
+
+Study Analysis v8 adds a deterministic `research` read model. `MetricCatalog` owns meaning,
+`AnalysisProfile` validates class/YAML declarations, and `ResearchAnalysis`/`ResearchDiagnostics`
+own bounded profiling/discovery. Offline assets only render; never run these diagnostics in the
+HPO heartbeat or fit scientific models in JavaScript. Freeze declarations and registry defaults
+in owned `analysis-semantics.json` before execution; child specs reference it, not a copied catalog.
+Keep separate analysis-semantic identity from scientific evidence identity. Test/derived test
+metrics cannot govern objective/constraints and cannot enter provisional discovery. Censored
+candidates never become exact final evidence. BY-adjusted exploratory permutations are not formal
+adaptive-sampling inference or scientific confidence. Show constants/missing metadata explicitly,
+preserve family coordinates/lineage, and separate unknown/different-unit Y axes unless the user
+opts into visual normalization. Research inbox/search/metric browser/validated saved views use
+persisted domain data. Routes and limits: `docs/RESEARCH_ANALYSIS.md` (Spanish sibling).
 Coverage uses bounded cards/charts/tables, not raw JSON, and contextual help explains
 statistical terms. Decisions append to `study/controller-history.jsonl`; keep
 `controller.json.recent` bounded, load the full

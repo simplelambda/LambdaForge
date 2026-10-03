@@ -89,6 +89,7 @@ version = { attr = "lambdaforge._version.VERSION" }
 
 [tool.setuptools.package-data]
 lambdaforge = [
+    "analysis/assets/*.js",
     "schemas/*.json",
     "tui/*.tcss",
 ]
@@ -116,6 +117,8 @@ lambdaforge = [
 "share/lambdaforge/docs" = [
     "docs/MANUAL.md",
     "docs/MANUAL.es.md",
+    "docs/RESEARCH_ANALYSIS.md",
+    "docs/RESEARCH_ANALYSIS.es.md",
 ]
 
 [tool.pytest.ini_options]

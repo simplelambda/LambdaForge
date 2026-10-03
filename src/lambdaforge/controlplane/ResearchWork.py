@@ -204,7 +204,11 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
     """Derive semantic work groups while leaving JobStore as the sole authority."""
     grouped: dict[tuple[str, str, str], list[JobRecord]] = defaultdict(list)
     for record in records:
-        identity_key = str(record.metadata.get("scientific_identity") or record.job_id)
+        identity_key = str(
+            record.metadata.get("recovery_work_identity")
+            or record.metadata.get("scientific_identity")
+            or record.job_id
+        )
         name = str(record.metadata.get("name") or record.config_path or record.job_id)
         grouped[(identity_key, record.cluster, name)].append(record)
     output = []

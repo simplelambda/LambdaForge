@@ -46,6 +46,7 @@ class StudyInsightAnalyzer:
         candidate_pool: Mapping[int, Mapping[str, Any]] | None = None,
         parameter_space: ParameterSpace | Mapping[str, Any] | None = None,
         final: bool = False,
+        scientific_understanding: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return one compact JSON-shaped HPO interpretation snapshot."""
         composite = isinstance(objective.get("metrics"), Mapping)
@@ -68,6 +69,7 @@ class StudyInsightAnalyzer:
                         else parameter_space
                     ),
                     "final": final,
+                    "scientific_understanding": scientific_understanding,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -214,14 +216,18 @@ class StudyInsightAnalyzer:
                 ).encode()
             ).hexdigest()
         )
-        scientific = ScientificQuestionAnalyzer.analyze(
-            bounded,
-            objective,
-            practical_margin=practical_margin,
-            fingerprint=evidence_fingerprint,
-            candidate_pool=candidate_pool,
-            parameter_space=geometry,
-            final=final,
+        scientific = (
+            dict(scientific_understanding)
+            if scientific_understanding is not None
+            else ScientificQuestionAnalyzer.analyze(
+                bounded,
+                objective,
+                practical_margin=practical_margin,
+                fingerprint=evidence_fingerprint,
+                candidate_pool=candidate_pool,
+                parameter_space=geometry,
+                final=final,
+            )
         )
         result = {
             "analysis_version": 6,
@@ -558,9 +564,7 @@ class StudyInsightAnalyzer:
         output: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
         for left_index, left in enumerate(names):
             for right in names[left_index + 1 :]:
-                detail = cls._joint_gain(
-                    left, right, observations, parameter_space=parameter_space
-                )
+                detail = cls._joint_gain(left, right, observations, parameter_space=parameter_space)
                 if detail is None:
                     continue
                 output[left].append({"parameter": right, **detail})
@@ -626,11 +630,7 @@ class StudyInsightAnalyzer:
                             parameter_space.value_distance(
                                 left,
                                 PARAMETER_INACTIVE if row[0] is _INACTIVE else row[0],
-                                (
-                                    PARAMETER_INACTIVE
-                                    if candidate[0] is _INACTIVE
-                                    else candidate[0]
-                                ),
+                                (PARAMETER_INACTIVE if candidate[0] is _INACTIVE else candidate[0]),
                             )
                         )
                     if use_right:
@@ -638,11 +638,7 @@ class StudyInsightAnalyzer:
                             parameter_space.value_distance(
                                 right,
                                 PARAMETER_INACTIVE if row[1] is _INACTIVE else row[1],
-                                (
-                                    PARAMETER_INACTIVE
-                                    if candidate[1] is _INACTIVE
-                                    else candidate[1]
-                                ),
+                                (PARAMETER_INACTIVE if candidate[1] is _INACTIVE else candidate[1]),
                             )
                         )
                     distance = math.sqrt(

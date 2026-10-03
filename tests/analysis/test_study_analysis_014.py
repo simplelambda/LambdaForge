@@ -260,7 +260,7 @@ def test_persistence_is_idempotent_for_the_same_evidence(tmp_path: Path) -> None
     second = StudyAnalysis.persist(source, path)
     assert first == second
     assert path.read_bytes() == original_bytes
-    assert second["analysis_version"] == 6
+    assert second["analysis_version"] == 8
 
 
 def test_analysis_serializes_paths_embedded_in_failure_diagnostics(tmp_path: Path) -> None:
@@ -632,7 +632,7 @@ def test_interactive_curve_and_parameter_exports_use_optional_renderer(
     assert "Select at most two candidates to compare" in study_html
     assert "Persisted adjusted response" in study_html
     assert "3D surface" in study_html
-    assert "My charts" in study_html
+    assert "Explore" in study_html
     assert "Parameter · width" in study_html
     assert "Resource · GPU seconds" in study_html
     assert "save-study-chart" in study_html

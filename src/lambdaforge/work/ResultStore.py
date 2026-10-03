@@ -322,6 +322,12 @@ class ResultStore:
         objective = definition.get("objective")
         objective = objective if isinstance(objective, Mapping) else None
         authored = StudyAnalysis.authored_space(definition)
+        semantics_path = execution_dir / "analysis-semantics.json"
+        if semantics_path.is_file() and not semantics_path.is_symlink():
+            frozen = _read_mapping(semantics_path)
+            selected["analysis_semantics"] = frozen.get(
+                str(definition.get("name", selected.get("name"))), {}
+            )
         return StudyAnalysis.persist(
             selected,
             execution_dir / "analysis.json",
@@ -740,9 +746,7 @@ def _portable_name(value: str) -> str:
     return (selected or "experiment")[:120]
 
 
-def _copy_evidence_tree(
-    source: Path, destination: Path, *, hardlink: bool = False
-) -> None:
+def _copy_evidence_tree(source: Path, destination: Path, *, hardlink: bool = False) -> None:
     """Copy regular evidence without following links or accepting special files."""
     authored = source.expanduser()
     if authored.is_symlink():
