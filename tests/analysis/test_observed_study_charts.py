@@ -12,6 +12,26 @@ import pytest
 from lambdaforge.analysis.Report import write_html
 
 
+def select_evidence(page: Any, selector: str, value: str) -> None:
+    """Exercise the semantic picker, rather than restoring deleted legacy selects."""
+    page.click(selector + "-picker")
+    name = value
+    if selector == "#parameter-select":
+        name = "param:" + value
+    if name.startswith("metric:") and not name.startswith("metric:__"):
+        name = name.removeprefix("metric:")
+    if name in {"__selection__", "metric:__selection__"}:
+        name = "selection_objective"
+    query = (
+        name.removeprefix("param:")
+        .removeprefix("metric:")
+        .replace("__best_observed__", "Best observed")
+        .replace("__current_observed__", "Current observed")
+    )
+    page.fill("#research-global-query", "" if name == "selection_objective" else query)
+    page.locator(f'#research-search-results button[data-choice="{name}"]').click()
+
+
 def sample_analysis() -> dict[str, Any]:
     candidates = []
     for trial, width, depth, flag, score in (
@@ -67,7 +87,7 @@ def test_observed_dashboard_embeds_all_numeric_metrics_and_local_renderer(tmp_pa
     assert "Observed heatmap" in output
     assert "Observed 3D surface" in output
     assert "3D scatter" in output
-    assert "Add another Y metric" in output
+    assert "Compare with…" in output
     assert "window.LambdaForgeStudyCharts" in output
     assert "65536" in output  # Bounded observed grid, not an unbounded Cartesian allocation.
     assert "never model predictions" in output
@@ -93,8 +113,8 @@ def test_observed_charts_in_browser_and_saved_preferences(tmp_path: Path) -> Non
         page.get_by_text("Advanced visualization options", exact=True).click()
 
         # Editing axes renders immediately; Save is persistence, never a drawing prerequisite.
-        page.select_option("#study-chart-x", "param:width")
-        page.select_option("#study-chart-y", "metric:train_loss")
+        select_evidence(page, "#study-chart-x", "param:width")
+        select_evidence(page, "#study-chart-y", "metric:train_loss")
         page.wait_for_function(
             """() => {const c = document.querySelector('#study-custom-chart .js-plotly-plot');
             return c.data[0]?.x?.length === 3 && c.data[0].y[0] === 0;}"""
@@ -103,10 +123,10 @@ def test_observed_charts_in_browser_and_saved_preferences(tmp_path: Path) -> Non
 
         def create(kind: str, x: str, y: str, z: str = "metric:__selection__") -> None:
             page.select_option("#study-chart-kind", kind)
-            page.select_option("#study-chart-x", x)
-            page.select_option("#study-chart-y", y)
+            select_evidence(page, "#study-chart-x", x)
+            select_evidence(page, "#study-chart-y", y)
             if kind in {"scatter3d", "heatmap", "surface"}:
-                page.select_option("#study-chart-z", z)
+                select_evidence(page, "#study-chart-z", z)
             page.click("#save-study-chart")
 
         def trace() -> dict[str, Any]:
@@ -118,12 +138,10 @@ def test_observed_charts_in_browser_and_saved_preferences(tmp_path: Path) -> Non
         assert trace()["x"] == [32, 32, 64]
         assert trace()["y"] == [0.0, 0.2, 0.3]
         page.select_option("#study-chart-aggregate", "mean")
-        page.fill("#study-chart-metric-search", "train_loss")
-        assert not page.locator(
-            '#study-chart-extra-metrics input[value="metric:accuracy"]'
-        ).is_visible()
-        page.locator('#study-chart-extra-metrics input[value="metric:train_loss"]').check()
-        page.fill("#study-chart-metric-search", "")
+        page.get_by_role("button", name="Compare with…", exact=True).click()
+        page.fill("#research-global-query", "train_loss")
+        page.locator('#research-search-results button[data-choice="train_loss"]').click()
+        assert "train loss" in page.locator("#research-compare-chips").inner_text()
         create("line", "param:width", "metric:__selection__")
         assert trace()["y"] == [0.7, 0.75]
         assert trace()["customdata"][0] == ["1, 2", 2]
@@ -172,15 +190,15 @@ def test_observed_charts_in_browser_and_saved_preferences(tmp_path: Path) -> Non
         page.screenshot(path=str(tmp_path / "observed-study-charts.png"), full_page=True)
 
         page.get_by_role("button", name="Parameters", exact=True).click()
-        page.select_option("#parameter-select", "width")
-        page.select_option("#parameter-metric", "train_loss")
+        select_evidence(page, "#parameter-select", "width")
+        select_evidence(page, "#parameter-metric", "train_loss")
         parameter = page.eval_on_selector(
             "#parameter-observed .js-plotly-plot", "chart => chart.data[0]"
         )
         assert parameter["x"] == [32, 64]
         assert parameter["y"] == [0.1, 0.3]
         assert "train loss" in page.locator("#parameter-value-metric").inner_text().lower()
-        page.select_option("#parameter-select", "flag")
+        select_evidence(page, "#parameter-select", "flag")
         assert "false" in page.locator("#parameter-values tbody").inner_text()
         page.reload()
         assert page.locator("#parameter-metric").input_value() == "train_loss"
@@ -206,7 +224,7 @@ def test_missing_selection_is_explained_without_substituting_partial_evidence(
         page.get_by_role("button", name="Explore", exact=True).click()
         page.get_by_text("Advanced visualization options", exact=True).click()
         assert "No final selection objective" in page.locator("#study-chart-status").inner_text()
-        page.select_option("#study-chart-y", "metric:__best_observed__")
+        select_evidence(page, "#study-chart-y", "metric:__best_observed__")
         page.check("#study-chart-partial")
         page.wait_for_function(
             """() => {
@@ -214,7 +232,7 @@ def test_missing_selection_is_explained_without_substituting_partial_evidence(
             return chart.data[0].x.length === 4;
             }"""
         )
-        page.select_option("#study-chart-y", "metric:__selection__")
+        select_evidence(page, "#study-chart-y", "metric:__selection__")
         page.wait_for_function(
             """() => {
             const chart = document.querySelector('#study-custom-chart .js-plotly-plot');

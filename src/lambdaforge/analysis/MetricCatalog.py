@@ -264,6 +264,8 @@ def resolve_semantics(
             "category",
             "expected",
             "optional",
+            "label",
+            "priority",
         }:
             raise ValueError("Unknown analysis question fields.")
         question_identity = question.get("id")
@@ -275,6 +277,16 @@ def resolve_semantics(
             raise ValueError("Analysis questions need unique nonempty ids.")
         identity = question_identity
         question_ids.add(identity)
+        if "label" in question and not isinstance(question["label"], str):
+            raise ValueError(f"Question {identity}.label must be text.")
+        priority = question.get("priority", 0)
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int | float)
+            or not math.isfinite(priority)
+            or priority < 0
+        ):
+            raise ValueError(f"Question {identity}.priority must be finite and non-negative.")
         if question.get("kind") in {"relationship", "consistency"} and not all(
             isinstance(question.get(k), str) for k in ("x", "y")
         ):

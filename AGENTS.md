@@ -203,6 +203,16 @@ alone remain ordinary Attempt/log Works and must not create study telemetry.
 
 ## YAML composition and studies
 
+ActivationCondition is the immutable AND-of-equality/membership authority shared through
+ParameterSpace: historical `when: {parent: value}` and explicit `{eq: value}` normalize identically;
+`{in: [...]}` requires unique finite parent-domain scalars and has order-independent identity.
+Topologically order dependencies, omit inactive keys and never multiply then deduplicate branches.
+Root resources alone inherit into steps; reject ignored root with/seeds/replicates/search/sweep/
+execution/objective/analysis. Preflight distinguishes Study dispatch budgets from scheduler ceilings
+(sum sequential, max parallel). Only live reliable direct GPU capacity may reject impossible
+requests; scheduler login/command grants remain runtime-owned and never broadened.
+Details: docs/CONDITIONAL_STUDIES.md.
+
 `steps` is a sequence. `{parallel: [...]}` is one concurrent level. The following level waits for
 all members. Cross-step outputs reference `step.output` and are invalid when the producer has
 multiple seeds/trials. `seeds` creates separate Runs and does not inject a `seed` argument.
@@ -412,6 +422,13 @@ uses isolated spawned Work processes inside the enclosing Job's aggregate fixed 
 Exhaustive seed/search is serial; adaptive search owns its allocation and schedules child Runs.
 
 ## Study Analysis and console
+
+Study HTML has one catalog-backed semantic picker, not select-plus-search overlays. Explore's
+primary Analyze/By/Compare controls infer observed views; explicit axes/type/palette/normalization
+stay Advanced. Parameters uses removable comparison chips. Configured question cards and category
+hierarchy are presentation of persisted semantics. Research owns the finding list; Evidence owns
+conclusions/diagnostics/JSON. Arbitrary observed interactions must not relabel persisted HPO models.
+Keep legacy saved-view keys, current/final/censored distinctions and the individual Run dashboard.
 
 `study/controller.json.initialization` is durable immutable scientific authority; `recent` is only
 a display tail. Preserve objective, practical margin, authored geometry/conditions, policy and seed

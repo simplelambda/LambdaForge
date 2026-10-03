@@ -219,6 +219,15 @@ class CommandLineInterface:
         )
         if supervised or (arguments.on == "local" and arguments.dry_run):
             config = WorkConfig.from_yaml(arguments.config)
+            target_capacity: Mapping[str, Any] | None = None
+            if arguments.dry_run and not supervised:
+                from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
+                from lambdaforge.controlplane.TargetCapacity import check_target_capacity
+
+                profile = ClusterCatalog.load(arguments.clusters).get("local")
+                target_capacity = check_target_capacity(
+                    profile, ControlPlaneFactory().transport(profile), config.resources.gpu_count
+                )
             outcome = WorkRunner().run(
                 config,
                 dry_run=arguments.dry_run,
@@ -229,6 +238,8 @@ class CommandLineInterface:
                 accept_code_change=getattr(arguments, "accept_code_change", False),
             )
             payload = outcome.to_dict()
+            if arguments.dry_run:
+                payload["target_capacity"] = target_capacity
             if arguments.json:
                 print(json.dumps(payload, indent=2))
             else:
@@ -236,6 +247,9 @@ class CommandLineInterface:
                     f"{payload['name']}: {payload.get('status', 'planned')} "
                     f"({payload['execution_id']})"
                 )
+                if arguments.dry_run:
+                    print(CommandLineInterface._explanation(config.explanation()))
+                    print(CommandLineInterface._capacity_summary(target_capacity))
             return 0 if payload.get("status", "succeeded") == "succeeded" else 4
         if any(
             getattr(arguments, option, None)
@@ -251,7 +265,8 @@ class CommandLineInterface:
             if enabled
         )
         if arguments.dry_run or arguments.wait_for_submit:
-            handle, bundle = ControlPlane(ClusterCatalog.load(arguments.clusters)).submit(
+            plane = ControlPlane(ClusterCatalog.load(arguments.clusters))
+            handle, bundle = plane.submit(
                 arguments.config,
                 cluster=arguments.on,
                 dry_run=arguments.dry_run,
@@ -259,6 +274,11 @@ class CommandLineInterface:
                 allow_duplicate=arguments.allow_duplicate,
             )
             payload = {"job": handle.to_dict(), "bundle": bundle.to_dict()}
+            if arguments.dry_run:
+                payload["preflight"] = WorkConfig.from_yaml(arguments.config).preflight()
+                payload["target_capacity"] = plane.jobs.store.get(handle.job_id).metadata.get(
+                    "target_capacity"
+                )
         else:
             handle = SubmissionService(ClusterCatalog.load(arguments.clusters)).enqueue(
                 arguments.config,
@@ -272,6 +292,13 @@ class CommandLineInterface:
             if arguments.json
             else f"Submitted {payload.get('job_id', payload)}"
         )
+        if arguments.dry_run and not arguments.json:
+            print(
+                CommandLineInterface._explanation(
+                    WorkConfig.from_yaml(arguments.config).explanation()
+                )
+            )
+            print(CommandLineInterface._capacity_summary(payload.get("target_capacity")))
         return 0
 
     @staticmethod
@@ -593,6 +620,12 @@ class CommandLineInterface:
         print(json.dumps(payload, indent=2) if as_json else human)
 
     @staticmethod
+    def _capacity_summary(inventory: Mapping[str, Any] | None) -> str:
+        if inventory and inventory.get("reliable") is True:
+            return f"Target capacity checked: {inventory.get('allocatable_gpus')} exposed GPUs."
+        return "Target capacity not checked: no reliable direct-host inventory is available."
+
+    @staticmethod
     def _explanation(payload: Mapping[str, Any]) -> str:
         lines = [f"Work: {payload['name']}", f"Planned Runs: {payload['planned_runs']}"]
         for level_number, level in enumerate(payload["levels"], 1):
@@ -604,6 +637,41 @@ class CommandLineInterface:
                         "required" if parameter["required"] else f"default={parameter['default']!r}"
                     )
                     lines.append(f"    {parameter['name']}: {parameter['type']} ({state})")
+                facts = run.get("preflight", {})
+                lines.append(
+                    f"    Design: {facts.get('candidates')} candidates × "
+                    f"{len(facts.get('shared_seeds', []))} shared seeds; "
+                    f"{facts.get('required_runs')} required Runs; "
+                    f"{facts.get('requested_gpus')} requested GPUs."
+                )
+                lines.append(
+                    f"    Study time budget: {facts.get('study_time_budget_seconds')} seconds; "
+                    f"scheduler wall-time: {facts.get('scheduler_wall_time_seconds')} seconds."
+                )
+                lines.append(
+                    f"    Shared seeds: {facts.get('shared_seeds')}; "
+                    f"replication: {facts.get('replication')}; "
+                    f"maximum parallelism: {facts.get('max_parallel') or 'auto'}."
+                )
+                if facts.get("reference") is not None:
+                    lines.append(f"    Reference candidate: {facts['reference']}.")
+                if facts.get("design_kind") == "adaptive":
+                    lines.append(f"    Count scope: {facts.get('count_scope')}.")
+                branches = facts.get("conditional_branches", {})
+                if branches:
+                    lines.append(
+                        "    Branches: "
+                        + ", ".join(
+                            f"{item['value']}={item['candidates']}" for item in branches["counts"]
+                        )
+                    )
+        facts = payload.get("preflight", {})
+        seconds = facts.get("scheduler_wall_time_seconds")
+        if seconds is not None:
+            lines.append(
+                f"Outer scheduler ceiling: {seconds / 3600:g} hours ({seconds / 86400:g} days)."
+            )
+        lines.append(str(facts.get("target_capacity", "")))
         return "\n".join(lines)
 
     @staticmethod

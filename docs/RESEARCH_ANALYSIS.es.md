@@ -11,6 +11,7 @@
 5. [Explorar y guardar](#5-explorar-y-guardar)
 6. [Arquitectura, seguridad y límites](#6-arquitectura-seguridad-y-límites)
 7. [Informe de implementación](#7-informe-de-implementación)
+8. [Informe de la segunda simplificación](#8-informe-de-la-segunda-simplificación)
 
 ## 1. Abrir el espacio
 
@@ -23,8 +24,9 @@ El HTML necesita `lambdaforge[analysis-report]`; el análisis numérico no neces
 Study remoto usa `lf export STUDY --output ./exports` o Export en la consola. El informe funciona
 sin conexión: es una captura, no una conexión viva al clúster. Regenera para incluir nuevas Runs.
 
-**Research** se abre primero: salud de métricas, estado científico/seeds/cobertura ya calculado y
-hasta ocho hallazgos priorizados. **Inspect** explica evidencia, método, soporte, ranking y límites;
+**Research** se abre primero. Las tarjetas de salud llevan a su evidencia. Las preguntas declaradas
+tienen tarjetas propias, antes del inbox exploratorio separado de hasta ocho hallazgos priorizados.
+**Inspect** explica evidencia, método, soporte, ranking y límites;
 **Explore these observations** abre los valores registrados. Una asociación exploratoria no es
 una nueva conclusión del HPO ni un efecto causal.
 
@@ -33,8 +35,10 @@ categoría y ordena por prioridad, cobertura o dispersión. Las métricas consta
 ocultas se omiten al principio, no se borran: activa **Show constants / missing / hidden**.
 El inspector muestra unidades, dirección, agregación y ausencias explícitas. Los grupos de
 redundancia son descriptivos; sus miembros siguen accesibles. **Ctrl/⌘ K** busca métricas,
-parámetros, familias, hallazgos, Trials y vistas guardadas. El mismo selector está junto a los ejes;
-marca favoritos con la estrella y reutiliza selecciones recientes.
+parámetros, familias, hallazgos, Trials y vistas guardadas. Ranking, Parameters, Interactions y
+Explore reutilizan ese selector dinámico, sin selects largos duplicados. Marca favoritos con la
+estrella y reutiliza selecciones recientes. **Categories** es un árbol desplegable: seleccionar
+`validation` incluye descendientes como `validation/global` y `validation/surface/quality`.
 
 ## 2. Declarar significado, no política de ejecución
 
@@ -111,6 +115,8 @@ analysis:
       parameters: [width]
       metrics: [val_accuracy]
     - id: expected-agreement
+      label: Acuerdo con la accuracy transformada
+      priority: 10
       kind: relationship
       x: val_accuracy
       y: transformed_accuracy
@@ -127,7 +133,8 @@ Tipos de pregunta: `relationship`, `consistency`, `parameter_screen`, `metric_fa
 `category_summary` y `tradeoff`. Relaciones/consistencia necesitan métricas `x`/`y` y admiten
 `expected: positive|negative|equal`; tradeoff enumera al menos dos métricas y category_summary una
 categoría. Referencias requeridas desconocidas fallan; `optional: true` admite una métrica ausente
-y registra la pregunta no disponible. Las preguntas enfocan la exploración, no planifican Runs ni
+y registra la pregunta no disponible. `label` y `priority` no negativa son opcionales y nombran/
+ordenan tarjetas, no ponderan HPO. Las preguntas enfocan la exploración, no planifican Runs ni
 crean un protocolo de contraste formal. Resúmenes de familia/categoría y Pareto de recursos ya
 existente siguen siendo descriptivos.
 
@@ -173,19 +180,33 @@ y el [ajuste de FDR con dependencia](https://docs.scipy.org/doc/scipy/reference/
 
 ## 5. Explorar y guardar
 
-En **Explore**, elige métrica y parámetro; los cambios se previsualizan. El buscador compartido
-evita repetir cientos de opciones estáticas. Advanced agrupa tipo, agregación, paleta, datos
-parciales y normalización visual explícita.
+En **Explore**, elige **Analyze** (métrica), **By** (chips de parámetros), **Compare with** opcional
+(chips de métricas) y el conjunto completo/parcial. **Explore observations** usa el renderer
+existente: un parámetro produce scatter, dos heatmap y más coordenadas paralelas. Elimina chips
+con ×. Métricas y controles avanzados conservan su preview inmediato. **Advanced visualization
+options** agrupa tipo/ejes X/Y/Z explícitos, agregación, paleta/inversión y normalización visual;
+las listas pequeñas siguen siendo selects. Nombre, notas y guardado quedan visibles.
 
 - Varias Y comparten escala solo con unidades declaradas iguales. Unidades distintas/desconocidas
   usan gráficos separados; **Visual 0–1 normalization only** es opcional y no cambia evidencia.
-- Parameters añade métricas de comparación con el mismo buscador o vuelve a una sola.
+- Parameters mantiene la métrica principal y **Add comparison metric…**; los chips eliminables
+  permiten volver a una sola sin un segundo sistema de selección.
 - Heatmaps/superficies numéricas observadas dejan vacías las combinaciones no probadas. Las
   superficies del surrogate permanecen separadas y etiquetadas. Scatter 3D admite categorías.
-- Coordenadas paralelas muestran hasta ocho parámetros y una métrica; excluyen coordenadas
-  ausentes explícitamente y no ajustan modelos nuevos.
+- Coordenadas paralelas usan los parámetros elegidos (o el default de ocho en vistas antiguas)
+  y una métrica; excluyen coordenadas ausentes explícitamente y no ajustan modelos nuevos.
 - Trials conserva marcas de poda/parcialidad. Busca en el ledger y compara dos candidatos en una
-  tabla por categorías con valores/diferencias. Dirección desconocida no significa mejora.
+  tabla por categorías con valores/diferencias. Hay filtro por rama condicional raíz cuando aplica.
+  La comparación empieza con métricas principales/prioritarias; buscar o **Show all recorded
+  metrics** la amplía. Dirección desconocida no significa mejora.
+
+**Interactions** tiene un panel observado para cualquier métrica con los selectores compartidos
+y heatmap/3D/superficie. El modelo predictivo del objetivo permanece separado. **Evidence**
+(antes Findings & evidence) conserva conclusiones científicas, diagnóstico del surrogate, evidencia
+de seeds/poda, metodología y snapshot estructurado. Los hallazgos exploratorios aparecen solo en
+Research; el dashboard individual de Run no cambia y sigue usando epochs.
+El snapshot completo de auditoría se formatea al desplegarlo y reutiliza el catálogo de métricas,
+serializado una sola vez. Todos los paneles comparten el catálogo leído, sin selectores independientes.
 
 Guarda vistas con nombre y notas. Exporta/importa **research-views.json**, que transporta
 configuración visual, no evidencia. Se validan versión, campos, referencias, tamaño y cantidad.
@@ -278,3 +299,77 @@ Este informe recoge la implementación y verificación local del 2026-10-03.
     seleccionado en comparación de dos Trials. Las vistas guardadas no son un workspace vivo.
 
 No se modificó WISDOM ni se contactó ningún clúster real durante la verificación.
+
+## 8. Informe de la segunda simplificación
+
+Este apartado recoge la segunda ronda focalizada del 2026-10-03; el apartado 7 describe la base previa.
+La [guía de Studies condicionales](CONDITIONAL_STUDIES.es.md) contiene gramática y ejemplos de planificación.
+
+1. **Controles retirados:** selects estáticos largos de métricas/parámetros en ranking, Parameters y
+   X/Y/Z; segundo catálogo de checkboxes/búsqueda para métricas adicionales; select plano de categorías.
+   Los valores ocultos solo adaptan el renderer: no quedan listas gigantes de opciones ocultas.
+2. **Capacidades conservadas:** ranking, varias métricas/unidades, heatmaps/3D/superficies observadas,
+   coordenadas paralelas, marcas parciales/pruned, familias, comparación de candidatos, modelos
+   persistidos, vistas/import/export, notas, favoritos/recientes y dashboard individual de Run.
+3. **Pestañas:** Findings & evidence pasa a Evidence. Conserva conclusiones/auditoría de seeds/poda/
+   surrogate; los hallazgos exploratorios quedan en Research. Las otras pestañas mantienen su finalidad.
+4. **Selector:** un catálogo y diálogo dinámico, resultados acotados, búsqueda semántica/aproximada,
+   teclado, favoritos/recientes. Los parámetros muestran tipo/dominio/activación, no solo nombres.
+5. **Explore:** Analyze / By / Compare with / subconjunto, chips eliminables y elección de gráfica.
+   Ejes X/Y/Z, tipo, agregación, paleta y normalización siguen disponibles en Advanced.
+6. **Preguntas:** tarjetas con etiqueta/prioridad, estado legible, soporte/motivo e Inspect antes de
+   los hallazgos exploratorios. label/priority afectan presentación, no política científica.
+7. **Jerarquía:** árbol de categorías desplegable; seleccionar un padre incluye descendientes.
+   Las dimensiones de familias de métricas no se confunden con categorías o condiciones de parámetros.
+8. **Gramática:** `when: {parent: scalar}`, `{parent: {eq: scalar}}` o
+   `{parent: {in: [scalar, ...]}}`; varios padres significan AND. Listas ambiguas/operadores ajenos fallan.
+9. **Representación:** predicados ActivationCondition inmutables dentro de ParameterDescriptor;
+   orden canónico de padres/miembros, serialización escalar histórica y persistencia JSON.
+10. **Autoridad:** normalización Work, sweep exhaustivo, RandomSearch, geometría ParameterSpace/
+    Sobol/adaptativa, codificación/decodificación/validez y activación en análisis comparten predicados.
+11. **Pertenencia:** valores finitos, únicos y no vacíos comprobados contra el dominio del padre;
+    sin OR implícito, expresiones recursivas, expansión del dominio ni API específica de un consumidor.
+12. **Igualdad:** eq explícito se normaliza al escalar antiguo. Igualdad sobre rangos numéricos y
+    orden declarado de dominios independientes conservan comportamiento; las regresiones protegen identidad.
+13. **Inactivos:** claves ausentes de candidatos/argumentos; se aplican defaults de la firma. Sin
+    null, categoría inactiva inventada o serialización de valores irrelevantes de hijos.
+14. **Duplicados:** enumeración topológica activa evita multiplicar ramas inactivas; valores repetidos
+    del sweep fallan en vez de duplicar identidades de evidencia silenciosamente.
+15. **Fixture:** seis ramas genéricas dan 1+2+10+16+9+18 = **56 candidatos únicos** × cuatro seeds
+    compartidas = **224 Runs obligatorios**, iguales a la unión pretendida de ramas independientes.
+16. **Referencia:** el selector existente debe identificar exactamente un candidato generado; cero/
+    varios resultados fallan. No se inventan referencias a valores inactivos.
+17. **Preflight:** validate/explain/dry-run muestran diseño/seeds/Runs/ramas/referencia, paralelismo,
+    GPUs y presupuestos. Dry-run humano no enumera cientos de Runs; JSON conserva el plan completo
+    y la observación de capacidad del destino.
+18. **Tiempo:** wall-time del scheduler y presupuesto lógico de dispatch siguen separados. Los
+    niveles secuenciales suman; los paralelos usan el máximo. Pruebas de 1008 h/42 días y composición mixta.
+19. **Capacidad:** sondeo directo UUID/visibilidad acotado rechaza peticiones GPU imposibles conocidas
+    antes de empaquetar/enviar. Fallo/ambigüedad permanecen desconocidos; ocupación no es capacidad.
+    Scheduler/site-command mantienen su concesión existente; preflight nunca reserva ni amplía GPUs.
+20. **Steps:** with/seeds/replicates/search/sweep/execution/objective/analysis raíz fallan explícitamente
+    en vez de ignorarse. resources raíz mantiene su herencia documentada.
+21. **Hook consumidor:** no se añade. Se reutiliza validación de clase/firma/tipos/marcadores sin
+    construir Work. Semántica arbitraria necesita validación del consumidor; no era necesario crear
+    otro contrato de callbacks para este cambio focalizado.
+22. **Esquema/versión:** condiciones y label/priority opcionales añadidos; se rechaza política raíz
+    sin efecto. Release sigue en 0.16.0; análisis v8 y vistas v1 compatibles. Sin otra versión YAML,
+    runner, política científica o DSL paralela de condiciones.
+23. **Compatibilidad:** no se reescribe evidencia histórica congelada. Identidad escalar, seeds,
+    objetivo/HPO/recursos, retry/export y HTML/vistas antiguos se conservan. Las condiciones viajan
+    por StudyDesign, inicialización e identidad de recuperación existentes.
+24. **Pruebas:** gramática/AND/dominio/ciclos/orden, inmutabilidad/pickle/esquema/identidad, sweep/
+    referencia, geometría Sobol/random/análisis, steps/raíz/tiempos y capacidad previa al submit sintética.
+    Chromium cubre 300 métricas/15 parámetros, jerarquía, preguntas, selector/chips, gráficas nuevas y
+    previas, comparación y recarga de vistas. Ruff/mypy pasan; pytest completo: **1136 passed**,
+    cuatro avisos no fatales de Lightning. Revisión final análisis/navegador/config/docs: **63 passed**;
+    política GPU/config/docs/smoke de entrenamiento: **34 passed**. Wheel, instalación aislada y
+    scaffold/validate/dry-run también pasan reutilizando dependencias instaladas del entorno local.
+    Integración CUDA local explícita: **1 passed**. La regresión de padre numérico comprueba que
+    las observaciones no transforman un rango declarado en dominio finito.
+25. **Límites:** sin DSL de expresiones, nuevo fitting, fusión automática de pasos, lint heurístico de
+    particiones o reglas de consumidor. Capacidad incierta permanece desconocida; in necesita dominio
+    finito. Conteos adaptativos describen una ventana, no garantizan ejecución. HTML sigue offline;
+    los controles no programan/podan Runs ni modifican evidencia.
+
+Verificación local/sintética. No se editó ningún proyecto consumidor ni se envió ningún Work remoto.

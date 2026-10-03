@@ -633,8 +633,8 @@ def test_interactive_curve_and_parameter_exports_use_optional_renderer(
     assert "Persisted adjusted response" in study_html
     assert "3D surface" in study_html
     assert "Explore" in study_html
-    assert "Parameter · width" in study_html
-    assert "Resource · GPU seconds" in study_html
+    assert 'id="parameter-select" value="width"' in study_html
+    assert 'id="resource-select"' in study_html
     assert "save-study-chart" in study_html
     assert "panelHeights" in study_html
     assert "Complete reproducible analysis JSON" in study_html

@@ -33,6 +33,7 @@ from lambdaforge.controlplane.python_runtime import (
 )
 from lambdaforge.controlplane.PythonRuntimeResolver import PythonRuntimeResolver
 from lambdaforge.controlplane.StorageService import StorageService
+from lambdaforge.controlplane.TargetCapacity import check_target_capacity
 from lambdaforge.controlplane.TlsTrust import TlsTrust
 from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
 from lambdaforge.controlplane.Transport import Transport
@@ -120,6 +121,11 @@ class ControlPlane:
                 exclude_job_id=reserved_job_id,
             )
         transport = self.factory.transport(profile) if cluster != "local" else None
+        target_capacity: dict[str, Any] = {"reliable": False, "allocatable_gpus": None}
+        if request.gpu_count:
+            target_capacity = check_target_capacity(
+                profile, transport or self.factory.transport(profile), request.gpu_count
+            )
         runtime: PythonRuntime | None = None
         effective_profile = profile
         torch_plan = None
@@ -397,6 +403,7 @@ class ControlPlane:
                         native_plan.to_dict() if native_plan is not None else None
                     ),
                     "environment_cleanup": environment_cleanup,
+                    "target_capacity": target_capacity,
                 },
                 job_id=reserved_job_id,
                 group_id=group_id,

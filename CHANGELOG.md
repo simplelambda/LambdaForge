@@ -12,6 +12,14 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Unify conditional equality/membership and dependency ordering across finite sweeps, samplers,
+  modelling and analysis; preserve old equality identities and omit inactive arguments. Reject
+  silently ignored root experimental fields in steps. Preflight separates exact required evidence,
+  scheduler wall-time, Study budgets and reliable direct-host GPU capacity.
+- Replace Study HTML's duplicate static metric/axis selectors with one semantic picker. Simplify
+  Explore, add comparison chips and observed interactions, prioritize inspectable configured
+  questions, expose hierarchical categories and consolidate scientific diagnostics under Evidence.
+
 - Study HTML charts preview axis/metric changes before saving, explain empty evidence and offer
   searchable multi-series checkboxes. Parameters can display any recorded numeric metric while
   keeping persisted objective-model responses separate from observed sweep summaries.

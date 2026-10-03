@@ -19,7 +19,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, as_completed, wait
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -137,6 +137,7 @@ class WorkExecutionPlan:
     levels: tuple[tuple[Mapping[str, Any], ...], ...]
     resources: Mapping[str, Any]
     reuse: bool
+    preflight: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a stable JSON planning envelope."""
@@ -149,6 +150,7 @@ class WorkExecutionPlan:
             "levels": [[dict(run) for run in level] for level in self.levels],
             "resources": dict(self.resources),
             "reuse": self.reuse,
+            "preflight": dict(self.preflight),
         }
 
 
@@ -237,6 +239,7 @@ class WorkRunner:
             tuple(levels),
             config.resources.to_dict(),
             reusable,
+            config.preflight(),
         )
 
     @staticmethod

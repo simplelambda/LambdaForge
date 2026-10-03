@@ -31,3 +31,10 @@ class Train(lf.Work):
         score = float((self.seed or 1) * learning_rate)
         self.metrics.log("score", score)
         return {"score": score}
+
+
+class CompareOptimizer(lf.Work):
+    """Demonstrate shared conditional sweep arguments without training a real model."""
+
+    def run(self, optimizer: str, momentum: float = 0.0) -> dict[str, float | str]:
+        return {"optimizer": optimizer, "momentum": momentum}

@@ -374,6 +374,14 @@ contenido se rechaza; DatasetArtifact v1 sigue siendo legible.
 
 ## 7. Secuencia, paralelismo, seeds y búsqueda
 
+Las ramas condicionales pertenecen a un Study cuando responden una pregunta experimental conjunta.
+Usa `when: {parent: {in: [a, b]}}` (AND entre padres) o la igualdad escalar antigua. Se omiten las
+claves inactivas, las dependencias no requieren orden en YAML y generación/análisis comparten
+geometría. Solo `resources` raíz se hereda por pasos; se rechaza `with`, seeds/replicates,
+search/sweep, execution, objective y analysis raíz en vez de ignorarlos. La
+[guía condicional numerada](CONDITIONAL_STUDIES.es.md) explica conteos exactos, referencias,
+identidad, capacidad y la diferencia entre tiempo del scheduler y presupuesto lógico.
+
 ### 7.1 Defaults por intención y autoridad resuelta
 
 El camino común no necesita enteros de seed ni ajuste manual del controlador. Con `search.space` y
@@ -1672,6 +1680,14 @@ Source/Transform/Sink ni selector global. Un campo YAML nuevo solo se justifica 
 planificación del investigador, no por un objeto interno que puede seguir en Python.
 
 ## 16. Análisis de estudios
+
+El HTML de Study utiliza un selector semántico compartido de métricas/parámetros, Explore con
+**Analyze / By / Compare with** y chips de comparación que se pueden quitar. Los ejes y ajustes
+explícitos quedan en **Advanced visualization options**. Las preguntas configuradas son tarjetas
+ampliables; Metrics & health ofrece categorías jerárquicas plegables. **Evidence** sustituye la
+pestaña duplicada de hallazgos y conserva conclusiones, diagnóstico, seeds, poda y JSON. Las
+interacciones observadas de cualquier métrica están separadas del modelo HPO persistido.
+Consulta [HTML de investigación](RESEARCH_ANALYSIS.es.md).
 
 Es una capa determinista a posteriori sobre evidencia persistida; no propone Runs ni modifica el
 controlador. Un estudio terminal escribe `EXECUTION/analysis.json` automáticamente y estas rutas

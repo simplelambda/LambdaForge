@@ -461,3 +461,158 @@ def test_browser_units_families_comparison_and_portable_views(tmp_path: Path) ->
         assert "Quality" in page.locator("#trial-comparison").inner_text()
         assert errors == []
         browser.close()
+
+
+def test_large_shared_picker_questions_hierarchy_and_smart_explore(tmp_path: Path) -> None:
+    pytest.importorskip("plotly")
+    playwright = pytest.importorskip("playwright.sync_api")
+    source = candidates(12)
+    for c in source:
+        c["parameters"].update({f"p{i}": c["trial"] / 12 for i in range(13)})
+        c["diagnostic_metrics"].update(
+            {f"m{i}": {"mean": (c["trial"] + i) / 400} for i in range(300)}
+        )
+    declaration = resolve_semantics(
+        {
+            "defaults": [{"pattern": "m*", "metadata": {"category": "hardware/gpu"}}],
+            "metrics": {
+                "quality": {
+                    "label": "Quality",
+                    "aliases": ["predictive quality"],
+                    "category": "validation/global",
+                    "unit": "ratio",
+                    "visibility": "primary",
+                },
+                "duplicate": {"category": "validation/surface/quality", "unit": "ratio"},
+                "small": {"category": "validation/surface/calibration", "unit": "ratio"},
+                "missing": {"category": "validation/global"},
+            },
+            "questions": [
+                {
+                    "id": "available",
+                    "label": "Agreement question",
+                    "priority": 10,
+                    "kind": "relationship",
+                    "x": "quality",
+                    "y": "duplicate",
+                },
+                {
+                    "id": "missing",
+                    "label": "Unobserved question",
+                    "optional": True,
+                    "kind": "relationship",
+                    "x": "quality",
+                    "y": "missing",
+                },
+            ],
+            "discovery": {"max_metrics": 16, "max_pairs": 8, "resamples": 32},
+        }
+    )
+    research = ResearchAnalysis.compute(
+        source,
+        fingerprint="shared-controls",
+        semantics=declaration,
+        parameter_names=list(source[0]["parameters"]),
+    )
+    path = write_html(
+        {
+            "source": {"status": "final"},
+            "objective": {"metric": "quality", "mode": "max"},
+            "search_space": {
+                "width": {"range": [0, 11]},
+                "category": {"values": ["a", "b"]},
+                **{f"p{i}": {"range": [0, 1]} for i in range(13)},
+            },
+            "candidates": source,
+            "research": research,
+        },
+        tmp_path / "shared-controls.html",
+    )
+    markup = path.read_text(encoding="utf-8")
+    assert markup.count('"metric_catalog"') == 1
+    assert '<option value="m299"' not in markup
+    with playwright.sync_playwright() as runtime:
+        if not Path(runtime.chromium.executable_path).exists():
+            pytest.skip("Optional Chromium is unavailable.")
+        browser = runtime.chromium.launch()
+        page = browser.new_page(viewport={"width": 1450, "height": 1100})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(path.as_uri())
+        assert page.locator("select option").count() < 120
+        assert page.locator("#research-questions .configured-question").count() == 2
+        assert page.locator("#research-questions h3").first.inner_text() == "Agreement question"
+        page.locator("#research-questions button").first.click()
+        assert "Support and status" in page.locator("#research-detail-body").inner_text()
+        page.click("#research-detail-close")
+        page.screenshot(path=str(tmp_path / "shared-summary.png"), full_page=True)
+
+        page.get_by_role("button", name="Metrics & health", exact=True).click()
+        page.locator("#research-category-tree > summary").click()
+        page.get_by_role("button", name="validation", exact=True).click()
+        categories = page.locator("#research-metrics-body tr td:nth-child(2)").all_text_contents()
+        assert len(categories) >= 3
+        assert all(value.startswith("validation/") for value in categories)
+        assert any("surface/calibration" in value for value in categories)
+
+        page.get_by_role("button", name="Explore", exact=True).click()
+        page.click("#research-primary-metric")
+        page.fill("#research-global-query", "predictive quality")
+        page.locator('#research-search-results button[data-choice="quality"]').locator(
+            ".."
+        ).get_by_title("Toggle favourite").click()
+        assert page.get_by_title("Toggle favourite").inner_text() == "★"
+        page.locator("#research-global-query").focus()
+        page.keyboard.press("ArrowDown")
+        page.keyboard.press("Enter")
+        assert "quality" in page.evaluate("window.lfResearchServices.getPrefs().researchFavorites")
+        assert "quality" in page.evaluate("window.lfResearchServices.getPrefs().researchRecent")
+        page.get_by_role("button", name="By · add parameter…", exact=True).click()
+        page.fill("#research-global-query", "width")
+        page.locator('#research-search-results button[data-choice="param:width"]').click()
+        page.click("#research-explore")
+        page.wait_for_function("document.querySelector('#study-chart-kind').value==='heatmap'")
+        page.get_by_role("button", name="By · add parameter…", exact=True).click()
+        page.fill("#research-global-query", "p12")
+        page.locator('#research-search-results button[data-choice="param:p12"]').click()
+        page.click("#research-explore")
+        page.wait_for_function(
+            "document.querySelector('#study-custom-chart "
+            ".js-plotly-plot').data[0].type==='parcoords'"
+        )
+        dimensions = page.eval_on_selector(
+            "#study-custom-chart .js-plotly-plot", "c => c.data[0].dimensions.map(d=>d.label)"
+        )
+        assert all(name in dimensions for name in ("width", "category", "p12"))
+        page.screenshot(path=str(tmp_path / "shared-explore.png"), full_page=True)
+
+        page.get_by_role("button", name="Parameters", exact=True).click()
+        page.click("#parameter-metric-picker")
+        page.fill("#research-global-query", "quality")
+        page.locator('#research-search-results button[data-choice="quality"]').click()
+        page.get_by_role("button", name="Add comparison metric…", exact=True).click()
+        page.fill("#research-global-query", "small")
+        page.locator('#research-search-results button[data-choice="small"]').click()
+        assert "small" in page.locator("#parameter-metric-chips").inner_text()
+        page.locator("#parameter-metric-chips button").click()
+        assert page.locator("#parameter-metric-chips button").count() == 0
+        page.get_by_role("button", name="Interactions", exact=True).click()
+        page.locator("#study-interactions").get_by_role(
+            "button", name="Analyze", exact=False
+        ).click()
+        page.fill("#research-global-query", "quality")
+        page.locator('#research-search-results button[data-choice="quality"]').click()
+        page.wait_for_function(
+            "document.querySelector('#research-observed-interactions "
+            ".js-plotly-plot').data.length>0"
+        )
+        page.get_by_role("button", name="Evidence", exact=True).click()
+        assert page.locator("#study-findings .finding").count() == 0
+        assert "Surrogate diagnostics" in page.locator("#study-findings").inner_text()
+        page.get_by_text("Complete reproducible analysis JSON", exact=True).click()
+        page.wait_for_function("document.querySelector('#study-raw-analysis').dataset.loaded==='true'")
+        snapshot = json.loads(page.locator("#study-raw-analysis").inner_text())
+        assert snapshot["research"]["metric_catalog"] == research["metric_catalog"]
+        assert snapshot["candidates"] == source
+        assert errors == []
+        browser.close()

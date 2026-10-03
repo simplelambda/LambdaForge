@@ -102,6 +102,21 @@ class ConditionalSweepWork(lf.Work):
         return {"model": model, "depth": depth}
 
 
+class MembershipSweepWork(lf.Work):
+    """Generic conditional scientific-design fixture, not consumer training code."""
+
+    def run(
+        self,
+        pooling_type: str,
+        area_mode: str = "point",
+        attention_hidden: int = 16,
+        topk_fraction: float = 0.1,
+        local_scale: float = 1,
+        beta: float = 1,
+    ) -> dict[str, str]:
+        return {"branch": pooling_type}
+
+
 class PolicyNamedParameterWork(lf.Work):
     """Ensure structured search space names never collide with controller policy fields."""
 

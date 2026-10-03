@@ -11,6 +11,7 @@
 5. [Explore and save](#5-explore-and-save)
 6. [Architecture, safety and limitations](#6-architecture-safety-and-limitations)
 7. [Implementation report](#7-implementation-report)
+8. [Second-round simplification report](#8-second-round-simplification-report)
 
 ## 1. Open a workspace
 
@@ -23,8 +24,9 @@ Install `lambdaforge[analysis-report]` for HTML; numerical analysis needs no Plo
 can be exported through `lf export STUDY --output ./exports` or the console's Export action. The
 report is an offline snapshot, not a live connection to the cluster. Regenerate to include new Runs.
 
-**Research** opens first. It shows metric health, existing scientific/seed/coverage status and up
-to eight prioritized findings. **Inspect** explains evidence, method, support, ranking and limits;
+**Research** opens first. Actionable health cards lead to their evidence. Configured questions have
+their own cards, before the separate exploratory inbox of up to eight prioritized findings.
+**Inspect** explains evidence, method, support, ranking and limits;
 **Explore these observations** opens the relevant recorded values. An exploratory association is
 not a new HPO conclusion or a causal effect.
 
@@ -33,8 +35,10 @@ category and sort by priority, coverage or spread. Constants, missing and hidden
 initially omitted, not deleted: enable **Show constants / missing / hidden**. The metric inspector
 keeps units, direction, aggregation and unavailable information explicit. Redundancy groups are
 descriptive; each recorded member remains accessible. **Ctrl/⌘ K** searches metrics, parameters,
-families, findings, Trials and saved views. Use the same picker beside metric selectors; star a
-metric to favour it and reuse recent selections.
+families, findings, Trials and saved views. Ranking, Parameters, Interactions and Explore all use
+this same dynamic picker, not duplicated long selects. Star a metric to favour it and reuse recent
+selections. **Categories** is a collapsible tree: selecting `validation` includes every descendant,
+such as `validation/global` and `validation/surface/quality`.
 
 ## 2. Declare meaning, not execution policy
 
@@ -111,6 +115,8 @@ analysis:
       parameters: [width]
       metrics: [val_accuracy]
     - id: expected-agreement
+      label: Agreement with transformed accuracy
+      priority: 10
       kind: relationship
       x: val_accuracy
       y: transformed_accuracy
@@ -129,7 +135,8 @@ Question kinds are `relationship`, `consistency`, `parameter_screen`, `metric_fa
 declare `expected: positive|negative|equal`; tradeoffs list at least two metrics; category summaries
 name a category. Unknown required metric/family references fail validation. `optional: true`
 allows a metric reference absent from this dataset and records an unavailable question, not a
-fabricated result. Questions focus exploration; they do not schedule Runs or formalize a hypothesis
+fabricated result. Optional `label` and non-negative `priority` name and order the question cards;
+they do not weight HPO. Questions focus exploration; they do not schedule Runs or formalize a hypothesis
 test protocol. Category/family summaries and existing resource Pareto views remain descriptive.
 
 ## 4. How discovery works
@@ -175,19 +182,33 @@ and [dependent-test FDR adjustment](https://docs.scipy.org/doc/scipy/reference/g
 
 ## 5. Explore and save
 
-Choose a metric and parameter in **Explore**; ordinary changes preview immediately. Metric search
-uses the shared catalog rather than hundreds of repeated static options. Advanced controls contain
-plot type, grouping, palette, partial evidence and explicit visual normalization.
+In **Explore**, choose **Analyze** (metric), **By** (parameter chips), optional **Compare with**
+(metric chips), and the completed/partial subset. **Explore observations** uses the existing
+renderer: one parameter means scatter, two mean a heatmap, and more mean parallel coordinates.
+Remove any chip with ×. Ordinary metric and advanced-control changes still preview immediately.
+**Advanced visualization options** holds explicit type/X/Y/Z, grouping, palette/reverse and visual
+normalization; small finite selectors remain ordinary selectors. Naming, notes and saving stay visible.
 
 - Multiple Y metrics share one scale only when declared units agree. Different/unknown units use
   small multiples; **Visual 0–1 normalization only** is opt-in and never changes scientific values.
-- Parameter views can add comparison metrics through the shared picker, or return to one metric.
+- Parameter views keep one primary metric and **Add comparison metric…**; removable chips return
+  to one metric without a second metric-selection system.
 - Observed pair heatmaps and numeric 3D surfaces retain empty untested cells; persisted surrogate
   surfaces stay in their separately labelled model panel. 3D scatter supports categories.
-- Parallel coordinates show up to eight parameters and one selected metric; missing coordinates
-  are excluded explicitly. They visualize observations, not newly fitted effects.
+- Parallel coordinates use the chosen parameters (or the existing eight-parameter default for old
+  views) and one metric; missing coordinates are excluded explicitly. They do not fit new effects.
 - Trials retain partial/pruned markers. Search the ledger and compare two candidates in a category-
-  ordered metric/difference table. Unknown direction is never labelled improvement.
+  ordered metric/difference table. A conditional-root branch filter is available when applicable.
+  The comparison starts with primary/priority metrics; search or **Show all recorded metrics**
+  expands it. Unknown direction is never labelled improvement.
+
+**Interactions** has a metric-agnostic observed panel with shared parameter/metric pickers and
+heatmap/3D/surface choices. The existing predictive objective panel stays separate. **Evidence**
+(formerly Findings & evidence) retains scientific conclusions, surrogate diagnostics, seed/pruning
+evidence, methodology and the structured snapshot. Exploratory finding cards appear only in Research;
+the Run metric dashboard is unchanged and continues to use epochs.
+The complete audit snapshot is formatted on expansion and reuses the single serialized metric
+catalog. All panels share the same parsed catalog rather than constructing independent selectors.
 
 Save a named view with optional notes. Export/import **research-views.json** to reuse chart
 specifications, not evidence. Imports validate version, fields, metric/parameter references and
@@ -280,3 +301,77 @@ This report records the implementation and local verification on 2026-10-03.
     selected reference Trial in a two-Trial comparison. Saved views do not form a live workspace.
 
 No WISDOM files were changed and no real cluster was contacted during this verification.
+
+## 8. Second-round simplification report
+
+This section records the focused follow-up on 2026-10-03; section 7 describes the earlier foundation.
+The [conditional Study guide](CONDITIONAL_STUDIES.md) includes grammar and planning examples.
+
+1. **Removed controls:** long static metric/parameter selects for ranking, Parameters and X/Y/Z,
+   the second checkbox/search catalog for extra metrics, and the flat category select. Hidden values
+   are renderer adapters only; there are no hidden long option lists.
+2. **Preserved features:** ranking, multi-metric/unit-aware plots, observed heatmaps/3D/surfaces,
+   parallel coordinates, partial/pruned markers, families, candidate comparison, persisted models,
+   saved views/import/export, notes, favourites/recents and the individual Run dashboard.
+3. **Tabs:** Findings & evidence becomes Evidence. Scientific conclusions/seed/pruning/surrogate
+   audit stay there; exploratory cards stay in Research. Other scientific tabs retain their purpose.
+4. **Picker:** one catalog/dynamic dialog, bounded results, semantic/fuzzy search, keyboard selection,
+   favourites/recents; parameters show kind/domain/activation rather than bare names.
+5. **Explore:** Analyze / By / Compare with / subset, removable chips and smart plot inference.
+   Explicit X/Y/Z, type, grouping, palette and normalization remain optional Advanced controls.
+6. **Questions:** labelled, priority-ordered cards show human status, support/reason and Inspect,
+   before exploratory findings. Optional label/priority affects display, not scientific policy.
+7. **Hierarchy:** collapsible category paths; selecting a parent includes all descendants.
+   Metric-family dimensions remain distinct from category paths and parameter conditions.
+8. **Grammar:** `when: {parent: scalar}`, `{parent: {eq: scalar}}` or
+   `{parent: {in: [scalar, ...]}}`; multiple parents mean AND. Bare lists/unknown operators fail.
+9. **Representation:** immutable ActivationCondition predicates inside ParameterDescriptor;
+   canonical parent/membership ordering, historical scalar equality serialization, JSON persistence.
+10. **Authority:** Work normalization, exhaustive sweeps, RandomSearch, ParameterSpace/Sobol/
+    adaptive geometry, encode/decode/validity and analysis activation all reuse the same predicates.
+11. **Membership:** finite, nonempty, unique values checked against the parent domain; no implicit
+    OR, recursive expressions, domain expansion or consumer-specific branch API.
+12. **Equality:** explicit eq normalizes to the old scalar form. Numeric-range equality and
+    independent authored domain order retain their behavior; regressions protect old identity.
+13. **Inactive keys:** absent from candidates/arguments; signature defaults still apply. No null
+    placeholders, invented inactive category or serialization of irrelevant child values.
+14. **Duplicates:** active topological enumeration avoids inactive Cartesian multiplication;
+    repeated sweep choices fail instead of silently duplicating evidence identities.
+15. **Fixture:** six generic branches yield 1+2+10+16+9+18 = **56 unique candidates** × four shared
+    seeds = **224 required Runs**, equal to the intended union of independently described branches.
+16. **Reference:** the existing selector must match exactly one generated candidate; zero/multiple
+    matches fail. No fabricated inactive-value reference is introduced.
+17. **Preflight:** validate/explain/dry-run expose design/seeds/required Runs/branches/reference,
+    parallelism, GPUs and budgets. Human dry-run does not dump hundreds of Runs; JSON keeps the
+    complete planning data plus target-capacity observation.
+18. **Time:** scheduler wall-time and logical Study dispatch budget remain separate. Sequential
+    levels sum; parallel members use their maximum. Tests cover 1008 h/42 days and mixed compositions.
+19. **Capacity:** a bounded direct UUID/visibility probe rejects known impossible GPU requests before
+    bundling/submission. Failed/ambiguous probes stay unknown; occupancy is not capacity. Scheduler/
+    site-command grants retain their existing boundary; preflight never claims or broadens GPUs.
+20. **Steps:** root with/seeds/replicates/search/sweep/execution/objective/analysis fail explicitly
+    instead of being ignored. Root resources retain documented inheritance.
+21. **Consumer hook:** none added. Existing class/signature/type/marker validation is reused without
+    constructing Work. Arbitrary consumer semantics need consumer validation; a new callback contract
+    was not necessary for these focused changes.
+22. **Schema/version:** additive activation definitions and question label/priority, and rejection of
+    unused composition-root policy. Release stays 0.16.0, analysis v8 and saved-view v1 remain compatible.
+    No new YAML version, runner, scientific policy or parallel condition DSL.
+23. **Compatibility:** frozen historical evidence is not rewritten; scalar identity, shared seeds,
+    objective/HPO/resource policies, retry/export and old HTML/saved views remain intact. Conditions
+    persist through the existing StudyDesign, initialization and recovery identities.
+24. **Tests:** grammar/AND/domain/cycles/order, immutable pickle/schema/identity round trips, finite
+    sweeps/reference, Sobol/random/analysis geometry, steps/root/time and synthetic pre-submit capacity.
+    Chromium covers 300 metrics/15 parameters, hierarchy, questions, pickers/chips, smart and previous
+    chart types, comparison and saved-view reload. Ruff/mypy pass; full pytest: **1136 passed**,
+    four nonfatal Lightning warnings. Final focused analysis/browser/config/docs checks: **63 passed**;
+    GPU-policy/config/docs/training smoke: **34 passed**. Wheel build, isolated installation and
+    scaffold/validate/dry-run smoke also pass, reusing the local environment's installed dependencies.
+    Explicit local CUDA integration: **1 passed**. Numeric-parent regression ensures observations
+    never redefine an authored range as a finite domain.
+25. **Limits:** no expression DSL, new fitting, automatic step merging, heuristic partition lint or
+    consumer-specific validation. Unreliable capacity stays unknown; membership needs a finite parent
+    domain. Adaptive counts describe a bounded window, not an execution guarantee. HTML is offline;
+    controls never schedule/prune Runs or mutate evidence.
+
+Verification is local/synthetic. No consumer project was edited and no remote Work was submitted.

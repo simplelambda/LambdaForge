@@ -9,6 +9,7 @@ import random
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.hpo.Trial import Trial
 
 
@@ -18,6 +19,7 @@ class RandomSearch:
     def __init__(self, space: Mapping[str, Mapping[str, Any]], *, seed: int = 0) -> None:
         self.space = {str(path): dict(spec) for path, spec in space.items()}
         self.seed = seed
+        self.geometry = ParameterSpace.from_schema(self.space)
 
     def trials(self, count: int) -> tuple[Trial, ...]:
         """Return deterministic unique trials with conditional parameters."""
@@ -30,14 +32,9 @@ class RandomSearch:
         while len(output) < count and attempts < count * 100:
             attempts += 1
             parameters: dict[str, Any] = {}
-            for path, spec in self.space.items():
-                condition = spec.get("when")
-                if condition is not None:
-                    if not isinstance(condition, Mapping) or any(
-                        parameters.get(key) != value for key, value in condition.items()
-                    ):
-                        continue
-                parameters[path] = self._sample(spec, rng)
+            for descriptor in self.geometry.descriptors:
+                if descriptor.active(parameters):
+                    parameters[descriptor.name] = self._sample(self.space[descriptor.name], rng)
             encoded = json.dumps(parameters, sort_keys=True, separators=(",", ":"), allow_nan=False)
             fingerprint = "sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
             if fingerprint not in seen:

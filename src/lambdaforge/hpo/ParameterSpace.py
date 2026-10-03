@@ -10,8 +10,11 @@ import json
 import math
 import random
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from lambdaforge.hpo.ActivationCondition import ActivationCondition
+from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 ParameterKind = Literal["continuous", "integer", "categorical", "boolean"]
 INACTIVE = "<inactive>"
@@ -28,15 +31,20 @@ class ParameterDescriptor:
     values: tuple[Any, ...] = ()
     scale: str = "linear"
     when: Mapping[str, Any] | None = None
+    activation: ActivationCondition = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        activation = ActivationCondition.parse(self.when)
+        normalized = activation.to_mapping()
+        object.__setattr__(self, "activation", activation)
+        object.__setattr__(self, "when", FrozenJsonMapping(normalized) if normalized else None)
 
     @property
     def conditional(self) -> bool:
         return self.when is not None
 
     def active(self, point: Mapping[str, Any]) -> bool:
-        return self.when is None or all(
-            point.get(str(name), INACTIVE) == expected for name, expected in self.when.items()
-        )
+        return self.activation.matches(point)
 
     def normalize(self, value: Any) -> float:
         if self.kind in {"continuous", "integer"}:
@@ -60,8 +68,7 @@ class ParameterDescriptor:
             bounded = min(1.0, max(0.0, float(coordinate)))
             if self.scale == "log":
                 value = math.exp(
-                    math.log(self.low)
-                    + bounded * (math.log(self.high) - math.log(self.low))
+                    math.log(self.low) + bounded * (math.log(self.high) - math.log(self.low))
                 )
             else:
                 value = self.low + bounded * (self.high - self.low)
@@ -91,20 +98,23 @@ class ParameterSpace:
         pending = list(descriptors)
         ordered: list[ParameterDescriptor] = []
         known_names = {value.name for value in pending}
+        if len(known_names) != len(pending):
+            raise ValueError("Parameter names must be unique.")
+        domains = {value.name: value.values for value in pending}
+        for descriptor in pending:
+            descriptor.activation.validate_domains(domains)
         while pending:
             ready = next(
                 (
                     value
                     for value in pending
-                    if set(map(str, value.when or {})).issubset(
-                        {item.name for item in ordered}
-                    )
+                    if value.activation.dependencies.issubset({item.name for item in ordered})
                 ),
                 None,
             )
             if ready is None:
                 unresolved = {
-                    value.name: sorted(set(map(str, value.when or {})) - known_names)
+                    value.name: sorted(value.activation.dependencies - known_names)
                     for value in pending
                 }
                 raise ValueError(f"Cyclic or missing conditional dependencies: {unresolved}.")
@@ -135,14 +145,22 @@ class ParameterSpace:
                 else tuple(dict.fromkeys(present))
             )
             raw_range = rule.get("range")
-            if not (
-                isinstance(raw_range, Sequence)
-                and not isinstance(raw_range, str | bytes)
-                and len(raw_range) == 2
-            ) and "low" in rule and "high" in rule:
+            if (
+                not (
+                    isinstance(raw_range, Sequence)
+                    and not isinstance(raw_range, str | bytes)
+                    and len(raw_range) == 2
+                )
+                and "low" in rule
+                and "high" in rule
+            ):
                 raw_range = (rule["low"], rule["high"])
             distribution = str(rule.get("type", ""))
             scale = "log" if distribution == "loguniform" else str(rule.get("scale", "linear"))
+            if raw_range is not None and raw_values is None:
+                # Observed values do not turn an authored range into a finite choice domain.
+                # This matters both for activation validation and counterfactual geometry.
+                values = ()
             numeric_values = bool(values) and all(_numeric(value) for value in values)
             low: float | None
             high: float | None
@@ -172,11 +190,7 @@ class ParameterSpace:
                     else "categorical"
                 )
             raw_when = rule.get("when")
-            when = (
-                {str(key): value for key, value in raw_when.items()}
-                if isinstance(raw_when, Mapping)
-                else None
-            )
+            when = ActivationCondition.parse(raw_when).to_mapping()
             descriptors.append(ParameterDescriptor(name, kind, low, high, values, scale, when))
         return cls(descriptors)
 
@@ -382,9 +396,7 @@ class ParameterSpace:
         if count <= 1:
             return (descriptor.denormalize(0.0),)
         return tuple(
-            dict.fromkeys(
-                descriptor.denormalize(index / (count - 1)) for index in range(count)
-            )
+            dict.fromkeys(descriptor.denormalize(index / (count - 1)) for index in range(count))
         )
 
     def support(self, name: str) -> Mapping[str, Any]:

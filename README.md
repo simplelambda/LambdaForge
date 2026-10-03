@@ -428,7 +428,14 @@ ordinals. The automatic stream is prefix-stable and provides more than two billi
 32-bit-compatible values per role.
 
 A sweep fixes its cells. Without a replication count it opens complete shared-seed blocks
-sequentially and uses simultaneous time-uniform paired confidence sequences for the primary stop
+sequentially. For alternatives with different applicable parameters, use one conditional space:
+`when: {parent: {in: [a, b]}}` activates a child in several branches. Scalar equality remains valid,
+children may precede parents, and inactive arguments are omitted. See the numbered
+[conditional Study/preflight guide](docs/CONDITIONAL_STUDIES.md) and
+[runnable example](examples/conditional-sweep.yaml). Root `resources` alone inherits into `steps`;
+root scientific policy must be declared per step, never silently ignored.
+
+Automatic sweeps use simultaneous time-uniform paired confidence sequences for the primary stop
 decision—not repeatedly inspected fixed-sample intervals. HPO pruning and per-cell seed racing are
 disabled. A missing permanent cell remains visibly incomplete. Practical equivalence is possible
 only when the researcher authored `objective.practical_margin`.
@@ -1247,7 +1254,9 @@ Work `analysis_profile` or YAML `analysis` declarations preserve metric meaning 
 questions before execution. Discovery is deterministic, bounded and retrospective; it does not
 change HPO. Test evidence cannot govern objective/constraints and is excluded from provisional
 automatic discovery. Different/unknown Y units use small multiples; normalization is visual and
-opt-in. Save views with notes and export/import their JSON specifications.
+opt-in. Save views with notes and export/import their JSON specifications. Explore uses **Analyze /
+By / Compare with** and removable chips; explicit axes live in Advanced. Configured questions have
+their own cards, categories form a collapsible tree, and **Evidence** retains the scientific audit.
 See the [research workspace guide](docs/RESEARCH_ANALYSIS.md) for declarations, families,
 methods, statistical caveats, controls and compatibility with older Studies.
 

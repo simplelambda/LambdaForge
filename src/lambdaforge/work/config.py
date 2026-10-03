@@ -6,6 +6,7 @@ import copy
 import importlib
 import inspect
 import itertools
+import json
 import math
 import os
 import types
@@ -18,8 +19,10 @@ import yaml
 
 from lambdaforge.analysis.AnalysisProfile import AnalysisProfile
 from lambdaforge.execution.ResourceRequest import ResourceRequest
+from lambdaforge.hpo.ActivationCondition import ActivationCondition
 from lambdaforge.hpo.AdaptiveSearch import SEARCH_POLICY_FIELDS, AdaptiveSearchPolicy
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
+from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.metrics.MetricRegistry import MetricRegistry
 from lambdaforge.ProjectContext import ProjectContext
 from lambdaforge.reproducibility.SeedProvider import SeedIdentity, SeedProvider
@@ -114,6 +117,7 @@ class WorkValidationReport:
     valid: bool
     errors: tuple[str, ...] = ()
     work_classes: tuple[str, ...] = ()
+    preflight: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a stable machine-readable report."""
@@ -123,13 +127,22 @@ class WorkValidationReport:
             "valid": self.valid,
             "errors": list(self.errors),
             "work_classes": list(self.work_classes),
+            "preflight": dict(self.preflight),
         }
 
     def summary(self) -> str:
         """Render a compact human result."""
         label = str(self.source) if self.source else self.name or "<mapping>"
         if self.valid:
-            return f"Valid Work: {label} ({len(self.work_classes)} executable class(es))."
+            lines = [f"Valid Work: {label} ({len(self.work_classes)} executable class(es))."]
+            for study in self.preflight.get("studies", ()):
+                lines.append(
+                    f"  {study['name']}: {study['candidates']} candidates, "
+                    f"{len(study['shared_seeds'])} shared seeds, "
+                    f"{study['required_runs']} required Runs, {study['requested_gpus']} GPUs."
+                )
+            lines.append(str(self.preflight.get("target_capacity", "")))
+            return "\n".join(lines)
         return "Invalid Work: " + label + "\n" + "\n".join(f"  - {error}" for error in self.errors)
 
 
@@ -253,9 +266,20 @@ class WorkConfig:
                 ),
             )
         else:
-            if "analysis" in data:
+            unsupported = set(data) & {
+                "with",
+                "seeds",
+                "replicates",
+                "search",
+                "sweep",
+                "execution",
+                "objective",
+                "analysis",
+            }
+            if unsupported:
                 raise ValueError(
-                    "For a steps composition, declare analysis on each Work step or on its class."
+                    f"For a steps composition, declare {', '.join(sorted(unsupported))} "
+                    "on each Work step; only root resources are inherited."
                 )
             steps = data.get("steps")
             if not isinstance(steps, Sequence) or isinstance(steps, str | bytes) or not steps:
@@ -324,7 +348,14 @@ class WorkConfig:
             return WorkValidationReport(source, None, False, (message,))
         errors = config.validation_errors(check_inputs=True)
         classes = tuple(run.work_class for level in config.levels for run in level.runs)
-        return WorkValidationReport(source, config.name, not errors, tuple(errors), classes)
+        return WorkValidationReport(
+            source,
+            config.name,
+            not errors,
+            tuple(errors),
+            classes,
+            config.preflight(),
+        )
 
     def validation_errors(self, *, check_inputs: bool) -> list[str]:
         """Validate Work inheritance, signatures, types, markers and references."""
@@ -487,6 +518,7 @@ class WorkConfig:
                             )
                         ),
                         "execution": definition.execution_policy.to_dict(),
+                        "preflight": _definition_preflight(definition),
                     }
                 )
             levels.append(current)
@@ -496,6 +528,18 @@ class WorkConfig:
             "planned_runs": self.planned_runs,
             "resources": self.resources.to_dict(),
             "resolved_configuration": self.resolved_configuration(),
+            "preflight": self.preflight(),
+        }
+
+    def preflight(self) -> dict[str, Any]:
+        """Return bounded design/time facts without listing individual Run identities."""
+        studies = [_definition_preflight(run) for level in self.levels for run in level.runs]
+        return {
+            "required_runs": sum(study["required_runs"] for study in studies),
+            "studies": studies,
+            "scheduler_wall_time_seconds": self.resources.runtime_seconds,
+            "time_composition": "sum of sequential levels; maximum within each parallel level",
+            "target_capacity": "not checked: select an execution target for capacity validation",
         }
 
     def resolved_configuration(self) -> dict[str, Any]:
@@ -555,6 +599,59 @@ class WorkConfig:
             "source": str(self.source) if self.source is not None else None,
             "levels": resolved,
         }
+
+
+def _definition_preflight(definition: RunDefinition) -> dict[str, Any]:
+    design = definition.study_design
+    candidate_count = len(definition.variants)
+    if definition.search_policy is not None:
+        candidate_count = min(
+            definition.search_policy.candidate_budget or candidate_count, candidate_count
+        )
+    branches: dict[str, Any] = {}
+    if design is not None:
+        geometry = ParameterSpace.from_schema(design.space)
+        parent = next(
+            (
+                item
+                for item in geometry.descriptors
+                if not item.conditional and item.kind in {"categorical", "boolean"}
+            ),
+            None,
+        )
+        if parent is not None:
+            branches = {
+                "parameter": parent.name,
+                "counts": [
+                    {
+                        "value": value,
+                        "candidates": sum(
+                            variant.get(parent.name) == value
+                            for variant in definition.variants[:candidate_count]
+                        ),
+                    }
+                    for value in parent.values
+                ],
+            }
+    return {
+        "name": definition.name,
+        "candidates": candidate_count,
+        "design_kind": design.kind if design else "single",
+        "count_scope": (
+            "current proposal window; replication is required only after a candidate is proposed"
+            if design and design.kind == "adaptive"
+            else "complete fixed design"
+        ),
+        "shared_seeds": list(definition.seeds),
+        "replication": design.replication if design else "single",
+        "required_runs": len(design.evidence.required) if design else definition.run_count,
+        "conditional_branches": branches,
+        "reference": dict(design.reference) if design and design.reference else None,
+        "max_parallel": definition.execution_policy.max_parallel,
+        "requested_gpus": definition.resources.gpu_count,
+        "study_time_budget_seconds": definition.execution_policy.max_time_seconds,
+        "scheduler_wall_time_seconds": definition.resources.runtime_seconds,
+    }
 
 
 def import_work_class(path: str) -> type[Work]:
@@ -985,7 +1082,10 @@ def _apply_execution_policy(
 
 def _dimension_mapping(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
-        return dict(value)
+        normalized = dict(value)
+        if "when" in normalized:
+            normalized["when"] = ActivationCondition.parse(normalized["when"]).to_mapping()
+        return normalized
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         return {"values": list(value)}
     raise TypeError("Search/sweep dimensions must be lists or mappings.")
@@ -1187,9 +1287,8 @@ def _variants(value: Any, *, adaptive: bool = False) -> tuple[Mapping[str, Any],
 
 
 def _exhaustive_variants(value: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
-    """Enumerate an exact finite conditional sweep in authored parameter order."""
-    dimensions: list[tuple[str, tuple[Any, ...], Mapping[str, Any] | None]] = []
-    known: set[str] = set()
+    """Enumerate exact active combinations through the shared dependency geometry."""
+    dimensions: dict[str, Any] = {}
     parameter_space = value.get("parameter_space")
     structured_space = isinstance(parameter_space, Mapping)
     authored_dimensions: Mapping[str, Any] = (
@@ -1210,30 +1309,20 @@ def _exhaustive_variants(value: Mapping[str, Any]) -> tuple[Mapping[str, Any], .
         choices = descriptor.get("values")
         if not isinstance(choices, Sequence) or isinstance(choices, str | bytes) or not choices:
             raise TypeError(f"search.{name}.values must be a non-empty list.")
-        raw_condition = descriptor.get("when")
-        condition: Mapping[str, Any] | None = None
-        if raw_condition is not None:
-            if not isinstance(raw_condition, Mapping) or not raw_condition:
-                raise TypeError(f"search.{name}.when must be a non-empty mapping.")
-            unknown = set(map(str, raw_condition)) - known
-            if unknown:
-                raise ValueError(
-                    f"search.{name}.when must reference parameters declared earlier: "
-                    f"{sorted(unknown)}."
-                )
-            condition = {str(key): item for key, item in raw_condition.items()}
-        dimensions.append((name, tuple(choices), condition))
-        known.add(name)
+        identities = [json.dumps(choice, sort_keys=True, allow_nan=False) for choice in choices]
+        if len(set(identities)) != len(identities):
+            raise ValueError(f"search.{name}.values contains duplicate values.")
+        dimensions[name] = descriptor
 
     expanded: list[dict[str, Any]] = [{}]
-    for name, choices, condition in dimensions:
+    geometry = ParameterSpace.from_schema(dimensions)
+    for dimension in geometry.descriptors:
         next_values: list[dict[str, Any]] = []
         for current in expanded:
-            active = condition is None or all(
-                current.get(key) == expected for key, expected in condition.items()
-            )
-            if active:
-                next_values.extend({**current, name: choice} for choice in choices)
+            if dimension.active(current):
+                next_values.extend(
+                    {**current, dimension.name: choice} for choice in dimension.values
+                )
             else:
                 next_values.append(current)
         expanded = next_values

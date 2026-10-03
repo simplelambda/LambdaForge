@@ -327,6 +327,12 @@ def _write_study_dashboard(
         for name, value in marginal.items()
         if isinstance(value, Mapping)
     )
+    # The audit reconstructs this shared catalog on demand rather than serializing it twice.
+    evidence = dict(analysis)
+    if isinstance(evidence.get("research"), Mapping):
+        evidence["research"] = {
+            name: value for name, value in evidence["research"].items() if name != "metric_catalog"
+        }
     payload = json.dumps(
         {
             "report_id": secrets.token_hex(12),
@@ -339,6 +345,9 @@ def _write_study_dashboard(
             "interactions": interactions,
             "resources": resource_rows,
             "research": research,
+            "evidence": evidence,
+            "surrogate": analysis.get("surrogate", {}),
+            "pruning": analysis.get("pruning", {}),
             "research_status": {
                 "scientific_status": analysis.get("scientific_status"),
                 "winner": analysis.get("winner", {}),
@@ -350,7 +359,6 @@ def _write_study_dashboard(
         separators=(",", ":"),
         default=str,
     ).replace("<", "\\u003c")
-    raw = html.escape(json.dumps(analysis, indent=2, ensure_ascii=False, default=str))
     status = html.escape(str(analysis.get("source", {}).get("status", "unknown")))
     style = """
 :root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--panel2:#1c2128;--line:#30363d;
@@ -398,6 +406,10 @@ border-bottom:1px solid var(--line)}.saved-chart.active{border-color:var(--accen
 """
     script = """
 (()=>{const data=JSON.parse(document.getElementById('lf-study-data').textContent);
+const audit=document.getElementById('study-raw-analysis');audit.closest('details').addEventListener('toggle',()=>{
+if(!audit.closest('details').open||audit.dataset.loaded)return;const evidence={...data.evidence};
+if(Object.hasOwn(data.research,'metric_catalog'))evidence.research={...evidence.research,metric_catalog:data.research.metric_catalog};
+audit.textContent=JSON.stringify(evidence,null,2);audit.dataset.loaded='true';});
 const key='lambdaforge:study-dashboard:'+data.report_id;let prefs={};try{prefs=JSON.parse(localStorage.getItem(key)||'{}')}catch(_e){}
 const save=patch=>{prefs={...prefs,...patch};try{localStorage.setItem(key,JSON.stringify(prefs))}catch(_e){}};
 const node=id=>document.querySelector('#'+id+' .js-plotly-plot, #'+id+' .plotly-graph-div');
@@ -472,7 +484,7 @@ const studyResizeObserver=new ResizeObserver(entries=>{const heights={...(prefs.
 document.querySelectorAll('.panel').forEach(panel=>studyResizeObserver.observe(panel));customCharts.mount();
 document.querySelectorAll('.trial-compare').forEach(box=>box.addEventListener('change',renderComparison));
 if(Array.isArray(prefs.trials))document.querySelectorAll('.trial-compare').forEach(box=>box.checked=prefs.trials.includes(Number(box.value)));
-for(const [id,value] of [['trial-metric',prefs.metric],['parameter-select',prefs.parameter],['parameter-metric',prefs.parameterMetric],['pair-select',prefs.pair],['interaction-kind',prefs.kind],['study-palette',prefs.palette],['resource-select',prefs.resource]])if(value!==undefined&&[...document.getElementById(id).options].some(o=>o.value===value))document.getElementById(id).value=value;
+for(const [id,value] of [['trial-metric',prefs.metric],['parameter-select',prefs.parameter],['parameter-metric',prefs.parameterMetric],['pair-select',prefs.pair],['interaction-kind',prefs.kind],['study-palette',prefs.palette],['resource-select',prefs.resource]])if(value!==undefined&&(!document.getElementById(id).options||[...document.getElementById(id).options].some(o=>o.value===value)))document.getElementById(id).value=value;
 document.getElementById('study-reverse').checked=Boolean(prefs.reverse);
 document.getElementById('trial-metric').addEventListener('change',updateRanking);document.getElementById('parameter-select').addEventListener('change',updateParameter);
 document.getElementById('parameter-metric').addEventListener('change',updateParameter);
@@ -482,26 +494,9 @@ function activate(target){document.querySelectorAll('.tab').forEach(tab=>tab.set
  document.querySelectorAll('.view').forEach(view=>view.hidden=view.id!==target);save({tab:target});document.querySelectorAll('#'+target+' .js-plotly-plot').forEach(chart=>requestAnimationFrame(()=>Plotly.Plots.resize(chart)))}
 document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>activate(tab.dataset.target)));
 updateRanking();updateParameter();updateInteraction();updateResources();renderComparison();if(prefs.tab&&document.getElementById(prefs.tab))activate(prefs.tab);
-window.lfResearchServices={customCharts,save,getPrefs:()=>prefs,config,baseLayout};
+window.lfResearchServices={data,customCharts,save,getPrefs:()=>prefs,config,baseLayout};
 })();
 """
-    metric_options = (
-        '<option value="__selection__">Selection objective</option>'
-        + "".join(
-            f'<option value="{html.escape(name, quote=True)}">Objective component · {html.escape(name)}</option>'
-            for name in component_metric_names[:16]
-        )
-        + "".join(
-            f'<option value="{html.escape(name, quote=True)}">Diagnostic · {html.escape(name)}</option>'
-            for name in sorted(
-                set(diagnostic_metric_names) | observed_metric_names - set(component_metric_names)
-            )[:16]
-        )
-    )
-    parameter_options = "".join(
-        f'<option value="{html.escape(name, quote=True)}">{html.escape(name)}</option>'
-        for name in parameter_names
-    )
     pair_names = (
         list(interactions.get("surfaces", {}))
         if isinstance(interactions.get("surfaces"), Mapping)
@@ -565,33 +560,6 @@ window.lfResearchServices={customCharts,save,getPrefs:()=>prefs,config,baseLayou
         + "</td></tr>"
         for value in candidates
     )
-    study_field_options = (
-        '<option value="trial">Trial</option>'
-        + "".join(
-            f'<option value="param:{html.escape(name, quote=True)}">Parameter · {html.escape(name)}</option>'
-            for name in parameter_names
-        )
-        + '<option value="metric:__selection__">Metric · selection objective</option>'
-        + '<option value="metric:__best_observed__">Metric · best observed objective (partial)</option>'
-        + '<option value="metric:__current_observed__">Metric · current observed objective</option>'
-        + "".join(
-            f'<option value="metric:{html.escape(name, quote=True)}">Metric · {html.escape(name)}</option>'
-            for name in metric_names[:16]
-        )
-        + "".join(
-            f'<option value="resource:{name}">Resource · {label}</option>'
-            for name, label in (
-                ("gpu_seconds", "GPU seconds"),
-                ("duration_seconds", "duration"),
-                ("cpu_seconds", "CPU seconds"),
-                ("peak_vram", "peak VRAM"),
-                ("peak_ram", "peak RAM"),
-            )
-        )
-    )
-    study_y_field_options = study_field_options.replace(
-        'value="metric:__selection__"', 'value="metric:__selection__" selected', 1
-    )
     document = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
         'content="width=device-width,initial-scale=1"><title>LambdaForge Study Analysis</title><style>'
@@ -606,12 +574,10 @@ window.lfResearchServices={customCharts,save,getPrefs:()=>prefs,config,baseLayou
         '<button class="tab" data-target="study-overview" aria-selected="true">Overview</button>'
         '<button class="tab" data-target="study-trials" aria-selected="false">Trials</button><button class="tab" data-target="study-parameters" aria-selected="false">Parameters</button>'
         '<button class="tab" data-target="study-interactions" aria-selected="false">Interactions</button><button class="tab" data-target="study-coverage" aria-selected="false">Coverage</button>'
-        '<button class="tab" data-target="study-resources" aria-selected="false">Resources</button><button class="tab" data-target="study-findings" aria-selected="false">Findings & evidence</button>'
+        '<button class="tab" data-target="study-resources" aria-selected="false">Resources</button><button class="tab" data-target="study-findings" aria-selected="false">Evidence</button>'
         '<button class="tab" data-target="study-custom" aria-selected="false">Explore</button></nav>'
         + workspace_html()
-        + '<section class="view" id="study-overview"><div class="grid"><article class="panel wide"><h2>Candidate ranking</h2><div class="tools"><label>Displayed metric <select id="trial-metric">'
-        + metric_options
-        + '</select></label></div><div class="plot" id="study-ranking">'
+        + '<section class="view" id="study-overview"><div class="grid"><article class="panel wide"><h2>Candidate ranking</h2><div class="tools"><label>Displayed metric <input type="hidden" id="trial-metric" value="__selection__"></label></div><div class="plot" id="study-ranking">'
         + figure_html["ranking"]
         + '</div></article><article class="panel"><h2>Predictive importance</h2><div class="plot">'
         + figure_html["importance"]
@@ -624,11 +590,9 @@ window.lfResearchServices={customCharts,save,getPrefs:()=>prefs,config,baseLayou
         '<section class="view" id="study-trials" hidden><div class="panel"><div class="tools"><span class="muted">Select at most two candidates to compare. Comparable ranking contains terminal selection evidence only. This ledger retains every attempted candidate; × means performance-pruned and its final selection remains unavailable.</span></div><div class="table-wrap"><table><thead><tr><th>State</th><th>Compare</th><th>Trial</th><th>Final selection</th><th>SE</th><th>Seeds</th><th>Censored</th><th>Partial best</th><th>Prune step</th><th>Prune reason</th><th>P(competitive)</th><th>Threshold</th><th>Reference</th><th>Parameters</th></tr></thead><tbody>'
         + trial_rows
         + '</tbody></table></div><div class="compare" id="trial-comparison"></div></div></section>'
-        '<section class="view" id="study-parameters" hidden><div class="tools"><label>Parameter <select id="parameter-select">'
-        + parameter_options
-        + '</select></label><label>Y metric <select id="parameter-metric">'
-        + metric_options
-        + '</select></label></div><div class="grid"><article class="panel wide"><h2>Observed metric by parameter value</h2><div class="plot" id="parameter-observed">'
+        '<section class="view" id="study-parameters" hidden><div class="tools"><label>Parameter <input type="hidden" id="parameter-select" value="'
+        + html.escape(parameter_names[0] if parameter_names else "", quote=True)
+        + '"></label><label>Analyze metric <input type="hidden" id="parameter-metric" value="__selection__"></label><div id="parameter-metric-chips" class="tools"></div></div><div class="grid"><article class="panel wide"><h2>Observed metric by parameter value</h2><div class="plot" id="parameter-observed">'
         + figure_html["observed"]
         + '</div><p class="note" id="parameter-observed-status" role="status"></p></article><details class="panel wide"><summary class="tools">Persisted adjusted selection response and uncertainty (model evidence)</summary><div class="plot" id="parameter-response">'
         + figure_html["response"]
@@ -647,8 +611,7 @@ window.lfResearchServices={customCharts,save,getPrefs:()=>prefs,config,baseLayou
         + '</div><p class="note">Per-comparable-Run resource evidence is kept separate from total controller spend.</p></div></section>'
         '<section class="view" id="study-findings" hidden>'
         + (findings_html or '<p class="empty">No findings were persisted.</p>')
-        + '<details class="panel"><summary class="tools">Complete reproducible analysis JSON</summary><pre class="raw">'
-        + raw
+        + '<details class="panel"><summary class="tools">Complete reproducible analysis JSON</summary><pre class="raw" id="study-raw-analysis">Open this section to inspect the persisted snapshot.'
         + '</pre></details></section><section class="view" id="study-custom" hidden><div class="panel">'
         '<div class="tools custom-builder"><label>Chart name <input id="study-chart-name" '
         'placeholder="My candidate view"></label><label>Type <select id="study-chart-kind">'
@@ -656,25 +619,14 @@ window.lfResearchServices={customCharts,save,getPrefs:()=>prefs,config,baseLayou
         '<option value="bar">Bar</option><option value="scatter3d">3D scatter</option>'
         '<option value="parallel">Parallel coordinates</option>'
         '<option value="heatmap">Observed heatmap</option><option value="surface">Observed 3D surface</option>'
-        '</select></label><label>X axis <select id="study-chart-x">'
-        + study_field_options
-        + '</select></label><label>Y axis <select id="study-chart-y">'
-        + study_y_field_options
-        + '</select></label><label id="study-chart-z-control" hidden>Z / cell metric <select id="study-chart-z">'
-        + study_y_field_options
-        + '</select></label><label>Grouping <select id="study-chart-aggregate">'
+        '</select></label><label>X axis <input type="hidden" id="study-chart-x" value="trial"></label><label>Y axis <input type="hidden" id="study-chart-y" value="metric:__selection__"></label><label id="study-chart-z-control" hidden>Z / cell metric <input type="hidden" id="study-chart-z" value="metric:__selection__"></label><label>Grouping <select id="study-chart-aggregate">'
         '<option value="points">One point per trial</option><option value="mean">Mean per exact X value + SD</option>'
         '</select></label><label>Colour scale <select id="study-chart-palette"><option>Accessible</option>'
         "<option>Blue ↔ red</option><option>Purple ↔ green</option><option>Brown ↔ teal</option></select></label>"
         '<label><input id="study-chart-reverse" type="checkbox">Reverse colours</label>'
         '<label><input id="study-chart-partial" type="checkbox">Include partial / pruned observations</label>'
-        '<details id="study-chart-extra-control" open><summary>Add another Y metric (2D)</summary>'
-        '<label>Find metrics <input id="study-chart-metric-search" type="search" placeholder="accuracy, loss…"></label>'
+        '<details id="study-chart-extra-control"><summary>Additional Y metrics (2D)</summary>'
         '<div id="study-chart-extra-metrics" class="metric-checklist" role="group" aria-label="Additional Y metrics">'
-        + "".join(
-            f'<label><input type="checkbox" value="metric:{html.escape(name, quote=True)}">{html.escape(name)}</label>'
-            for name in metric_names[:16]
-        )
         + '</div></details><button id="save-study-chart">Save chart</button>'
         '<span class="muted">Live preview · Save chart keeps this view for reopening.</span></div>'
         '<div class="saved-charts" id="study-saved-charts"></div><div class="plot" '
@@ -698,7 +650,7 @@ window.lfResearchServices={customCharts,save,getPrefs:()=>prefs,config,baseLayou
         .read_text(encoding="utf-8")
         + "</script><script>"
         + script
-        + "</script><script>LambdaForgeResearchWorkspace({data:JSON.parse(document.getElementById('lf-study-data').textContent),...window.lfResearchServices}).mount();"
+        + "</script><script>LambdaForgeResearchWorkspace(window.lfResearchServices).mount();"
         + "</script></body></html>"
     )
     path = Path(output).expanduser().resolve()

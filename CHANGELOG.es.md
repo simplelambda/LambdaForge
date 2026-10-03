@@ -11,6 +11,14 @@ metadata empaquetada.
 
 ### Corregido
 
+- Unificada la activación por igualdad/pertenencia y el orden de dependencias entre sweeps,
+  muestreadores, modelos y análisis. Se mantienen las identidades antiguas y se omiten argumentos
+  inactivos. Las composiciones rechazan políticas raíz ignoradas. Preflight distingue evidencia
+  obligatoria, tiempo del scheduler, presupuesto del Study y capacidad GPU directa fiable.
+- El HTML reemplaza selectores estáticos duplicados por un selector semántico, simplifica Explore,
+  muestra chips e interacciones observadas, prioriza preguntas configuradas ampliables y añade
+  categorías jerárquicas. Los diagnósticos científicos se consolidan en Evidence.
+
 - HTML de Study previsualiza ejes/métricas sin guardar, explica vistas vacías y ofrece casillas
   buscables para varias series. Parameters permite cualquier métrica numérica registrada sin
   confundir resúmenes observados del sweep con respuestas modeladas del objetivo.

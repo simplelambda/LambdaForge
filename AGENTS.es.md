@@ -39,6 +39,16 @@ remotos devuelven control tras crear el registro durable de preparación salvo q
 
 ## Contrato Work
 
+ActivationCondition es la autoridad inmutable AND de igualdad/pertenencia compartida por
+ParameterSpace. `when: {parent: valor}` y `{parent: {eq: valor}}` normalizan igual; `in` requiere
+escalares únicos de un dominio finito y tiene identidad independiente del orden de pertenencia.
+Ordena dependencias, omite claves inactivas y no multipliques ramas para deduplicarlas después.
+Solo resources raíz se hereda en steps; rechaza with/seeds/replicates/search/sweep/execution/
+objective/analysis raíz ignorados. Preflight distingue presupuesto del Study de techo del scheduler
+(suma secuencial, máximo paralelo). Solo un inventario GPU directo vivo/fiable puede rechazar
+solicitudes imposibles; los grants del scheduler/launcher siguen siendo autoridad del runtime.
+Guía: docs/CONDITIONAL_STUDIES.es.md.
+
 Un Study adaptativo se recupera con `lf retry STUDY` o **Resume Study…** en su ventana. Se prepara
 otro Job conectado a la Execution original exacta del mismo clúster: conserva evidencia completa/
 podada, decisiones HPO, seeds y presupuestos gastados. Runs fallidas/interrumpidas crean Attempts
@@ -353,6 +363,13 @@ genérico, alias/factory redundante ni policy de dominio: solo un primitivo reut
 tensorial preciso y pruebas focalizadas.
 
 ## Análisis de estudios y consola
+
+El HTML tiene un selector semántico del catálogo, no select más buscador superpuestos. Explore
+infiere vistas observadas desde Analyze/By/Compare; ejes/tipo/paleta/normalización van a Advanced.
+Parameters usa chips de comparación. Tarjetas de preguntas y categorías jerárquicas presentan
+semántica persistida. Research conserva los hallazgos; Evidence las conclusiones/diagnóstico/JSON.
+No confundas interacciones observadas de otras métricas con el modelo HPO. Conserva saved views
+antiguas, current/final/censura y el dashboard de Run individual.
 
 `study/controller.json.initialization` es autoridad científica inmutable y durable; `recent` solo
 es una cola visual. Conserva objetivo, margen, geometría/condiciones, política y streams al

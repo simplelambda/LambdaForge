@@ -1,0 +1,14 @@
+# One Study, five active candidates, four common seeds: twenty required Runs.
+# Un Study, cinco candidatos activos, cuatro seeds comunes: veinte Runs obligatorios.
+name: conditional-optimizer
+run: examples.work.CompareOptimizer
+seeds: [4, 7, 32, 54]
+sweep:
+  reference: {optimizer: baseline}
+  space:
+    momentum:
+      values: [0.8, 0.9]
+      when: {optimizer: {in: [sgd, accelerated]}}
+    optimizer: [baseline, sgd, accelerated]
+resources: {cpu: 1, memory: 1GiB, time: 1h}
+execution: {max_parallel: 2, max_time: 30m}

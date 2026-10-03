@@ -334,6 +334,13 @@ añade una clase vaga `GNN`: topología, agregación y equivariancia son decisio
 
 ## Composición y experimentos adaptativos
 
+Para alternativas con distintos parámetros aplicables, declara un único espacio condicional:
+`when: {parent: {in: [a, b]}}` activa el hijo en varias ramas. La igualdad escalar sigue siendo
+válida, los hijos pueden preceder a los padres y los argumentos inactivos se omiten. Consulta la
+[guía de Study condicional y preflight](docs/CONDITIONAL_STUDIES.es.md) y el
+[ejemplo ejecutable](examples/conditional-sweep.yaml). Solo `resources` raíz se hereda en `steps`;
+la política científica raíz debe declararse por paso, nunca se ignora.
+
 El YAML recomendado expresa intención científica y reserva externa; LambdaForge resuelve la
 política interna. Omitir una opción no deja el estudio sin control: selecciona una política
 automática versionada, persistida antes de ejecutar y visible sin lanzar nada:
@@ -1156,7 +1163,9 @@ y redundancia; **Ctrl/⌘ K** busca métricas, familias, parámetros, Trials y v
 El descubrimiento es determinista, acotado y retrospectivo, sin cambiar HPO. Evidencia de test no
 puede gobernar objetivo/restricciones ni discovery provisional. Unidades distintas/desconocidas
 usan gráficas separadas; normalizar es visual y opcional. Las vistas admiten notas y export/import
-JSON. Véase la [guía del espacio de investigación](docs/RESEARCH_ANALYSIS.es.md) para declaraciones,
+JSON. Explore usa **Analyze / By / Compare with** y chips eliminables; los ejes explícitos están
+en Advanced. Las preguntas tienen tarjetas propias, las categorías forman un árbol desplegable
+y **Evidence** conserva la auditoría científica. Véase la [guía del espacio de investigación](docs/RESEARCH_ANALYSIS.es.md) para declaraciones,
 familias, métodos, controles, límites estadísticos y Studies antiguos.
 
 La admisión de recursos también queda estructurada: capacidad GPU/CPU/RAM, Runs activas/en cola,

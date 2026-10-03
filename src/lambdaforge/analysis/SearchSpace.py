@@ -6,6 +6,7 @@ import random
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from lambdaforge.hpo.ActivationCondition import ActivationCondition
 from lambdaforge.hpo.ParameterSpace import ParameterDescriptor, ParameterSpace
 
 INACTIVE = "<inactive>"
@@ -51,10 +52,7 @@ def build_space(
 
 def condition_active(rule: Mapping[str, Any], point: Mapping[str, Any]) -> bool:
     """Return whether a parameter must exist for this parent configuration."""
-    condition = rule.get("when")
-    return not isinstance(condition, Mapping) or all(
-        point.get(str(name), INACTIVE) == expected for name, expected in condition.items()
-    )
+    return ActivationCondition.parse(rule.get("when")).matches(point)
 
 
 def canonicalize(

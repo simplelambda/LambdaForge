@@ -12,14 +12,15 @@ def workspace_html() -> str:
  <div class="cards" id="research-health"></div>
  <p class="note">Retrospective associations, not causal effects. Inspect a finding to see support,
  uncertainty, multiplicity, limitations and the underlying observations.</p>
- <div id="research-inbox"></div>
- <details class="panel"><summary class="tools">All exploratory findings and declared questions</summary>
- <div id="research-all-findings"></div><div id="research-questions"></div></details>
+ <h2>Configured research questions</h2><div id="research-questions" class="question-grid"></div>
+ <h2>Exploratory / integrity / resource signals</h2><div id="research-inbox"></div>
+ <details class="panel"><summary class="tools">All exploratory findings</summary>
+ <div id="research-all-findings"></div></details>
 </section>
 <section class="view" id="study-metrics" hidden><div class="panel">
  <div class="tools"><h2>Metrics & health</h2><label>Search <input id="research-metric-search" type="search" placeholder="Name, alias, description, category…"></label>
  <label><input id="research-show-all" type="checkbox">Show constants / missing / hidden</label>
- <label>Category <select id="research-category"><option value="">All categories</option></select></label>
+ <input type="hidden" id="research-category"><details id="research-category-tree"><summary>Categories · all</summary><div id="research-category-branches"></div></details>
  <label>Sort <select id="research-sort"><option value="priority">Priority</option><option value="coverage">Coverage</option><option value="name">Name</option><option value="spread">Spread</option></select></label></div>
  <div class="table-wrap"><table><thead><tr><th>Metric / meaning</th><th>Category · split</th><th>Unit / direction</th>
  <th>Evidence</th><th>Spread</th><th>Health / aggregation</th><th>Open</th></tr></thead><tbody id="research-metrics-body"></tbody></table></div>

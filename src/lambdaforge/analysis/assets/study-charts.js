@@ -20,6 +20,7 @@ window.LambdaForgeStudyCharts = function (services) {
     const rule = name.startsWith('param:') ? data.parameter_space?.[name.slice(6)] : null;
     return unique([...(Array.isArray(rule?.values) ? rule.values : []), ...observed]);
   };
+  let selectedParameters;
 
   function comparableRuns(candidate, partial) {
     const runs = (candidate.runs || []).filter(run => run.phase !== 'confirmation'
@@ -84,12 +85,12 @@ window.LambdaForgeStudyCharts = function (services) {
     const rows = rowsFor(spec, spec.y), traces = [];
     let message = '';
     if(spec.kind==='parallel'){
-      const parameters=data.parameters.slice(0,8), valid=data.candidates.filter(candidate=>(isComplete(candidate)||spec.partial)
+      const parameters=spec.parameters||data.parameters.slice(0,8), valid=data.candidates.filter(candidate=>(isComplete(candidate)||spec.partial)
         &&parameters.every(name=>present(field(candidate,'param:'+name,spec.partial)))&&finite(field(candidate,spec.y,spec.partial)));
       const dimensions=parameters.map(name=>{const a=axis(valid.map(row=>row.parameters[name]),name);return {label:name,values:a.values,...(a.layout.tickvals?{tickvals:a.layout.tickvals,ticktext:a.layout.ticktext}:{})}});
       dimensions.push({label:fieldLabel(spec.y),values:valid.map(row=>field(row,spec.y,spec.partial))});
       traces.push({type:'parcoords',dimensions,line:{color:valid.map(row=>field(row,spec.y,spec.partial)),colorscale,showscale:true}});
-      message=`${valid.length} observed Trials · first ${parameters.length} parameters, coloured by recorded metric. Missing coordinates are excluded; categories retain labels.`;
+      message=`${valid.length} observed Trials · ${parameters.length} parameters, coloured by recorded metric. Missing coordinates are excluded; categories retain labels.`;
     } else if (isJoint(spec.kind)) {
       if (spec.kind === 'scatter3d') {
         const x = axis(rows.map(row => row.x), fieldLabel(spec.x));
@@ -139,7 +140,7 @@ window.LambdaForgeStudyCharts = function (services) {
       }
     } else {
       const fields = [...new Set([spec.y, ...(spec.metrics || [])])];
-      const unit = field => data.research?.metric_catalog?.metrics?.[field.replace('metric:', '')]?.unit || 'unknown';
+      const unit = field => data.research?.metric_catalog?.metrics?.[field.replace('metric:', '').replace('__selection__','selection_objective')]?.unit || 'unknown';
       const units = fields.map(unit);
       // Unknown units are not assumed compatible. Preserve independent scales unless normalized explicitly.
       const smallMultiples = fields.length > 1 && !spec.normalize
@@ -219,10 +220,11 @@ window.LambdaForgeStudyCharts = function (services) {
     document.querySelectorAll('.saved-study-chart').forEach(button =>
       button.classList.toggle('active', button.dataset.id === spec?.id));
     if (spec) {
+      selectedParameters=spec.parameters;
       for (const name of ['kind', 'x', 'y', 'z', 'aggregate', 'palette']) {
         if (spec[name] !== undefined) {
           const select=id(name);
-          if(![...select.options].some(o=>o.value===spec[name])){const option=document.createElement('option');option.value=spec[name];option.textContent=fieldLabel(spec[name]);select.append(option);}
+          if(select.options&&![...select.options].some(o=>o.value===spec[name])){const option=document.createElement('option');option.value=spec[name];option.textContent=fieldLabel(spec[name]);select.append(option);}
           select.value = spec[name];
         }
       }
@@ -231,7 +233,7 @@ window.LambdaForgeStudyCharts = function (services) {
       if(id('normalize'))id('normalize').checked=!!spec.normalize;
       setAdditional(spec.metrics || []);
       if(document.getElementById('research-view-notes'))document.getElementById('research-view-notes').value=spec.notes||'';
-      form(); save({customChartId: spec.id}); render(spec);
+      form(); save({customChartId: spec.id}); render(spec);document.dispatchEvent(new Event('research-controls-changed'));
     }
   }
 
@@ -256,24 +258,25 @@ window.LambdaForgeStudyCharts = function (services) {
       metrics: [...id('extra-metrics').querySelectorAll('input:checked')].map(input => input.value),
       aggregate: id('aggregate').value, partial: id('partial').checked,
       palette: id('palette').value, reverse: id('reverse').checked,
-      notes:document.getElementById('research-view-notes')?.value||'',normalize:!!id('normalize')?.checked};
+      notes:document.getElementById('research-view-notes')?.value||'',normalize:!!id('normalize')?.checked,...(selectedParameters?{parameters:selectedParameters}: {})};
   }
   function setAdditional(fields){for(const field of fields){if(![...id('extra-metrics').querySelectorAll('input')].some(input=>input.value===field)){
     const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.value=field;label.append(input,document.createTextNode(fieldLabel(field)));id('extra-metrics').append(label);}}
     id('extra-metrics').querySelectorAll('input').forEach(input=>input.checked=fields.includes(input.value));}
-  function open(spec){for(const name of ['kind','x','y','z','aggregate','palette']){if(spec[name]!==undefined){const select=id(name);
+  function open(spec){if(Object.hasOwn(spec,'parameters'))selectedParameters=spec.parameters?.length?spec.parameters:undefined;else if(Object.hasOwn(spec,'x')||Object.hasOwn(spec,'kind'))selectedParameters=undefined;for(const name of ['kind','x','y','z','aggregate','palette']){if(spec[name]!==undefined){const select=id(name);
     if(select.options && ![...select.options].some(o=>o.value===spec[name])){const option=document.createElement('option');option.value=spec[name];option.textContent=fieldLabel(spec[name]);select.append(option);}select.value=spec[name];}}
     if(spec.metrics)setAdditional(spec.metrics);if(spec.partial!==undefined)id('partial').checked=!!spec.partial;
     if(spec.normalize!==undefined&&id('normalize'))id('normalize').checked=!!spec.normalize;
-    id('name').value=spec.name||'Exploratory view';if(document.getElementById('research-view-notes'))document.getElementById('research-view-notes').value=spec.notes||'';form();preview();}
+    id('name').value=spec.name||'Exploratory view';if(document.getElementById('research-view-notes'))document.getElementById('research-view-notes').value=spec.notes||'';form();preview();document.dispatchEvent(new Event('research-controls-changed'));}
   function importViews(document){const fields=new Set(['trial',...data.parameters.map(n=>'param:'+n),...Object.keys(data.research?.metric_catalog?.metrics||{}).map(n=>'metric:'+(n==='selection_objective'?'__selection__':n)),...data.metrics.map(n=>'metric:'+n),
     'metric:__selection__','metric:__best_observed__','metric:__current_observed__',...['gpu_seconds','duration_seconds','cpu_seconds','peak_vram','peak_ram'].map(n=>'resource:'+n)]);
     if(document.views_version!==1||!Array.isArray(document.views)||document.views.length>50)throw Error('Unsupported views document (maximum 50 views).');
-    const allowed=new Set(['id','name','kind','x','y','z','metrics','aggregate','partial','palette','reverse','notes','normalize']);
+    const allowed=new Set(['id','name','kind','x','y','z','metrics','aggregate','partial','palette','reverse','notes','normalize','parameters']);
     for(const spec of document.views){if(!spec||typeof spec.name!=='string'||spec.name.length>200||Object.keys(spec).some(name=>!allowed.has(name))||!['scatter','line','bar','scatter3d','heatmap','surface','parallel'].includes(spec.kind)
       ||!Array.isArray(spec.metrics||[])||(spec.metrics||[]).length>32||![spec.x,spec.y,...(spec.z?[spec.z]:[]),...(spec.metrics||[])].every(field=>fields.has(field))
       ||typeof(spec.notes||'')!=='string'||(spec.notes||'').length>10000||!['points','mean',undefined].includes(spec.aggregate)||![undefined,true,false].includes(spec.partial)||![undefined,true,false].includes(spec.normalize)
-      ||![undefined,true,false].includes(spec.reverse)||(spec.palette!==undefined&&!Object.hasOwn(palettes,spec.palette)))throw Error('Invalid saved chart fields.');}
+      ||![undefined,true,false].includes(spec.reverse)||(spec.palette!==undefined&&!Object.hasOwn(palettes,spec.palette))
+      ||(spec.parameters!==undefined&&(!Array.isArray(spec.parameters)||!spec.parameters.length||spec.parameters.length>32||!spec.parameters.every(name=>data.parameters.includes(name)))))throw Error('Invalid saved chart fields.');}
     const views=document.views.map(spec=>({...spec,id:globalThis.crypto?.randomUUID?.()||String(Math.random())}));save({customCharts:views,customChartId:views[0]?.id});saved();}
   let previewTimer;
   function preview() {
@@ -312,13 +315,10 @@ window.LambdaForgeStudyCharts = function (services) {
     });
     if (data.parameters.length) id('x').value = 'param:' + data.parameters[0];
     for (const name of ['kind', 'x', 'y', 'z', 'aggregate', 'palette', 'reverse', 'partial', 'extra-metrics']) {
+      if(['kind','x','y'].includes(name))id(name).addEventListener('change',()=>{selectedParameters=undefined;document.dispatchEvent(new Event('research-controls-changed'));});
       id(name).addEventListener('change', queuePreview);
     }
     id('name').addEventListener('input', queuePreview);
-    id('metric-search').addEventListener('input', () => {
-      const query = id('metric-search').value.toLowerCase();
-      id('extra-metrics').querySelectorAll('label').forEach(label => label.hidden = !label.textContent.toLowerCase().includes(query));
-    });
     document.getElementById('save-study-chart').addEventListener('click', () => {
       clearTimeout(previewTimer);
       const charts = getPrefs().customCharts || [], spec = specification();
@@ -328,5 +328,5 @@ window.LambdaForgeStudyCharts = function (services) {
     });
     form(); saved();
   }
-  return {mount, updateParameter, open, importViews};
+  return {mount, updateParameter, open, importViews, render, specification, preview};
 };

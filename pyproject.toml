@@ -113,12 +113,15 @@ lambdaforge = [
     "examples/work.yaml",
     "examples/sequence.yaml",
     "examples/search.yaml",
+    "examples/conditional-sweep.yaml",
 ]
 "share/lambdaforge/docs" = [
     "docs/MANUAL.md",
     "docs/MANUAL.es.md",
     "docs/RESEARCH_ANALYSIS.md",
     "docs/RESEARCH_ANALYSIS.es.md",
+    "docs/CONDITIONAL_STUDIES.md",
+    "docs/CONDITIONAL_STUDIES.es.md",
 ]
 
 [tool.pytest.ini_options]

@@ -424,6 +424,14 @@ the authoring API.
 
 ## 7. Sequence, parallelism, seeds and search
 
+Conditional branches belong to one Study when they answer one joint experimental question. Use
+`when: {parent: {in: [a, b]}}` (AND across parents), or historical scalar equality. Inactive keys
+are omitted, dependencies are order-independent, and the same geometry governs generation and
+analysis. Root `resources` inherits into steps; root `with`, seeds/replicates, search/sweep,
+execution, objective and analysis are rejected rather than ignored. The numbered
+[conditional Study guide](CONDITIONAL_STUDIES.md) covers exact counts, references, canonical
+identity, capacity checks and scheduler wall-time versus logical Study budgets.
+
 ### 7.1 Intent-first defaults and resolved authority
 
 The common path needs no authored seed integers or controller tuning. With `search.space` and an
@@ -1919,6 +1927,13 @@ service locator. New YAML vocabulary is justified only by a genuine researcher-c
 decision, not by an internal object that can stay in Python.
 
 ## 16. Study Analysis
+
+Study HTML uses one semantic picker for metrics and parameters, an **Analyze / By / Compare with**
+Explore view and removable metric chips. All explicit axis/chart settings remain in **Advanced
+visualization options**. Configured questions are first-class inspectable cards; Metrics & health
+has collapsible category paths. **Evidence** replaces the duplicated findings tab and retains
+conclusions, diagnostics, seeds, pruning and raw JSON. Observed arbitrary-metric interactions
+remain separate from persisted HPO model surfaces. See [Research HTML](RESEARCH_ANALYSIS.md).
 
 Study Analysis is a deterministic post-hoc layer over persisted study evidence. It does not propose
 Runs and never changes the controller. A terminal study automatically writes
