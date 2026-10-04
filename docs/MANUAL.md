@@ -1483,6 +1483,9 @@ controls never stop active Jobs. The coordinated Study ownership foundation is t
 prepared local CPU shards now use real direct Jobs through an internal shared dispatch boundary.
 `run --on-fleet`, remote/GPU shards, public pause/resume and global HPO/TUI integration remain pending.
 See [implementation status and contracts](COORDINATED_STUDIES.md) before using fleets.
+The common internal prepared executor delegates to ControlPlane/JobService and verifies immutable
+environment/code identities and canonical input relocation. Host-side result observation is batched;
+this is not yet a public distributed driver or an authority to offer unallocated GPUs.
 
 Humans configure the same profile in bare `lf` → Clusters. Common fields appear first and focused
 options provide contextual meaning/risk; advanced SSH, environment, path and GPU policy fields stay

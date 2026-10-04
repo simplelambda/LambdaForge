@@ -543,8 +543,12 @@ runner/proveedores/predictive/decisiones/TUI: `docs/COORDINATED_STUDIES.es.md`. 
 demuestran ejecución end-to-end.
 
 `WorkRunner(dispatcher=...)` es el punto interno compartido fixed/automático/adaptativo, no otro
-planner. `PreparedCpuShardExecutor` y `CoordinatedCpuDispatcher` ejecutan CPU local preparada;
-no acreditan remoto/GPU ni streaming adaptativo. El callback fixed/automático reemplaza la cola
+planner. `PreparedShardExecutor` y `CoordinatedDispatcher` comparten una ruta de ejecución.
+La frontera preparada reutiliza ControlPlane/JobService, identidades exactas, bindings file
+canónicos y observaciones acotadas en el host. Shards GPU baseline exigen Job propio, visibilidad
+opaca heredada y hardware homogéneo; los offers GPU quedan bloqueados hasta integrar la autoridad
+de asignación de miembro. Los tests del proveedor local no acreditan lanzamiento público Fleet
+remoto/GPU ni streaming adaptativo central. El callback fixed/automático reemplaza la cola
 no iniciada, no solo añade Runs; no retirar identidades con lease o ya aceptadas. La pausa v2
 congela aceptación/envíos y deja
 terminar workers propios sin asumir muerte; propiedad desconocida impide PAUSED. Mantener leases

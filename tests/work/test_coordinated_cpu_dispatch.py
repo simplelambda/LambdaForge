@@ -16,11 +16,11 @@ import yaml
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.Fleet import Fleet, FleetMember
 from lambdaforge.controlplane.FleetPlacement import ExecutionEquivalence
-from lambdaforge.controlplane.PreparedCpuShardExecutor import PreparedCpuShardExecutor
+from lambdaforge.controlplane.PreparedShardExecutor import PreparedShardExecutor
 from lambdaforge.controlplane.StudyCoordinator import StudyCoordinator
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.work import WorkConfig, WorkRunner
-from lambdaforge.work.coordinated_dispatch import CoordinatedCpuDispatcher
+from lambdaforge.work.coordinated_dispatch import CoordinatedDispatcher
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Detached process provider requires POSIX")
@@ -54,8 +54,8 @@ def test_fixed_study_across_two_real_direct_cpu_targets(
     eq = ExecutionEquivalence("test-code", "test-env", "no-inputs", "fp32", "local-cpu")
     # Tests' consumer package is deliberately not installed; inherit only its import root.
     import_root = str(Path(__file__).resolve().parents[2])
-    executors: dict[str, PreparedCpuShardExecutor] = {}
-    dispatcher: CoordinatedCpuDispatcher
+    executors: dict[str, PreparedShardExecutor] = {}
+    dispatcher: CoordinatedDispatcher
 
     def invocation(key: str) -> dict[str, Any]:
         return dict(dispatcher.invocation(key))
@@ -67,7 +67,7 @@ def test_fixed_study_across_two_real_direct_cpu_targets(
             workspace=str(tmp_path / member.cluster),
             command_prefix=("env", "PYTHONPATH=" + import_root),
         )
-        executors[member.cluster] = PreparedCpuShardExecutor(
+        executors[member.cluster] = PreparedShardExecutor(
             profile,
             member,
             root=tmp_path / member.cluster / "shards",
@@ -75,7 +75,7 @@ def test_fixed_study_across_two_real_direct_cpu_targets(
             equivalence=eq,
             invocation=invocation,
         )
-    dispatcher = CoordinatedCpuDispatcher(control, executors)
+    dispatcher = CoordinatedDispatcher(control, executors)
     started = time.monotonic()
     result = WorkRunner(dispatcher=dispatcher).run(config)
     assert time.monotonic() - started < 60

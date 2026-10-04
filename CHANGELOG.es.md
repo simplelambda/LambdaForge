@@ -11,6 +11,11 @@ metadata empaquetada.
 
 ### Añadido
 
+- Adaptadores internos unificados en `PreparedShardExecutor`/`CoordinatedDispatcher`. Entrypoints
+  preparados reutilizan ControlPlane/JobService, TLS/wrappers GPU, identidades inmutables y fence
+  exacto de envío. Solo reubican inputs file verificados y observan resultados acotados en el host.
+  Shards GPU baseline exigen grants propios/hardware verificado; offers GPU de producción,
+  streaming adaptativo central y lanzamiento/recovery Fleet público siguen pendientes.
 - Punto interno único de despacho para planners fixed, paired sweep automático y adaptativo.
   Fleet CPU local preparada usa Jobs ProcessScheduler desacoplados, invocaciones exactas durables
   e ingestión central con un análisis final único; se prueban seeds fijas y refill pareado automático.

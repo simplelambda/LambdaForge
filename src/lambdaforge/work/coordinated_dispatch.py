@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from lambdaforge.controlplane.FleetPlacement import GlobalRun
-from lambdaforge.controlplane.PreparedCpuShardExecutor import PreparedCpuShardExecutor
+from lambdaforge.controlplane.PreparedShardExecutor import PreparedShardExecutor
 from lambdaforge.controlplane.StudyCoordinator import StudyCoordinator
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
@@ -24,7 +24,7 @@ from lambdaforge.work.models import WorkResult
 from lambdaforge.work.study import StudyTelemetry
 
 
-class CoordinatedCpuDispatcher:
+class CoordinatedDispatcher:
     """Retain one central scientific authority while prepared direct CPU Jobs run independently.
 
     Construct with an initialized coordinator and verified executors. Invocations persist before
@@ -35,7 +35,7 @@ class CoordinatedCpuDispatcher:
     def __init__(
         self,
         coordinator: StudyCoordinator,
-        executors: Mapping[str, PreparedCpuShardExecutor],
+        executors: Mapping[str, PreparedShardExecutor],
         *,
         poll_seconds: float = 0.1,
     ) -> None:

@@ -1307,6 +1307,9 @@ nunca detienen Jobs activos. La base de propiedad de Study coordinado está prob
 hay shards CPU locales preparados mediante Jobs directos reales y un dispatcher interno compartido.
 Siguen pendientes `run --on-fleet`, remoto/GPU, pause/resume públicos e integración HPO/TUI. Consulta
 [estado y contratos de implementación](COORDINATED_STUDIES.es.md) antes de usar fleets.
+El ejecutor preparado común delega en ControlPlane/JobService y verifica identidades inmutables y
+reubicación canónica de inputs. La observación en el host va por lotes: aún no es un driver público
+distribuido ni autoridad para ofrecer GPUs no concedidas.
 
 Un usuario configura el perfil en `lf` → Clusters. Primero aparecen campos comunes y cada opción
 enfocada explica significado/riesgo; SSH, entorno, rutas y política GPU avanzados quedan ocultos

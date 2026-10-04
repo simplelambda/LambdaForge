@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,7 @@ from lambdaforge.controlplane.NativeEnvironment import (
     NativeEnvironmentPlanner,
     NativeEnvironmentSpecification,
 )
+from lambdaforge.controlplane.PreparedWork import PreparedWork
 from lambdaforge.controlplane.python_runtime import (
     NoCompatiblePythonRuntimeError,
     PythonRuntime,
@@ -80,9 +82,14 @@ class ControlPlane:
         reserved_job_id: str | None = None,
         allow_duplicate: bool = False,
         progress: Callable[[str], None] | None = None,
+        entrypoint_builder: Callable[[PreparedWork], Sequence[str]] | None = None,
     ) -> tuple[JobHandle, ExecutionBundle]:
         """Build/cache a bundle, stage it and submit the normal remote run command."""
         notify = progress or (lambda _phase: None)
+        if entrypoint_builder is not None:
+            if run_arguments:
+                raise ValueError("Prepared entrypoints cannot silently ignore run arguments.")
+            reserved_job_id = reserved_job_id or self.jobs.new_id()
         if self.catalog.project is not None and not self.catalog.project.owns_source(
             str(Path(config_path).resolve())
         ):
@@ -236,6 +243,8 @@ class ControlPlane:
                 run_arguments,
             )
             config = str(Path(config_path).resolve())
+            execution_prefix = profile.command_prefix
+            executable = profile.python
         else:
             notify("staging")
             storage = profile.storage
@@ -270,6 +279,14 @@ class ControlPlane:
                     bundle,
                     remote_bundle_dir=remote_dir,
                 )
+                if (
+                    entrypoint_builder is not None
+                    and bundle.environment_id is not None
+                    and prepared.environment_id != bundle.environment_id
+                ):
+                    raise ValueError(
+                        "Prepared interpreter belongs to another environment identity."
+                    )
                 remote_python = prepared.python
                 if runtime is not None:
                     self.runtime_resolver.activate(profile, transport, runtime)
@@ -364,6 +381,32 @@ class ControlPlane:
                 config,
                 run_arguments,
             )
+            execution_prefix = (*profile.command_prefix, *environment_prefix)
+            executable = remote_python
+        if entrypoint_builder is not None:
+            assert reserved_job_id is not None
+            transport = transport or self.factory.transport(profile)
+            module_argv = tuple(
+                entrypoint_builder(
+                    PreparedWork(
+                        profile,
+                        transport,
+                        bundle,
+                        executable,
+                        config,
+                        str(work_dir),
+                        reserved_job_id,
+                        dry_run,
+                    )
+                )
+            )
+            if (
+                not module_argv
+                or any(not isinstance(value, str) or not value for value in module_argv)
+                or re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", module_argv[0]) is None
+            ):
+                raise ValueError("Prepared entrypoints require a nonempty module argv.")
+            command = (*execution_prefix, executable, "-m", *module_argv)
         external_claimed = False
         if request.gpu_count > 0 and gpu_mode == "command":
             claim = profile.gpu_access.claim(request.gpu_count)

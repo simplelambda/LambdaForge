@@ -11,7 +11,7 @@ import pytest
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.jobs import JobState
-from lambdaforge.controlplane.PreparedCpuShardExecutor import PreparedCpuShardExecutor
+from lambdaforge.controlplane.PreparedShardExecutor import PreparedShardExecutor
 from lambdaforge.controlplane.SchedulerSubmission import SchedulerSubmission
 from lambdaforge.controlplane.StudyCoordinator import ShardRejectedError
 from lambdaforge.execution.ResourceRequest import ResourceRequest
@@ -51,7 +51,7 @@ class Factory:
 def prepared(tmp_path: Path) -> tuple[Any, Any, Any, Any, Scheduler]:
     control, shard, invocations = prepared_shard(tmp_path)
     provider = Scheduler()
-    executor = PreparedCpuShardExecutor(
+    executor = PreparedShardExecutor(
         ClusterProfile("A", python=sys.executable, workspace=str(tmp_path / "host")),
         shard.member,
         root=tmp_path / "executor",
@@ -115,7 +115,7 @@ def test_remote_or_gpu_profiles_never_get_prepared_cpu_attestation(tmp_path: Pat
         (ClusterProfile("A", python="unverified-python"), ResourceRequest(), "verified current"),
     ):
         with pytest.raises(ValueError, match=message):
-            PreparedCpuShardExecutor(
+            PreparedShardExecutor(
                 profile,
                 shard.member,
                 root=tmp_path / "refused",

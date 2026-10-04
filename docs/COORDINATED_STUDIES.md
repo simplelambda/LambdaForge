@@ -24,24 +24,34 @@ Implemented and tested:
   unknown remote states, explicit bounded lost-Attempt retry, restart reconciliation, result-digest
   validation and contradiction quarantine. Scientific proposals are inputs, not invented here.
 - `ShardExecutor`: a protocol for idempotent submission and factual owned-executor observation.
-  `PreparedCpuShardExecutor` now uses real detached `ProcessScheduler` Jobs for already verified
+  `PreparedShardExecutor` uses real detached `ProcessScheduler` Jobs for already verified
   fresh local CPU invocations. It requires the current existing interpreter, applies local caps,
-  prevalidates invocations before submission and preserves an ambiguous submit fence. Remote,
-  SLURM, command-GPU and recovered-Attempt integrations are not yet supported.
-- `work.shard.execute_concrete_shard`: internal fresh-CPU worker proof using the existing isolated
+  prevalidates invocations before submission and preserves an ambiguous submit fence. Its prepared
+  provider path delegates to ordinary `ControlPlane` bundle/environment/input preparation and
+  `JobService`; provider IDs are separate from logical Job IDs. It verifies code/environment/input
+  identity, preserves TLS/site GPU wrapping, and observes bounded result batches on their host.
+  This is an internal boundary, not yet a complete remote Fleet driver.
+- `work.shard.execute_concrete_shard`: internal fresh worker using the existing isolated
   dispatcher, not a second planner. It validates a finite leased queue, stores outcomes immediately,
   isolates consumer failures and makes completed re-delivery idempotent. It deliberately rejects
-  GPU execution, recovered Attempts and checkpoint continuation until their provider/identity
-  bindings are ready. Verified preflight equivalence is a required caller input, not independently
+  recovered Attempts and checkpoint continuation until their provider/identity bindings are ready.
+  GPU workers require an exact provider Job, inherited opaque visibility and verified homogeneous
+  hardware. A finite baseline GPU shard uses native ARI; live GPU allocation offers, co-location
+  and the production member-agent lifecycle are not integrated, so GPU offers remain closed.
+  Verified preflight equivalence is a required caller input, not independently
   established by this internal worker. It is not connected to public submission.
 - `WorkRunner(dispatcher=...)` reuses the same fixed, automatic paired-sweep and adaptive planning
   functions; no seeds, candidates, convergence or scientific algorithms move into the dispatcher.
-  `CoordinatedCpuDispatcher` connects fixed CPU execution to the coordinator, durable exact
+  `CoordinatedDispatcher` connects fixed CPU execution to the coordinator, durable exact
   invocations, provider reconciliation and the original result/refill callback, including exact
   unstarted-frontier withdrawals without revoking resident workers. Real two-target direct-CPU
   integrations cover fixed seeds and automatic complete paired-block refill, producing one
   Study/Execution and one final analysis. It rejects adaptive
   execution until central live metric/pruning integration exists.
+- Prepared typed file inputs retain authored parameters in their lease and bind only the runtime
+  location, verified by canonical content/size on both sides. Plain strings are never relocated.
+  Distributed dataset-placement attestation remains gated: shared NAME@VERSION alone is not proof.
+  Unidentified or existing remote environments are not immutable preparation evidence.
 - Coordinator state v2 adds `pausing`, `paused` and `resuming`. Pause freezes accepting proposals and
   dispatch, drains rather than kills owned workers, accepts terminal results and waits on unknown
   owners. Proven pre-submit leases survive with the same lease identity. Original creation time
@@ -172,6 +182,7 @@ python -m pytest -q tests/controlplane/test_coordinated_study.py tests/controlpl
 python -m pytest -q tests/work/test_concrete_shard.py
 python -m pytest -q tests/work/test_study_dispatch_boundary.py tests/controlplane/test_coordinator_pause.py
 python -m pytest -q tests/work/test_coordinated_cpu_dispatch.py tests/controlplane/test_prepared_cpu_executor.py
+python -m pytest -q tests/controlplane/test_shard_preparation.py tests/controlplane/test_prepared_provider_dispatch.py
 ```
 
 The fixed design test supplies 56 candidates × 4 seeds = 224 unique required Runs and fake targets
@@ -185,6 +196,13 @@ not yet end-to-end distributed Work execution or predictive optimizer quality.
 The CPU shard test invokes four real spawned Work processes at concurrency two, keeps successful
 and failed scientific evidence and native paths, and proves repeated delivery does not create
 another Attempt. It does not submit a provider Job, grant a GPU or start an optimizer.
+
+Prepared-provider acceptance also exercises actual bundle staging, JobService, a detached direct
+supervisor, CPU children and a minimal CUDA tensor child with native ARI. Installation/runtime
+resolution are fixtures; the transport is loopback, not SSH. The GPU test uses explicitly shared
+local access and inherits the supervisor's grant; it skips when CUDA is unavailable. This does not
+establish SLURM/site-command acceptance, managed package installation, production GPU offers or a
+public distributed GPU Study. Input identity/mutation and opaque-grant regressions are separate.
 
 The prepared-provider tests run four fixed identities or three complete two-candidate paired
 blocks over two detached direct CPU targets, ingest native outcomes centrally and produce one

@@ -1,15 +1,16 @@
-"""Concrete CPU shard execution through the existing isolated Work dispatcher.
+"""Concrete shard execution through the existing isolated Work/ARI dispatcher.
 
 This is an internal execution boundary, not a second Study runner or a public launch route.
 It accepts already prepared invocations and executor-verified equivalence. Production bundle,
-environment and provider preparation must precede this boundary. GPU shards deliberately fail
-closed until granted-executor integration and global/native Attempt recovery are connected.
+environment and provider preparation must precede this boundary. GPU execution additionally
+requires an exact provider Job, inherited opaque grant and verified homogeneous hardware stratum.
 """
 
 from __future__ import annotations
 
 import inspect
 import json
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,11 +19,53 @@ from lambdaforge.controlplane.FleetPlacement import ExecutionEquivalence
 from lambdaforge.controlplane.StudyCoordinator import StudyShard
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveSearch import AdaptiveSearchPolicy
+from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 from lambdaforge.work.atomic import atomic_write_json
 from lambdaforge.work.config import import_work_class
 from lambdaforge.work.models import WorkResult
 from lambdaforge.work.runner import WorkRunner, _execute_adaptive_dispatch
+
+
+def verify_shard_gpu_grant(
+    shard: StudyShard, resources: ResourceRequest, equivalence: ExecutionEquivalence
+) -> tuple[str, ...]:
+    """Check owned allocation before invoking native ARI; never infer ungranted devices.
+
+    The configured ProcessSupervisor/site launcher or SLURM allocation must provide visibility.
+    Homogeneous device labels come from the existing short-lived Torch probe, not the controller's
+    physical host inventory. This attests an already running executor, not a future allocation.
+    """
+    if not resources.gpu_count:
+        return ()
+    if (
+        os.environ.get("LAMBDAFORGE_JOB_ID") != "job-fleet-" + shard.shard_id
+        or not os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+        or os.environ.get("LAMBDAFORGE_GPU_ACCESS_MODE")
+        not in {"auto", "exclusive", "shared", "command", "scheduler"}
+    ):
+        raise ValueError(
+            "GPU shards require an exact granted provider Job and inherited visibility."
+        )
+    if shard.member.max_gpus is not None and resources.gpu_count > shard.member.max_gpus:
+        raise ValueError("GPU shard exceeds its Fleet member GPU cap.")
+    from lambdaforge.work.runner import (
+        _gpu_hardware_labels,
+        _initial_gpu_memory_inventory,
+        _visible_gpu_tokens,
+    )
+
+    tokens = _visible_gpu_tokens(resources.gpu_count)
+    memory = _initial_gpu_memory_inventory(len(tokens))
+    labels = _gpu_hardware_labels(len(tokens), memory)
+    if not labels or any(label.startswith("unknown") for label in labels) or len(set(labels)) != 1:
+        raise ValueError("GPU execution requires a verified homogeneous hardware stratum.")
+    fingerprint = ScientificIdentity.from_payload(
+        {"gpu_stratum_version": 1, "model_capacity": labels[0]}
+    ).digest
+    if fingerprint != equivalence.hardware:
+        raise ValueError("Granted GPU hardware differs from the verified execution stratum.")
+    return tokens
 
 
 def prepare_concrete_shard(
@@ -33,8 +76,9 @@ def prepare_concrete_shard(
     resources: ResourceRequest,
     verified_equivalence: ExecutionEquivalence,
     parallelism: int,
+    input_bindings: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[tuple[int, int | None], str]]:
-    """Validate a finite exact CPU queue without creating state or starting a child.
+    """Validate a finite exact queue without creating state or starting a scientific child.
 
     ``invocations`` is keyed by global Run key and uses the native dispatcher specification.
     The caller is responsible for verified environment/bundle/input preparation. All invocations
@@ -42,16 +86,18 @@ def prepare_concrete_shard(
     is available to the worker. A interrupted owner is not automatically restarted: its live
     children must first be reconciled by the provider authority.
     """
-    if resources.gpu_count:
-        raise ValueError("GPU shards require granted provider/ARI integration; not enabled yet.")
     if (
         isinstance(parallelism, bool)
         or not isinstance(parallelism, int)
         or not 1 <= parallelism <= resources.cpu_cores
     ):
-        raise ValueError("CPU shard parallelism must fit its prepared host allocation.")
+        raise ValueError("Shard parallelism must fit its prepared host allocation.")
     if shard.member.max_runs is not None and parallelism > shard.member.max_runs:
         raise ValueError("Shard parallelism exceeds the Fleet member Run cap.")
+    if resources.gpu_count and (
+        shard.member.max_gpus is not None and resources.gpu_count > shard.member.max_gpus
+    ):
+        raise ValueError("GPU shard exceeds the Fleet member GPU cap.")
     if set(invocations) != {lease.run.key for lease in shard.leases}:
         raise ValueError("Shard invocations must match every exact leased Run, without additions.")
     root = root.absolute()
@@ -60,9 +106,19 @@ def prepare_concrete_shard(
     prepared = []
     identities: dict[tuple[int, int | None], str] = {}
     execution_ids = set()
-    for lease in shard.leases:
-        if lease.run.requires_gpu or lease.run.equivalence != verified_equivalence:
-            raise ValueError("Shard invocation does not match its verified CPU execution stratum.")
+    relocated = None
+    if input_bindings is not None:
+        from lambdaforge.controlplane.ShardPreparation import relocate_file_inputs
+
+        relocated = relocate_file_inputs(
+            [invocations[lease.run.key]["parameters"] for lease in shard.leases], input_bindings
+        )
+    for index, lease in enumerate(shard.leases):
+        if (
+            lease.run.requires_gpu != bool(resources.gpu_count)
+            or lease.run.equivalence != verified_equivalence
+        ):
+            raise ValueError("Shard invocation does not match its verified execution stratum.")
         if lease.attempt != 1:
             raise ValueError(
                 "Recovered shards require global/native Attempt binding; not enabled yet."
@@ -124,8 +180,10 @@ def prepare_concrete_shard(
             raise ValueError("Shard source must be a prepared regular absolute YAML path.")
         WorkRunner._verify_shared_bundle_inputs(source)
         definition = value["definition"]
-        if ResourceRequest.from_mapping(definition["resources"]).gpu_count:
-            raise ValueError("A CPU shard cannot contain a GPU invocation.")
+        if bool(ResourceRequest.from_mapping(definition["resources"]).gpu_count) != bool(
+            resources.gpu_count
+        ):
+            raise ValueError("Invocation accelerator requirements differ from its prepared shard.")
         target = import_work_class(definition["work_class"])
         inspect.signature(target.run).bind(None, **value["parameters"])
         trial = value.get("trial_index")
@@ -139,6 +197,8 @@ def prepare_concrete_shard(
             raise ValueError("Shard requires its original native Execution identity.")
         execution_ids.add(value["execution_id"])
         value["execution_dir"] = str(root / "execution")
+        if relocated is not None:
+            value["parameters"] = relocated[index]
         value["definition"] = {**definition, "has_variants": True, "study_expected": False}
         prepared.append(value)
     if len(execution_ids) != 1:
@@ -157,13 +217,15 @@ def execute_concrete_shard(
     resources: ResourceRequest,
     verified_equivalence: ExecutionEquivalence,
     parallelism: int,
+    input_bindings: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], ...]:
-    """Execute validated exact CPU leases through native isolated Runs, with no planner.
+    """Execute validated exact leases through native isolated Runs/ARI, with no planner.
 
     Fresh results persist incrementally. A restarted completed worker replays immutable outcomes;
     an interrupted owner requires provider reconciliation and must never be silently restarted.
     """
     root = root.absolute()
+    verify_shard_gpu_grant(shard, resources, verified_equivalence)
     prepared, identities = prepare_concrete_shard(
         shard,
         invocations,
@@ -171,6 +233,7 @@ def execute_concrete_shard(
         resources=resources,
         verified_equivalence=verified_equivalence,
         parallelism=parallelism,
+        input_bindings=input_bindings,
     )
     objective = prepared[0]["definition"].get("objective") or {}
     manifest = {"worker_version": 1, "shard": shard.to_dict(), "invocations": prepared}
@@ -227,7 +290,7 @@ def execute_concrete_shard(
             prepared,
             resources=resources,
             policy=AdaptiveSearchPolicy(
-                max_parallel=parallelism, early_stopping=False, failure_retries=0
+                max_parallel=parallelism, runs_per_gpu=1, early_stopping=False, failure_retries=0
             ),
             objective_metric=str(objective.get("metric", "")),
             objective_mode=str(objective.get("mode", "max")),
@@ -249,8 +312,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("manifest", type=Path)
+    parser.add_argument("manifest", type=Path, nargs="?")
+    parser.add_argument("--observe", type=Path)
+    parser.add_argument("--keys", nargs="+", default=[])
     arguments = parser.parse_args(argv)
+    if arguments.observe is not None:
+        observe_worker(arguments.observe, arguments.keys)
+        return 0
+    if arguments.manifest is None:
+        parser.error("manifest or --observe is required")
     path = arguments.manifest.absolute()
     if any(item.is_symlink() for item in (path, *path.parents)) or not path.is_file():
         raise ValueError("Shard manifest must be an owned regular file.")
@@ -268,8 +338,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         resources=ResourceRequest.from_mapping(value["resources"]),
         verified_equivalence=ExecutionEquivalence(**value["equivalence"]),
         parallelism=value["parallelism"],
+        input_bindings=value.get("input_bindings"),
     )
     return 0
+
+
+def observe_worker(root: Path, keys: Sequence[str]) -> None:
+    """Project one bounded exact result batch on its owner; never download the full manifest."""
+    import re
+
+    if (
+        not 1 <= len(keys) <= 64
+        or len(keys) != len(set(keys))
+        or any(not re.fullmatch(r"sha256:[a-f0-9]{64}", key) for key in keys)
+    ):
+        raise ValueError("Observation requires at most 64 exact global Run keys.")
+    root = root.absolute()
+    if any(path.is_symlink() for path in (root, *root.parents)):
+        raise ValueError("Owned observation root is symlinked.")
+    path = root / "worker.json"
+    if path.is_symlink():
+        raise ValueError("Owned observation metadata is symlinked.")
+    state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    payload = {
+        "shard_id": (state.get("manifest", {}).get("shard") or {}).get("shard_id"),
+        "results": {key: state["results"][key] for key in keys if key in state.get("results", {})},
+    }
+    encoded = json.dumps(payload, allow_nan=False)
+    if len(encoded.encode("utf-8")) > 8 * 1024**2:
+        raise ValueError("Shard observation exceeds the bounded control-envelope limit.")
+    print(encoded)
 
 
 if __name__ == "__main__":

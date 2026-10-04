@@ -394,7 +394,10 @@ def test_submission_worker_persists_pre_scheduler_failure(
     assert "synthetic staging failure" in jobs.logs(handle.job_id)
 
 
-def test_tls_environment_reaches_the_scientific_scheduler_command(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prepared_entrypoint", [False, True])
+def test_tls_environment_reaches_the_scientific_scheduler_command(
+    tmp_path: Path, prepared_entrypoint: bool
+) -> None:
     """TLS trust must extend beyond bootstrap into Work processes."""
     config = task_config(tmp_path / "task.yaml")
     profile = remote_profile()
@@ -514,6 +517,16 @@ def test_tls_environment_reaches_the_scientific_scheduler_command(tmp_path: Path
 
     factory = Factory()
     jobs = JobService(catalog, store, factory)  # type: ignore[arg-type]
+    contexts: list[Any] = []
+
+    def entrypoint(context: Any) -> tuple[str, str]:
+        contexts.append(context)
+        assert context.profile == profile
+        assert context.python == "/managed/env/bin/python"
+        assert not context.dry_run
+        assert context.config.endswith("/work/config.yaml")
+        return "lambdaforge.work.shard", context.work_dir + "/.fleet-shard.json"
+
     ControlPlane(
         catalog,
         jobs,
@@ -521,7 +534,11 @@ def test_tls_environment_reaches_the_scientific_scheduler_command(tmp_path: Path
         factory,  # type: ignore[arg-type]
         CudaResolver(),  # type: ignore[arg-type]
         RuntimeResolver(),  # type: ignore[arg-type]
-    ).submit(config, cluster="remote")
+    ).submit(
+        config,
+        cluster="remote",
+        entrypoint_builder=entrypoint if prepared_entrypoint else None,
+    )
 
     command = factory.provider.command
     assert command[0] == "env"
@@ -529,12 +546,21 @@ def test_tls_environment_reaches_the_scientific_scheduler_command(tmp_path: Path
     assert "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt" in command
     assert "LAMBDAFORGE_CACHE_ROOT=/work/user/.lambdaforge/cache" in command
     python_index = command.index("/managed/env/bin/python")
-    assert command[python_index : python_index + 4] == (
-        "/managed/env/bin/python",
-        "-m",
-        "lambdaforge",
-        "run",
-    )
+    if prepared_entrypoint:
+        assert command[python_index : python_index + 3] == (
+            "/managed/env/bin/python",
+            "-m",
+            "lambdaforge.work.shard",
+        )
+        assert contexts[0].job_id == store.records()[0].job_id
+        assert f"LAMBDAFORGE_JOB_ID={contexts[0].job_id}" in command
+    else:
+        assert command[python_index : python_index + 4] == (
+            "/managed/env/bin/python",
+            "-m",
+            "lambdaforge",
+            "run",
+        )
     cleanup = store.records()[0].metadata["environment_cleanup"]
     assert "warning" in cleanup
 

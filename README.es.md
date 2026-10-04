@@ -50,6 +50,9 @@ habilitada**: la base probada de leases/reconciliación y los pendientes están 
 [Studies coordinados](docs/COORDINATED_STUDIES.es.md). Los envíos independientes siguen siendo
 Studies separados, no un HPO compartido. La integración interna CPU preparada ya prueba Jobs
 directos reales y un análisis único; no habilita Fleet remoto/GPU ni pause/resume públicos.
+El ejecutor preparado común reutiliza la preparación ordinaria, verifica reubicación de inputs y
+expone observaciones remotas acotadas. Offers GPU de producción y streaming adaptativo siguen
+bloqueados; el documento de estado distingue fronteras probadas e integración pública pendiente.
 
 Ejecuta `lf` sin argumentos en una terminal interactiva para abrir la Consola de investigación. Su
 pantalla Clusters crea y edita perfiles con ayuda contextual, credenciales seguras y pasos

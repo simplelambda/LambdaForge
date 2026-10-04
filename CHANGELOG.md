@@ -12,6 +12,12 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Generalize the internal adapters to one `PreparedShardExecutor`/`CoordinatedDispatcher` path.
+  Prepared entrypoints reuse ControlPlane and JobService while retaining TLS, GPU site wrappers,
+  immutable environment/code/input validation and exact submission fencing. Relocate only verified
+  typed file markers and observe bounded result batches on the execution host. Native baseline GPU
+  shards require owned provider grants and verified hardware; production GPU offers, central adaptive
+  streaming and public Fleet launch/recovery remain pending, not inferred from these integrations.
 - Share one internal Study execution-dispatch boundary across the existing fixed, automatic paired
   sweep and adaptive planners. Prepared local CPU Fleet execution now uses detached ProcessScheduler
   Jobs, exact invocation persistence and central result ingestion to produce one final analysis;

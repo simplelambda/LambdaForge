@@ -1,8 +1,8 @@
-"""Prepared local CPU shards through the existing durable ProcessScheduler.
+"""Prepared concrete shards through the existing provider and preparation boundaries.
 
-This is not remote preparation and does not authorize GPU work. No environment is installed,
-no input is replicated and no scientific planner is created by this adapter. It provides an
-actual provider integration for an already verified local execution stratum.
+Local existing CPU invocations keep their verified direct-provider path. Passing ControlPlane
+uses ordinary immutable bundle/environment/input preparation and JobService for remote providers.
+This adapter never creates a planner or infers GPU offers from unallocated physical devices.
 """
 
 from __future__ import annotations
@@ -12,14 +12,17 @@ import re
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
+from lambdaforge.controlplane.ControlPlane import ControlPlane
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.Fleet import ClusterHealth, FleetMember
 from lambdaforge.controlplane.FleetPlacement import ClusterOffer, ExecutionEquivalence
 from lambdaforge.controlplane.jobs import JobState
+from lambdaforge.controlplane.PreparedWork import PreparedWork
+from lambdaforge.controlplane.ShardPreparation import prepared_input_bindings
 from lambdaforge.controlplane.StudyCoordinator import (
     RemoteObservation,
     ShardRejectedError,
@@ -30,8 +33,8 @@ from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 from lambdaforge.work.atomic import atomic_write_json
 
 
-class PreparedCpuShardExecutor:
-    """Durable direct CPU provider; ambiguous acceptance never triggers another submit.
+class PreparedShardExecutor:
+    """One provider adapter; ambiguous acceptance never triggers another submit.
 
     ``invocation`` supplies exact already-prepared native specifications. Equivalence belongs
     to the caller's verified preparation, not to an observation of physical hardware. Pending
@@ -48,18 +51,21 @@ class PreparedCpuShardExecutor:
         equivalence: ExecutionEquivalence,
         invocation: Callable[[str], Mapping[str, Any]],
         factory: ControlPlaneFactory | None = None,
+        control_plane: ControlPlane | None = None,
     ) -> None:
-        if profile.transport != "local" or profile.scheduler != "local":
+        if control_plane is None and (profile.transport != "local" or profile.scheduler != "local"):
             raise ValueError("Prepared CPU executor supports local direct profiles only.")
-        if (
+        if control_plane is None and (
             profile.environment != "existing"
             or Path(profile.python).absolute() != Path(sys.executable).absolute()
         ):
             raise ValueError(
                 "Prepared local CPU execution requires the verified current interpreter."
             )
-        if resources.gpu_count or profile.name != member.cluster:
+        if (resources.gpu_count and control_plane is None) or profile.name != member.cluster:
             raise ValueError("Prepared CPU executor cannot claim GPU or another member's work.")
+        if control_plane is not None and control_plane.catalog.get(member.cluster) != profile:
+            raise ValueError("Prepared executor must use its exact ControlPlane profile.")
         self.root = root.absolute()
         if any(path.is_symlink() for path in (self.root, *self.root.parents)):
             raise ValueError("Prepared shard storage cannot be symlinked.")
@@ -68,8 +74,15 @@ class PreparedCpuShardExecutor:
         self.resources = resources
         self.equivalence = equivalence
         self.invocation = invocation
-        factory = factory or ControlPlaneFactory()
-        self.scheduler = factory.scheduler(profile, factory.transport(profile))
+        self.control_plane = control_plane
+        factory = (
+            control_plane.factory if control_plane is not None else factory or ControlPlaneFactory()
+        )
+        self.scheduler = (
+            None
+            if control_plane is not None
+            else factory.scheduler(profile, factory.transport(profile))
+        )
 
     def _directory(self, shard: StudyShard) -> Path:
         if not re.fullmatch(r"[a-f0-9]{64}", shard.shard_id) or shard.cluster != self.profile.name:
@@ -88,12 +101,12 @@ class PreparedCpuShardExecutor:
         ):
             raise ShardRejectedError("Prepared shard exceeds its local CPU/Run cap.")
         if any(
-            lease.run.requires_gpu
+            lease.run.requires_gpu != bool(self.resources.gpu_count)
             or lease.run.equivalence != self.equivalence
             or lease.attempt != 1
             for lease in shard.leases
         ):
-            raise ShardRejectedError("Only fresh equivalent CPU Runs have prepared ownership.")
+            raise ShardRejectedError("Only fresh equivalent Runs have prepared ownership.")
         invocations = {
             lease.run.key: dict(self.invocation(lease.run.key)) for lease in shard.leases
         }
@@ -110,7 +123,7 @@ class PreparedCpuShardExecutor:
             )
         except (ValueError, TypeError, OSError) as error:
             raise ShardRejectedError(f"Prepared invocation preflight failed: {error}") from error
-        manifest = {
+        manifest: dict[str, Any] = {
             "manifest_version": 1,
             "shard": shard.to_dict(),
             "invocations": invocations,
@@ -145,6 +158,62 @@ class PreparedCpuShardExecutor:
                 raise RuntimeError("Ambiguous shard acceptance must be reconciled, not submitted.")
             atomic_write_json(path, manifest)
             atomic_write_json(intent, {"job_id": job_id, "acknowledged": False})
+            if self.control_plane is not None:
+                receipt: dict[str, Any] = {"job_id": job_id, "acknowledged": False}
+
+                def entrypoint(prepared: PreparedWork) -> Sequence[str]:
+                    if prepared.dry_run or prepared.job_id != job_id:
+                        raise ValueError("Shard preparation needs its exact non-preview Job.")
+                    sources = {value["source"] for value in invocations.values()}
+                    if len(sources) != 1:
+                        raise ShardRejectedError("One shard must share a prepared source bundle.")
+                    try:
+                        bindings = prepared_input_bindings(
+                            Path(next(iter(sources))),
+                            prepared,
+                            self.equivalence,
+                            invocations=invocations,
+                        )
+                    except (ValueError, TypeError, OSError) as error:
+                        raise ShardRejectedError(f"Bundle equivalence failed: {error}") from error
+                    # Operational paths change only at this already-prepared boundary. Scientific
+                    # parameters stay authored; the worker verifies content before binding paths.
+                    remote_path = str(PurePosixPath(prepared.work_dir) / ".fleet-shard.json")
+                    worker_root = str(PurePosixPath(prepared.work_dir) / "worker")
+                    values = {
+                        key: {**value, "source": prepared.config}
+                        for key, value in invocations.items()
+                    }
+                    remote_manifest = {
+                        **manifest,
+                        "root": worker_root,
+                        "invocations": values,
+                        "input_bindings": bindings,
+                    }
+                    encoded = json.dumps(remote_manifest, allow_nan=False)
+                    if len(encoded.encode("utf-8")) > 8 * 1024**2:
+                        raise ShardRejectedError("Prepared manifest exceeds the envelope limit.")
+                    upload = directory / "prepared-manifest.json"
+                    atomic_write_json(upload, remote_manifest)
+                    prepared.transport.put(upload, remote_path)
+                    receipt.update({"worker_root": worker_root, "python": prepared.python})
+                    atomic_write_json(intent, receipt)
+                    return ("lambdaforge.work.shard", remote_path)
+
+                handle, _bundle = self.control_plane.submit(
+                    next(iter(invocations.values()))["source"],
+                    cluster=self.profile.name,
+                    resources=self.resources,
+                    reserved_job_id=job_id,
+                    allow_duplicate=True,
+                    entrypoint_builder=entrypoint,
+                )
+                if handle.job_id != job_id or not handle.scheduler_id:
+                    raise RuntimeError("Provider did not acknowledge the exact shard Job.")
+                receipt.update({"acknowledged": True, "scheduler_id": handle.scheduler_id})
+                atomic_write_json(intent, receipt)
+                return job_id
+            assert self.scheduler is not None
             submission = self.scheduler.submit(
                 (self.profile.python, "-m", "lambdaforge.work.shard", str(path)),
                 self.resources,
@@ -162,14 +231,59 @@ class PreparedCpuShardExecutor:
         expected_job = "job-fleet-" + shard.shard_id
         if job_id is not None and job_id != expected_job:
             raise ValueError("Provider Job does not belong to this shard.")
-        path = directory / "worker" / "worker.json"
-        if path.is_symlink() or path.parent.is_symlink():
-            raise ValueError("Owned worker evidence is symlinked.")
-        state = json.loads(path.read_text()) if path.exists() else {}
-        if state and state.get("manifest", {}).get("shard") != shard.to_dict():
-            raise ValueError("Worker evidence does not belong to its exact leased shard.")
+        worker_root: Path | PurePosixPath = directory / "worker"
+        if self.control_plane is not None:
+            receipt_path = directory / "submission.json"
+            if receipt_path.is_symlink():
+                raise ValueError("Owned executor receipt is symlinked.")
+            receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
+            state: dict[str, Any] = {"results": {}}
+            if receipt.get("worker_root") and receipt.get("python"):
+                worker_root = PurePosixPath(receipt["worker_root"])
+                transport = self.control_plane.factory.transport(self.profile)
+                for offset in range(0, len(shard.leases), 64):
+                    batch = shard.leases[offset : offset + 64]
+                    response = transport.run(
+                        (
+                            *self.profile.command_prefix,
+                            receipt["python"],
+                            "-m",
+                            "lambdaforge.work.shard",
+                            "--observe",
+                            str(worker_root),
+                            "--keys",
+                            *(lease.run.key for lease in batch),
+                        ),
+                        timeout=30,
+                    )
+                    if response.returncode:
+                        # Transport failure is absence of evidence, never an owned Run loss.
+                        continue
+                    if len(response.stdout.encode("utf-8")) > 8 * 1024**2:
+                        raise ValueError("Provider observation exceeds the control-envelope limit.")
+                    payload = json.loads(response.stdout)
+                    if payload["shard_id"] not in {None, shard.shard_id}:
+                        raise ValueError("Worker observation belongs to another shard.")
+                    if payload["results"] and payload["shard_id"] != shard.shard_id:
+                        raise ValueError("Published results need an exact observed shard identity.")
+                    if set(payload["results"]) - {lease.run.key for lease in batch}:
+                        raise ValueError("Observation contains another batch's results.")
+                    state["results"].update(payload["results"])
+        else:
+            path = directory / "worker" / "worker.json"
+            if path.is_symlink() or path.parent.is_symlink():
+                raise ValueError("Owned worker evidence is symlinked.")
+            state = json.loads(path.read_text()) if path.exists() else {}
+            if state and state.get("manifest", {}).get("shard") != shard.to_dict():
+                raise ValueError("Worker evidence does not belong to its exact leased shard.")
         try:
-            provider_state = self.scheduler.state(expected_job)
+            if self.control_plane is not None:
+                provider_state = self.control_plane.jobs.get(
+                    expected_job, include_study=False
+                ).state
+            else:
+                assert self.scheduler is not None
+                provider_state = self.scheduler.state(expected_job)
         except (RuntimeError, OSError):
             provider_state = JobState.UNKNOWN
         observed = (
@@ -186,8 +300,12 @@ class PreparedCpuShardExecutor:
                 continue
             native = envelope.get("result", {})
             invocation = self.invocation(lease.run.key)
-            result_path = Path(str(native.get("run_dir", "")))
-            expected_root = directory / "worker" / "execution"
+            result_path = (
+                PurePosixPath(str(native.get("run_dir", "")))
+                if self.control_plane is not None
+                else Path(str(native.get("run_dir", "")))
+            )
+            expected_root = worker_root / "execution"
             if (
                 native.get("execution_id") != invocation["execution_id"]
                 or native.get("seed") != lease.run.seed
@@ -195,7 +313,10 @@ class PreparedCpuShardExecutor:
                 or (native.get("trial") or {}).get("index") != invocation["trial_index"]
                 or not result_path.is_absolute()
                 or not result_path.is_relative_to(expected_root)
-                or any(path.is_symlink() for path in (result_path, *result_path.parents))
+                or (
+                    self.control_plane is None
+                    and any(Path(path).is_symlink() for path in (result_path, *result_path.parents))
+                )
             ):
                 raise ValueError("Native worker result differs from its exact owned invocation.")
         return tuple(
@@ -231,23 +352,29 @@ class PreparedCpuShardExecutor:
                 raise ValueError("Owned executor receipt is symlinked.")
             if receipt.is_file():
                 value = json.loads(receipt.read_text())
-                if value == {
-                    "job_id": "job-fleet-" + attempt["shard_id"],
-                    "acknowledged": True,
-                }:
+                if (
+                    value.get("job_id") == "job-fleet-" + attempt["shard_id"]
+                    and value.get("acknowledged") is True
+                ):
                     acknowledged.append(attempt["lease_id"])
         return ClusterOffer(
             self.member.cluster,
             ClusterHealth.ONLINE,
-            "local",
-            "auto",
+            self.profile.scheduler,
+            self.profile.gpu_access.effective_mode(self.profile.scheduler),
             now,
             now + 10,
-            slots=slots,
+            # GPU preparation/launch is not a live allocation. Until the persistent member
+            # allocation authority is integrated, never turn physical inventory into an offer.
+            slots=0 if self.resources.gpu_count else slots,
             equivalence=self.equivalence,
             environment_ready=True,
             inputs_ready=True,
             local_admission_verified=True,
             acknowledged_leases=tuple(acknowledged),
-            diagnostics={"authority": "prepared-local-cpu-process-provider", "gpu_support": False},
+            diagnostics={
+                "authority": "prepared-shard-provider",
+                "gpu_support": False,
+                "gpu_pending": "owned-allocation-offer" if self.resources.gpu_count else None,
+            },
         )

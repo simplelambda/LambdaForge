@@ -23,23 +23,33 @@ Implementado y probado:
 - `StudyCoordinator`: leases atómicas por Attempt, shards únicos, fence previo al envío, estado
   remoto desconocido, retry limitado de pérdida confirmada, reconciliación tras reinicio,
   validación de digests y cuarentena. Recibe propuestas científicas; no inventa otro optimizer.
-- `ShardExecutor`: contrato de envío idempotente y observación factual. `PreparedCpuShardExecutor`
+- `ShardExecutor`: contrato de envío idempotente y observación factual. `PreparedShardExecutor`
   usa ahora Jobs reales y desacoplados de `ProcessScheduler` para CPU local fresca ya verificada.
   Exige el intérprete existente actual, aplica límites y prevalidación antes del envío, y conserva
-  el fence ante aceptación ambigua. Remoto, SLURM, command-GPU y Attempts recuperados siguen pendientes.
+  el fence ante aceptación ambigua. Su ruta preparada delega en bundles/entornos/inputs de
+  `ControlPlane` y en `JobService`, separando Job ID del ID del scheduler. Verifica identidades,
+  conserva TLS/wrappers GPU y obtiene lotes acotados de resultados desde su host. Sigue siendo
+  una frontera interna, no el driver remoto Fleet completo.
 - `work.shard.execute_concrete_shard`: prueba interna de worker CPU fresco que reutiliza el
   dispatcher aislado, sin otro planner. Valida una cola finita de leases, persiste resultados,
-  aísla fallos científicos y no reejecuta una reentrega terminada. Rechaza GPU, Attempts recuperados
-  y continuación desde checkpoint hasta conectar sus garantías de proveedor/identidad. Exige
+  aísla fallos científicos y no reejecuta una reentrega terminada. Rechaza Attempts recuperados
+  y continuación desde checkpoint hasta conectar sus garantías de proveedor/identidad. El worker
+  GPU exige Job propio, visibilidad opaca heredada y hardware homogéneo verificado; un shard GPU
+  finito de baseline usa ARI nativo. Faltan offers de asignaciones GPU vivas, co-location y el agente
+  persistente de miembro: los offers GPU siguen cerrados. Exige
   equivalencia previamente verificada por el llamador; no la acredita esta capa por sí misma ni
   está conectada al envío público.
 - `WorkRunner(dispatcher=...)` conserva los mismos planners fixed, paired sweep automático y
   adaptativo. Seeds, candidatos, convergencia y algoritmos científicos no pasan al dispatcher.
-  `CoordinatedCpuDispatcher` integra CPU fixed con leases, invocaciones durables, reconciliación y
+  `CoordinatedDispatcher` integra CPU fixed con leases, invocaciones durables, reconciliación y
   el callback original de resultados/refill, incluida la retirada exacta de la cola no iniciada
   sin revocar workers residentes. Las pruebas reales con dos destinos CPU directos cubren seeds
   fijas y refill de bloques pareados automáticos completos, con un Study/Execution y un análisis
   final. Rechaza HPO distribuido hasta integrar métricas/pruning central.
+- Los inputs file conservan parámetros authored en la lease: solo se reubica su ruta de ejecución,
+  con verificación canónica de contenido/tamaño en ambos lados. No se reubican strings normales.
+  La verificación de placements de datasets sigue bloqueada: NAME@VERSION igual no acredita bytes.
+  Un entorno remoto existing/no identificado no acredita preparación inmutable.
 - Estado coordinator v2: `pausing`, `paused`, `resuming`. La pausa congela aceptar propuestas/envíos,
   deja terminar workers propios, ingiere resultados y espera por propietarios desconocidos.
   Leases anteriores al envío conservan identidad. El reloj original puede importarse una sola vez
@@ -166,6 +176,7 @@ python -m pytest -q tests/controlplane/test_coordinated_study.py tests/controlpl
 python -m pytest -q tests/work/test_concrete_shard.py
 python -m pytest -q tests/work/test_study_dispatch_boundary.py tests/controlplane/test_coordinator_pause.py
 python -m pytest -q tests/work/test_coordinated_cpu_dispatch.py
+python -m pytest -q tests/controlplane/test_shard_preparation.py tests/controlplane/test_prepared_provider_dispatch.py
 ```
 
 El diseño fijo simulado tiene 56 candidatos × 4 seeds = 224 Runs y capacidades A=2, B=3, C=1.
@@ -179,6 +190,13 @@ end-to-end ni calidad del optimizer predictive.
 La prueba del shard CPU ejecuta cuatro Work reales en subprocesos a concurrencia dos, conserva
 evidencia y rutas nativas de los éxitos/fallos y verifica que reentregar no crea otro Attempt.
 No envía un Job a un proveedor, no otorga una GPU y no arranca un optimizer.
+
+La aceptación preparada también prueba staging real, JobService, supervisor directo desacoplado,
+workers CPU y una operación CUDA mínima con ARI nativo. Resolver/instalar el entorno son fixtures;
+el transporte es loopback, no SSH. El test GPU utiliza acceso local shared explícito e hereda el
+grant del supervisor; se omite sin CUDA. No acredita SLURM/gpu exec, instalación managed real,
+offers GPU de producción ni Study GPU distribuido público. Identidad/mutación de inputs y grants
+opacos tienen regresiones separadas.
 
 Las pruebas del proveedor preparado ejecutan cuatro identidades fijas o tres bloques pareados
 completos de dos candidatos en dos destinos CPU directos con Jobs desacoplados; ingieren evidencia

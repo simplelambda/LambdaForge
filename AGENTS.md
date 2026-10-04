@@ -654,8 +654,12 @@ Remaining runner/provider/predictive/decision/TUI integration: `docs/COORDINATED
 Do not claim end-to-end execution from fake tests.
 
 Internal `WorkRunner(dispatcher=...)` is the common fixed/automatic/adaptive execution boundary,
-not another planner. Prepared local CPU Jobs use `PreparedCpuShardExecutor` and
-`CoordinatedCpuDispatcher`; they do not establish remote/GPU readiness or adaptive metric streams.
+not another planner. `PreparedShardExecutor` and `CoordinatedDispatcher` share one execution path.
+The prepared provider boundary reuses ControlPlane/JobService, exact bundle/environment identities,
+canonical typed-file bindings and host-side bounded observations. Native baseline GPU shards require
+owned Job markers, inherited opaque visibility and homogeneous hardware; live GPU offers remain
+gated until member allocation authority is integrated. Do not claim public remote/GPU Fleet launch
+or central adaptive metric streams from the internal local-provider acceptance tests.
 The fixed/automatic planner's callback replaces the unstarted frontier, not just appends new Runs;
 never withdraw an already leased or accepted identity. Coordinator v2 pause freezes acceptance and
 dispatch and drains owned workers without assuming death;
