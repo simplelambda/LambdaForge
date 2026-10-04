@@ -1681,7 +1681,12 @@ planificación del investigador, no por un objeto interno que puede seguir en Py
 
 ## 16. Análisis de estudios
 
-El HTML de Study utiliza un selector semántico compartido de métricas/parámetros, Explore con
+El HTML de Study empieza en **Overview / Resumen**, con estados, importancia contextual y gráficos
+recomendados. Parámetros condicionales muestran rama/soporte aparte, nunca responsabilidad global.
+Interpretaciones/preguntas usan carruseles, hallazgos completos se paginan y **ⓘ** explica términos.
+La cabecera permite inglés/español sin traducir nombres ni afirmaciones guardadas. Los controles
+son desplegables buscables, no modales; en **Parameters**, marcar/desmarcar superpone curvas en un
+gráfico (unidades distintas/desconocidas conservan ejes Y separados). Explore utiliza
 **Analyze / By / Compare with** y chips de comparación que se pueden quitar. Los ejes y ajustes
 explícitos quedan en **Advanced visualization options**. Las preguntas configuradas son tarjetas
 ampliables; Metrics & health ofrece categorías jerárquicas plegables. **Evidence** sustituye la
@@ -1817,7 +1822,7 @@ presupuesto acotado de reintentos.
 
 ### 16.4 Espacio de investigación y declaraciones
 
-El HTML offline empieza en **Research**, con **Metrics & health**, buscador compartido
+El HTML offline empieza en **Overview**, con **Research**, **Metrics & health**, buscador global
 (**Ctrl/⌘ K**), familias y **Explore**. Python persiste perfiles, relaciones exploratorias acotadas,
 diagnósticos de multiplicidad y hallazgos de inspección; JavaScript solo presenta/filtra evidencia.
 YAML `analysis` o `Work.analysis_profile` declaran etiquetas/unidades/derivación, familias y
@@ -1827,7 +1832,8 @@ del registro; recuperación/export los conservan. El esquema 8 añade `research`
 Test, incluidas derivaciones/componentes compuestos, no puede gobernar objetivo/restricciones ni
 discovery provisional; el análisis terminal sí permite inspeccionarlo. Semántica desconocida
 sigue explícita; discovery no es causalidad ni confianza nueva del HPO. Unidades Y diferentes
-usan gráficas separadas, normalización visual opcional y vistas con notas/export/import JSON
+usan gráficas separadas en Explore y ejes Y independientes del mismo gráfico en Parameters.
+Hay normalización visual opcional y vistas con notas/export/import JSON
 validado. La [guía completa](RESEARCH_ANALYSIS.es.md) reúne pasos numerados, YAML, límites de
 algoritmos, cautelas estadísticas y comportamiento de Studies antiguos.
 

@@ -24,8 +24,25 @@ Install `lambdaforge[analysis-report]` for HTML; numerical analysis needs no Plo
 can be exported through `lf export STUDY --output ./exports` or the console's Export action. The
 report is an offline snapshot, not a live connection to the cluster. Regenerate to include new Runs.
 
-**Research** opens first. Actionable health cards lead to their evidence. Configured questions have
-their own cards, before the separate exploratory inbox of up to eight prioritized findings.
+**Overview** is the first tab and the default on a newly generated report. It shows candidate
+states with exact counts, selection/confirmation context, unconditional predictive associations
+and suggested views that open the exact chart. The optional score-by-trial plot is collapsed in
+**Trials**, not the main overview. Reopening a file restores your last tab.
+
+Conditional parameters are deliberately excluded from the global importance chart. Their table
+shows the activation rule, observed active/total candidates, completed support, persisted model
+score and reliability. That score may mix parent-branch activation with within-branch variation;
+it is not a causal percentage, an additive share of responsibility or a reason to choose the branch.
+Interpretation is a horizontal, keyboard/mouse-scrollable carousel. The **ⓘ** help contains shared
+stability/seed-noise explanations; individual details preserve the exact original conclusion.
+
+Use **Language / Idioma** in the header for English or Spanish. Interface labels, contextual help,
+status summaries and supported chart labels switch immediately and persist for that generated
+file. Authored names and saved scientific statements remain in their original language; no remote
+translation service changes your evidence.
+
+**Research** retains actionable health cards. Configured questions and the separate exploratory
+inbox use horizontal carousels; the complete exploratory list is paged six findings at a time.
 **Inspect** explains evidence, method, support, ranking and limits;
 **Explore these observations** opens the relevant recorded values. An exploratory association is
 not a new HPO conclusion or a causal effect.
@@ -35,9 +52,9 @@ category and sort by priority, coverage or spread. Constants, missing and hidden
 initially omitted, not deleted: enable **Show constants / missing / hidden**. The metric inspector
 keeps units, direction, aggregation and unavailable information explicit. Redundancy groups are
 descriptive; each recorded member remains accessible. **Ctrl/⌘ K** searches metrics, parameters,
-families, findings, Trials and saved views. Ranking, Parameters, Interactions and Explore all use
-this same dynamic picker, not duplicated long selects. Star a metric to favour it and reuse recent
-selections. **Categories** is a collapsible tree: selecting `validation` includes every descendant,
+families, findings, Trials and saved views. Ordinary metric, parameter, axis, type, palette and
+filter controls open an anchored searchable dropdown, not a modal. Global **Ctrl/⌘ K** search
+remains a deliberate dialog with favourites and recents. **Categories** is a collapsible tree: selecting `validation` includes every descendant,
 such as `validation/global` and `validation/surface/quality`.
 
 ## 2. Declare meaning, not execution policy
@@ -187,12 +204,18 @@ In **Explore**, choose **Analyze** (metric), **By** (parameter chips), optional 
 renderer: one parameter means scatter, two mean a heatmap, and more mean parallel coordinates.
 Remove any chip with ×. Ordinary metric and advanced-control changes still preview immediately.
 **Advanced visualization options** holds explicit type/X/Y/Z, grouping, palette/reverse and visual
-normalization; small finite selectors remain ordinary selectors. Naming, notes and saving stay visible.
+normalization. Type/palette/filter menus share the searchable dropdown. Naming, notes and saving stay visible.
 
 - Multiple Y metrics share one scale only when declared units agree. Different/unknown units use
   small multiples; **Visual 0–1 normalization only** is opt-in and never changes scientific values.
-- Parameter views keep one primary metric and **Add comparison metric…**; removable chips return
-  to one metric without a second metric-selection system.
+- In **Parameters**, open **Analyze metric**, search e.g. `mean`, check a metric, then search `auroc`
+  and check another without closing the dropdown. All selections stay checked across searches.
+  Uncheck a metric to remove its curve; zero selections shows an explicit empty state. Arrow keys
+  navigate and Space toggles a checkbox; Escape/Done/outside click closes the dropdown.
+  The curves share **one chart**: identical declared units share Y, while different/unknown units
+  have separately labelled Y axes. Do not compare heights across independent axes. Explore keeps
+  its unit-aware small-multiple default and optional visual normalization. Selection changes do not
+  change scientific aggregation, objective policy or the persisted model response.
 - Observed pair heatmaps and numeric 3D surfaces retain empty untested cells; persisted surrogate
   surfaces stay in their separately labelled model panel. 3D scatter supports categories.
 - Parallel coordinates use the chosen parameters (or the existing eight-parameter default for old
@@ -205,7 +228,7 @@ normalization; small finite selectors remain ordinary selectors. Naming, notes a
 **Interactions** has a metric-agnostic observed panel with shared parameter/metric pickers and
 heatmap/3D/surface choices. The existing predictive objective panel stays separate. **Evidence**
 (formerly Findings & evidence) retains scientific conclusions, surrogate diagnostics, seed/pruning
-evidence, methodology and the structured snapshot. Exploratory finding cards appear only in Research;
+evidence, methodology and the structured snapshot in expandable sections. Exploratory finding cards appear only in Research;
 the Run metric dashboard is unchanged and continues to use epochs.
 The complete audit snapshot is formatted on expansion and reuses the single serialized metric
 catalog. All panels share the same parsed catalog rather than constructing independent selectors.

@@ -12,6 +12,10 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Rework the offline Study HTML around Overview: exact candidate states, conditional-importance
+  context, compact interpretation/question carousels, paged findings and actionable suggested plots.
+  Replace selector modals with searchable anchored dropdowns and same-chart metric checkboxes;
+  preserve unit-aware axes, add English/Spanish preferences and contextual interpretation help.
 - Unify conditional equality/membership and dependency ordering across finite sweeps, samplers,
   modelling and analysis; preserve old equality identities and omit inactive arguments. Reject
   silently ignored root experimental fields in steps. Preflight separates exact required evidence,

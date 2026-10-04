@@ -28,8 +28,17 @@ def select_evidence(page: Any, selector: str, value: str) -> None:
         .replace("__best_observed__", "Best observed")
         .replace("__current_observed__", "Current observed")
     )
-    page.fill("#research-global-query", "" if name == "selection_objective" else query)
-    page.locator(f'#research-search-results button[data-choice="{name}"]').click()
+    if selector == "#parameter-metric":
+        # This helper intentionally chooses one metric; the real dropdown also supports overlays.
+        selected = page.locator("#study-dropdown-options input:checked").evaluate_all(
+            "inputs => inputs.map(input => input.dataset.choice)"
+        )
+        for previous in selected:
+            page.locator(f'#study-dropdown-options input[data-choice="{previous}"]').uncheck()
+    page.fill("#study-dropdown-query", "" if name == "selection_objective" else query)
+    page.locator(f'#study-dropdown-options input[data-choice="{name}"]').check()
+    if selector == "#parameter-metric":
+        page.keyboard.press("Escape")
 
 
 def sample_analysis() -> dict[str, Any]:
@@ -122,7 +131,7 @@ def test_observed_charts_in_browser_and_saved_preferences(tmp_path: Path) -> Non
         assert page.locator(".saved-study-chart").count() == 0
 
         def create(kind: str, x: str, y: str, z: str = "metric:__selection__") -> None:
-            page.select_option("#study-chart-kind", kind)
+            page.select_option("#study-chart-kind", kind, force=True)
             select_evidence(page, "#study-chart-x", x)
             select_evidence(page, "#study-chart-y", y)
             if kind in {"scatter3d", "heatmap", "surface"}:
@@ -137,10 +146,11 @@ def test_observed_charts_in_browser_and_saved_preferences(tmp_path: Path) -> Non
         create("scatter", "param:width", "metric:train_loss")
         assert trace()["x"] == [32, 32, 64]
         assert trace()["y"] == [0.0, 0.2, 0.3]
-        page.select_option("#study-chart-aggregate", "mean")
+        page.select_option("#study-chart-aggregate", "mean", force=True)
         page.get_by_role("button", name="Compare with…", exact=True).click()
-        page.fill("#research-global-query", "train_loss")
-        page.locator('#research-search-results button[data-choice="train_loss"]').click()
+        page.fill("#study-dropdown-query", "train_loss")
+        page.locator('#study-dropdown-options input[data-choice="train_loss"]').check()
+        page.keyboard.press("Escape")
         assert "train loss" in page.locator("#research-compare-chips").inner_text()
         create("line", "param:width", "metric:__selection__")
         assert trace()["y"] == [0.7, 0.75]
@@ -157,7 +167,7 @@ def test_observed_charts_in_browser_and_saved_preferences(tmp_path: Path) -> Non
         assert trace()["x"] == [32, 64, 128]
         assert trace()["y"] == [1, 2]
         assert trace()["z"] == [[0.7, None, None], [None, 0.75, None]]
-        page.select_option("#study-chart-palette", "Purple ↔ green")
+        page.select_option("#study-chart-palette", "Purple ↔ green", force=True)
         create("heatmap", "param:flag", "param:depth", "metric:train_loss")
         assert trace()["x"] == ["false", "true"]
         assert trace()["z"] == [[0.2, 0.0], [None, 0.3]]

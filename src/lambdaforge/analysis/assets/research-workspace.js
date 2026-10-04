@@ -8,8 +8,11 @@ window.LambdaForgeResearchWorkspace = function (services) {
   const profiles = research.metric_profiles || {}, findings = research.findings || [];
   const exploratory = findings.filter(f=>f.origin!=='configured');
   const el = id => document.getElementById(id);
+  const dropdown = LambdaForgeStudyControls();
+  const carousel = LambdaForgeStudyOverview(services).carousel;
   const make = (tag, text, cls) => {const n = document.createElement(tag); if(text !== undefined)n.textContent = text;
     if(cls)n.className = cls; return n;};
+  const authored = node => {node.dataset.authored='true';return node;};
   const fmt = value => value === null || value === undefined ? 'unknown'
     : typeof value === 'number' ? value.toLocaleString(undefined, {maximumSignificantDigits: 4}) : String(value);
   const key = name => name === 'selection_objective' ? '__selection__' : name;
@@ -25,7 +28,7 @@ window.LambdaForgeResearchWorkspace = function (services) {
   let picker = null, pickerScope = 'all';
   const controls = [];
   const parameterDescription = name => {const rule=data.parameter_space?.[name]||{};
-    const condition=Object.entries(rule.when||{}).map(([parent,value])=>parent+' '+(value&&typeof value==='object'?'∈ '+JSON.stringify(value.in):'= '+JSON.stringify(value))).join(' and ');
+    const condition=Object.entries(rule.when||{}).map(([parent,value])=>parent+' '+(value&&typeof value==='object'?'∈ '+JSON.stringify(value.in):'= '+JSON.stringify(value))).join(' ∧ ');
     return `${rule.type||rule.kind||(rule.range?'numeric':'categorical')} · ${JSON.stringify(rule.values||rule.range||[rule.low,rule.high])}${condition?' · Active when '+condition:''}`;};
   function tab(id) {const button = document.querySelector(`.tab[data-target="${id}"]`); if(button)button.click();}
   function explore(spec) {tab('study-custom'); customCharts.open({kind:'scatter', partial:false, aggregate:'points', palette:'Accessible', ...spec});}
@@ -45,7 +48,7 @@ window.LambdaForgeResearchWorkspace = function (services) {
     el('research-detail').showModal();
   }
   function findingCard(finding) {const card=make('article',undefined,'finding');card.append(make('span',finding.origin+' · '+finding.reliability.status,'badge'),
-    make('h3',finding.title),make('p',finding.summary));const button=make('button','Inspect');
+    authored(make('h3',finding.title)),authored(make('p',finding.summary)));const button=make('button','Inspect');
     button.onclick=()=>detail(finding.title,[['Evidence',finding.evidence || {support:finding.support}],['Reliability',finding.reliability],
       ['Ranking components',finding.ranking_components || finding.reliability.components || {}],['Limitations',{caveats:finding.caveats}]],finding.recommended_view);card.append(button);return card;}
   function metrics() {const query=el('research-metric-search').value.toLowerCase(), category=el('research-category').value,
@@ -54,7 +57,7 @@ window.LambdaForgeResearchWorkspace = function (services) {
       && (!category || catalog[name].category===category || catalog[name].category.startsWith(category+'/')) && query.split(/\s+/).every(word=>searchable(catalog[name]).includes(word)));
     names.sort((a,b)=>sort==='name'?label(a).localeCompare(label(b)):sort==='coverage'?(profiles[b]?.coverage||0)-(profiles[a]?.coverage||0):
       sort==='spread'?(profiles[b]?.robust_spread||0)-(profiles[a]?.robust_spread||0):(catalog[b].priority||0)-(catalog[a].priority||0)||a.localeCompare(b));
-    for(const name of names){const m=catalog[name],p=profiles[name]||{},row=make('tr'),meaning=make('td');meaning.append(make('strong',m.label),make('div',name,'muted'),make('div',m.description,'muted'));row.append(meaning);
+    for(const name of names){const m=catalog[name],p=profiles[name]||{},row=make('tr'),meaning=make('td');meaning.append(authored(make('strong',m.label)),authored(make('div',name,'muted')),authored(make('div',m.description,'muted')));row.append(meaning);
       const fields=[m.category+' · '+m.split,m.unit+' · '+m.direction,`${p.finite_candidates??'?'}/${p.total_candidates??'?'} candidates · ${p.seed_support??'?'} seeds`,
         `${fmt(p.min)} → ${fmt(p.max)} · SD ${fmt(p.sd)}`,`${p.reason||'unprofiled'} · ${m.aggregation} ${p.warnings?.join(' · ')||''}`];
       fields.forEach(v=>row.append(make('td',v)));const action=make('td'),button=make('button','Inspect');button.onclick=()=>detail(m.label,
@@ -92,11 +95,24 @@ window.LambdaForgeResearchWorkspace = function (services) {
       if(item.name){const star=make('button',favorites.includes(item.name)?'★':'☆');star.title='Toggle favourite';star.onclick=()=>{save({researchFavorites:favorites.includes(item.name)?favorites.filter(n=>n!==item.name):[...favorites,item.name]});search();};row.append(star);}box.append(row);}
     if(!items.length)box.append(make('p','No matches. Try a shorter name or alias.'));
   }
-  function choose(callback,scope='metric') {picker=callback;pickerScope=callback?scope:'all';el('research-global-query').value='';search();el('research-search').showModal();el('research-global-query').focus();}
+  function choose(callback,scope='metric',options={}) {
+    if(!callback){picker=null;pickerScope='all';el('research-global-query').value='';search();el('research-search').showModal();el('research-global-query').focus();return;}
+    const anchor=options.anchor||document.activeElement;
+    dropdown.open(anchor,{title:options.title||'Choose evidence',multiple:!!options.multiple,
+      selected:options.selected||(()=>[]),items:()=>{
+        const items=[];
+        if(scope!=='parameter')for(const [name,m] of Object.entries(catalog))items.push({value:name,label:m.label,authored:true,
+          description:[m.category,m.unit,profiles[name]?.reason||m.aggregation,m.description].filter(Boolean).join(' · '),aliases:m.aliases||[]});
+        if(scope!=='metric')for(const name of data.parameters||[])items.push({value:'param:'+name,label:name,authored:true,description:parameterDescription(name)});
+        if(scope==='axis')for(const [value,title] of [['trial','Trial'],['metric:__best_observed__','Best observed objective (partial)'],['metric:__current_observed__','Current observed objective'],...['gpu_seconds','duration_seconds','cpu_seconds','peak_vram','peak_ram'].map(n=>['resource:'+n,n.replaceAll('_',' ')])])items.push({value,label:title,description:'Recorded evidence coordinate'});
+        return items;
+      },change:(name,checked)=>{if(catalog[name])recent(name);callback(name,checked);syncControls();}});
+  }
   function semanticControl(id,scope='metric',prefix='') {const input=el(id);if(!input)return;const button=make('button');button.type='button';button.id=id+'-picker';
     const update=()=>{const value=input.value;button.textContent=(value.startsWith('param:')?'Parameter · '+value.slice(6):value==='trial'?'Trial':value.startsWith('resource:')?value.slice(9).replaceAll('_',' '):scope==='parameter'?value:label(value.replace(/^metric:/,'')))+' ▾';
       button.title=scope==='parameter'?parameterDescription(value):'Search names, aliases, categories, tags and descriptions';};
-    button.onclick=()=>choose(name=>{input.value=scope==='parameter'?name.slice(6):catalog[name]?prefix+key(name):name;input.dispatchEvent(new Event('change',{bubbles:true}));update();},scope);
+    button.onclick=()=>choose(name=>{input.value=scope==='parameter'?name.slice(6):catalog[name]?prefix+key(name):name;input.dispatchEvent(new Event('change',{bubbles:true}));update();},scope,
+      {anchor:button,selected:()=>[scope==='parameter'?'param:'+input.value:metricName(input.value.replace(/^metric:/,''))]});
     input.after(button);input.addEventListener('change',update);controls.push(update);update();}
   function chips(target,values,remove) {const box=el(target);box.replaceChildren();for(const value of values){const button=make('button',label(value.replace(/^metric:/,''))+' ×','metric-chip');button.onclick=()=>remove(value);box.append(button);}}
   function syncControls(){controls.forEach(update=>update());
@@ -105,6 +121,15 @@ window.LambdaForgeResearchWorkspace = function (services) {
     const axis=['heatmap','scatter3d','surface'].includes(el('study-chart-kind').value)?'z':'y';
     el('research-primary-metric').textContent=label(el('study-chart-'+axis).value.replace(/^metric:/,''))+' ▾';
   }
+  function parameterMetricsControl(){const input=el('parameter-metric'),button=make('button');button.id='parameter-metric-picker';button.type='button';
+    const selected=()=>[...(input.value?['metric:'+input.value]:[]),...(getPrefs().parameterMetrics||[])];
+    const update=()=>{const names=[...new Set(selected())];button.textContent=names.length?names.slice(0,2).map(name=>label(name.slice(7))).join(' + ')+(names.length>2?' + '+(names.length-2):'')+' ▾':'Select metrics ▾';};
+    button.onclick=()=>choose((name,checked)=>{const value='metric:'+key(name),fields=selected().filter(n=>n!==value);
+      if(checked)fields.push(value);input.value=fields[0]?.slice(7)||'';save({parameterMetrics:fields.slice(1),parameterMetric:input.value});
+      customCharts.updateParameter();syncControls();},'metric',{anchor:button,title:'Parameter response metrics',multiple:true,
+        selected:()=>selected().map(name=>metricName(name.slice(7)))});
+    input.after(button);controls.push(update);update();
+  }
   function categoryTree(){const root={};for(const m of Object.values(catalog)){let node=root;for(const part of m.category.split('/'))node=node[part]||(node[part]={});}
     const area=el('research-category-branches');const select=path=>{el('research-category').value=path;el('research-category-tree').querySelector('summary').textContent='Categories · '+(path||'all');metrics();};
     const all=make('button','All categories');all.onclick=()=>select('');area.append(all);
@@ -112,14 +137,14 @@ window.LambdaForgeResearchWorkspace = function (services) {
       button.onclick=event=>{event.preventDefault();select(path);};summary.append(button);details.append(summary);branch(children,details,path);box.append(details);}}
     branch(root,area);
   }
-  function questionCards(){const declarations=research.semantics?.questions||[],priority=id=>declarations.find(q=>q.id===id)?.priority||0;for(const question of [...research.questions||[]].sort((a,b)=>priority(b.id)-priority(a.id))){const declaration=declarations.find(q=>q.id===question.id)||{},
+  function questionCards(){const cards=[],declarations=research.semantics?.questions||[],priority=id=>declarations.find(q=>q.id===id)?.priority||0;for(const question of [...research.questions||[]].sort((a,b)=>priority(b.id)-priority(a.id))){const declaration=declarations.find(q=>q.id===question.id)||{},
       relationships=(research.relationships||[]).filter(r=>r.question===question.id),card=make('article',undefined,'finding configured-question'),
       title=declaration.label||declaration.title||question.id.replaceAll('_',' ').replaceAll('-',' ');
       card.append(make('span','Configured · '+question.status.replaceAll('_',' '),'badge'),make('h3',title),make('p',question.reason||''),
         make('p',`${question.comparable_relationships??question.observed_members??question.observed_metrics??0} supported observations / relationships`,'muted'));
       const inspect=make('button','Inspect question');inspect.onclick=()=>detail(title,[['Declared question',declaration],['Support and status',question],['Recorded relationships',relationships],['Findings',findings.filter(f=>relationships.some(r=>f.id==='association:'+r.x+':'+r.y))]],
-        declaration.x&&declaration.y?{x:'metric:'+key(declaration.x),y:'metric:'+key(declaration.y)}:null);card.append(inspect);el('research-questions').append(card);}
-    if(!(research.questions||[]).length)el('research-questions').append(make('p','No questions configured. Exploratory findings remain available.','note'));
+        declaration.x&&declaration.y?{x:'metric:'+key(declaration.x),y:'metric:'+key(declaration.y)}:null);card.append(inspect);cards.push(card);}
+    if(cards.length)carousel('research-questions',cards);else el('research-questions').append(make('p','No questions configured. Exploratory findings remain available.','note'));
   }
   function observedInteractions(){const panel=el('study-interactions'),box=make('article',undefined,'panel'),tools=make('div',undefined,'tools');
     box.append(make('h2','Observed metric interactions · not the predictive HPO model'));let metric='__selection__',x=data.parameters[0],y=data.parameters[1]||x;
@@ -131,6 +156,7 @@ window.LambdaForgeResearchWorkspace = function (services) {
     metricButton.onclick=()=>choose(name=>{metric=key(name);metricButton.textContent='Analyze '+label(metric);render();});
     xButton.onclick=()=>choose(name=>{x=name.slice(6);xButton.textContent='X · '+x;render();},'parameter');yButton.onclick=()=>choose(name=>{y=name.slice(6);yButton.textContent='Y · '+y;render();},'parameter');kind.onchange=render;
     tools.append(metricButton,xButton,yButton,kind);box.append(tools,plot,status);panel.prepend(box);render();
+    document.addEventListener('study-language-changed',()=>{if(!panel.hidden)render();});
   }
   function mount() {
     const styles=make('style');styles.textContent=`dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;width:min(950px,95vw);max-height:85vh;overflow:auto;padding:22px}dialog::backdrop{background:#0009}dialog p{overflow-wrap:anywhere}.research-search-result{padding:10px;border-bottom:1px solid var(--line)}#research-global-query{width:100%;padding:14px;font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px}.research-search-result p{margin:6px 0}.tools input[type=search]{padding:10px;background:var(--bg);color:var(--text);border:1px solid var(--line)}#research-metrics-body td{white-space:normal;min-width:140px}#research-detail h3{color:var(--accent)}.explore-simple{border-bottom:1px solid var(--line);background:var(--panel2)}.explore-simple button{margin:5px}.question-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}.metric-chip{border-radius:30px;border-color:var(--accent)}#research-category-branches details{padding-left:15px}#research-category-branches{max-height:350px;overflow:auto}.evidence-conclusion{padding:18px;border-bottom:1px solid var(--line)}`;document.head.append(styles);
@@ -144,9 +170,14 @@ window.LambdaForgeResearchWorkspace = function (services) {
     el('research-health').after(make('p',count+' recorded metrics · all evidence remains available in Metrics & health.','muted'));
     const status=data.research_status||{};el('research-health').after(make('p',
       `Scientific status: ${status.scientific_status||'unavailable'} · seed stability: ${status.seed_analysis?.status||'unavailable'} · joint coverage: ${status.coverage?.quality||'unavailable'}`,'note'));
-    (research.inbox_findings||exploratory.slice(0,8)).filter(f=>f.origin!=='configured').forEach(f=>el('research-inbox').append(findingCard(f)));
+    const inbox=(research.inbox_findings||exploratory.slice(0,8)).filter(f=>f.origin!=='configured');
+    if(inbox.length)carousel('research-inbox',inbox.map(findingCard));
     if(!exploratory.length)el('research-inbox').append(make('p','No supported exploratory relationships yet. Explore the recorded evidence or inspect metric health; missing support is not a negative result.','empty'));
-    exploratory.forEach(f=>el('research-all-findings').append(findingCard(f)));
+    let findingPage=0;const findingArea=el('research-all-findings'),pages=Math.ceil(exploratory.length/6);
+    function findingPageView(){findingArea.replaceChildren();const bar=make('div',undefined,'finding-pagination'),previous=make('button','Previous'),next=make('button','Next');
+      previous.disabled=findingPage===0;next.disabled=findingPage>=pages-1;previous.onclick=()=>{findingPage--;findingPageView()};next.onclick=()=>{findingPage++;findingPageView()};
+      bar.append(previous,make('span',`Page ${findingPage+1} / ${Math.max(1,pages)}`),next);findingArea.append(bar);
+      exploratory.slice(findingPage*6,findingPage*6+6).forEach(f=>findingArea.append(findingCard(f)));}findingPageView();
     questionCards();categoryTree();const category=el('research-category');
     const prefs=getPrefs();el('research-metric-search').value=prefs.researchMetricQuery||'';el('research-show-all').checked=!!prefs.researchShowAll;category.value=prefs.researchCategory||'';el('research-sort').value=prefs.researchSort||'priority';
     ['research-metric-search','research-show-all','research-category','research-sort'].forEach(id=>el(id).addEventListener('input',metrics));metrics();
@@ -159,8 +190,7 @@ window.LambdaForgeResearchWorkspace = function (services) {
     el('research-global-query').onkeydown=event=>{if(event.key==='ArrowDown'){event.preventDefault();el('research-search-results').querySelector('button')?.focus()}if(event.key==='Enter'){event.preventDefault();el('research-search-results').querySelector('button')?.click()}};
     el('research-search-results').onkeydown=event=>{if(!['ArrowDown','ArrowUp'].includes(event.key))return;event.preventDefault();const buttons=[...el('research-search-results').querySelectorAll('button')],index=buttons.indexOf(document.activeElement);buttons[Math.max(0,Math.min(buttons.length-1,index+(event.key==='ArrowDown'?1:-1)))]?.focus();};
     document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='k'){event.preventDefault();picker=null;choose(null)}});
-    ['trial-metric','parameter-metric'].forEach(id=>semanticControl(id));semanticControl('parameter-select','parameter');['study-chart-x','study-chart-y'].forEach(id=>semanticControl(id,'axis','metric:'));semanticControl('study-chart-z','metric','metric:');
-    const addParameter=make('button','Add comparison metric…');addParameter.onclick=()=>choose(name=>{save({parameterMetrics:[...new Set([...(getPrefs().parameterMetrics||[]),'metric:'+key(name)])]});customCharts.updateParameter();syncControls();});el('parameter-metric').closest('.tools').append(addParameter);
+    semanticControl('trial-metric');parameterMetricsControl();semanticControl('parameter-select','parameter');['study-chart-x','study-chart-y'].forEach(id=>semanticControl(id,'axis','metric:'));semanticControl('study-chart-z','metric','metric:');
     const builder=el('study-chart-name').closest('.custom-builder'), advanced=make('details');advanced.append(make('summary','Advanced visualization options'));
     const simple=make('div',undefined,'tools explore-simple');simple.append(make('strong','Analyze'));
     const metric=make('button','Choose metric…');metric.id='research-primary-metric';metric.onclick=()=>choose(name=>{const axis=['heatmap','scatter3d','surface'].includes(el('study-chart-kind').value)?'z':'y';customCharts.open({[axis]:'metric:'+key(name)});});simple.append(metric);
@@ -168,7 +198,8 @@ window.LambdaForgeResearchWorkspace = function (services) {
     const subset=make('select');subset.id='research-subset';for(const [value,text] of [['completed','Completed candidates'],['partial','Include partial / pruned']]){const option=make('option',text);option.value=value;subset.append(option);}
     function renderBy(){byChips.replaceChildren();for(const name of by){const chip=make('button',name+' ×');chip.onclick=()=>{by=by.filter(n=>n!==name);draftByDirty=true;renderBy();};byChips.append(chip);}}
     byButton.onclick=()=>choose(name=>{by=[...new Set([...by,name.slice(6)])];draftByDirty=true;renderBy();},'parameter');
-    compare.onclick=()=>choose(name=>{const fields=[...el('study-chart-extra-metrics').querySelectorAll('input:checked')].map(i=>i.value);customCharts.open({metrics:[...new Set([...fields,'metric:'+key(name)])]});});
+    compare.onclick=()=>choose((name,checked)=>{const field='metric:'+key(name),fields=[...el('study-chart-extra-metrics').querySelectorAll('input:checked')].map(i=>i.value).filter(value=>value!==field);if(checked)fields.push(field);customCharts.open({metrics:fields});},'metric',
+      {anchor:compare,multiple:true,selected:()=>[...el('study-chart-extra-metrics').querySelectorAll('input:checked')].map(i=>metricName(i.value.slice(7)))});
     const run=make('button','Explore observations');run.id='research-explore';run.onclick=()=>{const axis=['heatmap','scatter3d','surface'].includes(el('study-chart-kind').value)?'z':'y',primary=el('study-chart-'+axis).value.startsWith('metric:')?el('study-chart-'+axis).value:'metric:__selection__';
       draftByDirty=false;customCharts.open({kind:by.length>2?'parallel':by.length===2?'heatmap':'scatter',x:by[0]?'param:'+by[0]:'trial',y:by.length===2?'param:'+by[1]:primary,z:primary,partial:subset.value==='partial',parameters:by});};
     renderBy();simple.append(byChips,byButton,compare,compareChips,subset,run);
@@ -180,7 +211,8 @@ window.LambdaForgeResearchWorkspace = function (services) {
     advanced.append(normalization);normalize.onchange=()=>el('study-chart-y').dispatchEvent(new Event('change'));
     const active=(getPrefs().customCharts||[]).find(view=>view.id===getPrefs().customChartId);if(active){normalize.checked=!!active.normalize;notes.value=active.notes||'';customCharts.open(active);}
     const explain=make('p',(research.methodology?.limitations||[]).join(' '),'note');el('study-findings').prepend(explain);
-    const ledger=el('study-findings');ledger.querySelectorAll('.finding').forEach(card=>{const note=make('section',undefined,'evidence-conclusion');while(card.firstChild)note.append(card.firstChild);card.replaceWith(note);});
+    const ledger=el('study-findings');ledger.querySelectorAll('.finding').forEach(card=>{const note=make('details',undefined,'evidence-conclusion'),summary=make('summary',card.querySelector('h3')?.textContent||'Conclusion');
+      card.querySelector('h3')?.remove();note.append(summary);while(card.firstChild)note.append(card.firstChild);card.replaceWith(note);});
     for(const [title,value] of [['Surrogate diagnostics',data.surrogate||{}],['Seed evidence',data.research_status?.seed_analysis||{}],['Pruning evidence',data.pruning||{}],['Research methodology',research.methodology||{}]]){const section=make('details',undefined,'panel');section.append(make('summary',title),describe(value));ledger.append(section);}
     const exportButton=make('button','Export research views'),importButton=make('button','Import research views'),input=make('input');input.type='file';input.accept='.json,application/json';input.hidden=true;
     const views=el('study-saved-charts');views.before(exportButton,importButton,input);
@@ -205,7 +237,14 @@ window.LambdaForgeResearchWorkspace = function (services) {
     if(parent){for(const value of data.parameter_space[parent].values){const option=make('option',parent+' · '+String(value));option.value=JSON.stringify(value);branch.append(option);}trialTools.append(branch);}
     const filterTrials=()=>document.querySelectorAll('#study-trials tbody tr').forEach((row,index)=>{const candidate=data.candidates[index];row.hidden=!row.textContent.toLowerCase().includes(trialSearch.value.toLowerCase())||!!(parent&&branch.value&&JSON.stringify(candidate.parameters?.[parent])!==branch.value);});trialSearch.oninput=filterTrials;branch.onchange=filterTrials;
     document.addEventListener('research-controls-changed',syncControls);syncControls();observedInteractions();
-    if(!getPrefs().tab)tab('study-research');
+    // Small type/palette/filter menus use the same searchable control, not another UI.
+    document.querySelectorAll('select').forEach(select=>{
+      const button=make('button');button.type='button';button.className='semantic-select';button.id=select.id?select.id+'-picker':'';
+      const update=()=>{button.textContent=(select.selectedOptions[0]?.textContent||select.value)+' ▾';button.disabled=select.disabled;};
+      button.onclick=()=>dropdown.open(button,{selected:()=>[select.value],items:()=>[...select.options].map(option=>({value:option.value,label:option.textContent,description:'',aliases:[]})),change:value=>{select.value=value;select.dispatchEvent(new Event('input',{bubbles:true}));select.dispatchEvent(new Event('change',{bubbles:true}));update();}});
+      select.hidden=true;select.after(button);select.addEventListener('change',update);controls.push(update);update();
+    });
+    if(!getPrefs().tab)tab('study-overview');
   }
   return {mount};
 };

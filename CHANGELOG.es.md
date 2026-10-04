@@ -11,6 +11,10 @@ metadata empaquetada.
 
 ### Corregido
 
+- Rediseñado el HTML offline de Study con Overview inicial, estados exactos, importancia condicional
+  contextual, carruseles, hallazgos paginados y gráficos recomendados. Los selectores son desplegables
+  buscables con casillas para curvas del mismo gráfico y ejes según unidades. Idioma inglés/español
+  persistente y ayudas de interpretación, sin cambiar evidencia ni decisiones científicas.
 - Unificada la activación por igualdad/pertenencia y el orden de dependencias entre sweeps,
   muestreadores, modelos y análisis. Se mantienen las identidades antiguas y se omiten argumentos
   inactivos. Las composiciones rechazan políticas raíz ignoradas. Preflight distingue evidencia

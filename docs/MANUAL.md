@@ -1928,7 +1928,13 @@ decision, not by an internal object that can stay in Python.
 
 ## 16. Study Analysis
 
-Study HTML uses one semantic picker for metrics and parameters, an **Analyze / By / Compare with**
+Study HTML starts in **Overview**, with candidate states, contextual predictive importance and
+suggested charts. Conditional scores stay in their branch/support table, never global responsibility.
+Interpretation/questions use carousels and full findings are paged. English/Spanish is selectable in
+the header; authored names and exact persisted statements are not translated. Searchable anchored
+dropdowns replace control modals. **Parameters** checkboxes overlay selected curves in one chart
+(different/unknown units retain separate Y axes). Shared explanations are behind **ⓘ**.
+There is an **Analyze / By / Compare with**
 Explore view and removable metric chips. All explicit axis/chart settings remain in **Advanced
 visualization options**. Configured questions are first-class inspectable cards; Metrics & health
 has collapsible category paths. **Evidence** replaces the duplicated findings tab and retains
@@ -2072,8 +2078,8 @@ terminal only after there are no active Runs and the bounded retry budget is exh
 
 ### 16.4 Research workspace and declarations
 
-The offline report now opens a **Research** inbox, with **Metrics & health**, a shared searchable
-picker (**Ctrl/⌘ K**), family plots and **Explore**. The Python domain layer persists metric profiles,
+The offline report opens **Overview**, with **Research**, **Metrics & health**, a global search
+(**Ctrl/⌘ K**), family plots and **Explore**. The Python domain layer persists metric profiles,
 bounded exploratory relationships, multiplicity diagnostics and inspection findings; browser code
 only filters/presents recorded evidence. Declare optional YAML `analysis` or class-level
 `Work.analysis_profile` for metric labels/units/lineage, families and questions. Declarations and
@@ -2083,7 +2089,8 @@ recovery/export. Schema version 8 adds `research` while retaining prior scientif
 Test metrics, including derived/composite components, cannot govern objective/constraints.
 Provisional discovery excludes test evidence, while terminal reports may inspect it. Unknown
 semantics remain explicit; discovery is not causal inference or new HPO confidence. Distinct Y
-units use small multiples; visual normalization is opt-in. Saved views support notes and validated
+units use small multiples in Explore and independent same-chart Y axes in Parameters; visual
+normalization is opt-in. Saved views support notes and validated
 JSON import/export. [The full research guide](RESEARCH_ANALYSIS.md) contains numbered instructions,
 YAML examples, algorithm limits, statistical caveats and legacy behavior.
 

@@ -423,9 +423,16 @@ Exhaustive seed/search is serial; adaptive search owns its allocation and schedu
 
 ## Study Analysis and console
 
-Study HTML has one catalog-backed semantic picker, not select-plus-search overlays. Explore's
+Study HTML opens Overview, with exact candidate states and contextual importance. Exclude conditional
+parameters from the global chart; retain their branch/support/model score in a separate table, never
+label predictive variation causal responsibility. Interpretation/questions use carousels, complete
+findings are paged and shared diagnostics live in help. English/Spanish presentation preferences
+never translate authored identities or mutate persisted evidence. Ordinary controls use one anchored
+searchable dropdown, not a modal; only explicit global search/inspection uses dialogs. Parameters
+checkboxes add/remove lines in one chart, preserving independent axes for unknown/different units.
+Explore's
 primary Analyze/By/Compare controls infer observed views; explicit axes/type/palette/normalization
-stay Advanced. Parameters uses removable comparison chips. Configured question cards and category
+stay Advanced. Parameters retains removable comparison chips. Configured question cards and category
 hierarchy are presentation of persisted semantics. Research owns the finding list; Evidence owns
 conclusions/diagnostics/JSON. Arbitrary observed interactions must not relabel persisted HPO models.
 Keep legacy saved-view keys, current/final/censored distinctions and the individual Run dashboard.

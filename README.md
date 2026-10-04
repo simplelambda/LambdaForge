@@ -1247,7 +1247,14 @@ selection evidence. Preferences are local to that
 generated HTML. Plotly is not a base dependency: without the extra, execution, JSON analysis and
 the Research Console remain fully functional.
 
-The report opens in **Research**: a prioritized inbox links findings to their evidence and charts.
+The report opens in **Overview**: candidate counts/states, selection context and suggested views
+replace a dominant score-by-trial plot (now optional in Trials). Conditional parameter importance
+is separated with branch/support/reliability instead of implying global causal responsibility.
+Interpretations and questions use horizontal carousels; complete findings are paged. Controls use
+searchable anchored dropdowns, not metric-selection modals. **Parameters** checkboxes add/remove
+curves in one chart, with independent axes for different/unknown units. **ⓘ** explains interpretation.
+Choose English/Spanish in the header; preferences persist for that file without changing evidence
+or translating authored names. **Research** links prioritized findings to evidence and charts.
 **Metrics & health** organizes labels, categories, units, aliases, constants, missing support and
 redundancy; **Ctrl/⌘ K** searches metrics, families, parameters, Trials and saved views. Optional
 Work `analysis_profile` or YAML `analysis` declarations preserve metric meaning and research

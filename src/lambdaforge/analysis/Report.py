@@ -138,24 +138,32 @@ def _write_study_dashboard(
     )
     importance = analysis.get("parameter_importance", {})
     importance = importance if isinstance(importance, Mapping) else {}
+    space_schema = parameter_space.to_schema() if parameter_space is not None else {}
+    # Conditional model scores mix activity/branch effects. Do not rank them as global
+    # parameter responsibility; the contextual table below retains the persisted values.
+    unconditional_importance = {
+        name: value
+        for name, value in importance.items()
+        if not space_schema.get(name, {}).get("when")
+    }
     importance_figure = go.Figure(
         data=[
             go.Bar(
-                x=list(importance),
+                x=list(unconditional_importance),
                 y=[
                     value.get("importance", 0) if isinstance(value, Mapping) else 0
-                    for value in importance.values()
+                    for value in unconditional_importance.values()
                 ],
                 marker={"color": "#bc8cff"},
-                hovertemplate="%{x}<br>global importance=%{y:.4f}<extra></extra>",
+                hovertemplate="%{x}<br>predictive association=%{y:.4f}<extra></extra>",
             )
         ]
     )
     importance_figure.update_layout(
-        **common_layout,
-        title="Global predictive importance",
+        **{**common_layout, "height": 350},
+        title="Predictive association · unconditional parameters",
         xaxis_title="Parameter",
-        yaxis_title="Fraction of surrogate variation",
+        yaxis_title="Model variation score (not causal responsibility)",
     )
     response_figure = go.Figure()
     response_figure.update_layout(
@@ -216,9 +224,9 @@ def _write_study_dashboard(
         "modeBarButtonsToRemove": ["lasso2d", "select2d"],
     }
     figure_html = {
-        "ranking": plot(ranking, include_plotlyjs="inline", output_type="div", config=plot_config),
+        "ranking": plot(ranking, include_plotlyjs=False, output_type="div", config=plot_config),
         "importance": plot(
-            importance_figure, include_plotlyjs=False, output_type="div", config=plot_config
+            importance_figure, include_plotlyjs="inline", output_type="div", config=plot_config
         ),
         "response": plot(
             response_figure, include_plotlyjs=False, output_type="div", config=plot_config
@@ -243,7 +251,17 @@ def _write_study_dashboard(
         ),
     }
     completed = len(comparable_candidates)
-    censored = sum(int(value.get("censored_observations") or 0) for value in candidates)
+    censored = sum(
+        int(
+            value.get("censored_observations")
+            or sum(
+                bool(run.get("censored") or run.get("state") == "pruned")
+                for run in value.get("runs", ())
+                if isinstance(run, Mapping)
+            )
+        )
+        for value in candidates
+    )
     winner = analysis.get("winner", {})
     winner = winner if isinstance(winner, Mapping) else {}
     winning = winner.get("confirmed_winner") or winner.get("screening_winner")
@@ -261,55 +279,7 @@ def _write_study_dashboard(
         + "</p></article>"
         for value in findings
     )
-    scientific = analysis.get("scientific_understanding", {})
-    scientific = scientific if isinstance(scientific, Mapping) else {}
-    parameter_questions = [
-        value for value in scientific.get("parameter_questions", ()) if isinstance(value, Mapping)
-    ]
-    interpretation_html = "".join(
-        '<article class="finding"><span class="badge">'
-        + html.escape(str(value.get("conclusion_kind", "UNRESOLVED")))
-        + " · stability "
-        + html.escape(f"{100 * float(value.get('descriptive_stability', 0.0) or 0.0):.0f}%")
-        + "</span><h3>"
-        + html.escape(str(value.get("parameter", "Parameter")))
-        + "</h3><p>"
-        + html.escape(str(value.get("summary", "The question remains unresolved.")))
-        + "</p><p><b>Direct support:</b> "
-        + html.escape(
-            ", ".join(map(str, value.get("response_support", {}).get("direct", ()))) or "none"
-        )
-        + " · <b>Censored only:</b> "
-        + html.escape(
-            ", ".join(map(str, value.get("response_support", {}).get("censored_only", ())))
-            or "none"
-        )
-        + " · <b>Predictive only:</b> "
-        + html.escape(
-            ", ".join(map(str, value.get("response_support", {}).get("surrogate_only", ())))
-            or "none"
-        )
-        + '</p><p class="muted"><b>Missing evidence:</b> '
-        + html.escape("; ".join(map(str, value.get("missing_evidence", ()))) or "none identified")
-        + '</p><p class="muted">Stability is evidence-realization agreement, not truth probability. '
-        + html.escape(str(value.get("stability_diagnostics", {}).get("realizations", "unknown")))
-        + " realizations; Monte Carlo resolution "
-        + html.escape(
-            str(value.get("stability_diagnostics", {}).get("monte_carlo_resolution", "unknown"))
-        )
-        + ". Seed noise: "
-        + html.escape(str(scientific.get("seed_noise_model", {}).get("status", "unresolved")))
-        + "; repeated candidates "
-        + html.escape(str(scientific.get("seed_noise_model", {}).get("repeated_candidates", 0)))
-        + "; df "
-        + html.escape(
-            str(scientific.get("seed_noise_model", {}).get("residual_degrees_of_freedom", 0))
-        )
-        + "; sigma range "
-        + html.escape(str(scientific.get("seed_noise_model", {}).get("sigma_range", "unknown")))
-        + "</p></article>"
-        for value in parameter_questions
-    )
+    # Compact, localized cards are rendered from the persisted questions in study-overview.js.
     coverage_rows = "".join(
         "<tr><td>"
         + html.escape(str(name))
@@ -339,7 +309,7 @@ def _write_study_dashboard(
             "objective_label": objective_label,
             "candidates": candidates,
             "parameters": parameter_names,
-            "parameter_space": parameter_space.to_schema() if parameter_space is not None else {},
+            "parameter_space": space_schema,
             "metrics": metric_names,
             "responses": analysis.get("response_curves", {}),
             "interactions": interactions,
@@ -406,6 +376,10 @@ border-bottom:1px solid var(--line)}.saved-chart.active{border-color:var(--accen
 """
     script = """
 (()=>{const data=JSON.parse(document.getElementById('lf-study-data').textContent);
+// Overview references the same persisted snapshot, without serializing scientific diagnostics twice.
+data.importance=data.evidence.parameter_importance||{};
+data.scientific=data.evidence.scientific_understanding||{};
+data.parameter_questions=(data.scientific.parameter_questions||[]).filter(q=>q&&typeof q==='object');
 const audit=document.getElementById('study-raw-analysis');audit.closest('details').addEventListener('toggle',()=>{
 if(!audit.closest('details').open||audit.dataset.loaded)return;const evidence={...data.evidence};
 if(Object.hasOwn(data.research,'metric_catalog'))evidence.research={...evidence.research,metric_catalog:data.research.metric_catalog};
@@ -419,9 +393,11 @@ const palettes={'Blue ↔ red':[[0,'#2166ac'],[.5,'#f2f2f2'],[1,'#b2182b']],
 'Brown ↔ teal':[[0,'#8c510a'],[.5,'#f5f5f5'],[1,'#01665e']],
 'Accessible':[[0,'#0072b2'],[.5,'#d8d8d8'],[1,'#d55e00']]};
 const fmt=value=>value===null||value===undefined||!Number.isFinite(Number(value))?'—':Number(value).toLocaleString(undefined,{maximumSignificantDigits:6});
+const translate=text=>{const labels=[data.objective_label,...Object.values(data.research?.metric_catalog?.metrics||{}).map(m=>m.label),...(prefs.customCharts||[]).map(c=>c.name)];
+return labels.includes(text)?text:window.LambdaForgeStudyLocale?.t(text)||text;};
 const baseLayout=(title,x='',y='')=>({template:'plotly_dark',paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(13,17,23,.72)',
-font:{family:'Inter, ui-sans-serif, system-ui',color:'#c9d1d9'},height:500,margin:{l:72,r:30,t:52,b:66},title,
-xaxis:{title:{text:x},autorange:true},yaxis:{title:{text:y},autorange:true}});
+font:{family:'Inter, ui-sans-serif, system-ui',color:'#c9d1d9'},height:500,margin:{l:72,r:30,t:52,b:66},title:{text:translate(title),font:{color:'#c9d1d9',size:16}},
+xaxis:{title:{text:translate(x)},autorange:true},yaxis:{title:{text:translate(y)},autorange:true}});
 const finite=value=>typeof value==='number'&&Number.isFinite(value);
 function metricValue(candidate,metric){if(metric==='__selection__')return candidate.mean;
  const recorded=data.research?.rows?.find(row=>row.trial===candidate.trial)?.values?.[metric];if(finite(recorded))return recorded;
@@ -470,11 +446,11 @@ const resourcesByTrial=new Map(data.resources.map(row=>[Number(row.trial),row]))
 function studyField(candidate,field){if(field==='trial')return candidate.trial;if(field.startsWith('param:'))return candidate.parameters?.[field.slice(6)];
  if(field.startsWith('metric:')){return metricValue(candidate,field.slice(7))}
  if(field.startsWith('resource:'))return resourcesByTrial.get(Number(candidate.trial))?.[field.slice(9)];return null}
-function fieldLabel(field){if(field==='trial')return 'Trial';const colon=field.indexOf(':'),kind=field.slice(0,colon),name=field.slice(colon+1);if(kind==='metric'&&name==='__selection__')return data.objective_label;
+function fieldLabel(field){if(field==='trial')return translate('Trial');const colon=field.indexOf(':'),kind=field.slice(0,colon),name=field.slice(colon+1);if(kind==='metric'&&name==='__selection__')return data.objective_label;
  if(kind==='metric'&&data.research?.metric_catalog?.metrics?.[name])return data.research.metric_catalog.metrics[name].label;
- if(kind==='metric'&&name==='__best_observed__')return 'Best observed '+data.objective_label+' (partial)';
- if(kind==='metric'&&name==='__current_observed__')return 'Current observed '+data.objective_label;
- return (kind==='param'?'Parameter · ':kind==='metric'?'Metric · ':'Resource · ')+name.replaceAll('_',' ')}
+ if(kind==='metric'&&name==='__best_observed__')return translate('Best observed ')+data.objective_label+translate(' (partial)');
+ if(kind==='metric'&&name==='__current_observed__')return translate('Current observed ')+data.objective_label;
+ return translate(kind==='param'?'Parameter · ':kind==='metric'?'Metric · ':'Resource · ')+name.replaceAll('_',' ')}
 const customCharts=LambdaForgeStudyCharts({data,node,config,baseLayout,studyField,fieldLabel,metricValue,
  save,getPrefs:()=>prefs,palettes});
 const panelHeights=prefs.panelHeights||{};document.querySelectorAll('.panel').forEach((panel,index)=>{const view=panel.closest('.view'),id=(view?.id||'root')+':'+index;panel.dataset.resizeKey=id;
@@ -491,10 +467,14 @@ document.getElementById('parameter-metric').addEventListener('change',updatePara
 for(const id of ['pair-select','interaction-kind','study-palette','study-reverse'])document.getElementById(id).addEventListener('change',updateInteraction);
 document.getElementById('resource-select').addEventListener('change',updateResources);
 function activate(target){document.querySelectorAll('.tab').forEach(tab=>tab.setAttribute('aria-selected',String(tab.dataset.target===target)));
- document.querySelectorAll('.view').forEach(view=>view.hidden=view.id!==target);save({tab:target});document.querySelectorAll('#'+target+' .js-plotly-plot').forEach(chart=>requestAnimationFrame(()=>Plotly.Plots.resize(chart)))}
+ document.querySelectorAll('.view').forEach(view=>view.hidden=view.id!==target);save({tab:target});document.querySelectorAll('#'+target+' .js-plotly-plot').forEach(chart=>requestAnimationFrame(()=>Plotly.Plots.resize(chart)));document.dispatchEvent(new Event('study-view-changed'));}
 document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>activate(tab.dataset.target)));
 updateRanking();updateParameter();updateInteraction();updateResources();renderComparison();if(prefs.tab&&document.getElementById(prefs.tab))activate(prefs.tab);
-window.lfResearchServices={data,customCharts,save,getPrefs:()=>prefs,config,baseLayout};
+window.lfResearchServices={data,customCharts,save,getPrefs:()=>prefs,config,baseLayout,refreshVisible:()=>{
+const visible=document.querySelector('.view:not([hidden])')?.id;
+if(visible==='study-parameters')updateParameter();else if(visible==='study-custom')customCharts.preview();
+else if(visible==='study-interactions')updateInteraction();else if(visible==='study-resources')updateResources();
+else if(visible==='study-trials')updateRanking();}};
 })();
 """
     pair_names = (
@@ -569,27 +549,22 @@ window.lfResearchServices={data,customCharts,save,getPrefs:()=>prefs,config,base
         f'<span class="status">{status}</span></header><div class="cards"><div class="card"><small>Candidates</small><strong>{len(candidates)}</strong></div>'
         f'<div class="card"><small>Complete candidates</small><strong>{completed}</strong></div><div class="card"><small>Censored Runs</small><strong>{censored}</strong></div>'
         f'<div class="card"><small>Leading trial</small><strong>{html.escape(str(winning_trial or "—"))}</strong></div></div>'
-        '<nav class="tabs"><button class="tab" data-target="study-research" aria-selected="false">Research</button>'
+        '<nav class="tabs"><button class="tab" data-target="study-overview" aria-selected="true">Overview</button>'
+        '<button class="tab" data-target="study-research" aria-selected="false">Research</button>'
         '<button class="tab" data-target="study-metrics" aria-selected="false">Metrics & health</button>'
-        '<button class="tab" data-target="study-overview" aria-selected="true">Overview</button>'
         '<button class="tab" data-target="study-trials" aria-selected="false">Trials</button><button class="tab" data-target="study-parameters" aria-selected="false">Parameters</button>'
         '<button class="tab" data-target="study-interactions" aria-selected="false">Interactions</button><button class="tab" data-target="study-coverage" aria-selected="false">Coverage</button>'
         '<button class="tab" data-target="study-resources" aria-selected="false">Resources</button><button class="tab" data-target="study-findings" aria-selected="false">Evidence</button>'
         '<button class="tab" data-target="study-custom" aria-selected="false">Explore</button></nav>'
         + workspace_html()
-        + '<section class="view" id="study-overview"><div class="grid"><article class="panel wide"><h2>Candidate ranking</h2><div class="tools"><label>Displayed metric <input type="hidden" id="trial-metric" value="__selection__"></label></div><div class="plot" id="study-ranking">'
-        + figure_html["ranking"]
-        + '</div></article><article class="panel"><h2>Predictive importance</h2><div class="plot">'
+        + '<section class="view" id="study-overview"><div id="overview-summary"></div><div class="grid"><article class="panel"><h2>Study progress</h2><div id="overview-states" class="plot"></div></article><article class="panel"><h2>Predictive importance</h2><div class="plot" id="overview-importance">'
         + figure_html["importance"]
-        + '</div></article><article class="panel"><h2>Interpretation</h2><p class="note">Associations describe persisted evidence and fitted predictions; they are not causal. Predictive importance is meaningful only with the support and reliability shown below.</p>'
-        + (
-            interpretation_html
-            or '<div class="empty">No parameter conclusion is available yet.</div>'
-        )
-        + "</article></div></section>"
+        + '</div><p class="note">Predictive association, not causal responsibility. Conditional parameters are shown separately with their active branch and support.</p></article><article class="panel wide" id="overview-conditional"><h2>Conditional parameter evidence</h2><div class="table-wrap" id="overview-conditional-table"></div></article><article class="panel wide"><div class="tools"><h2>Interpretation</h2><button id="interpretation-help" class="info-button" aria-label="Interpretation help">ⓘ</button></div><div id="overview-interpretation"></div></article><article class="panel wide"><h2>Suggested views</h2><div id="overview-suggestions"></div></article></div></section>'
         '<section class="view" id="study-trials" hidden><div class="panel"><div class="tools"><span class="muted">Select at most two candidates to compare. Comparable ranking contains terminal selection evidence only. This ledger retains every attempted candidate; × means performance-pruned and its final selection remains unavailable.</span></div><div class="table-wrap"><table><thead><tr><th>State</th><th>Compare</th><th>Trial</th><th>Final selection</th><th>SE</th><th>Seeds</th><th>Censored</th><th>Partial best</th><th>Prune step</th><th>Prune reason</th><th>P(competitive)</th><th>Threshold</th><th>Reference</th><th>Parameters</th></tr></thead><tbody>'
         + trial_rows
-        + '</tbody></table></div><div class="compare" id="trial-comparison"></div></div></section>'
+        + '</tbody></table></div><div class="compare" id="trial-comparison"></div></div><details class="panel"><summary class="tools">Optional score by trial</summary><div class="tools"><label>Displayed metric <input type="hidden" id="trial-metric" value="__selection__"></label></div><div class="plot" id="study-ranking">'
+        + figure_html["ranking"]
+        + "</div></details></section>"
         '<section class="view" id="study-parameters" hidden><div class="tools"><label>Parameter <input type="hidden" id="parameter-select" value="'
         + html.escape(parameter_names[0] if parameter_names else "", quote=True)
         + '"></label><label>Analyze metric <input type="hidden" id="parameter-metric" value="__selection__"></label><div id="parameter-metric-chips" class="tools"></div></div><div class="grid"><article class="panel wide"><h2>Observed metric by parameter value</h2><div class="plot" id="parameter-observed">'
@@ -642,6 +617,18 @@ window.lfResearchServices={data,customCharts,save,getPrefs:()=>prefs,config,base
         + payload
         + "</script><script>"
         + files("lambdaforge.analysis")
+        .joinpath("assets/study-controls.js")
+        .read_text(encoding="utf-8")
+        + "</script><script>"
+        + files("lambdaforge.analysis")
+        .joinpath("assets/study-locale.js")
+        .read_text(encoding="utf-8")
+        + "</script><script>"
+        + files("lambdaforge.analysis")
+        .joinpath("assets/study-overview.js")
+        .read_text(encoding="utf-8")
+        + "</script><script>"
+        + files("lambdaforge.analysis")
         .joinpath("assets/study-charts.js")
         .read_text(encoding="utf-8")
         + "</script><script>"
@@ -651,6 +638,7 @@ window.lfResearchServices={data,customCharts,save,getPrefs:()=>prefs,config,base
         + "</script><script>"
         + script
         + "</script><script>LambdaForgeResearchWorkspace(window.lfResearchServices).mount();"
+        + "LambdaForgeStudyOverview(window.lfResearchServices).mount();LambdaForgeStudyLocale.mount(window.lfResearchServices);"
         + "</script></body></html>"
     )
     path = Path(output).expanduser().resolve()

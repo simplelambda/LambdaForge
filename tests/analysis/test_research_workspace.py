@@ -341,9 +341,10 @@ def test_research_html_browser_catalog_search_and_finding_drilldown(tmp_path: Pa
         errors: list[str] = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.goto(path.as_uri())
-        assert page.locator("#study-research").is_visible()
+        assert page.locator("#study-overview").is_visible()
+        page.get_by_role("button", name="Research", exact=True).click()
         assert page.locator("#research-inbox .finding").count() > 0
-        page.locator("#research-inbox button").first.click()
+        page.locator("#research-inbox .finding button").first.click()
         assert page.locator("#research-detail").is_visible()
         page.click("#research-detail-close")
         page.keyboard.press("Control+k")
@@ -411,6 +412,7 @@ def test_browser_units_families_comparison_and_portable_views(tmp_path: Path) ->
         errors: list[str] = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.goto(path.as_uri())
+        page.get_by_role("button", name="Research", exact=True).click()
         page.screenshot(path=str(tmp_path / "inbox.png"), full_page=True)
         page.get_by_role("button", name="Metrics & health", exact=True).click()
         page.get_by_role("button", name="Quality by fraction", exact=True).click()
@@ -539,10 +541,11 @@ def test_large_shared_picker_questions_hierarchy_and_smart_explore(tmp_path: Pat
         errors: list[str] = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.goto(path.as_uri())
+        page.get_by_role("button", name="Research", exact=True).click()
         assert page.locator("select option").count() < 120
         assert page.locator("#research-questions .configured-question").count() == 2
         assert page.locator("#research-questions h3").first.inner_text() == "Agreement question"
-        page.locator("#research-questions button").first.click()
+        page.locator("#research-questions .configured-question button").first.click()
         assert "Support and status" in page.locator("#research-detail-body").inner_text()
         page.click("#research-detail-close")
         page.screenshot(path=str(tmp_path / "shared-summary.png"), full_page=True)
@@ -557,6 +560,10 @@ def test_large_shared_picker_questions_hierarchy_and_smart_explore(tmp_path: Pat
 
         page.get_by_role("button", name="Explore", exact=True).click()
         page.click("#research-primary-metric")
+        page.fill("#study-dropdown-query", "predictive quality")
+        # Global search retains favourites; ordinary controls are now anchored dropdowns.
+        page.keyboard.press("Escape")
+        page.keyboard.press("Control+k")
         page.fill("#research-global-query", "predictive quality")
         page.locator('#research-search-results button[data-choice="quality"]').locator(
             ".."
@@ -568,13 +575,16 @@ def test_large_shared_picker_questions_hierarchy_and_smart_explore(tmp_path: Pat
         assert "quality" in page.evaluate("window.lfResearchServices.getPrefs().researchFavorites")
         assert "quality" in page.evaluate("window.lfResearchServices.getPrefs().researchRecent")
         page.get_by_role("button", name="By · add parameter…", exact=True).click()
-        page.fill("#research-global-query", "width")
-        page.locator('#research-search-results button[data-choice="param:width"]').click()
+        page.fill("#study-dropdown-query", "category")
+        page.locator('#study-dropdown-options input[data-choice="param:category"]').check()
+        page.get_by_role("button", name="By · add parameter…", exact=True).click()
+        page.fill("#study-dropdown-query", "width")
+        page.locator('#study-dropdown-options input[data-choice="param:width"]').check()
         page.click("#research-explore")
         page.wait_for_function("document.querySelector('#study-chart-kind').value==='heatmap'")
         page.get_by_role("button", name="By · add parameter…", exact=True).click()
-        page.fill("#research-global-query", "p12")
-        page.locator('#research-search-results button[data-choice="param:p12"]').click()
+        page.fill("#study-dropdown-query", "p12")
+        page.locator('#study-dropdown-options input[data-choice="param:p12"]').check()
         page.click("#research-explore")
         page.wait_for_function(
             "document.querySelector('#study-custom-chart "
@@ -588,20 +598,21 @@ def test_large_shared_picker_questions_hierarchy_and_smart_explore(tmp_path: Pat
 
         page.get_by_role("button", name="Parameters", exact=True).click()
         page.click("#parameter-metric-picker")
-        page.fill("#research-global-query", "quality")
-        page.locator('#research-search-results button[data-choice="quality"]').click()
-        page.get_by_role("button", name="Add comparison metric…", exact=True).click()
-        page.fill("#research-global-query", "small")
-        page.locator('#research-search-results button[data-choice="small"]').click()
+        page.fill("#study-dropdown-query", "quality")
+        page.locator('#study-dropdown-options input[data-choice="quality"]').check()
+        page.fill("#study-dropdown-query", "small")
+        page.locator('#study-dropdown-options input[data-choice="small"]').check()
+        page.keyboard.press("Escape")
         assert "small" in page.locator("#parameter-metric-chips").inner_text()
+        page.locator("#parameter-metric-chips button").last.click()
         page.locator("#parameter-metric-chips button").click()
         assert page.locator("#parameter-metric-chips button").count() == 0
         page.get_by_role("button", name="Interactions", exact=True).click()
         page.locator("#study-interactions").get_by_role(
             "button", name="Analyze", exact=False
         ).click()
-        page.fill("#research-global-query", "quality")
-        page.locator('#research-search-results button[data-choice="quality"]').click()
+        page.fill("#study-dropdown-query", "quality")
+        page.locator('#study-dropdown-options input[data-choice="quality"]').check()
         page.wait_for_function(
             "document.querySelector('#research-observed-interactions "
             ".js-plotly-plot').data.length>0"
@@ -610,7 +621,9 @@ def test_large_shared_picker_questions_hierarchy_and_smart_explore(tmp_path: Pat
         assert page.locator("#study-findings .finding").count() == 0
         assert "Surrogate diagnostics" in page.locator("#study-findings").inner_text()
         page.get_by_text("Complete reproducible analysis JSON", exact=True).click()
-        page.wait_for_function("document.querySelector('#study-raw-analysis').dataset.loaded==='true'")
+        page.wait_for_function(
+            "document.querySelector('#study-raw-analysis').dataset.loaded==='true'"
+        )
         snapshot = json.loads(page.locator("#study-raw-analysis").inner_text())
         assert snapshot["research"]["metric_catalog"] == research["metric_catalog"]
         assert snapshot["candidates"] == source

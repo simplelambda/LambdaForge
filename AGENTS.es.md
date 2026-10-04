@@ -364,7 +364,13 @@ tensorial preciso y pruebas focalizadas.
 
 ## Análisis de estudios y consola
 
-El HTML tiene un selector semántico del catálogo, no select más buscador superpuestos. Explore
+El HTML empieza en Overview, con estados exactos e importancia contextual. Excluye parámetros
+condicionales del gráfico global; conserva rama/soporte/score modelado aparte, nunca como
+responsabilidad causal. Interpretaciones/preguntas usan carruseles, hallazgos completos se paginan
+y diagnóstico común va en ayuda. El idioma inglés/español no traduce identidades declaradas ni
+modifica evidencia. Los controles usan un desplegable buscable junto al botón, no una modal;
+solo búsqueda global/inspección explícita usa diálogos. Parameters marca/desmarca curvas en un
+gráfico con ejes independientes para unidades distintas/desconocidas. Explore
 infiere vistas observadas desde Analyze/By/Compare; ejes/tipo/paleta/normalización van a Advanced.
 Parameters usa chips de comparación. Tarjetas de preguntas y categorías jerárquicas presentan
 semántica persistida. Research conserva los hallazgos; Evidence las conclusiones/diagnóstico/JSON.

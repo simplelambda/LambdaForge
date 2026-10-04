@@ -24,8 +24,25 @@ El HTML necesita `lambdaforge[analysis-report]`; el análisis numérico no neces
 Study remoto usa `lf export STUDY --output ./exports` o Export en la consola. El informe funciona
 sin conexión: es una captura, no una conexión viva al clúster. Regenera para incluir nuevas Runs.
 
-**Research** se abre primero. Las tarjetas de salud llevan a su evidencia. Las preguntas declaradas
-tienen tarjetas propias, antes del inbox exploratorio separado de hasta ocho hallazgos priorizados.
+**Overview / Resumen** es la primera pestaña y la vista inicial de un informe nuevo. Muestra
+estados con recuentos exactos, contexto de selección/confirmación, asociaciones predictivas no
+condicionales y recomendaciones que abren el gráfico concreto. El score por número de candidato
+queda plegado en **Trials**, no domina el resumen. Al reabrir se conserva la última pestaña.
+
+Los parámetros condicionales no entran en el gráfico de importancia global. Su tabla muestra la
+regla de activación, candidatos activos/total, soporte completo, score modelado guardado y
+fiabilidad. El score puede mezclar activación de la rama con variación interna; no es un porcentaje
+causal, una cuota aditiva de responsabilidad ni una justificación para elegir esa rama.
+Interpretation usa un carrusel horizontal desplazable con ratón/teclado. **ⓘ** reúne explicaciones
+comunes de estabilidad y ruido; los detalles conservan la conclusión original exacta.
+
+**Language / Idioma** en la cabecera cambia inglés/español inmediatamente y guarda la elección
+para ese HTML. Cambian controles, ayudas, estados y etiquetas de gráficos compatibles. Los nombres
+declarados y las afirmaciones científicas guardadas conservan su idioma original: ningún servicio
+remoto traduce ni modifica la evidencia.
+
+**Research** conserva las tarjetas de salud. Preguntas e inbox exploratorio usan carruseles;
+la lista completa está paginada de seis en seis.
 **Inspect** explica evidencia, método, soporte, ranking y límites;
 **Explore these observations** abre los valores registrados. Una asociación exploratoria no es
 una nueva conclusión del HPO ni un efecto causal.
@@ -35,9 +52,9 @@ categoría y ordena por prioridad, cobertura o dispersión. Las métricas consta
 ocultas se omiten al principio, no se borran: activa **Show constants / missing / hidden**.
 El inspector muestra unidades, dirección, agregación y ausencias explícitas. Los grupos de
 redundancia son descriptivos; sus miembros siguen accesibles. **Ctrl/⌘ K** busca métricas,
-parámetros, familias, hallazgos, Trials y vistas guardadas. Ranking, Parameters, Interactions y
-Explore reutilizan ese selector dinámico, sin selects largos duplicados. Marca favoritos con la
-estrella y reutiliza selecciones recientes. **Categories** es un árbol desplegable: seleccionar
+parámetros, familias, hallazgos, Trials y vistas guardadas. Los controles de métrica, parámetro,
+ejes, tipo, paleta y filtros usan un desplegable buscable junto al botón, no una modal. El buscador
+global **Ctrl/⌘ K** conserva su diálogo con favoritos/recientes. **Categories** es un árbol desplegable: seleccionar
 `validation` incluye descendientes como `validation/global` y `validation/surface/quality`.
 
 ## 2. Declarar significado, no política de ejecución
@@ -185,12 +202,17 @@ En **Explore**, elige **Analyze** (métrica), **By** (chips de parámetros), **C
 existente: un parámetro produce scatter, dos heatmap y más coordenadas paralelas. Elimina chips
 con ×. Métricas y controles avanzados conservan su preview inmediato. **Advanced visualization
 options** agrupa tipo/ejes X/Y/Z explícitos, agregación, paleta/inversión y normalización visual;
-las listas pequeñas siguen siendo selects. Nombre, notas y guardado quedan visibles.
+tipo/paleta/filtros usan el mismo desplegable buscable. Nombre, notas y guardado quedan visibles.
 
 - Varias Y comparten escala solo con unidades declaradas iguales. Unidades distintas/desconocidas
   usan gráficos separados; **Visual 0–1 normalization only** es opcional y no cambia evidencia.
-- Parameters mantiene la métrica principal y **Add comparison metric…**; los chips eliminables
-  permiten volver a una sola sin un segundo sistema de selección.
+- En **Parameters**, abre **Analyze metric**, busca `mean`, marca una métrica, busca `auroc` y
+  marca otra sin cerrar el desplegable. La selección se conserva entre búsquedas; desmarcar elimina
+  la curva y ninguna selección muestra un estado vacío explícito. Flechas navegan, Espacio marca,
+  Escape/Listo/clic exterior cierra. Las curvas comparten **un gráfico**: unidades declaradas iguales
+  comparten Y; distintas/desconocidas usan ejes Y independientes identificados. No compares alturas
+  entre esos ejes. Explore conserva gráficos separados por defecto y normalización visual opcional.
+  La selección no modifica agregación, objetivo ni respuesta modelada persistida.
 - Heatmaps/superficies numéricas observadas dejan vacías las combinaciones no probadas. Las
   superficies del surrogate permanecen separadas y etiquetadas. Scatter 3D admite categorías.
 - Coordenadas paralelas usan los parámetros elegidos (o el default de ocho en vistas antiguas)
@@ -203,7 +225,7 @@ las listas pequeñas siguen siendo selects. Nombre, notas y guardado quedan visi
 **Interactions** tiene un panel observado para cualquier métrica con los selectores compartidos
 y heatmap/3D/superficie. El modelo predictivo del objetivo permanece separado. **Evidence**
 (antes Findings & evidence) conserva conclusiones científicas, diagnóstico del surrogate, evidencia
-de seeds/poda, metodología y snapshot estructurado. Los hallazgos exploratorios aparecen solo en
+de seeds/poda, metodología y snapshot estructurado en secciones plegables. Los hallazgos exploratorios aparecen solo en
 Research; el dashboard individual de Run no cambia y sigue usando epochs.
 El snapshot completo de auditoría se formatea al desplegarlo y reutiliza el catálogo de métricas,
 serializado una sola vez. Todos los paneles comparten el catálogo leído, sin selectores independientes.

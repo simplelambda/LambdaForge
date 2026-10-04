@@ -1156,7 +1156,14 @@ son opcionales y nunca sustituyen evidencia final ausente. Las preferencias pert
 no forma parte de las dependencias base: sin el extra siguen funcionando la
 ejecución, el JSON y la Consola.
 
-El informe empieza en **Research**, con hallazgos priorizados que enlazan a su evidencia y gráficas.
+El informe empieza en **Overview / Resumen**: estados y recuentos, contexto de selección y vistas
+recomendadas sustituyen al gran score por candidato (opcional en Trials). La importancia condicional
+muestra rama/soporte/fiabilidad aparte, sin sugerir responsabilidad causal global. Interpretaciones y
+preguntas usan carruseles; hallazgos completos se paginan. Los controles son desplegables buscables,
+no modales. **Parameters** marca/desmarca curvas en un gráfico, con ejes independientes para unidades
+distintas/desconocidas. **ⓘ** explica cómo interpretarlo. La cabecera permite inglés/español y guarda
+la preferencia del HTML sin cambiar evidencia ni traducir nombres declarados. **Research** conserva
+los hallazgos priorizados que enlazan a evidencia y gráficas.
 **Metrics & health** organiza etiquetas, categorías, unidades, alias, constantes, soporte ausente
 y redundancia; **Ctrl/⌘ K** busca métricas, familias, parámetros, Trials y vistas guardadas.
 `Work.analysis_profile` o YAML `analysis` declaran significado y preguntas antes de ejecutar.

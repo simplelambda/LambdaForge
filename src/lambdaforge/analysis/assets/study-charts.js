@@ -143,8 +143,10 @@ window.LambdaForgeStudyCharts = function (services) {
       const unit = field => data.research?.metric_catalog?.metrics?.[field.replace('metric:', '').replace('__selection__','selection_objective')]?.unit || 'unknown';
       const units = fields.map(unit);
       // Unknown units are not assumed compatible. Preserve independent scales unless normalized explicitly.
-      const smallMultiples = fields.length > 1 && !spec.normalize
+      const incompatible = fields.length > 1 && !spec.normalize
         && (units.includes('unknown') || new Set(units).size > 1);
+      const smallMultiples = incompatible && !spec.overlay;
+      const overlayAxes = new Map();
       const metricColors = ['#58a6ff', '#56d364', '#bc8cff', '#ffa657', '#39c5cf', '#ff7b72'];
       for (const [index, yField] of fields.entries()) {
         const selected = rowsFor(spec, yField), color = metricColors[index % metricColors.length];
@@ -177,13 +179,24 @@ window.LambdaForgeStudyCharts = function (services) {
         if(smallMultiples){const suffix=index===0?'':String(index+1),trace=traces[traces.length-1];trace.xaxis='x'+suffix;trace.yaxis='y'+suffix;
           layout['xaxis'+suffix]={title:{text:fieldLabel(spec.x)},autorange:true};
           layout['yaxis'+suffix]={title:{text:fieldLabel(yField)},autorange:true};}
+        if(incompatible && spec.overlay){
+          // Unknown units are independent, even when their magnitudes happen to match.
+          const group=units[index]==='unknown'?yField:units[index];
+          if(!overlayAxes.has(group))overlayAxes.set(group,overlayAxes.size);
+          const axisIndex=overlayAxes.get(group),suffix=axisIndex===0?'':String(axisIndex+1);
+          traces[traces.length-1].yaxis='y'+suffix;
+          if(!layout['yaxis'+suffix]||axisIndex===0)layout['yaxis'+suffix]={title:{text:fieldLabel(yField),font:{color}},autorange:true,
+            ...(axisIndex?{overlaying:'y',side:'right',anchor:'free',autoshift:true,showgrid:false}:{})};
+        }
       }
       if(smallMultiples){layout.grid={rows:fields.length,columns:1,pattern:'independent'};layout.height=Math.min(1800,fields.length*280);}
+      if(incompatible && spec.overlay)layout.margin.r=160;
       if(spec.normalize){layout.yaxis.title={text:'Per-metric visual 0–1 normalization (not scientific utility)'};}
       message = `${rows.length} trials for the primary metric · ${fields.length} metric(s). `
         + (spec.aggregate === 'mean' ? 'Equal-weight trial means; error bars are empirical SD across trials, not seed confidence intervals.'
         : 'Each point is a trial summary; duplicate parameter values are retained.')
-        + (smallMultiples?' Different or unknown units use small multiples with independent Y scales.':'');
+        + (smallMultiples?' Different or unknown units use small multiples with independent Y scales.':'')
+        + (incompatible&&spec.overlay?' Same-chart overlays use separate Y axes for different or unknown units.':'');
     }
     if (!traces.length || traces.every(trace => trace.type==='parcoords'?!trace.dimensions?.some(d=>d.values?.length):!trace.x?.length)) {
       const parameterRows = data.candidates.filter(candidate => present(field(candidate, spec.x, true)));
@@ -289,8 +302,11 @@ window.LambdaForgeStudyCharts = function (services) {
   function updateParameter() {
     const name = document.getElementById('parameter-select').value;
     const metric = document.getElementById('parameter-metric').value;
-    const spec = {id: 'parameter:' + name + ':' + metric, name: 'Observed metric by parameter value',
-      kind: 'line', x: 'param:' + name, y: 'metric:' + metric, metrics:getPrefs().parameterMetrics||[], aggregate: 'mean', partial: false};
+    if(!metric){const chart=node('parameter-observed');if(chart)Plotly.react(chart,[],baseLayout('No metrics selected. Choose one or more metrics above.'),config);
+      status('No metrics selected. Choose one or more metrics above.','parameter-observed-status');document.querySelector('#parameter-values tbody').replaceChildren();return;}
+    const extras=getPrefs().parameterMetrics||[];
+    const spec = {id: 'parameter:' + name + ':' + metric + ':' + JSON.stringify(extras), name: 'Observed metric by parameter value',
+      kind: 'line', x: 'param:' + name, y: 'metric:' + metric, metrics:extras, aggregate: 'mean', partial: false,overlay:true};
     render(spec, 'parameter-observed', 'parameter-observed-status');
     const body = document.querySelector('#parameter-values tbody'); body.replaceChildren();
     document.getElementById('parameter-value-metric').textContent = 'Mean · ' + fieldLabel(spec.y);
