@@ -54,7 +54,8 @@ Operational fleets can be inspected with `lf fleets list/show/offers`; `drain/di
 preview catalog changes and require `--apply` to save. Coordinated execution is **not yet enabled**:
 the tested lease/reconciliation foundation and remaining work are documented in
 [Coordinated Studies](docs/COORDINATED_STUDIES.md). Independent cluster submissions remain separate
-Studies, not shared HPO.
+Studies, not shared HPO. An internal prepared-CPU integration now exercises real direct Jobs and
+one final Study analysis; this does not yet enable remote/GPU Fleet launch or public pause/resume.
 
 Run bare `lf` in an interactive terminal to open the Research Console. Its Clusters screen adds and
 edits profiles with contextual explanations, secure credential handling and explicit test,

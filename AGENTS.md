@@ -653,6 +653,15 @@ preserves leases as unknown; positive owned-Attempt loss proof is mandatory befo
 Remaining runner/provider/predictive/decision/TUI integration: `docs/COORDINATED_STUDIES.md`.
 Do not claim end-to-end execution from fake tests.
 
+Internal `WorkRunner(dispatcher=...)` is the common fixed/automatic/adaptive execution boundary,
+not another planner. Prepared local CPU Jobs use `PreparedCpuShardExecutor` and
+`CoordinatedCpuDispatcher`; they do not establish remote/GPU readiness or adaptive metric streams.
+The fixed/automatic planner's callback replaces the unstarted frontier, not just appends new Runs;
+never withdraw an already leased or accepted identity. Coordinator v2 pause freezes acceptance and
+dispatch and drains owned workers without assuming death;
+unknown ownership prevents PAUSED. Preserve exact pre-submit leases, evidence and original clock
+across resume/v1 migration. Public launch/pause/resume/adoption remain pending.
+
 Keep `Transport` and `Scheduler` provider boundaries. OpenSSH multiplexing reuses a private
 ControlMaster for its configured idle period. Credentials stay in interactive/keyring/env sources
 and never enter argv, YAML, bundles, state or logs. Managed Python environments are immutable,

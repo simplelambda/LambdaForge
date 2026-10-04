@@ -1303,8 +1303,9 @@ desconocida.
 
 Inspección Fleet: `lf fleets list/show/offers`; controles de catálogo:
 `lf fleets drain/disable/enable FLEET CLUSTER [--apply]`. Observar no concede GPUs y estas acciones
-nunca detienen Jobs activos. La base de propiedad de Study coordinado está probada, pero aún no
-están habilitados `run --on-fleet`, workers reales ni integración HPO/TUI global. Consulta
+nunca detienen Jobs activos. La base de propiedad de Study coordinado está probada; ya
+hay shards CPU locales preparados mediante Jobs directos reales y un dispatcher interno compartido.
+Siguen pendientes `run --on-fleet`, remoto/GPU, pause/resume públicos e integración HPO/TUI. Consulta
 [estado y contratos de implementación](COORDINATED_STUDIES.es.md) antes de usar fleets.
 
 Un usuario configura el perfil en `lf` → Clusters. Primero aparecen campos comunes y cada opción

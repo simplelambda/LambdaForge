@@ -1480,7 +1480,8 @@ original byte count and SHA-256, so compactness cannot be mistaken for missing e
 Fleet discovery: `lf fleets list/show/offers`; operator catalog controls:
 `lf fleets drain/disable/enable FLEET CLUSTER [--apply]`. Observations do not grant GPUs and these
 controls never stop active Jobs. The coordinated Study ownership foundation is tested, but
-`run --on-fleet`, actual shard workers and global HPO/TUI integration are not enabled yet.
+prepared local CPU shards now use real direct Jobs through an internal shared dispatch boundary.
+`run --on-fleet`, remote/GPU shards, public pause/resume and global HPO/TUI integration remain pending.
 See [implementation status and contracts](COORDINATED_STUDIES.md) before using fleets.
 
 Humans configure the same profile in bare `lf` → Clusters. Common fields appear first and focused

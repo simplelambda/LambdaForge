@@ -10,6 +10,19 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+### Added
+
+- Share one internal Study execution-dispatch boundary across the existing fixed, automatic paired
+  sweep and adaptive planners. Prepared local CPU Fleet execution now uses detached ProcessScheduler
+  Jobs, exact invocation persistence and central result ingestion to produce one final analysis;
+  fixed seeds and automatic paired-block refill are tested. Honor the native planner's unstarted
+  frontier replacement without withdrawing resident workers or accepted evidence.
+  Remote/GPU/adaptive streaming and public `run --on-fleet` integration are still pending.
+- Add durable coordinator v2 pause/resume intent, drain-to-paused reconciliation and exact pre-submit
+  lease retention. Preserve original adopted wall-time/budgets and migrate valid v1 state without
+  altering evidence. Pre-submit reconciliation retains unspent leases; resumed leases cannot cross
+  an expired original time budget. Public pause/resume/adoption commands are not enabled here.
+
 ## [0.17.0] - 2026-10-04
 
 ### Added

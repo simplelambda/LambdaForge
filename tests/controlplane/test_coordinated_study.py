@@ -369,6 +369,7 @@ def test_lost_requires_owned_attempt_proof(tmp_path: Path) -> None:
     shard = control.plan_shards([offer("A", 1)])[0]
     lease = shard.leases[0]
     executor = FakeExecutor()
+    control.submit_shard(shard, executor)
     executor.observations[shard.shard_id] = (
         RemoteObservation(
             lease.run.key,

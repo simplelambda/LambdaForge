@@ -542,6 +542,15 @@ leases desconocidas; retry requiere prueba positiva de pérdida del Attempt prop
 runner/proveedores/predictive/decisiones/TUI: `docs/COORDINATED_STUDIES.es.md`. Pruebas fake no
 demuestran ejecución end-to-end.
 
+`WorkRunner(dispatcher=...)` es el punto interno compartido fixed/automático/adaptativo, no otro
+planner. `PreparedCpuShardExecutor` y `CoordinatedCpuDispatcher` ejecutan CPU local preparada;
+no acreditan remoto/GPU ni streaming adaptativo. El callback fixed/automático reemplaza la cola
+no iniciada, no solo añade Runs; no retirar identidades con lease o ya aceptadas. La pausa v2
+congela aceptación/envíos y deja
+terminar workers propios sin asumir muerte; propiedad desconocida impide PAUSED. Mantener leases
+previas al envío, evidencia y reloj original al reanudar/migrar v1. Launch/pause/resume/adopción
+públicos siguen pendientes.
+
 El `pyproject.toml` más cercano, no el entorno virtual activo, selecciona `ProjectContext`.
 `[tool.lambdaforge].project_id` es un ID estable opcional de 1–80 caracteres; si falta se deriva de
 la raíz resuelta. Los perfiles/referencias de credenciales de usuario y leases GPU/proceso por host

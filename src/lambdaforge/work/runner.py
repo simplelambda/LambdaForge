@@ -92,6 +92,7 @@ from lambdaforge.work.cache import WorkCache
 from lambdaforge.work.checkpoints import CheckpointCollection
 from lambdaforge.work.config import RunDefinition, WorkConfig, import_work_class
 from lambdaforge.work.design import ExecutionPolicy, StudyConvergenceState
+from lambdaforge.work.dispatcher import StudyDispatcher
 from lambdaforge.work.managed import (
     CANONICAL_FINGERPRINT_ALGORITHM,
     LEGACY_FINGERPRINT_ALGORITHM,
@@ -184,6 +185,9 @@ class WorkExecutionResult:
 
 class WorkRunner:
     """Establish runtime, invoke Work.run and finalize owned scientific evidence."""
+
+    def __init__(self, *, dispatcher: StudyDispatcher | None = None) -> None:
+        self._dispatcher = dispatcher
 
     def plan(self, config: WorkConfig, *, rerun: bool = False) -> WorkExecutionPlan:
         """Resolve expansion/identity without constructing a Work or creating state."""
@@ -304,6 +308,12 @@ class WorkRunner:
         accept_code_change: bool = False,
     ) -> WorkExecutionPlan | WorkExecutionResult:
         """Execute sequential levels and process-isolated parallel Work Runs."""
+        if self._dispatcher is not None and (
+            len(config.levels) != 1
+            or len(config.levels[0].runs) != 1
+            or not config.levels[0].runs[0].study_expected
+        ):
+            raise ValueError("An external dispatcher requires one Study, not composed Work.")
         plan = self.plan(config, rerun=rerun)
         execution_dir = self._execution_root(plan.source, config.name) / plan.execution_id
         if resume_execution is not None:
@@ -547,7 +557,11 @@ class WorkRunner:
                 groups.append(specifications)
             level_results: list[WorkResult] = []
             if len(groups) == 1:
-                level_results.extend(_execute_group(groups[0]))
+                level_results.extend(
+                    _execute_group(groups[0], dispatcher=self._dispatcher)
+                    if self._dispatcher is not None
+                    else _execute_group(groups[0])
+                )
             else:
                 worker_limit = max(1, min(len(groups), os.cpu_count() or 1))
                 with ProcessPoolExecutor(
@@ -1088,15 +1102,29 @@ class WorkRunner:
         )
 
 
-def _execute_group(specifications: Sequence[Mapping[str, Any]]) -> tuple[WorkResult, ...]:
+def _execute_group(
+    specifications: Sequence[Mapping[str, Any]], *, dispatcher: StudyDispatcher | None = None
+) -> tuple[WorkResult, ...]:
     """Execute one Work definition serially or through its adaptive controller."""
     if specifications:
         raw = specifications[0]["definition"].get("search_policy")
         if isinstance(raw, Mapping):
-            return _execute_adaptive_group(specifications, AdaptiveSearchPolicy.from_search(raw))
+            return (
+                _execute_adaptive_group(
+                    specifications, AdaptiveSearchPolicy.from_search(raw), dispatcher=dispatcher
+                )
+                if dispatcher is not None
+                else _execute_adaptive_group(specifications, AdaptiveSearchPolicy.from_search(raw))
+            )
         design = specifications[0]["definition"].get("study_design")
         if isinstance(design, Mapping) and design.get("type") in {"sweep", "repeated"}:
-            return _execute_fixed_evidence_group(specifications)
+            return (
+                _execute_fixed_evidence_group(specifications, dispatcher=dispatcher)
+                if dispatcher is not None
+                else _execute_fixed_evidence_group(specifications)
+            )
+    if dispatcher is not None:
+        raise ValueError("External execution requires a normalized Study design.")
     definition = specifications[0]["definition"] if specifications else {}
     telemetry = (
         StudyTelemetry.from_environment() if definition.get("study_expected") is True else None
@@ -1130,6 +1158,8 @@ def _execute_group(specifications: Sequence[Mapping[str, Any]]) -> tuple[WorkRes
 
 def _execute_fixed_evidence_group(
     specifications: Sequence[Mapping[str, Any]],
+    *,
+    dispatcher: StudyDispatcher | None = None,
 ) -> tuple[WorkResult, ...]:
     """Execute every fixed evidence identity through the common ARI dispatcher."""
     if not specifications:
@@ -1455,7 +1485,7 @@ def _execute_fixed_evidence_group(
         persist_block_progress(next_block, ())
         return next_block
 
-    outcomes = _execute_adaptive_dispatch(
+    outcomes = (dispatcher or _execute_adaptive_dispatch)(
         prepared,
         resources=resources,
         policy=policy,
@@ -1937,7 +1967,10 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
 
 
 def _execute_adaptive_group(
-    specifications: Sequence[Mapping[str, Any]], policy: AdaptiveSearchPolicy
+    specifications: Sequence[Mapping[str, Any]],
+    policy: AdaptiveSearchPolicy,
+    *,
+    dispatcher: StudyDispatcher | None = None,
 ) -> tuple[WorkResult, ...]:
     """Interleave new candidates and probability-driven shared-seed evidence."""
     if not specifications:
@@ -4333,7 +4366,7 @@ def _execute_adaptive_group(
                 compute_seconds=0.0,
             )
 
-        _execute_adaptive_dispatch(
+        (dispatcher or _execute_adaptive_dispatch)(
             limited,
             resources=resources,
             policy=policy,

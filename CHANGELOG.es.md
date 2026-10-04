@@ -9,6 +9,19 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+### Añadido
+
+- Punto interno único de despacho para planners fixed, paired sweep automático y adaptativo.
+  Fleet CPU local preparada usa Jobs ProcessScheduler desacoplados, invocaciones exactas durables
+  e ingestión central con un análisis final único; se prueban seeds fijas y refill pareado automático.
+  Respeta la retirada de cola no iniciada del planner sin revocar workers ni evidencia aceptada.
+  Remoto/GPU/streaming adaptativo y la ruta pública
+  `run --on-fleet` siguen pendientes.
+- Pausa/reanudación durable v2 del coordinator, reconciliación hasta paused y conservación de leases
+  previas al envío. Mantiene reloj/presupuestos originales al adoptar y migra v1 sin alterar evidencia.
+  Reconciliar conserva leases no enviadas y reanudar no elude el presupuesto temporal original.
+  Este cambio interno aún no habilita comandos públicos pause/resume/adopción.
+
 ## [0.17.0] - 2026-10-04
 
 ### Añadido

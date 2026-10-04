@@ -25,7 +25,7 @@ from lambdaforge.work.models import WorkResult
 from lambdaforge.work.runner import WorkRunner, _execute_adaptive_dispatch
 
 
-def execute_concrete_shard(
+def prepare_concrete_shard(
     shard: StudyShard,
     invocations: Mapping[str, Mapping[str, Any]],
     *,
@@ -33,8 +33,8 @@ def execute_concrete_shard(
     resources: ResourceRequest,
     verified_equivalence: ExecutionEquivalence,
     parallelism: int,
-) -> tuple[dict[str, Any], ...]:
-    """Run a finite, exact CPU queue, persist each result and never create scientific work.
+) -> tuple[list[dict[str, Any]], dict[tuple[int, int | None], str]]:
+    """Validate a finite exact CPU queue without creating state or starting a child.
 
     ``invocations`` is keyed by global Run key and uses the native dispatcher specification.
     The caller is responsible for verified environment/bundle/input preparation. All invocations
@@ -83,6 +83,14 @@ def execute_concrete_shard(
             "hpo_fidelity",
             "evidence_required",
             "evidence_requirement",
+            "candidate_pool_index",
+            "hpo_startup_anchor",
+            "hpo_probe_purpose",
+            "hpo_target_questions",
+            "study_recovery",
+            "sweep_block_ordinal",
+            "sweep_lookahead",
+            "predicted_duration_seconds",
         }
         if set(value) - allowed:
             raise ValueError("Concrete shard invocations cannot inject operational runtime fields.")
@@ -93,16 +101,19 @@ def execute_concrete_shard(
             or value.get("hpo_fidelity", {}) != dict(lease.run.fidelity)
         ):
             raise ValueError("Native invocation differs from its exact scientific lease.")
-        if value.get("restart") is not False or any(
-            name in value
-            for name in (
-                "gpu_slot",
-                "gpu_index",
-                "gpu_semaphore",
-                "recovery_checkpoint_root",
-                "study_recovery",
-                "hpo_controller_restart",
-                "hpo_scientific_continuation",
+        if (
+            value.get("restart") is not False
+            or value.get("study_recovery")
+            or any(
+                name in value
+                for name in (
+                    "gpu_slot",
+                    "gpu_index",
+                    "gpu_semaphore",
+                    "recovery_checkpoint_root",
+                    "hpo_controller_restart",
+                    "hpo_scientific_continuation",
+                )
             )
         ):
             raise ValueError("A fresh shard cannot inject devices, restart or recovery authority.")
@@ -135,6 +146,33 @@ def execute_concrete_shard(
     objective = prepared[0]["definition"].get("objective") or {}
     if any((value["definition"].get("objective") or {}) != objective for value in prepared):
         raise ValueError("Shard invocations cannot reinterpret the shared scientific objective.")
+    return prepared, identities
+
+
+def execute_concrete_shard(
+    shard: StudyShard,
+    invocations: Mapping[str, Mapping[str, Any]],
+    *,
+    root: Path,
+    resources: ResourceRequest,
+    verified_equivalence: ExecutionEquivalence,
+    parallelism: int,
+) -> tuple[dict[str, Any], ...]:
+    """Execute validated exact CPU leases through native isolated Runs, with no planner.
+
+    Fresh results persist incrementally. A restarted completed worker replays immutable outcomes;
+    an interrupted owner requires provider reconciliation and must never be silently restarted.
+    """
+    root = root.absolute()
+    prepared, identities = prepare_concrete_shard(
+        shard,
+        invocations,
+        root=root,
+        resources=resources,
+        verified_equivalence=verified_equivalence,
+        parallelism=parallelism,
+    )
+    objective = prepared[0]["definition"].get("objective") or {}
     manifest = {"worker_version": 1, "shard": shard.to_dict(), "invocations": prepared}
     lock = CrossProcessFileLock(
         root / ".owner.lock", shared=False, timeout_seconds=5.0, poll_interval_seconds=0.05
@@ -204,3 +242,35 @@ def execute_concrete_shard(
         state["state"] = "completed"
         atomic_write_json(state_path, state)
         return tuple(state["results"][lease.run.key] for lease in shard.leases)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Execute an owned prepared manifest under the existing provider supervisor."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("manifest", type=Path)
+    arguments = parser.parse_args(argv)
+    path = arguments.manifest.absolute()
+    if any(item.is_symlink() for item in (path, *path.parents)) or not path.is_file():
+        raise ValueError("Shard manifest must be an owned regular file.")
+    if path.stat().st_size > 8 * 1024**2:
+        raise ValueError("Prepared shard manifest exceeds the bounded control-envelope limit.")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if value.get("manifest_version") != 1:
+        raise ValueError("Unsupported prepared shard manifest.")
+    if value.get("root") != str(path.parent / "worker"):
+        raise ValueError("Prepared worker root must belong to the exact provider manifest.")
+    execute_concrete_shard(
+        StudyShard.from_mapping(value["shard"]),
+        value["invocations"],
+        root=Path(value["root"]),
+        resources=ResourceRequest.from_mapping(value["resources"]),
+        verified_equivalence=ExecutionEquivalence(**value["equivalence"]),
+        parallelism=value["parallelism"],
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

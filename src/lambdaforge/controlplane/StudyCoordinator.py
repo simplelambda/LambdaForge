@@ -8,6 +8,7 @@ An unavailable executor never authorizes re-execution of its leases.
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -90,6 +91,22 @@ class StudyShard:
             "leases": [lease.to_dict() for lease in self.leases],
         }
 
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> StudyShard:
+        """Restore exact versioned ownership; never infer absent identities."""
+        if value.get("shard_version") != 1:
+            raise ValueError("Unsupported persisted shard version.")
+        return cls(
+            value["shard_id"],
+            value["study_identity"],
+            value["cluster"],
+            tuple(
+                RunLease(GlobalRun.from_mapping(item["run"]), item["attempt"], item["lease_id"])
+                for item in value["leases"]
+            ),
+            FleetMember.from_mapping(value["member"]),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class RemoteObservation:
@@ -157,6 +174,14 @@ class StudyCoordinator:
         with self._lock():
             value = self._read()
             yield value
+            if value["lifecycle"] == "pausing" and not any(
+                record["state"] in {"queued", "running", "unknown_remote"}
+                for record in value["runs"].values()
+            ):
+                value["lifecycle"] = "paused"
+                value["lifecycle_history"].append(
+                    {"state": "paused", "at": self.clock(), "reason": "owned work reconciled"}
+                )
             value["revision"] += 1
             atomic_write_json(self.state_path, value)
 
@@ -167,7 +192,7 @@ class StudyCoordinator:
         if (
             not isinstance(value, dict)
             or type(value.get("coordinator_version")) is not int
-            or value["coordinator_version"] != 1
+            or value["coordinator_version"] not in {1, 2}
         ):
             raise ValueError("Missing, corrupt or unsupported coordinator state; refusing restart.")
         required = {
@@ -196,8 +221,34 @@ class StudyCoordinator:
             for name in ("revision", "attempts_reserved")
         ) or any(not isinstance(value[name], list) for name in ("fleet_history", "quarantine")):
             raise ValueError("Coordinator state has invalid accounting; refusing restart.")
+        if (
+            isinstance(value["created_at"], bool)
+            or not isinstance(value["created_at"], (int, float))
+            or not math.isfinite(value["created_at"])
+            or value["created_at"] < 0
+        ):
+            raise ValueError("Coordinator state has an invalid original clock; refusing restart.")
+        positive_limit(value["max_runs"], "Persisted Study max_runs")
+        duration = value["max_time_seconds"]
+        if duration is not None and (
+            isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or not math.isfinite(duration)
+            or duration <= 0
+        ):
+            raise ValueError("Coordinator state has an invalid time budget; refusing restart.")
         if value["fleet"].get("fleet_version") != 1:
             raise ValueError("Unsupported persisted Fleet version; refusing restart.")
+        if value["coordinator_version"] == 1:
+            # The v1 foundation had no pause state. Its immutable identity/accounting is retained.
+            value.update(coordinator_version=2, lifecycle="running", lifecycle_history=[])
+        if value.get("lifecycle") not in {
+            "running",
+            "pausing",
+            "paused",
+            "resuming",
+        } or not isinstance(value.get("lifecycle_history"), list):
+            raise ValueError("Coordinator lifecycle is missing or corrupt; refusing restart.")
         return value
 
     def initialize(
@@ -208,11 +259,20 @@ class StudyCoordinator:
         *,
         max_runs: int | None = None,
         max_time_seconds: float | None = None,
+        created_at: float | None = None,
     ) -> None:
         """Create a new owned execution exactly once, or verify its immutable startup contract."""
         if not study_identity or not execution_id:
             raise ValueError("Coordinator requires exact Study and Execution identities.")
         positive_limit(max_runs, "Study max_runs")
+        if created_at is not None and (
+            isinstance(created_at, bool)
+            or not isinstance(created_at, (int, float))
+            or not math.isfinite(created_at)
+            or created_at < 0
+            or created_at > self.clock()
+        ):
+            raise ValueError("Adopted Study start time must be a finite original timestamp.")
         if max_time_seconds is not None and (
             not isinstance(max_time_seconds, (int, float))
             or isinstance(max_time_seconds, bool)
@@ -238,15 +298,19 @@ class StudyCoordinator:
                     max_time_seconds,
                 ):
                     raise ValueError("Restart cannot change Study/Execution identity or budgets.")
+                if created_at is not None and created_at != value["created_at"]:
+                    raise ValueError("Restart cannot reset the original Study clock.")
                 return
             atomic_write_json(
                 self.state_path,
                 {
-                    "coordinator_version": 1,
+                    "coordinator_version": 2,
                     "revision": 0,
                     "study_identity": study_identity,
                     "execution_id": execution_id,
-                    "created_at": self.clock(),
+                    "created_at": self.clock() if created_at is None else created_at,
+                    "lifecycle": "running",
+                    "lifecycle_history": [],
                     "fleet": fleet.to_dict(),
                     "members": {
                         member.cluster: {
@@ -268,6 +332,54 @@ class StudyCoordinator:
                 },
             )
 
+    def request_pause(self, *, reason: str = "operator requested continuation-safe pause") -> str:
+        """Freeze new dispatch, drain owned work and continue accepting terminal evidence.
+
+        This conservative pause does not kill or assume death of any worker. Unknown remote
+        ownership keeps PAUSING until reconciled. Proven unsubmitted leases remain intact for
+        resume; neither seeds, result blobs nor the immutable budget clock are reset.
+        """
+        with self._transaction() as value:
+            if value["lifecycle"] in {"running", "resuming"}:
+                value["lifecycle"] = "pausing"
+                value["lifecycle_history"].append(
+                    {"state": "pausing", "at": self.clock(), "reason": reason}
+                )
+        return str(self.snapshot()["state"])
+
+    def begin_resume(self) -> None:
+        """Persist resumption intent; the driver must reconcile before activating placement."""
+        with self._transaction() as value:
+            if value["lifecycle"] not in {"paused", "resuming"}:
+                raise ValueError("Only a reconciled paused Study can resume.")
+            if value["lifecycle"] == "paused":
+                value["lifecycle"] = "resuming"
+                value["lifecycle_history"].append({"state": "resuming", "at": self.clock()})
+
+    def finish_resume(self) -> None:
+        """Activate dispatch without modifying evidence, pending identities or spent budgets."""
+        with self._transaction() as value:
+            if value["lifecycle"] != "resuming":
+                raise ValueError("Resume must first persist its intent and reconcile ownership.")
+            value["lifecycle"] = "running"
+            value["lifecycle_history"].append({"state": "running", "at": self.clock()})
+
+    def run_records(self) -> tuple[dict[str, Any], ...]:
+        """Explicit driver/detail read, never part of the bounded overview snapshot."""
+        with self._lock():
+            return tuple({"run_key": key, **record} for key, record in self._read()["runs"].items())
+
+    def unsubmitted_shards(self) -> tuple[StudyShard, ...]:
+        """Recover only proven pre-submit leases; ambiguous acceptance is never resubmitted."""
+        with self._lock():
+            value = self._read()
+            return tuple(
+                self._shard(shard["definition"])
+                for shard in value["shards"].values()
+                if shard["job_id"] is None
+                and all(value["runs"][key]["state"] == "leased" for key in shard["run_keys"])
+            )
+
     def enqueue(self, runs: Sequence[GlobalRun]) -> None:
         """Idempotently accept planner decisions; a same key/different definition is an error."""
         with self._transaction() as value:
@@ -281,6 +393,10 @@ class StudyCoordinator:
                             "A logical Run identity cannot acquire a different definition."
                         )
                     continue
+                if value["lifecycle"] != "running":
+                    raise ValueError(
+                        "Paused/pausing Studies cannot accept new scientific proposals."
+                    )
                 value["runs"][run.key] = {
                     "definition": run.to_dict(),
                     "state": "planned",
@@ -299,6 +415,23 @@ class StudyCoordinator:
                 return False
             record.update(state="cancelled", withdrawal={"reason": reason, "at": self.clock()})
             return True
+
+    def withdraw_planned(self, run_keys: Sequence[str], *, reason: str) -> None:
+        """Apply the scientific planner's queue replacement, never revoke an owned worker.
+
+        Unlike an operator's predictive cancellation, the planner may end an unstarted required
+        block when its time budget expires or another required cell fails. This is a withdrawal,
+        not fabricated completed evidence. Validate the whole change before applying any part.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Planner withdrawal requires an explicit reason.")
+        with self._transaction() as value:
+            if any(value["runs"][key]["state"] != "planned" for key in run_keys):
+                raise ValueError("Planner cannot withdraw a leased or terminal Run.")
+            for key in run_keys:
+                value["runs"][key].update(
+                    state="cancelled", withdrawal={"reason": reason, "at": self.clock()}
+                )
 
     def set_member_state(self, cluster: str, state: ClusterHealth) -> None:
         if state not in {ClusterHealth.ONLINE, ClusterHealth.DRAINING, ClusterHealth.DISABLED}:
@@ -343,9 +476,12 @@ class StudyCoordinator:
         }
 
     @staticmethod
-    def _shard_active(value: Mapping[str, Any], shard_id: str) -> bool:
+    def _shard_active(
+        value: Mapping[str, Any], shard_id: str, *, submitted_only: bool = False
+    ) -> bool:
         return any(
             value["runs"][key]["state"] in _ACTIVE
+            and (not submitted_only or value["runs"][key]["state"] != "leased")
             and value["runs"][key]["attempts"][-1]["shard_id"] == shard_id
             for key in value["shards"][shard_id]["run_keys"]
         )
@@ -363,6 +499,9 @@ class StudyCoordinator:
         broker = GlobalPlacementBroker()
         with self._transaction() as value:
             now = self.clock()
+            if value["lifecycle"] != "running":
+                value["idle_reasons"] = {"study": [f"study-{value['lifecycle']}"]}
+                return ()
             if (
                 value["max_time_seconds"] is not None
                 and now - value["created_at"] >= value["max_time_seconds"]
@@ -491,6 +630,14 @@ class StudyCoordinator:
                 raise ValueError("Shard does not match its durable lease record.")
             if persisted["job_id"] is not None:
                 return str(persisted["job_id"])
+            if value["lifecycle"] != "running":
+                return None
+            if (
+                value["max_time_seconds"] is not None
+                and self.clock() - value["created_at"] >= value["max_time_seconds"]
+            ):
+                value["idle_reasons"] = {"study": ["time-budget-exhausted"]}
+                return None
             if any(value["runs"][lease.run.key]["state"] != "leased" for lease in shard.leases):
                 raise RuntimeError("Ambiguous shard submission must be reconciled, not repeated.")
             if value["members"][shard.cluster]["state"] != "online":
@@ -562,24 +709,15 @@ class StudyCoordinator:
             member["retry_at"] = self.clock() + min(300, 2 ** min(member["failures"], 8))
             member["reason"] = reason
             for record in value["runs"].values():
-                if record["state"] in _ACTIVE and record["attempts"][-1]["cluster"] == cluster:
+                if record["state"] in {"queued", "running", "unknown_remote"} and (
+                    record["attempts"][-1]["cluster"] == cluster
+                ):
                     record["state"] = "unknown_remote"
                     record["attempts"][-1]["state"] = "unknown_remote"
 
     @staticmethod
     def _shard(value: Mapping[str, Any]) -> StudyShard:
-        if value.get("shard_version") != 1:
-            raise ValueError("Unsupported persisted shard version.")
-        return StudyShard(
-            value["shard_id"],
-            value["study_identity"],
-            value["cluster"],
-            tuple(
-                RunLease(GlobalRun.from_mapping(item["run"]), item["attempt"], item["lease_id"])
-                for item in value["leases"]
-            ),
-            FleetMember.from_mapping(value["member"]),
-        )
+        return StudyShard.from_mapping(value)
 
     def reconcile(self, cluster: str, executor: ShardExecutor) -> dict[str, int]:
         """Ask the existing local authority; only a positively LOST Attempt becomes retryable."""
@@ -588,8 +726,13 @@ class StudyCoordinator:
             selected = [
                 (self._shard(shard["definition"]), shard["job_id"])
                 for shard_id, shard in value["shards"].items()
-                if shard["cluster"] == cluster and self._shard_active(value, shard_id)
+                if shard["cluster"] == cluster
+                and self._shard_active(value, shard_id, submitted_only=True)
             ]
+        if not selected:
+            # A never-submitted lease needs no remote observation. Likewise an empty registry
+            # is not evidence that an unreachable member has become healthy again.
+            return {}
         counts: Counter[str] = Counter()
         try:
             for shard, job_id in selected:
@@ -771,6 +914,19 @@ class StudyCoordinator:
                 "revision": value["revision"],
                 "study_identity": value["study_identity"],
                 "execution_id": value["execution_id"],
+                "state": value["lifecycle"],
+                "created_at": value["created_at"],
+                "elapsed_seconds": max(0.0, self.clock() - value["created_at"]),
+                "remaining_runs": (
+                    None
+                    if value["max_runs"] is None
+                    else max(0, value["max_runs"] - value["attempts_reserved"])
+                ),
+                "remaining_seconds": (
+                    None
+                    if value["max_time_seconds"] is None
+                    else max(0.0, value["max_time_seconds"] - (self.clock() - value["created_at"]))
+                ),
                 "fleet": value["fleet"]["name"],
                 "members": value["members"],
                 "counts": dict(Counter(record["state"] for record in value["runs"].values())),
