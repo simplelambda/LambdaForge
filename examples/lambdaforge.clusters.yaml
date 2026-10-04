@@ -62,3 +62,9 @@ profiles:
       gpus: 1
       gpu_memory: 20GiB
       time: 4h
+fleets:
+  # Operational discovery only; coordinated Work dispatch is not enabled yet.
+  atlas-research:
+    coordinator: local
+    members:
+      - {cluster: atlas, max_gpus: 2, max_inflight_jobs: 2, required: false}

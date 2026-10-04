@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import lambdaforge
+from lambdaforge._version import VERSION
 from lambdaforge.cli.parser import build_parser
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 
@@ -18,8 +19,8 @@ def test_version_and_minimal_public_api_are_consistent() -> None:
     source = (ROOT / "src/lambdaforge/_version.py").read_text(encoding="utf-8")
     version = re.search(r'^VERSION = "([^"]+)"$', source, re.MULTILINE)
     assert version is not None
-    assert version.group(1) == LambdaForgeVersion.CURRENT == "0.16.0"
-    assert lambdaforge.__version__ == "0.16.0"
+    assert version.group(1) == LambdaForgeVersion.CURRENT == VERSION
+    assert lambdaforge.__version__ == VERSION
     assert lambdaforge.__all__ == ["Work", "__version__", "clustering"]
 
 
@@ -30,7 +31,7 @@ def test_cli_reports_version_and_accepts_only_current_execution_route(
     with pytest.raises(SystemExit) as exit_info:
         parser.parse_args(["--version"])
     assert exit_info.value.code == 0
-    assert capsys.readouterr().out.strip() == "lf 0.16.0"
+    assert capsys.readouterr().out.strip() == f"lf {VERSION}"
     assert parser.parse_args(["run", "study.yaml"]).command == "run"
     clear = parser.parse_args(["jobs", "clear", "--apply"])
     assert clear.job_command == "clear" and clear.apply is True
@@ -44,3 +45,15 @@ def test_cli_reports_version_and_accepts_only_current_execution_route(
     assert export.command == "export" and export.selector == "study"
     with pytest.raises(ValueError):
         parser.parse_args(["datasets", "build", "old.yaml"])
+
+
+@pytest.mark.parametrize("suffix", ["", ".es"])
+def test_current_release_documentation_is_consistent(suffix: str) -> None:
+    readme = (ROOT / f"README{suffix}.md").read_text(encoding="utf-8")
+    pins = re.findall(r"lambdaforge(?:\[[^\]]+\])?==([\d.]+)", readme)
+    assert pins and all(pin == VERSION for pin in pins)
+    assert f"LambdaForge {VERSION}" in (ROOT / f"AGENTS{suffix}.md").read_text(encoding="utf-8")
+    minor = ".".join(VERSION.split(".")[:2])
+    manual_title = (ROOT / f"docs/MANUAL{suffix}.md").read_text(encoding="utf-8").splitlines()[0]
+    assert f"LambdaForge {minor}" in manual_title
+    assert f"## [{VERSION}] - " in (ROOT / f"CHANGELOG{suffix}.md").read_text(encoding="utf-8")

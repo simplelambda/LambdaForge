@@ -1,6 +1,6 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.16.0. Spanish is
+This is the low-token source of truth for agents using or modifying LambdaForge 0.17.0. Spanish is
 in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
 then inspect the public signature or implementation being changed. Current tests and code override
 assumptions.
@@ -642,6 +642,16 @@ DatasetArtifact v2/index/registry format. There is no dataset-build execution pr
 manifest reads and immutable name/version conflict checks.
 
 ## Control-plane invariants
+
+Coordinated Fleet execution is under implementation, NOT a supported `run --on-fleet` route.
+`Fleet`, executor-attested `ClusterOffer`, `GlobalPlacementBroker` and `StudyCoordinator` provide
+tested ownership/persistence contracts. Never reinterpret independent JobGroups as coordinated
+Studies or instantiate another HPO controller on workers. `lf fleets list/show/offers` inspect
+catalogs/resources; `drain/disable/enable` preview/apply catalog controls only, not running production
+Studies. Physical ResourceService observations do not grant dispatch capacity. Transport loss
+preserves leases as unknown; positive owned-Attempt loss proof is mandatory before bounded retry.
+Remaining runner/provider/predictive/decision/TUI integration: `docs/COORDINATED_STUDIES.md`.
+Do not claim end-to-end execution from fake tests.
 
 Keep `Transport` and `Scheduler` provider boundaries. OpenSSH multiplexing reuses a private
 ControlMaster for its configured idle period. Credentials stay in interactive/keyring/env sources

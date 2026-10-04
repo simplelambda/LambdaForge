@@ -14,6 +14,7 @@ import yaml
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.ExecutionProfile import ExecutionProfile
+from lambdaforge.controlplane.Fleet import Fleet
 from lambdaforge.ProjectContext import ProjectContext
 
 
@@ -28,10 +29,12 @@ class ClusterCatalog:
         sources: Mapping[str, Path | None] | None = None,
         shadowed_sources: Mapping[str, tuple[Path, ...]] | None = None,
         project: ProjectContext | None = None,
+        fleets: Mapping[str, Fleet] | None = None,
     ) -> None:
         self._profiles = dict(profiles)
         self.project = project
         self._execution_profiles = dict(execution_profiles or {})
+        self._fleets = dict(fleets or {})
         self._sources = dict(sources or {})
         self._shadowed_sources = dict(shadowed_sources or {})
 
@@ -57,6 +60,7 @@ class ClusterCatalog:
         }
         descriptors: dict[str, dict[str, Any]] = {}
         execution_profiles: dict[str, ExecutionProfile] = {}
+        fleets: dict[str, Fleet] = {}
         sources: dict[str, Path | None] = {"local": None}
         shadowed: dict[str, list[Path]] = {}
         for source in unique:
@@ -83,13 +87,58 @@ class ClusterCatalog:
                 if not isinstance(descriptor, Mapping):
                     raise TypeError(f"Execution profile {name!r} in {source} must be a mapping.")
                 execution_profiles[str(name)] = ExecutionProfile.from_mapping(str(name), descriptor)
+            raw_fleets = value.get("fleets", {})
+            if not isinstance(raw_fleets, Mapping):
+                raise TypeError(f"Cluster catalog fleets in {source} must be a mapping.")
+            for name, descriptor in raw_fleets.items():
+                if not isinstance(descriptor, Mapping):
+                    raise TypeError(f"Fleet {name!r} in {source} must be a mapping.")
+                # Replace a fleet atomically rather than recursively merging membership lists.
+                fleets[str(name)] = Fleet.from_mapping(str(name), descriptor)
+        for fleet in fleets.values():
+            for cluster in (fleet.coordinator, *(member.cluster for member in fleet.members)):
+                if cluster not in profiles:
+                    raise ValueError(
+                        f"Fleet {fleet.name!r} references unknown cluster {cluster!r}."
+                    )
         return cls(
             profiles,
             execution_profiles,
             sources=sources,
             shadowed_sources={key: tuple(values) for key, values in shadowed.items()},
             project=project,
+            fleets=fleets,
         )
+
+    def fleet_names(self) -> tuple[str, ...]:
+        """Return fleet names without conflating independent execution profiles/groups."""
+        return tuple(sorted(self._fleets))
+
+    def fleet(self, name: str) -> Fleet:
+        try:
+            return self._fleets[name]
+        except KeyError as error:
+            raise KeyError(f"Unknown fleet {name!r}; configured: {self.fleet_names()}.") from error
+
+    @staticmethod
+    def add_fleet(path: str | Path, fleet: Fleet) -> Path:
+        """Persist an operational fleet alongside cluster profiles, without scientific YAML."""
+        destination = Path(path).expanduser().resolve()
+        loaded = (
+            yaml.safe_load(destination.read_text(encoding="utf-8")) if destination.is_file() else {}
+        )
+        if loaded is not None and not isinstance(loaded, Mapping):
+            raise TypeError("Cluster catalog must contain a mapping.")
+        value = dict(loaded or {})
+        value.setdefault("clusters", {})
+        descriptors = value.setdefault("fleets", {})
+        if not isinstance(descriptors, dict):
+            raise TypeError("Cluster catalog fleets must be a mapping.")
+        descriptor = fleet.to_dict()
+        descriptor.pop("name")
+        descriptor.pop("fleet_version")
+        descriptors[fleet.name] = descriptor
+        return ClusterCatalog._write(destination, value)
 
     @staticmethod
     def _merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:

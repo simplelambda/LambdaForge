@@ -51,6 +51,30 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("--format", choices=("human", "json", "yaml"), default="human")
     resolve.add_argument("--json", action="store_true")
 
+    fleets = commands.add_parser("fleets", help="Inspect operational cluster fleets.")
+    fleets.add_argument("--catalog", type=Path)
+    fleet_commands = fleets.add_subparsers(dest="fleet_command", required=True)
+    fleet_list = fleet_commands.add_parser("list", help="List configured fleets, without probing.")
+    fleet_list.add_argument("--json", action="store_true")
+    for name in ("show", "offers"):
+        fleet_item = fleet_commands.add_parser(
+            name,
+            help="Show fleet configuration."
+            if name == "show"
+            else "Observe member resources; not a GPU grant.",
+        )
+        fleet_item.add_argument("name")
+        fleet_item.add_argument("--json", action="store_true")
+    for name, state in (("drain", "draining"), ("disable", "disabled"), ("enable", "online")):
+        fleet_item = fleet_commands.add_parser(
+            name, help="Change new-work eligibility; never stop active Jobs."
+        )
+        fleet_item.add_argument("name")
+        fleet_item.add_argument("cluster")
+        fleet_item.add_argument("--apply", action="store_true")
+        fleet_item.add_argument("--json", action="store_true")
+        fleet_item.set_defaults(member_state=state)
+
     init = commands.add_parser("init", help="Create an installable Work project.")
     init.add_argument("directory", type=Path)
     init.add_argument("--force", action="store_true")

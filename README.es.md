@@ -27,7 +27,7 @@ proyecto:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.16.0
+python -m pip install lambdaforge==0.17.0
 python -m pip install -e .
 python -m pip check
 ```
@@ -43,6 +43,12 @@ lf help
 lf run --help
 lf help clusters add
 ```
+
+`lf fleets list/show/offers` inspecciona flotas operacionales; `drain/disable/enable` hace preview
+y requiere `--apply` para guardar cambios de catálogo. La ejecución coordinada **aún no está
+habilitada**: la base probada de leases/reconciliación y los pendientes están en
+[Studies coordinados](docs/COORDINATED_STUDIES.es.md). Los envíos independientes siguen siendo
+Studies separados, no un HPO compartido.
 
 Ejecuta `lf` sin argumentos en una terminal interactiva para abrir la Consola de investigación. Su
 pantalla Clusters crea y edita perfiles con ayuda contextual, credenciales seguras y pasos
@@ -295,7 +301,7 @@ produce un error claro. La ruta y la versión consultada se registran una sola v
 ## Clustering
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.16.0"
+python -m pip install "lambdaforge[clustering]==0.17.0"
 ```
 
 ```python
@@ -1077,7 +1083,7 @@ y atómico. También puede calcularse o actualizarse expresamente:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.16.0"
+python -m pip install "lambdaforge[analysis-report]==0.17.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json

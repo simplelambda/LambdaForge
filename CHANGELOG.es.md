@@ -9,6 +9,18 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+## [0.17.0] - 2026-10-04
+
+### Añadido
+
+- Catálogos Fleet y controles preview-first. Base operacional probada para Study coordinado:
+  leases exactas por Run/Attempt, placement seguro, reconciliación tras partición/reinicio e
+  ingestión idempotente con cuarentena de contradicciones. Aún no está conectada a ejecución Work
+  ni HPO predictive: el documento bilingüe de estado detalla los pendientes. No cambia ejecución
+  en un cluster ni envíos independientes.
+  Una prueba interna de shard CPU fresco reutiliza el dispatcher nativo con invocaciones exactas y
+  resultados durables; quedan pendientes integración pública de proveedores, GPU y recovery.
+
 ### Corregido
 
 - Rediseñado el HTML offline de Study con Overview inicial, estados exactos, importancia condicional

@@ -29,7 +29,7 @@ projects, or an editable checkout while developing LambdaForge:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.16.0
+python -m pip install lambdaforge==0.17.0
 python -m pip install -e .
 python -m pip check
 lf --version
@@ -49,6 +49,12 @@ lf help
 lf run --help
 lf help clusters add
 ```
+
+Operational fleets can be inspected with `lf fleets list/show/offers`; `drain/disable/enable`
+preview catalog changes and require `--apply` to save. Coordinated execution is **not yet enabled**:
+the tested lease/reconciliation foundation and remaining work are documented in
+[Coordinated Studies](docs/COORDINATED_STUDIES.md). Independent cluster submissions remain separate
+Studies, not shared HPO.
 
 Run bare `lf` in an interactive terminal to open the Research Console. Its Clusters screen adds and
 edits profiles with contextual explanations, secure credential handling and explicit test,
@@ -336,7 +342,7 @@ version probes live once in `environment.json`.
 Install the optional mature backend and use the uniform Python contract:
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.16.0"
+python -m pip install "lambdaforge[clustering]==0.17.0"
 ```
 
 ```python
@@ -1164,7 +1170,7 @@ can be run or refreshed explicitly:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.16.0"
+python -m pip install "lambdaforge[analysis-report]==0.17.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json

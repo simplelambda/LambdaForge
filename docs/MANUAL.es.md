@@ -1,4 +1,4 @@
-# Manual de LambdaForge 0.16
+# Manual de LambdaForge 0.17
 
 [English](MANUAL.md) · Español
 
@@ -1300,6 +1300,12 @@ u omitida con motivo, bytes originales y SHA-256, evitando confundir compacidad 
 desconocida.
 
 ## 10. Clústeres y Jobs
+
+Inspección Fleet: `lf fleets list/show/offers`; controles de catálogo:
+`lf fleets drain/disable/enable FLEET CLUSTER [--apply]`. Observar no concede GPUs y estas acciones
+nunca detienen Jobs activos. La base de propiedad de Study coordinado está probada, pero aún no
+están habilitados `run --on-fleet`, workers reales ni integración HPO/TUI global. Consulta
+[estado y contratos de implementación](COORDINATED_STUDIES.es.md) antes de usar fleets.
 
 Un usuario configura el perfil en `lf` → Clusters. Primero aparecen campos comunes y cada opción
 enfocada explica significado/riesgo; SSH, entorno, rutas y política GPU avanzados quedan ocultos

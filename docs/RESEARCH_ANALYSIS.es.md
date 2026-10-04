@@ -2,6 +2,9 @@
 
 [English](RESEARCH_ANALYSIS.md) · [Manual](MANUAL.es.md#16-análisis-de-estudios)
 
+Versión actual de la aplicación: **0.17.0**. Análisis v8 y vistas guardadas v1 siguen compatibles;
+los informes siguientes conservan el contexto histórico de su implementación.
+
 ## Índice
 
 1. [Abrir el espacio](#1-abrir-el-espacio)
@@ -310,7 +313,7 @@ Este informe recoge la implementación y verificación local del 2026-10-03.
     instalada con CLI/scaffold/validación/HTML e interacción/capturas Chromium. Matriz sintética de
     500 candidatos, 300 métricas, 15 parámetros y 15 seeds: **9,424 s**, **4.809.115 bytes** y solo
     32 relaciones con remuestreo costoso por defecto. El tiempo depende de la máquina.
-23. **Versiones/esquema:** release continúa en **0.16.0**; documento de análisis pasa a **8**;
+23. **Versiones/esquema al implementar:** release era **0.16.0**; documento de análisis pasó a **8**;
     documentos research/semánticos comienzan en **1**. YAML añade declaraciones explícitas opcionales.
 24. **Evidencia anterior:** no exige declaraciones; ausencia de semántica se infiere explícitamente.
     Se conservan campos científicos. HTML legado obtiene navegación, no hallazgos inventados.
@@ -375,7 +378,7 @@ La [guía de Studies condicionales](CONDITIONAL_STUDIES.es.md) contiene gramáti
     construir Work. Semántica arbitraria necesita validación del consumidor; no era necesario crear
     otro contrato de callbacks para este cambio focalizado.
 22. **Esquema/versión:** condiciones y label/priority opcionales añadidos; se rechaza política raíz
-    sin efecto. Release sigue en 0.16.0; análisis v8 y vistas v1 compatibles. Sin otra versión YAML,
+    sin efecto. Implementado sobre 0.16.0; análisis v8 y vistas v1 compatibles. Sin otra versión YAML,
     runner, política científica o DSL paralela de condiciones.
 23. **Compatibilidad:** no se reescribe evidencia histórica congelada. Identidad escalar, seeds,
     objetivo/HPO/recursos, retry/export y HTML/vistas antiguos se conservan. Las condiciones viajan

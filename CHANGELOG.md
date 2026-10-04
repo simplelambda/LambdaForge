@@ -10,6 +10,18 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-04
+
+### Added
+
+- Operational Fleet catalogs and preview-first discovery/member controls. Add a tested durable
+  coordinated-Study ownership foundation: exact Run/Attempt leases, fail-closed placement,
+  network-partition/restart reconciliation and idempotent/quarantined evidence ingestion.
+  This is not yet connected to Work execution or predictive HPO; see the bilingual implementation
+  status document. Single-cluster and independent multi-cluster behavior is unchanged.
+  An internal fresh CPU-shard test reuses the native isolated dispatcher with exact prepared
+  invocations and durable outcomes; public provider/GPU/recovery integration remains pending.
+
 ### Fixed
 
 - Rework the offline Study HTML around Overview: exact candidate states, conditional-importance

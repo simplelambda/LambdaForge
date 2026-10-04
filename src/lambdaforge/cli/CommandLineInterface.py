@@ -170,6 +170,10 @@ class CommandLineInterface:
             return 0
         if arguments.command == "clusters":
             return run_cluster_command(arguments)
+        if arguments.command == "fleets":
+            from lambdaforge.cli.fleets import run_fleet_command
+
+            return run_fleet_command(arguments)
         if arguments.command == "jobs":
             return run_job_command(arguments)
         if arguments.command == "datasets":

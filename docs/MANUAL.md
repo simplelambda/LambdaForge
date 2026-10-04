@@ -1,4 +1,4 @@
-# LambdaForge 0.16 manual
+# LambdaForge 0.17 manual
 
 ## Contents
 
@@ -1476,6 +1476,12 @@ metric/resource streams. `manifest.json` lists every transformed or omitted sour
 original byte count and SHA-256, so compactness cannot be mistaken for missing evidence.
 
 ## 10. Clusters and jobs
+
+Fleet discovery: `lf fleets list/show/offers`; operator catalog controls:
+`lf fleets drain/disable/enable FLEET CLUSTER [--apply]`. Observations do not grant GPUs and these
+controls never stop active Jobs. The coordinated Study ownership foundation is tested, but
+`run --on-fleet`, actual shard workers and global HPO/TUI integration are not enabled yet.
+See [implementation status and contracts](COORDINATED_STUDIES.md) before using fleets.
 
 Humans configure the same profile in bare `lf` → Clusters. Common fields appear first and focused
 options provide contextual meaning/risk; advanced SSH, environment, path and GPU policy fields stay

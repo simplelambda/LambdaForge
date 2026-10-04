@@ -1,6 +1,6 @@
 # Guía de LambdaForge para agentes
 
-Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.16.0. Consulta solo la
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.17.0. Consulta solo la
 sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
 
 ## Arquitectura no negociable
@@ -531,6 +531,16 @@ configurarse con `LightningTrainConfig.epoch_metric_display_names`, y la UI nunc
 separada.
 
 ## Identidad y aislamiento por proyecto
+
+La ejecución Fleet coordinada está en implementación: NO existe aún `run --on-fleet` soportado.
+`Fleet`, `ClusterOffer` acreditada localmente, `GlobalPlacementBroker` y `StudyCoordinator`
+implementan contratos probados de propiedad/persistencia. Nunca reinterpretar JobGroups
+independientes como HPO coordinado ni crear otro optimizer en los workers. `lf fleets
+list/show/offers` inspecciona; `drain/disable/enable` preview/apply cambia el catálogo, no Studies
+de producción activos. Observar recursos físicos no concede capacidad. Perder conexión conserva
+leases desconocidas; retry requiere prueba positiva de pérdida del Attempt propio. Pendientes
+runner/proveedores/predictive/decisiones/TUI: `docs/COORDINATED_STUDIES.es.md`. Pruebas fake no
+demuestran ejecución end-to-end.
 
 El `pyproject.toml` más cercano, no el entorno virtual activo, selecciona `ProjectContext`.
 `[tool.lambdaforge].project_id` es un ID estable opcional de 1–80 caracteres; si falta se deriva de

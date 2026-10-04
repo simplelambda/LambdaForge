@@ -2,6 +2,9 @@
 
 [Español](RESEARCH_ANALYSIS.es.md) · [Manual](MANUAL.md#16-study-analysis)
 
+Current application release: **0.17.0**. Analysis v8 and saved-view v1 remain compatible; the
+implementation reports below retain their historical release context.
+
 ## Contents
 
 1. [Open a workspace](#1-open-a-workspace)
@@ -313,7 +316,7 @@ This report records the implementation and local verification on 2026-10-03.
     validation/HTML smoke and Chromium interaction/screenshots passed. A synthetic 500-candidate,
     300-metric, 15-parameter, 15-seed matrix took **9.424 s**, produced **4,809,115 bytes** and used
     only 32 expensive relationship resamples with default policy. Timing is machine-specific.
-23. **Versions/schema:** application release stays **0.16.0**; analysis document becomes **8**;
+23. **Versions/schema at implementation:** application release was **0.16.0**; analysis became **8**;
     research/semantic documents start at **1**. YAML schema adds optional explicit analysis shapes.
 24. **Older evidence:** no declaration is required; missing semantics are explicitly inferred.
     Existing scientific fields remain. Legacy HTML inputs get navigation but no fabricated findings.
@@ -378,7 +381,7 @@ The [conditional Study guide](CONDITIONAL_STUDIES.md) includes grammar and plann
     constructing Work. Arbitrary consumer semantics need consumer validation; a new callback contract
     was not necessary for these focused changes.
 22. **Schema/version:** additive activation definitions and question label/priority, and rejection of
-    unused composition-root policy. Release stays 0.16.0, analysis v8 and saved-view v1 remain compatible.
+    unused composition-root policy. Implemented against 0.16.0; analysis v8 and saved-view v1 remain compatible.
     No new YAML version, runner, scientific policy or parallel condition DSL.
 23. **Compatibility:** frozen historical evidence is not rewritten; scalar identity, shared seeds,
     objective/HPO/resource policies, retry/export and old HTML/saved views remain intact. Conditions

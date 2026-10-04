@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from lambdaforge import Work
+from lambdaforge._version import VERSION
 from lambdaforge.configuration.ConfigurationDescriptor import ConfigurationDescriptor
 from lambdaforge.work import ResultStore, WorkConfig, WorkRunner
 
@@ -166,7 +167,7 @@ def test_runtime_outputs_metrics_inputs_and_immutable_views(tmp_path: Path) -> N
         "name": "work-test-project",
         "version": "1.2.3",
     }
-    assert execution["lambdaforge_version"] == "0.16.0"
+    assert execution["lambdaforge_version"] == VERSION
     with pytest.raises(TypeError):
         config.raw["name"] = "changed"  # type: ignore[index]
 
