@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,18 @@ class WorkService:
         reconciled: list[dict[str, Any]] = []
         terminal: list[dict[str, str]] = []
         failures: list[dict[str, str]] = []
-        for job_id in work.job_ids:
+
+        # Stop the coordinator FIRST, freezing new member creation before enumerating owners.
+        def targets() -> Iterator[str]:
+            yield from work.job_ids
+            yield from (
+                record.job_id
+                for record in self.jobs.list(refresh=False)
+                if record.metadata.get("fleet_role") == "member"
+                and record.metadata.get("fleet_parent_job") in work.job_ids
+            )
+
+        for job_id in targets():
             try:
                 record = self.jobs.get(job_id)
                 reconcilable = (
@@ -108,7 +120,13 @@ class WorkService:
                 "applied": apply,
                 "already_deleted": True,
             }
-        records = tuple(self.jobs.get(job_id) for job_id in work.job_ids)
+        members = tuple(
+            record.job_id
+            for record in self.jobs.list(refresh=False)
+            if record.metadata.get("fleet_role") == "member"
+            and record.metadata.get("fleet_parent_job") in work.job_ids
+        )
+        records = tuple(self.jobs.get(job_id) for job_id in (*work.job_ids, *members))
         unknown = tuple(record for record in records if record.state.value == "unknown")
         active = tuple(
             record.job_id
@@ -190,6 +208,11 @@ class WorkService:
         """Delete one terminal Job's exact workspace and local history record."""
         job_id = self.jobs.resolve_selector(selector)
         record = self.jobs.get(job_id)
+        if self.jobs.recovery_dependents(job_id):
+            raise ValueError(
+                "Another Study/Fleet owner references this Job; delete the semantic family "
+                "instead. No workspace was removed."
+            )
         unknown = record.state.value == "unknown"
         if not record.state.terminal and not unknown:
             raise ValueError(f"Cannot delete active job {job_id}; cancel it first.")

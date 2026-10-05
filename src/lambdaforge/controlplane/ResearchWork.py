@@ -111,8 +111,6 @@ class ResearchWork:
 
 def study_overview(value: Mapping[str, Any]) -> dict[str, Any]:
     """Project full Study telemetry onto the fields required by collection views."""
-    if value.get("detail_level") == "overview":
-        return copy.deepcopy(dict(value))
     objective = value.get("objective")
     objective = dict(objective) if isinstance(objective, Mapping) else {}
     candidates = value.get("candidates", ())
@@ -132,12 +130,16 @@ def study_overview(value: Mapping[str, Any]) -> dict[str, Any]:
             and (not partial_only or item.get("selection_objective") is None)
         ]
         if not comparable:
+            if value.get("detail_level") == "overview":
+                previous = value.get("partial_leader" if partial_only else "leader")
+                if isinstance(previous, Mapping):
+                    return {
+                        key: copy.deepcopy(previous[key])
+                        for key in ("trial", "value", "field")
+                        if key in previous
+                    }
             return None
-        selected = sorted(
-            comparable,
-            key=lambda item: float(item[field]),
-            reverse=mode == "max",
-        )[0]
+        selected = (max if mode == "max" else min)(comparable, key=lambda item: float(item[field]))
         return {
             "trial": selected.get("trial"),
             "value": selected.get(field),
@@ -170,7 +172,19 @@ def study_overview(value: Mapping[str, Any]) -> dict[str, Any]:
         "counts": copy.deepcopy(dict(counts)) if isinstance(counts, Mapping) else {},
         "cost": copy.deepcopy(dict(cost)) if isinstance(cost, Mapping) else {},
         "admission": {
-            "current": copy.deepcopy(dict(current_admission))
+            "current": {
+                key: copy.deepcopy(current_admission[key])
+                for key in (
+                    "status",
+                    "reason",
+                    "potential_slots",
+                    "gpu_count",
+                    "runs_per_gpu",
+                    "max_parallel",
+                    "limiting_resource",
+                )
+                if key in current_admission
+            }
             if isinstance(current_admission, Mapping)
             else None
         },
@@ -204,13 +218,16 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
     """Derive semantic work groups while leaving JobStore as the sole authority."""
     grouped: dict[tuple[str, str, str], list[JobRecord]] = defaultdict(list)
     for record in records:
+        if record.metadata.get("fleet_role") == "member":
+            continue
         identity_key = str(
             record.metadata.get("recovery_work_identity")
             or record.metadata.get("scientific_identity")
             or record.job_id
         )
         name = str(record.metadata.get("name") or record.config_path or record.job_id)
-        grouped[(identity_key, record.cluster, name)].append(record)
+        target = str(record.metadata.get("execution_target") or record.cluster)
+        grouped[(identity_key, target, name)].append(record)
     output = []
     for (identity_key, cluster, name), attempts in grouped.items():
         ordered = sorted(attempts, key=lambda value: value.created_at_utc)

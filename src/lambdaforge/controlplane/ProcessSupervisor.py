@@ -364,7 +364,9 @@ class ProcessSupervisor:
             state = cls._read_json(child / "state.json")
             request = cls._read_json(child / "request.json")
             if state and request and state.get("job_id") == child.name:
-                study = cls._read_json(child / "study" / "summary.json")
+                study = cls._read_json(child / "study" / "overview.json")
+                if study is None:
+                    study = cls._read_json(child / "study" / "summary.json")
                 if study is not None:
                     state = {**state, "study": study_overview(study)}
                 states.append({"state": state, "request": request})

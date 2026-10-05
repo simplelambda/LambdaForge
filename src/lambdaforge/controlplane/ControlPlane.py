@@ -120,9 +120,17 @@ class ControlPlane:
                 pytorch=TorchInstallationPolicy(profile.pytorch.channel, True),
             )
         if not dry_run and not allow_duplicate:
+            execution_target = cluster
+            if reserved_job_id is not None:
+                try:
+                    reserved = self.jobs.get(reserved_job_id, refresh=False)
+                except (KeyError, FileNotFoundError):
+                    pass  # Internal prepared callers may reserve only their provider identity.
+                else:
+                    execution_target = str(reserved.metadata.get("execution_target", cluster))
             self.jobs.refuse_active_execution(
                 descriptor.scientific_identity,
-                cluster,
+                execution_target,
                 name=descriptor.name,
                 source=descriptor.source,
                 exclude_job_id=reserved_job_id,

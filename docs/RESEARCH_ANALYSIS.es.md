@@ -212,9 +212,26 @@ tipo/paleta/filtros usan el mismo desplegable buscable. Nombre, notas y guardado
 - En **Parameters**, abre **Analyze metric**, busca `mean`, marca una métrica, busca `auroc` y
   marca otra sin cerrar el desplegable. La selección se conserva entre búsquedas; desmarcar elimina
   la curva y ninguna selección muestra un estado vacío explícito. Flechas navegan, Espacio marca,
-  Escape/Listo/clic exterior cierra. Las curvas comparten **un gráfico**: unidades declaradas iguales
-  comparten Y; distintas/desconocidas usan ejes Y independientes identificados. No compares alturas
-  entre esos ejes. Explore conserva gráficos separados por defecto y normalización visual opcional.
+  Escape/Listo/clic exterior cierra. **Estilo del gráfico** permite líneas/puntos, barras agrupadas,
+  distribuciones de candidatos por X o mapas de calor para muchas métricas. No hay sectores:
+  métricas independientes no son partes aditivas de un total. **Distribución** ofrece gráfico
+  combinado o un panel por métrica. **Escalas Y → Automáticas** agrupa rangos con al menos un 50%
+  de solapamiento del intervalo más estrecho (incluye contención), compatible entre todos los pares
+  del grupo. Una constante puede compartir un rango que la contenga. Nunca agrupa unidades conocidas
+  distintas; unidades desconocidas pueden compartir escala visual, no significado científico.
+  Puedes forzar escalas independientes o compartidas; los paneles separados respetan esa elección.
+  También hay puntos por Trial sin promediar, curvas escalonadas y áreas, violines con puntos reales,
+  barras horizontales, histogramas y CDF empíricas. Histogramas/CDF agrupan todos los resúmenes
+  candidatos coincidentes; cajas/violines permiten comparar valores exactos del parámetro.
+  Unir puntos es descriptivo, no un ajuste de respuesta. Los ejes automáticos muestran los nombres
+  de sus métricas, no números de escala anónimos.
+  No compares alturas entre ejes independientes. **Dispersión** permite ocultar desviación típica,
+  usar bigotes o banda ±SD en líneas con X numérico; otros estilos usan bigotes. Las distribuciones
+  ya muestran observaciones. La SD es entre candidatos, no confianza entre semillas, y falta para
+  una observación. El mapa normaliza colores por métrica (color neutro para constantes); el hover
+  muestra medias originales y lo no observado queda vacío. Los ajustes persisten en este HTML en
+  el navegador; regenerarlo los reinicia. Explore conserva gráficos separados por defecto y
+  normalización visual opcional.
   La selección no modifica agregación, objetivo ni respuesta modelada persistida.
 - Heatmaps/superficies numéricas observadas dejan vacías las combinaciones no probadas. Las
   superficies del surrogate permanecen separadas y etiquetadas. Scatter 3D admite categorías.
@@ -237,6 +254,44 @@ Guarda vistas con nombre y notas. Exporta/importa **research-views.json**, que t
 configuración visual, no evidencia. Se validan versión, campos, referencias, tamaño y cantidad.
 Las preferencias del mismo HTML conservan vistas, paletas, tamaños, favoritos y búsquedas;
 regenerarlo crea un ámbito nuevo. No hay servicios cloud ni LLM necesarios.
+
+### Pestañas HTML del proyecto
+
+La visualización de dominio pertenece al consumidor. Dentro de `Work.run`, declara un HTML
+gestionado y escribe el documento completo de tu aplicación:
+
+```python
+viewer = self.outputs.html_section("predictions", section="proteins", title="Proteins")
+viewer.write_text(render_predictions_html())
+```
+
+La acción HTML interactiva del Study, `lf results report SELECTOR --output report.html` y la
+exportación portable leen estos archivos solo bajo petición explícita. Una sección crea una pestaña
+junto a Explore/Evidence/Resources. Varios outputs o Runs comparten pestaña con selector buscable
+etiquetado por Trial/seed/output. Los títulos de una sección deben coincidir. Overview, HPO,
+paneles Analysis y sondeos ordinarios no descargan HTML. La lectura remota se pagina y cachea en
+su propio host, fuera del heartbeat del planificador.
+
+El documento es HTML UTF-8 autocontenido: incluye JavaScript/CSS, visualizaciones y datos de
+predicciones; no funcionan rutas relativas a recursos ni peticiones externas. LambdaForge no
+programa lógica de dominio, lee NPZ ni expone callbacks Python al navegador. Cada documento usa un
+iframe de origen opaco `sandbox="allow-scripts allow-downloads"` y CSP restrictiva; sus scripts no
+acceden al dashboard padre, archivos locales, otros sitios ni credenciales. Esto aísla presentación,
+no el Python confiable del Work. Dentro del iframe el HTML sigue siendo interactivo; preferencias
+y navegación del dashboard son independientes. Antes de incrustarlo se verifican ownership,
+tamaño exacto y fingerprint persistido. Symlinks, contenido ausente/modificado o exceso de límites
+(16 MiB/documento, 64 MiB/informe) dan error explícito, no pestañas vacías. Se usa el lifecycle y
+retención del output ordinario, sin otro registro, runner o sistema de plugins.
+
+También se pueden aportar documentos directamente sin ejecutar un Work:
+
+```python
+from lambdaforge.analysis.Report import write_html
+
+write_html(analysis, "report.html", sections=[
+    {"name": "proteins", "title": "Proteins", "label": "Trial 3 · seed 7", "html": html_text},
+])
+```
 
 ## 6. Arquitectura, seguridad y límites
 

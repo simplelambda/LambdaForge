@@ -45,14 +45,16 @@ lf help clusters add
 ```
 
 `lf fleets list/show/offers` inspecciona flotas operacionales; `drain/disable/enable` hace preview
-y requiere `--apply` para guardar cambios de catálogo. La ejecución coordinada **aún no está
-habilitada**: la base probada de leases/reconciliación y los pendientes están en
-[Studies coordinados](docs/COORDINATED_STUDIES.es.md). Los envíos independientes siguen siendo
-Studies separados, no un HPO compartido. La integración interna CPU preparada ya prueba Jobs
-directos reales y un análisis único; no habilita Fleet remoto/GPU ni pause/resume públicos.
-El ejecutor preparado común reutiliza la preparación ordinaria, verifica reubicación de inputs y
-expone observaciones remotas acotadas. Offers GPU de producción y streaming adaptativo siguen
-bloqueados; el documento de estado distingue fronteras probadas e integración pública pendiente.
+y requiere `--apply` para guardar cambios de catálogo. `lf run CONFIG --on-fleet NAME` lanza
+asíncronamente un Study adaptativo nuevo/fixed/repetido/pareado automático coordinado, con coordinador local y
+Jobs managed preparados por miembro. Run Work ofrece los mismos destinos Fleet. Las allocations
+propias proporcionan offers baseline CPU/GPU con caducidad y equivalencia exacta; un único planner
+y análisis final. Logs/curvas vivos y artifacts finalizados conservan su host; cancelación semántica
+abarca toda la familia propia. Streams nativos ordenados y poda central dirigida soportan HPO
+adaptativo nuevo. La ruta es limitada: continuación checkpoint/fidelity, co-location, recovery/
+adopción, expansión en vivo y export distribuido siguen bloqueados. Consulta
+[estado y fronteras probadas](docs/COORDINATED_STUDIES.es.md). Envíos independientes siguen siendo
+Studies separados, no HPO compartido.
 
 Ejecuta `lf` sin argumentos en una terminal interactiva para abrir la Consola de investigación. Su
 pantalla Clusters crea y edita perfiles con ayuda contextual, credenciales seguras y pasos
@@ -1010,16 +1012,23 @@ Las vistas de colección usan modelos de lectura deliberadamente ligeros. Overvi
 del inventario por proveedor directo —o solo del estado de Jobs activos si el scheduler no tiene
 inventario—, consulta los contadores del registro local de datasets y
 nunca transfiere los índices de candidatos/Runs de todos los Studies. Work y Studies tampoco
-sondean recursos ni datasets. Abrir un Study carga su índice acotado; el análisis HPO, el historial
-completo del controlador y los logs se solicitan solo al abrir sus pestañas. Curvas por epoch,
+sondean recursos ni datasets. Abrir un Study carga solo celdas de Trials y contadores agregados;
+parámetros/seeds se leen al abrir un Trial. HPO precomputado, Analysis agregado, recursos, historial
+completo y logs se solicitan solo cuando se necesitan. Curvas por epoch,
 artefactos y logs aislados se leen únicamente al entrar en una seed. `lf overview --json` conserva
 este contrato compacto; `lf show WORK` y `lf show WORK --run CLAVE --json` añaden los siguientes
 niveles de detalle. Si el proveedor no permite confirmar un Job más allá de `unknown`, el borrado
 ofrece una operación explícita solo sobre el historial local: no toca el proceso ni el workspace
 remotos no verificados. Si el cómputo aún puede estar activo, primero hay que reconectar y cancelarlo.
 El worker mantiene `study/interactive.json` como índice compacto separado del resumen rico
-autoritativo; los resúmenes legacy demasiado grandes se proyectan en el host de ejecución y el
-historial completo se descarga en páginas JSONL acotadas solo al abrir Action history. Los redraws
+autoritativo. Ficheros específicos de HPO/recursos/Trial evitan leer el resumen entero; el post-hoc
+provisional se cachea en un proceso de lectura separado en el host, nunca en el heartbeat HPO.
+Índices legacy ricos se proyectan en su host. Las lecturas de Study usan páginas de 512 KiB y
+conservan la geometría condicional persistida de sweeps, incluso con workers antiguos e inmutables.
+Contextos de respuesta ausentes indican evidencia insuficiente, no un Study fallido. Usan
+marcadores de snapshot sin cambios, sin rechazar totales válidos de más de 8 MiB. Vistas padre
+ocultas dejan de sondear. El historial completo se descarga en páginas JSONL acotadas solo al abrir
+Action history. Los redraws
 vivos conservan fila seleccionada, scroll de tablas/logs y viewport manual de cada gráfica.
 
 `LightningRunner` registra curvas escalares, `epoch_time_s`, `validation_time_s`, el pico de
@@ -1170,8 +1179,31 @@ El informe empieza en **Overview / Resumen**: estados y recuentos, contexto de s
 recomendadas sustituyen al gran score por candidato (opcional en Trials). La importancia condicional
 muestra rama/soporte/fiabilidad aparte, sin sugerir responsabilidad causal global. Interpretaciones y
 preguntas usan carruseles; hallazgos completos se paginan. Los controles son desplegables buscables,
-no modales. **Parameters** marca/desmarca curvas en un gráfico, con ejes independientes para unidades
-distintas/desconocidas. **ⓘ** explica cómo interpretarlo. La cabecera permite inglés/español y guarda
+no modales. **Parameters** marca/desmarca métricas y permite líneas, puntos, barras agrupadas,
+distribuciones o mapa de calor. Elige paneles combinados/separados, escalas automáticas por rangos
+solapados, compartidas o independientes, y SD oculta/bigotes/banda. Unidades conocidas distintas
+permanecen separadas automáticamente; agrupar unidades desconocidas es visual, no científico.
+También hay puntos individuales por Trial, líneas escalonadas/áreas, violines, barras horizontales,
+histogramas y distribuciones acumuladas empíricas. Cada eje indica qué métricas comparten su escala.
+Las distribuciones agrupan resúmenes de candidatos, no semillas independientes; cajas/violines
+comparan valores exactos del parámetro. El dashboard de Run añade distribuciones de epochs y estos
+estilos de curvas.
+
+El proyecto puede aportar pestañas HTML propias sin un plugin específico de dominio:
+
+```python
+viewer = self.outputs.html_section("proteins", title="Proteins")
+viewer.write_text(project_generated_html)  # Incluye scripts, datos y recursos del propio proyecto.
+```
+
+**Interactive Study report**, `lf results report` y la exportación portable integran los documentos
+declarados y finalizados. Trials/seeds comparten pestaña con selector de documento; `section="proteins"`
+agrupa varios outputs con nombres distintos. Se verifican rutas propias/checksums y solo se lee HTML
+al generar el informe explícitamente. Cada documento usa un iframe aislado, sin peticiones externas
+ni acceso a la página principal. Límites: 16 MiB/documento, 64 MiB/informe.
+Consulta [pestañas HTML del proyecto](docs/RESEARCH_ANALYSIS.es.md#pestañas-html-del-proyecto).
+
+**ⓘ** explica cómo interpretarlo. La cabecera permite inglés/español y guarda
 la preferencia del HTML sin cambiar evidencia ni traducir nombres declarados. **Research** conserva
 los hallazgos priorizados que enlazan a evidencia y gráficas.
 **Metrics & health** organiza etiquetas, categorías, unidades, alias, constantes, soporte ausente

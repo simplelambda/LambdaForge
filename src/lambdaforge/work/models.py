@@ -190,6 +190,15 @@ class WorkResult:
     termination_type: str = "completed"
     termination: Mapping[str, Any] = field(default_factory=dict)
     seed_metadata: Mapping[str, Any] = field(default_factory=dict)
+    scalar_mirror_paths: tuple[Path, ...] = ()
+
+    @property
+    def scalar_paths(self) -> tuple[Path, ...]:
+        """Operational verified mirrors, or the native owner files for ordinary execution."""
+        return self.scalar_mirror_paths or (
+            self.run_dir / "metrics.jsonl",
+            self.run_dir / "training-metrics.jsonl",
+        )
 
     @property
     def ok(self) -> bool:
@@ -200,6 +209,7 @@ class WorkResult:
         """Return the complete machine-readable result envelope."""
         return {
             "result_version": 1,
+            "scalar_mirror_paths": [str(path) for path in self.scalar_mirror_paths],
             "name": self.name,
             "work_class": self.work_class,
             "execution_id": self.execution_id,

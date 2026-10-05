@@ -214,7 +214,7 @@ def test_password_ssh_rejects_unknown_keys_redacts_and_transfers(tmp_path: Path)
         password_provider=lambda: "top-secret",
         paramiko_module=FakeParamiko(FakeSshClient(failure=RuntimeError("bad top-secret"))),
     )
-    with pytest.raises(RuntimeError) as captured:
+    with pytest.raises(ConnectionError) as captured:
         failing.run(("true",))
     assert "top-secret" not in str(captured.value)
     assert "***" in str(captured.value)

@@ -9,19 +9,64 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+### Corregido
+
+- Analysis de sweeps condicionales usa el espacio del StudyDesign persistido, también en lecturas
+  vivas de entornos worker antiguos e inmutables. Evidencia insuficiente por rama no provoca una
+  media vacía; los diagnósticos remotos acotados conservan la excepción final.
+
 ### Añadido
+
+- Más estilos HTML en Parameters/Explore y Runs: puntos individuales, líneas escalonadas/áreas,
+  violines, comparaciones horizontales, histogramas y distribuciones acumuladas; ejes que identifican
+  sus métricas. `outputs.html_section()` declara pestañas interactivas propias y autocontenidas,
+  agrupadas por sección y Run e integradas en informes/exportaciones. Lectura explícita paginada,
+  artifacts propios verificados e iframes aislados sin conexión cargados bajo demanda.
+
+- Lecturas jerárquicas de Study: solo contadores en colecciones, celdas compactas de Trials,
+  seeds/parámetros bajo demanda y evidencia de la Run seleccionada; HPO/recursos precomputados
+  separados y Analysis agregado. Filtrado de parámetros y caché post-hoc provisional en el host,
+  análisis completo solo al exportar HTML y sin sondeo de vistas padre ocultas. Proyección legacy
+  antes de transferir y páginas de 512 KiB para vistas grandes, conservando seguridad por respuesta
+  y comprobaciones de generación sin rechazar totales válidos superiores a 8 MiB.
+
+- Gráficos HTML de parámetros con líneas, puntos, barras agrupadas, distribuciones y mapas de
+  calor; agrupación automática de escalas solapadas, paneles con rangos compartidos/independientes
+  y desviación típica configurable (bigotes, banda u oculta). Ajustes persistentes por informe,
+  controles inglés/español y valores originales en hover, sin cambiar HPO ni fabricar evidencia.
+
+- HPO adaptativo Fleet nuevo con el planner central existente. Streams escalares nativos ordenados,
+  acotados y ligados a leases exactas, compresión verificada, cursores durables, deduplicación y
+  recuperación de appends interrumpidos. Resultados terminales solo tras completar sus métricas.
+  Poda nativa calibrada mediante solicitudes dirigidas idempotentes, evidencia protegida y
+  espejos verificados para curvas históricas. Repriorización sin lease auditada y frontera
+  científica nativa para capacidad admisible libre. Continuación de checkpoints, recovery
+  distribuido, co-location y restantes protocolos Fleet siguen pendientes.
+
+- Ruta pública limitada `lf run --on-fleet` y selector en la Consola para Studies fixed/repetidos/
+  pareados automáticos. Un coordinador local durable prepara allocations managed persistentes;
+  acredita hardware/identidades y offers baseline CPU/GPU propios antes de crear leases. Reutiliza
+  planner, ARI, ingestión acotada y análisis único; respeta paralelismo global y la frescura del offer
+  del primer miembro mientras consulta los siguientes.
+- Show/logs/artifacts vivos/terminales conservan miembro/lease exactos; Jobs miembros no crean Works
+  semánticos separados. Cancelación/borrado por familia, protección de historial referenciado y
+  rutas del coordinador aisladas; compactación/streams permanecen en su host. Últimas/mejores
+  métricas nativas de Runs activos se proyectan sin copiar su historia; logs/curvas seleccionados
+  se leen bajo demanda antes de terminar. Se rechazan identidades/rutas ajenas. Un recibo de drain
+  corrupto no impide intentar drenar otros miembros. Continuación de checkpoints,
+  co-location, recovery/adopción, expansión y export distribuido siguen bloqueados. Retry/export
+  no reinician silenciosamente como un solo clúster ni generan paquetes incompletos.
 
 - Adaptadores internos unificados en `PreparedShardExecutor`/`CoordinatedDispatcher`. Entrypoints
   preparados reutilizan ControlPlane/JobService, TLS/wrappers GPU, identidades inmutables y fence
   exacto de envío. Solo reubican inputs file verificados y observan resultados acotados en el host.
-  Shards GPU baseline exigen grants propios/hardware verificado; offers GPU de producción,
-  streaming adaptativo central y lanzamiento/recovery Fleet público siguen pendientes.
+  Shards GPU baseline exigen grants propios/hardware verificado. La ruta pública limitada anterior
+  añade offers baseline persistentes y stream adaptativo; recovery Fleet sigue pendiente.
 - Punto interno único de despacho para planners fixed, paired sweep automático y adaptativo.
   Fleet CPU local preparada usa Jobs ProcessScheduler desacoplados, invocaciones exactas durables
   e ingestión central con un análisis final único; se prueban seeds fijas y refill pareado automático.
   Respeta la retirada de cola no iniciada del planner sin revocar workers ni evidencia aceptada.
-  Remoto/GPU/streaming adaptativo y la ruta pública
-  `run --on-fleet` siguen pendientes.
+  La ruta pública preparada anterior amplía esta integración CPU con streams adaptativos.
 - Pausa/reanudación durable v2 del coordinator, reconciliación hasta paused y conservación de leases
   previas al envío. Mantiene reloj/presupuestos originales al adoptar y migra v1 sin alterar evidencia.
   Reconciliar conserva leases no enviadas y reanudar no elude el presupuesto temporal original.

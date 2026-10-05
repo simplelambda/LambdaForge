@@ -49,6 +49,12 @@ class StudyAnalysis:
         policy = cls._search_policy(source)
         if authored_space is None and isinstance(policy.get("parameter_space"), Mapping):
             authored_space = dict(policy["parameter_space"])
+        if authored_space is None:
+            # Fixed/paired sweeps have no adaptive INITIALIZE policy. Their normalized design
+            # still owns geometry; inferring it from sparse rows loses conditional branches.
+            design_space = cls._study_design(source).get("space")
+            if isinstance(design_space, Mapping):
+                authored_space = dict(design_space)
         normalized_objective = cls.objective(source, objective)
         mode = str(normalized_objective["mode"])
         candidates, runs = normalize_evidence(source, normalized_objective)

@@ -93,8 +93,9 @@ class BundleFixture:
 
 @pytest.mark.skipif(os.name != "posix", reason="Detached direct provider needs POSIX")
 @pytest.mark.parametrize("gpu", [False, True])
+@pytest.mark.parametrize("allocated", [False, True])
 def test_prepared_provider_runs_native_work_and_observes_exact_results(
-    tmp_path: Path, gpu: bool
+    tmp_path: Path, gpu: bool, allocated: bool
 ) -> None:
     if gpu and not torch.cuda.is_available():
         pytest.skip("Actual local CUDA is unavailable")
@@ -195,14 +196,28 @@ def test_prepared_provider_runs_native_work_and_observes_exact_results(
         equivalence=eq,
         invocation=lambda key: invocations[key],
         control_plane=plane,
+        allocation_id="a" * 64 if allocated else None,
     )
     # A launch path/hardware probe is still NOT an allocation offer.
     if gpu:
         assert executor.offer(()).admissible_gpus == 0
         assert executor.offer(()).slots == 0
-    job_id = executor.submit(shard)
+    if allocated:
+        job_id = executor.start_allocation(source, shard.study_identity)
+    else:
+        job_id = executor.submit(shard)
     try:
         deadline = time.monotonic() + 90
+        if allocated:
+            while executor.offer(()).slots == 0:
+                if time.monotonic() > deadline:
+                    pytest.fail(f"Allocation never became ready: {jobs.logs(job_id)}")
+                time.sleep(0.5)
+            ready = executor.offer(())
+            assert ready.local_admission_verified
+            assert ready.admissible_gpus == int(gpu)
+            assert executor.start_allocation(source, shard.study_identity) == job_id
+            assert executor.submit(shard) == job_id
         while True:
             observations = executor.observe(shard, job_id)
             if all(item.result is not None for item in observations):
@@ -214,12 +229,23 @@ def test_prepared_provider_runs_native_work_and_observes_exact_results(
             {"completed"} if gpu else {"completed", "failed"}
         )
         assert executor.submit(shard) == job_id
-        receipt = json.loads((executor.root / shard.shard_id / "submission.json").read_text())
+        receipt_path = (
+            executor.root / "allocation-receipt.json"
+            if allocated
+            else executor.root / shard.shard_id / "submission.json"
+        )
+        receipt = json.loads(receipt_path.read_text())
         assert receipt["acknowledged"] is True
         assert receipt["scheduler_id"] == jobs.get(job_id, refresh=False).scheduler_id
-        assert receipt["worker_root"].startswith(str(tmp_path / "provider"))
+        assert receipt["root" if allocated else "worker_root"].startswith(
+            str(tmp_path / "provider")
+        )
         assert all(item.result["equivalence"] == eq.to_dict() for item in observations)
         assert len(jobs.store.records()) == 1
+        if allocated:
+            # Completion does not release the provider allocation between concrete waves.
+            assert jobs.get(job_id, include_study=False).state.value == "running"
+            executor.drain_allocation()
     finally:
         record = jobs.get(job_id, include_study=False)
         if not record.state.terminal:

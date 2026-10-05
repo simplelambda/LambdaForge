@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import math
@@ -19,6 +20,15 @@ from lambdaforge.analysis.ResearchWorkspace import workspace_html
 from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.scientific_format import format_parameter_vector
 from lambdaforge.work.atomic import atomic_write_text
+
+_EXTRA_CHART_OPTIONS = (
+    '<option value="raw">Individual trial points</option>'
+    '<option value="step">Step lines</option><option value="area">Area</option>'
+    '<option value="violin">Violin distributions</option>'
+    '<option value="hbar">Horizontal bars</option>'
+    '<option value="histogram">Histogram</option>'
+    '<option value="ecdf">Cumulative distribution</option>'
+)
 
 
 def _pruned_run(candidate: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -38,8 +48,18 @@ def _display(value: Any) -> str:
     return "—" if value is None else str(value)
 
 
-def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
-    """Write the self-contained Study Analysis dashboard."""
+def write_html(
+    analysis: Mapping[str, Any],
+    output: str | Path,
+    *,
+    sections: Sequence[Mapping[str, str]] = (),
+) -> Path:
+    """Write the offline dashboard with optional isolated project HTML tabs.
+
+    Sections contain ``name``, ``title`` and self-contained UTF-8 ``html``;
+    optional ``label`` distinguishes several documents in the same named tab.
+    Scripts run only inside an opaque-origin sandbox, without external requests.
+    """
     try:
         import plotly.graph_objects as go
         from plotly.offline import plot
@@ -48,13 +68,102 @@ def write_html(analysis: Mapping[str, Any], output: str | Path) -> Path:
             "Install lambdaforge[analysis-report] to export interactive HTML reports."
         ) from error
 
-    return _write_study_dashboard(analysis, output, go=go, plot=plot)
+    return _write_study_dashboard(analysis, output, go=go, plot=plot, sections=sections)
+
+
+def _project_sections(sections: Sequence[Mapping[str, str]]) -> tuple[str, str, str]:
+    """Escape declarations and encode HTML; never insert consumer markup in the parent."""
+    groups: dict[str, dict[str, Any]] = {}
+    total = 0
+    for section in sections:
+        name, title, content = (section.get(key) for key in ("name", "title", "html"))
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
+            raise ValueError("HTML section name must contain 1–80 characters.")
+        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 120:
+            raise ValueError("HTML section title must contain 1–120 characters.")
+        if not isinstance(content, str):
+            raise ValueError("HTML section content must be a UTF-8 string.")
+        encoded = content.encode("utf-8")
+        total += len(encoded)
+        if len(encoded) > 16 * 1024 * 1024 or total > 64 * 1024 * 1024:
+            raise ValueError("Project HTML exceeds the 16 MiB/document or 64 MiB/report limit.")
+        group = groups.setdefault(name, {"title": title, "documents": []})
+        if group["title"] != title:
+            raise ValueError(f"Conflicting titles for HTML section {name!r}.")
+        group["documents"].append(
+            {
+                "label": section.get("label") or title,
+                "content": base64.b64encode(encoded).decode("ascii"),
+            }
+        )
+    buttons, panels = [], []
+    for index, group in enumerate(groups.values()):
+        key = f"project-section-{index}"
+        title = html.escape(group["title"])
+        buttons.append(
+            f'<button class="tab" data-target="{key}" aria-selected="false" data-authored>{title}</button>'
+        )
+        options = "".join(
+            f'<option value="{n}">{html.escape(doc["label"])}</option>'
+            for n, doc in enumerate(group["documents"])
+        )
+        panels.append(
+            f'<section class="view" id="{key}" hidden><article class="panel">'
+            f'<div class="tools"><h2 data-authored>{title}</h2><label>Document <select id="{key}-document" class="project-document" data-authored>{options}</select></label></div>'
+            '<p class="note">Project-provided HTML · isolated offline viewer. Its content is authored by the project, not LambdaForge analysis.</p>'
+            f'<iframe title="{title}" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer" '
+            'style="width:100%;height:75vh;min-height:400px;resize:vertical;border:1px solid #30363d;border-radius:10px;background:white"></iframe>'
+            "</article></section>"
+        )
+    payload = json.dumps(list(groups.values()), ensure_ascii=True).replace("<", "\\u003c")
+    script = r"""
+(() => {
+ const groups = JSON.parse(document.getElementById('lf-project-sections').textContent);
+ const key = 'lambdaforge:project-sections:' + JSON.parse(document.getElementById('lf-study-data').textContent).report_id;
+ let preferences = {}; try { preferences = JSON.parse(localStorage.getItem(key) || '{}'); } catch(_error) {}
+ const policy = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'unsafe-inline' data: blob:; img-src data: blob:; font-src data: blob:; media-src data: blob:; worker-src blob:; connect-src 'none'; form-action 'none'; base-uri 'none';";
+ function load(index) {
+  const panel = document.getElementById('project-section-' + index);
+  if (panel.hidden) return;
+  const selected = panel.querySelector('select').value, frame = panel.querySelector('iframe');
+  if (frame.dataset.document === selected) return;
+  const raw = Uint8Array.from(atob(groups[index].documents[Number(selected)].content), c => c.charCodeAt(0));
+  frame.srcdoc = '<!doctype html><meta http-equiv="Content-Security-Policy" content="' + policy + '">' + new TextDecoder().decode(raw);
+  frame.dataset.document = selected;
+ }
+ groups.forEach((group,index) => {
+  const panel = document.getElementById('project-section-' + index);
+  const select = panel.querySelector('select');
+  if ([...select.options].some(option => option.value === preferences[index])) {
+   select.value = preferences[index];select.dispatchEvent(new Event('change'));
+  }
+  select.addEventListener('change', () => {
+   preferences[index] = select.value;
+   try { localStorage.setItem(key, JSON.stringify(preferences)); } catch(_error) {}
+   load(index);
+  });
+  new MutationObserver(() => load(index)).observe(panel, {attributes:true, attributeFilter:['hidden']});
+  load(index);
+ });
+})();
+"""
+    return (
+        "".join(buttons),
+        "".join(panels),
+        f'<script id="lf-project-sections" type="application/json">{payload}</script><script>{script}</script>',
+    )
 
 
 def _write_study_dashboard(
-    analysis: Mapping[str, Any], output: str | Path, *, go: Any, plot: Any
+    analysis: Mapping[str, Any],
+    output: str | Path,
+    *,
+    go: Any,
+    plot: Any,
+    sections: Sequence[Mapping[str, str]] = (),
 ) -> Path:
     """Render persisted Study Analysis as one navigable offline dashboard."""
+    section_buttons, section_panels, section_script = _project_sections(sections)
     candidates = [
         dict(value) for value in analysis.get("candidates", ()) if isinstance(value, Mapping)
     ]
@@ -354,6 +463,7 @@ var(--muted);font-size:.82rem;display:flex;align-items:center;gap:7px}.wide{grid
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{padding:10px 12px;border-bottom:
 1px solid var(--line);text-align:right;white-space:nowrap}th:first-child,td:first-child{text-align:left}th{position:sticky;
 top:0;background:#21262d;text-transform:uppercase;letter-spacing:.06em;font-size:.72rem}tr:hover{background:#ffffff08}
+.parameter-chart-panel{overflow:auto}
 .compare{padding:16px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.compare-card{border:
 1px solid var(--line);border-radius:10px;padding:13px}.compare-card dl{display:grid;grid-template-columns:auto 1fr;gap:5px 12px}
 .compare-card dt{color:var(--muted)}.compare-card dd{margin:0;text-align:right;overflow-wrap:anywhere}.finding{padding:17px;
@@ -542,7 +652,9 @@ else if(visible==='study-trials')updateRanking();}};
     )
     document = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
-        'content="width=device-width,initial-scale=1"><title>LambdaForge Study Analysis</title><style>'
+        'content="width=device-width,initial-scale=1">'
+        '<meta http-equiv="Content-Security-Policy" content="frame-src \'none\'">'
+        '<title>LambdaForge Study Analysis</title><style>'
         + style
         + '</style></head><body><div class="shell"><header><div><h1>Study Analysis dashboard</h1>'
         "<p>Explore persisted evidence; every association remains descriptive or predictive.</p></div>"
@@ -555,7 +667,9 @@ else if(visible==='study-trials')updateRanking();}};
         '<button class="tab" data-target="study-trials" aria-selected="false">Trials</button><button class="tab" data-target="study-parameters" aria-selected="false">Parameters</button>'
         '<button class="tab" data-target="study-interactions" aria-selected="false">Interactions</button><button class="tab" data-target="study-coverage" aria-selected="false">Coverage</button>'
         '<button class="tab" data-target="study-resources" aria-selected="false">Resources</button><button class="tab" data-target="study-findings" aria-selected="false">Evidence</button>'
-        '<button class="tab" data-target="study-custom" aria-selected="false">Explore</button></nav>'
+        '<button class="tab" data-target="study-custom" aria-selected="false">Explore</button>'
+        + section_buttons
+        + "</nav>"
         + workspace_html()
         + '<section class="view" id="study-overview"><div id="overview-summary"></div><div class="grid"><article class="panel"><h2>Study progress</h2><div id="overview-states" class="plot"></div></article><article class="panel"><h2>Predictive importance</h2><div class="plot" id="overview-importance">'
         + figure_html["importance"]
@@ -567,7 +681,15 @@ else if(visible==='study-trials')updateRanking();}};
         + "</div></details></section>"
         '<section class="view" id="study-parameters" hidden><div class="tools"><label>Parameter <input type="hidden" id="parameter-select" value="'
         + html.escape(parameter_names[0] if parameter_names else "", quote=True)
-        + '"></label><label>Analyze metric <input type="hidden" id="parameter-metric" value="__selection__"></label><div id="parameter-metric-chips" class="tools"></div></div><div class="grid"><article class="panel wide"><h2>Observed metric by parameter value</h2><div class="plot" id="parameter-observed">'
+        + '"></label><label>Analyze metric <input type="hidden" id="parameter-metric" value="__selection__"></label><div id="parameter-metric-chips" class="tools"></div></div>'
+        '<div class="tools"><label>Chart style <select id="parameter-style"><option value="line">Lines + points</option><option value="scatter">Points</option><option value="bar">Grouped bars</option><option value="box">Trial distributions</option><option value="matrix">Metric heatmap</option>'
+        + _EXTRA_CHART_OPTIONS
+        + "</select></label>"
+        '<label>Arrangement <select id="parameter-arrangement"><option value="overlay">Combined chart</option><option value="panels">One panel per metric</option></select></label>'
+        '<label>Y scales <select id="parameter-scales"><option value="auto">Automatic · overlapping ranges</option><option value="independent">Independent scales</option><option value="shared">Shared scale</option></select></label>'
+        '<label>Dispersion <select id="parameter-dispersion"><option value="whiskers">SD whiskers</option><option value="band">SD shaded band</option><option value="off">Hidden</option></select></label></div>'
+        '<p class="note">Automatic scales group substantially overlapping observed ranges, but never known different units. Sharing a scale is visual, not scientific equivalence. SD describes variation across candidate summaries, not seed uncertainty. Use distributions for repeated values, or a heatmap to compare many metrics.</p>'
+        '<div class="grid"><article class="panel wide parameter-chart-panel"><h2>Observed metric by parameter value</h2><div class="plot" id="parameter-observed">'
         + figure_html["observed"]
         + '</div><p class="note" id="parameter-observed-status" role="status"></p></article><details class="panel wide"><summary class="tools">Persisted adjusted selection response and uncertainty (model evidence)</summary><div class="plot" id="parameter-response">'
         + figure_html["response"]
@@ -594,7 +716,9 @@ else if(visible==='study-trials')updateRanking();}};
         '<option value="bar">Bar</option><option value="scatter3d">3D scatter</option>'
         '<option value="parallel">Parallel coordinates</option>'
         '<option value="heatmap">Observed heatmap</option><option value="surface">Observed 3D surface</option>'
-        '</select></label><label>X axis <input type="hidden" id="study-chart-x" value="trial"></label><label>Y axis <input type="hidden" id="study-chart-y" value="metric:__selection__"></label><label id="study-chart-z-control" hidden>Z / cell metric <input type="hidden" id="study-chart-z" value="metric:__selection__"></label><label>Grouping <select id="study-chart-aggregate">'
+        '<option value="box">Trial distributions</option><option value="matrix">Metric heatmap</option>'
+        + _EXTRA_CHART_OPTIONS
+        + '</select></label><label>X axis <input type="hidden" id="study-chart-x" value="trial"></label><label>Y axis <input type="hidden" id="study-chart-y" value="metric:__selection__"></label><label id="study-chart-z-control" hidden>Z / cell metric <input type="hidden" id="study-chart-z" value="metric:__selection__"></label><label>Grouping <select id="study-chart-aggregate">'
         '<option value="points">One point per trial</option><option value="mean">Mean per exact X value + SD</option>'
         '</select></label><label>Colour scale <select id="study-chart-palette"><option>Accessible</option>'
         "<option>Blue ↔ red</option><option>Purple ↔ green</option><option>Brown ↔ teal</option></select></label>"
@@ -612,7 +736,9 @@ else if(visible==='study-trials')updateRanking();}};
         "trial/seed summaries, not new metric optima. Exact-value grouping averages trials equally, "
         "with other parameters uncontrolled. Heatmap/surface cells are observed means, never model "
         "predictions; untested combinations stay blank. Partial values are descriptive only. Saved "
-        "views stay in this HTML’s browser preferences; they do not refit or control HPO.</p></div></section></div>"
+        "views stay in this HTML’s browser preferences; they do not refit or control HPO.</p></div></section>"
+        + section_panels
+        + "</div>"
         '<script id="lf-study-data" type="application/json">'
         + payload
         + "</script><script>"
@@ -639,7 +765,9 @@ else if(visible==='study-trials')updateRanking();}};
         + script
         + "</script><script>LambdaForgeResearchWorkspace(window.lfResearchServices).mount();"
         + "LambdaForgeStudyOverview(window.lfResearchServices).mount();LambdaForgeStudyLocale.mount(window.lfResearchServices);"
-        + "</script></body></html>"
+        + "</script>"
+        + section_script
+        + "</body></html>"
     )
     path = Path(output).expanduser().resolve()
     atomic_write_text(path, document)
@@ -1255,8 +1383,15 @@ function renderCustomChart(spec){const chart=plotNode('custom-chart');if(!chart)
   ry=Object.fromEntries(right.x.map((step,index)=>[String(step),right.y[index]])),steps=Object.keys(lx).filter(step=>step in ry).sort((a,b)=>Number(a)-Number(b));
   traces=[{type:'scatter',mode:'markers+lines',x:steps.map(step=>lx[step]),y:steps.map(step=>ry[step]),customdata:steps,
   marker:{color:steps.map(Number),colorscale:'Viridis',size:9,showscale:true,colorbar:{title:'Epoch'}},hovertemplate:'%{x:.6g} / %{y:.6g}<br>epoch=%{customdata}<extra></extra>'}];xLabel=left.label;yLabel=right.label;}
- else{const normalized=spec?.kind==='normalized';traces=items.map(item=>({type:'scatter',mode:'lines+markers',x:item.x,y:normalized?item.normalized:item.y,
-  name:item.label,line:{color:item.color,width:2.5},marker:{color:item.color,size:5},hovertemplate:'epoch=%{x}<br>value=%{y:.6g}<extra></extra>'}));
+ else if(['histogram','ecdf','box','violin'].includes(spec?.kind)){
+  traces=items.map(item=>{const values=[...item.y].sort((a,b)=>a-b),common={name:item.label,marker:{color:item.color}};
+   if(spec.kind==='histogram')return {...common,type:'histogram',x:values,opacity:.6};
+   if(spec.kind==='ecdf')return {...common,type:'scatter',mode:'lines',x:values,y:values.map((_,i)=>(i+1)/values.length),line:{color:item.color,shape:'hv'}};
+   return {...common,type:spec.kind,y:values,...(spec.kind==='violin'?{points:'all',box:{visible:true}}:{boxpoints:'all'})};});
+  xLabel=['box','violin'].includes(spec.kind)?'Metric':'Observed value';yLabel=spec.kind==='ecdf'?'Cumulative fraction':spec.kind==='histogram'?'Epoch count':'Observed value';}
+ else{const normalized=spec?.kind==='normalized';traces=items.map(item=>({type:'scatter',mode:spec?.kind==='scatter'?'markers':'lines+markers',x:item.x,y:normalized?item.normalized:item.y,
+  name:item.label,line:{color:item.color,width:2.5,shape:spec?.kind==='step'?'hv':'linear'},marker:{color:item.color,size:5},
+  ...(spec?.kind==='area'?{fill:'tozeroy',fillcolor:item.color+'22'}:{}),hovertemplate:'epoch=%{x}<br>value=%{y:.6g}<extra></extra>'}));
   yLabel=normalized?'Position within observed range':'Observed value'}
  Plotly.react(chart,traces,customLayout(spec?.name||'Saved chart',xLabel,yLabel),window.lfPlotConfig)}
 function showCustomChart(id){const charts=Array.isArray(preferences.customCharts)?preferences.customCharts:[],spec=charts.find(item=>item.id===id)||charts[0];
@@ -1444,6 +1579,9 @@ if(preferences.tab&&document.getElementById(preferences.tab))activate(preference
         '<label>Chart name <input id="custom-chart-name" placeholder="My comparison"></label>'
         '<label>Chart type <select id="custom-chart-kind"><option value="curves">Curves</option>'
         '<option value="normalized">Normalized trends</option><option value="latest">Latest values</option>'
+        '<option value="scatter">Points</option><option value="step">Step lines</option><option value="area">Area</option>'
+        '<option value="histogram">Histogram</option><option value="ecdf">Cumulative distribution</option>'
+        '<option value="box">Epoch distributions</option><option value="violin">Violin distributions</option>'
         '<option value="relationship">X/Y relationship</option></select></label>'
         '<span class="muted">Uses the currently selected metrics</span>'
         '<button id="save-custom-chart">Save chart</button></div>'

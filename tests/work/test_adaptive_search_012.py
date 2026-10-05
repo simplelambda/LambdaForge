@@ -2428,8 +2428,10 @@ def test_default_pruning_requires_two_distinct_uncompetitive_steps(tmp_path: Pat
     assert "confirmations=2/2" in weak_stop.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("mirrored", [False, True])
 def test_completed_historical_candidate_can_prune_a_lone_active_straggler(
     tmp_path: Path,
+    mirrored: bool,
 ) -> None:
     historical_dir = tmp_path / "historical"
     historical_dir.mkdir()
@@ -2488,6 +2490,15 @@ def test_completed_historical_candidate_can_prune_a_lone_active_straggler(
         fidelity={"current": 0, "target": 3, "maximum": 9},
     )
     calibration_peers = _completed_pruner_calibration(tmp_path)
+    if mirrored:
+        historical, prior_same_seed, *calibration_peers = (
+            replace(
+                value,
+                run_dir=tmp_path / "not-a-local-owner" / value.run_id,
+                scalar_mirror_paths=value.scalar_paths,
+            )
+            for value in (historical, prior_same_seed, *calibration_peers)
+        )
     stop = tmp_path / "active.stop"
 
     _request_early_stops(

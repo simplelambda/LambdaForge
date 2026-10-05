@@ -1022,11 +1022,34 @@ científico. LambdaForge mantiene junto al Job un índice compacto del estudio y
 por Run interno. Los `work.log`, `metrics.jsonl`, `training-metrics.jsonl` y `result.json` ya
 existentes siguen siendo la autoridad; el índice los referencia y resume solo estado y últimos
 escalares. Nunca copia checkpoints de modelos, directorios de output ni bytes de artefactos.
-El worker persiste el índice transportable como `study/interactive.json`, separado del resumen rico
-autoritativo. Los resúmenes antiguos sobredimensionados se proyectan en su host en vez de
-descargarse enteros; el historial append-only se pagina y solo se carga al abrir Action history.
-Entrar en una seed lee de forma lazy únicamente el registro, curvas acotadas y log de esa Run. Un
-Study grande válido no falla por superar el límite MiB de una respuesta SSH interactiva.
+Las lecturas remotas siguen la vista visible, no el tamaño de la Execution:
+
+- Overview y la lista de Studies reciben solo contadores, objetivo/líder y metadatos básicos de
+  estado/coste de `study/overview.json`. No descargan listas de candidatos ni seeds.
+- Abrir un Study lee `study/interactive.json` (proyección v3): celdas de la tabla de Trials, estados
+  agregados de Runs y parámetros de un único líder. No incluye seeds, curvas ni estado HPO.
+- Abrir un Trial lee su `study/trials/trial-XXXXX.json`: parámetros y tabla de sus seeds. Buscar
+  parámetros filtra en el host de ejecución, sin descargar todos los parámetros.
+- Abrir una seed lee solo su registro nativo, curvas acotadas, metadatos de artefactos y log.
+- HPO lee `study/hpo.json` precomputado; Resources lee `study/resources.json`. El historial completo
+  se pagina únicamente al abrir explícitamente Action history.
+- Analysis lee los agregados de `study/analysis-panel.json`, sin evidencia individual por Run ni
+  catálogo de investigación HTML. El worker persiste el análisis final. El post-hoc provisional se
+  calcula/cachea en el host de ejecución solo cuando se solicita, en un proceso de lectura separado,
+  nunca en el heartbeat de planificación. HPO no reajusta este análisis. Exportar HTML solicita
+  explícitamente el análisis completo, no sustituye sus datos por el modelo ligero de la consola.
+
+Los resúmenes/índices antiguos ricos se proyectan en su host, nunca se descargan enteros. Todas las
+vistas de lectura de Study usan páginas de 512 KiB con comprobación de generación; un refresco sin
+cambios devuelve solo un marcador pequeño. Se conserva la seguridad por respuesta, pero no se
+rechaza un Study grande válido por un límite agregado de 8 MiB. Las vistas padre ocultas dejan de
+sondear hasta volver a ser visibles. Son cambios de lectura/presentación, no de decisiones HPO ni
+de evidencia científica.
+Analysis de sweeps usa el espacio del StudyDesign persistido, incluidas ramas condicionales aún
+sin completar; no reconstruye condiciones a partir de filas observadas. Si faltan contextos válidos
+de respuesta, indica evidencia insuficiente, no un fallo del Study en ejecución. El proceso de
+lectura pasa esa geometría explícitamente a workers antiguos e inmutables: actualizar el controlador
+no requiere reiniciar el Study para aplicar esta corrección de lectura.
 
 la Consola de investigación presenta esta jerarquía:
 
@@ -1211,7 +1234,8 @@ lf show WORK --run trial-00017-seed-4 --json
 lf logs WORK --run trial-00017-seed-4 --tail 300
 ```
 
-`work.items[].study` contiene catálogo compacto y claves exactas. `show --run` devuelve parámetros,
+`work.items[].study` solo contiene contadores compactos, objetivo y metadatos del líder. Abre un
+Study y Trial en la consola para obtener sus claves de Run sin descargar todos. `show --run` devuelve parámetros,
 últimos valores, curvas reducidas, log acotado, fallo, rutas de evidencia y el inventario de
 artefactos gestionados ya finalizados. La salida humana destaca la ruta utilizable preferida; el
 JSON conserva checksum, tamaño, rol, tipo MIME, ubicaciones gestionada/publicada, retención y
@@ -1303,13 +1327,18 @@ desconocida.
 
 Inspección Fleet: `lf fleets list/show/offers`; controles de catálogo:
 `lf fleets drain/disable/enable FLEET CLUSTER [--apply]`. Observar no concede GPUs y estas acciones
-nunca detienen Jobs activos. La base de propiedad de Study coordinado está probada; ya
-hay shards CPU locales preparados mediante Jobs directos reales y un dispatcher interno compartido.
-Siguen pendientes `run --on-fleet`, remoto/GPU, pause/resume públicos e integración HPO/TUI. Consulta
+nunca detienen Jobs activos. `lf run CONFIG --on-fleet NAME [--dry-run]` usa un coordinador local
+durable y allocations managed para Studies adaptativos nuevos/fixed/repetidos/pareados automáticos, con un planner
+nativo y análisis único. Run Work ofrece el mismo selector. Show/logs de Runs vivos/terminados
+resuelven su miembro; resúmenes escalares actuales/mejores nunca leen rutas remotas localmente.
+Curvas/logs siguen siendo lazy; cancel/delete abarcan la familia propia. Streams escalares ordenados
+y poda central exacta soportan HPO adaptativo nuevo. Offers GPU baseline; continuación de checkpoints/
+fidelity, co-location, recovery/adopción, expansión en vivo y export distribuido siguen bloqueados.
+Consulta
 [estado y contratos de implementación](COORDINATED_STUDIES.es.md) antes de usar fleets.
 El ejecutor preparado común delega en ControlPlane/JobService y verifica identidades inmutables y
-reubicación canónica de inputs. La observación en el host va por lotes: aún no es un driver público
-distribuido ni autoridad para ofrecer GPUs no concedidas.
+reubicación canónica de inputs. La observación en el host va por lotes; nunca autoriza GPUs
+no concedidas.
 
 Un usuario configura el perfil en `lf` → Clusters. Primero aparecen campos comunes y cada opción
 enfocada explica significado/riesgo; SSH, entorno, rutas y política GPU avanzados quedan ocultos
@@ -1691,12 +1720,27 @@ planificación del investigador, no por un objeto interno que puede seguir en Py
 
 ## 16. Análisis de estudios
 
+Hay puntos individuales por Trial, curvas escalonadas/áreas, violines, barras horizontales,
+histogramas y CDF empíricas, con ejes compartidos identificados por métricas. El proyecto añade HTML
+autocontenido con `self.outputs.html_section("proteins", title="Proteins").write_text(html_text)`;
+generar informe lee artifacts finalizados verificados, nunca durante planificación. Varios Runs
+comparten selector de documento. Iframes aislados offline separan JavaScript del proyecto; incrusta
+recursos/datos (16 MiB/documento, 64 MiB/informe). Consulta el contrato y API directa en
+[pestañas HTML del proyecto](RESEARCH_ANALYSIS.es.md#pestañas-html-del-proyecto).
+
 El HTML de Study empieza en **Overview / Resumen**, con estados, importancia contextual y gráficos
 recomendados. Parámetros condicionales muestran rama/soporte aparte, nunca responsabilidad global.
 Interpretaciones/preguntas usan carruseles, hallazgos completos se paginan y **ⓘ** explica términos.
 La cabecera permite inglés/español sin traducir nombres ni afirmaciones guardadas. Los controles
 son desplegables buscables, no modales; en **Parameters**, marcar/desmarcar superpone curvas en un
-gráfico (unidades distintas/desconocidas conservan ejes Y separados). Explore utiliza
+gráfico (las escalas automáticas agrupan rangos sustancialmente solapados, nunca unidades conocidas
+distintas). Puedes elegir líneas, puntos, barras agrupadas, distribuciones de candidatos o mapa de
+calor. **Distribución** cambia entre gráfico combinado y un panel por métrica. **Escalas Y** permite
+rangos independientes o compartidos explícitamente. **Dispersión** oculta la desviación típica o
+usa bigotes/bandas (solo líneas con X numérico; las demás vistas usan bigotes). Se calcula entre
+candidatos, no es incertidumbre entre semillas, y falta si hay menos de dos observaciones. El mapa
+normaliza colores por métrica; el hover conserva medias originales y lo no observado queda vacío.
+Los ajustes se conservan al reabrir el mismo HTML generado. Explore utiliza
 **Analyze / By / Compare with** y chips de comparación que se pueden quitar. Los ejes y ajustes
 explícitos quedan en **Advanced visualization options**. Las preguntas configuradas son tarjetas
 ampliables; Metrics & health ofrece categorías jerárquicas plegables. **Evidence** sustituye la

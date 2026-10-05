@@ -416,6 +416,37 @@ class StudyCoordinator:
             record.update(state="cancelled", withdrawal={"reason": reason, "at": self.clock()})
             return True
 
+    def replan_unstarted(self, run: GlobalRun) -> None:
+        """Apply native planner reprioritization, never rewrite leased science or evidence."""
+        with self._transaction() as value:
+            record = value["runs"][run.key]
+            if value["lifecycle"] != "running" or record["attempts"] or record["accepted"]:
+                raise ValueError("Only an unleased Run may be replanned.")
+            if record["state"] not in {"planned", "cancelled"}:
+                raise ValueError("Terminal scientific evidence cannot be replanned.")
+            before, after = record["definition"], run.to_dict()
+            if {
+                key: child
+                for key, child in before.items()
+                if key not in {"priority_class", "proposal"}
+            } != {
+                key: child
+                for key, child in after.items()
+                if key not in {"priority_class", "proposal"}
+            }:
+                raise ValueError(
+                    "Replanning cannot change scientific identity/parameters/resources."
+                )
+            if before != after or record["state"] != "planned":
+                record.setdefault("planning_history", []).append(
+                    {
+                        "at": self.clock(),
+                        "previous": before,
+                        "previous_state": record["state"],
+                    }
+                )
+                record.update(definition=after, state="planned")
+
     def withdraw_planned(self, run_keys: Sequence[str], *, reason: str) -> None:
         """Apply the scientific planner's queue replacement, never revoke an owned worker.
 
@@ -487,7 +518,11 @@ class StudyCoordinator:
         )
 
     def plan_shards(
-        self, offers: Sequence[ClusterOffer], *, adaptive: bool = False
+        self,
+        offers: Sequence[ClusterOffer],
+        *,
+        adaptive: bool = False,
+        maximum_new_runs: int | None = None,
     ) -> tuple[StudyShard, ...]:
         """Reserve unique attempts BEFORE crossing a provider boundary.
 
@@ -495,6 +530,12 @@ class StudyCoordinator:
         wave only: no extra speculative queue is created by placement. Unknown leases occupy
         caps until positively reconciled. Scientific Run/time budgets also include lookahead.
         """
+        if maximum_new_runs is not None and (
+            isinstance(maximum_new_runs, bool)
+            or not isinstance(maximum_new_runs, int)
+            or maximum_new_runs < 0
+        ):
+            raise ValueError("Placement wave size must be a nonnegative integer or null.")
         shards = []
         broker = GlobalPlacementBroker()
         with self._transaction() as value:
@@ -552,6 +593,11 @@ class StudyCoordinator:
             )
             value["idle_reasons"] = {}
             for key, record in planned:
+                if (
+                    maximum_new_runs is not None
+                    and sum(len(leases) for leases in assigned.values()) >= maximum_new_runs
+                ):
+                    break
                 if (
                     value["max_runs"] is not None
                     and value["attempts_reserved"] >= value["max_runs"]

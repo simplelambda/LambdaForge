@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -15,7 +16,7 @@ from typing import Any
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility, aggregate_constraint, pareto_front
 from lambdaforge.hpo.ScientificConclusions import scientific_status
 from lambdaforge.hpo.StudyInsights import StudyInsightAnalyzer
-from lambdaforge.study_projection import interactive_study
+from lambdaforge.study_projection import panel_detail, study_table, trial_detail
 from lambdaforge.work.models import WorkResult, atomic_json
 
 
@@ -26,6 +27,7 @@ class StudyTelemetry:
         self.root = root.resolve()
         self.progress_path = progress_path.resolve() if progress_path is not None else None
         self._lock = Lock()
+        self._trial_projection_hashes: dict[int, str] = {}
 
     @classmethod
     def from_environment(cls) -> StudyTelemetry | None:
@@ -222,6 +224,9 @@ class StudyTelemetry:
                     objective=snapshot.get("objective"),
                     status="final",
                 )
+                from lambdaforge.study_projection import analysis_panel
+
+                atomic_json(self.root / "analysis-panel.json", analysis_panel(analysis))
                 final_scientific_status = analysis.get("scientific_status")
                 if final_scientific_status in {
                     "resolved",
@@ -521,6 +526,68 @@ class StudyTelemetry:
                 "updated_at_utc": _now(),
             },
         )
+
+    def run_placement(
+        self,
+        specification: Mapping[str, Any],
+        *,
+        cluster: str,
+        job_id: str,
+        shard_id: str,
+        lease_id: str,
+        attempt: int,
+    ) -> None:
+        """Attach compact Fleet provenance to the existing per-Run telemetry authority."""
+        self._write_run(
+            study_run_key(specification),
+            {
+                "placement": {
+                    "cluster": cluster,
+                    "job_id": job_id,
+                    "shard_id": shard_id,
+                    "lease_id": lease_id,
+                    "attempt": attempt,
+                },
+            },
+        )
+
+    def remote_run_observed(
+        self, specification: Mapping[str, Any], observation: Mapping[str, Any]
+    ) -> None:
+        """Mirror a verified bounded native Run view, never resolve its host paths locally.
+
+        Placement must have been attached by the dispatcher first. Accepted result envelopes
+        remain the scientific evidence authority; these summaries only serve live read models.
+        """
+        key = study_run_key(specification)
+        previous = self._run_state(key)
+        if not isinstance(previous.get("placement"), Mapping):
+            raise ValueError("Remote Run observations require exact verified placement.")
+        fields = {
+            "state",
+            "run_dir",
+            "log_path",
+            "metrics_path",
+            "training_metrics_path",
+            "metrics",
+            "objective_observation",
+            "latest_step",
+            "best_step",
+            "best_objective",
+            "duration_seconds",
+            "gpu_index",
+            "gpu_token",
+            "started_at_utc",
+            "finished_at_utc",
+            "attempt_id",
+            "failure",
+            "termination_type",
+            "termination",
+            "prune_reason",
+        }
+        updates = {name: value for name, value in observation.items() if name in fields}
+        if any(previous.get(name) != value for name, value in updates.items()):
+            self._write_run(key, {**updates, "updated_at_utc": _now()})
 
     def run_retrying(
         self,
@@ -957,7 +1024,26 @@ class StudyTelemetry:
             atomic_json(self.root / "summary.json", snapshot)
             # Interactive readers consume this bounded index.  The full summary remains local to
             # the worker/result pipeline and may grow with rich per-Run diagnostics.
-            atomic_json(self.root / "interactive.json", interactive_study(snapshot))
+            from lambdaforge.work.atomic import atomic_write_text
+
+            atomic_write_text(
+                self.root / "interactive.json",
+                json.dumps(study_table(snapshot), separators=(",", ":"), allow_nan=False),
+            )
+            from lambdaforge.controlplane.ResearchWork import study_overview
+
+            atomic_json(self.root / "overview.json", study_overview(snapshot))
+            atomic_json(self.root / "hpo.json", panel_detail(snapshot, "hpo"))
+            atomic_json(self.root / "resources.json", panel_detail(snapshot, "resources"))
+            for candidate in candidates:
+                detail = trial_detail(candidate)
+                trial = int(candidate["trial"])
+                fingerprint = hashlib.sha256(
+                    json.dumps(detail, sort_keys=True).encode()
+                ).hexdigest()
+                if self._trial_projection_hashes.get(trial) != fingerprint:
+                    atomic_json(self.root / "trials" / f"trial-{trial:05d}.json", detail)
+                    self._trial_projection_hashes[trial] = fingerprint
             if self.progress_path is not None:
                 scheduled = int(snapshot["counts"]["scheduled_runs"])
                 atomic_json(
@@ -1036,7 +1122,14 @@ class StudyTelemetry:
             else None
         )
         records: list[Mapping[str, Any]] = []
-        for field in ("metrics_path", "training_metrics_path"):
+        # Fleet paths belong to execution hosts. Read their already verified result scalars,
+        # never unrelated files that happen to share the same absolute path locally.
+        local_streams = (
+            ()
+            if isinstance(run.get("placement"), Mapping)
+            else ("metrics_path", "training_metrics_path")
+        )
+        for field in local_streams:
             raw = run.get(field)
             if not isinstance(raw, str):
                 continue

@@ -89,7 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="Execute one Work configuration.")
     run.add_argument("config", type=Path)
-    run.add_argument("--on", default="local")
+    targets = run.add_mutually_exclusive_group()
+    targets.add_argument("--on", default="local")
+    targets.add_argument(
+        "--on-fleet",
+        help="Execute one fresh adaptive/fixed/repeated Study on a prepared Fleet.",
+    )
     run.add_argument("--clusters", type=Path)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--wait-for-submit", action="store_true")

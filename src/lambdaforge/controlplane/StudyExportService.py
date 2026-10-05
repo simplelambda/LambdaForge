@@ -60,6 +60,11 @@ class StudyExportService:
         if not records:
             raise ValueError(f"Work {selector!r} has no Attempt to export.")
         record = max(records, key=lambda value: value.created_at_utc)
+        if record.metadata.get("fleet"):
+            raise ValueError(
+                "Distributed Fleet artifact export is not integrated yet; refusing a "
+                "coordinator-only package that would omit member evidence."
+            )
         # Refresh only the selected Attempt: its captured state must be current, while probing
         # every historical retry would add unnecessary provider traffic and failure modes.
         record = self.jobs.get(record.job_id, refresh=True)

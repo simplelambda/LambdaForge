@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.controlplane.Fleet import FleetMember
 from lambdaforge.controlplane.FleetPlacement import ExecutionEquivalence
 from lambdaforge.controlplane.StudyCoordinator import StudyShard
 from lambdaforge.execution.ResourceRequest import ResourceRequest
@@ -24,7 +25,8 @@ from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 from lambdaforge.work.atomic import atomic_write_json
 from lambdaforge.work.config import import_work_class
 from lambdaforge.work.models import WorkResult
-from lambdaforge.work.runner import WorkRunner, _execute_adaptive_dispatch
+from lambdaforge.work.runner import WorkRunner, _execute_adaptive_dispatch, _scoped_environment
+from lambdaforge.work.study import StudyTelemetry, study_run_key
 
 
 def verify_shard_gpu_grant(
@@ -36,10 +38,46 @@ def verify_shard_gpu_grant(
     Homogeneous device labels come from the existing short-lived Torch probe, not the controller's
     physical host inventory. This attests an already running executor, not a future allocation.
     """
+    return verify_provider_gpu_grant(
+        "job-fleet-" + shard.shard_id, shard.member, resources, equivalence
+    )
+
+
+def verify_provider_gpu_grant(
+    job_id: str,
+    member: FleetMember,
+    resources: ResourceRequest,
+    equivalence: ExecutionEquivalence,
+) -> tuple[str, ...]:
+    """Attest one already allocated provider owner, preserving its opaque visibility."""
     if not resources.gpu_count:
         return ()
+    tokens, hardware = attest_provider_hardware(job_id, member, resources)
+    if resources.gpu_count and hardware != equivalence.hardware:
+        raise ValueError("Granted GPU hardware differs from the verified execution stratum.")
+    return tokens
+
+
+def attest_provider_hardware(
+    job_id: str,
+    member: FleetMember,
+    resources: ResourceRequest,
+) -> tuple[tuple[str, ...], str]:
+    """Observe hardware ONLY within an exact live provider owner, before admitting science."""
+    if os.environ.get("LAMBDAFORGE_JOB_ID") != job_id:
+        raise ValueError("Hardware attestation requires its exact granted provider Job.")
+    if not resources.gpu_count:
+        import platform
+
+        return (), ScientificIdentity.from_payload(
+            {
+                "cpu_stratum_version": 1,
+                "system": platform.system(),
+                "machine": platform.machine(),
+            }
+        ).digest
     if (
-        os.environ.get("LAMBDAFORGE_JOB_ID") != "job-fleet-" + shard.shard_id
+        os.environ.get("LAMBDAFORGE_JOB_ID") != job_id
         or not os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
         or os.environ.get("LAMBDAFORGE_GPU_ACCESS_MODE")
         not in {"auto", "exclusive", "shared", "command", "scheduler"}
@@ -47,7 +85,7 @@ def verify_shard_gpu_grant(
         raise ValueError(
             "GPU shards require an exact granted provider Job and inherited visibility."
         )
-    if shard.member.max_gpus is not None and resources.gpu_count > shard.member.max_gpus:
+    if member.max_gpus is not None and resources.gpu_count > member.max_gpus:
         raise ValueError("GPU shard exceeds its Fleet member GPU cap.")
     from lambdaforge.work.runner import (
         _gpu_hardware_labels,
@@ -63,9 +101,7 @@ def verify_shard_gpu_grant(
     fingerprint = ScientificIdentity.from_payload(
         {"gpu_stratum_version": 1, "model_capacity": labels[0]}
     ).digest
-    if fingerprint != equivalence.hardware:
-        raise ValueError("Granted GPU hardware differs from the verified execution stratum.")
-    return tokens
+    return tokens, fingerprint
 
 
 def prepare_concrete_shard(
@@ -147,6 +183,12 @@ def prepare_concrete_shard(
             "sweep_block_ordinal",
             "sweep_lookahead",
             "predicted_duration_seconds",
+            "hpo_opportunistic",
+            "hpo_scheduler_action",
+            "hpo_scheduler_priority",
+            "hpo_scientific_value",
+            "hpo_pruner_calibration",
+            "hpo_resource_frontier_extension",
         }
         if set(value) - allowed:
             raise ValueError("Concrete shard invocations cannot inject operational runtime fields.")
@@ -218,6 +260,7 @@ def execute_concrete_shard(
     verified_equivalence: ExecutionEquivalence,
     parallelism: int,
     input_bindings: list[dict[str, Any]] | None = None,
+    provider_job_id: str | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Execute validated exact leases through native isolated Runs/ARI, with no planner.
 
@@ -225,7 +268,10 @@ def execute_concrete_shard(
     an interrupted owner requires provider reconciliation and must never be silently restarted.
     """
     root = root.absolute()
-    verify_shard_gpu_grant(shard, resources, verified_equivalence)
+    if provider_job_id is None:
+        verify_shard_gpu_grant(shard, resources, verified_equivalence)
+    else:
+        verify_provider_gpu_grant(provider_job_id, shard.member, resources, verified_equivalence)
     prepared, identities = prepare_concrete_shard(
         shard,
         invocations,
@@ -284,22 +330,47 @@ def execute_concrete_shard(
             }
             state["results"][key] = envelope
             atomic_write_json(state_path, state)
+            from lambdaforge.work.retention import compact_attempt
+
+            try:
+                compact_attempt(result)
+            except (OSError, ValueError) as error:
+                print(f"[retention] Owned shard Attempt compaction failed: {error}", flush=True)
             return tuple(dict(value) for value in queued)
 
-        _execute_adaptive_dispatch(
-            prepared,
-            resources=resources,
-            policy=AdaptiveSearchPolicy(
-                max_parallel=parallelism, runs_per_gpu=1, early_stopping=False, failure_retries=0
-            ),
-            objective_metric=str(objective.get("metric", "")),
-            objective_mode=str(objective.get("mode", "max")),
+        # Reuse the native process-owned Run index. This is a view of exact leased work,
+        # never a worker-side Study planner, candidate catalogue or result store.
+        telemetry = StudyTelemetry(root / "study")
+        telemetry.initialize(
+            name=str(prepared[0]["definition"]["name"]),
+            execution_id=str(prepared[0]["execution_id"]),
+            strategy="exhaustive",
             objective=objective,
-            historical_results=(),
-            parallelism=parallelism,
-            telemetry=None,
-            on_result=persist_result,
+            specifications=prepared,
         )
+        telemetry.schedule(prepared)
+        observed_specifications = [
+            {**value, "definition": {**value["definition"], "study_expected": True}}
+            for value in prepared
+        ]
+        with _scoped_environment({"LAMBDAFORGE_STUDY_PATH": str(telemetry.root)}):
+            _execute_adaptive_dispatch(
+                observed_specifications,
+                resources=resources,
+                policy=AdaptiveSearchPolicy(
+                    max_parallel=parallelism,
+                    runs_per_gpu=1,
+                    early_stopping=False,
+                    failure_retries=0,
+                ),
+                objective_metric=str(objective.get("metric", "")),
+                objective_mode=str(objective.get("mode", "max")),
+                objective=objective,
+                historical_results=(),
+                parallelism=parallelism,
+                telemetry=telemetry,
+                on_result=persist_result,
+            )
         if set(state["results"]) != set(leases):
             raise RuntimeError("Shard ended without an outcome for every concrete leased Run.")
         state["state"] = "completed"
@@ -364,6 +435,43 @@ def observe_worker(root: Path, keys: Sequence[str]) -> None:
         "shard_id": (state.get("manifest", {}).get("shard") or {}).get("shard_id"),
         "results": {key: state["results"][key] for key in keys if key in state.get("results", {})},
     }
+    runs: dict[str, Any] = {}
+    native_telemetry = StudyTelemetry(root / "study")
+    invocations = state.get("manifest", {}).get("invocations", ())
+    leases = (state.get("manifest", {}).get("shard") or {}).get("leases", ())
+    identities = {
+        (int(value["run"]["candidate"]), value["run"].get("seed")): value["run"]["run_key"]
+        for value in leases
+    }
+    for invocation in invocations:
+        key = identities.get((invocation["trial_index"], invocation.get("seed")))
+        if not isinstance(key, str) or key not in keys:
+            continue
+        run = native_telemetry._run_state(study_run_key(invocation))
+        if not run or not all(
+            isinstance(run.get(field), str) and run[field]
+            for field in (
+                "attempt_id",
+                "run_dir",
+                "log_path",
+                "metrics_path",
+                "training_metrics_path",
+            )
+        ):
+            continue
+        objective = invocation["definition"].get("objective") or {}
+        metrics, latest, best_step, best, observation, _status = (
+            native_telemetry._observation_summary(run, objective=objective)
+        )
+        runs[key] = {
+            **run,
+            "metrics": metrics,
+            "latest_step": latest,
+            "best_step": best_step,
+            "best_objective": best,
+            "objective_observation": observation,
+        }
+    payload["runs"] = runs
     encoded = json.dumps(payload, allow_nan=False)
     if len(encoded.encode("utf-8")) > 8 * 1024**2:
         raise ValueError("Shard observation exceeds the bounded control-envelope limit.")

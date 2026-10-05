@@ -47,6 +47,66 @@ def presentation_evidence() -> dict[str, Any]:
     return document
 
 
+def test_additional_native_chart_types_and_named_scales(tmp_path: Path) -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    pytest.importorskip("plotly")
+    report = write_html(sample_analysis(), tmp_path / "chart-gallery.html")
+    with playwright.sync_playwright() as runtime:
+        if not Path(runtime.chromium.executable_path).exists():
+            pytest.skip("Optional Chromium is unavailable.")
+        browser = runtime.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 1080})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(report.as_uri())
+        page.get_by_role("button", name="Parameters", exact=True).click()
+        selector = "#parameter-observed .js-plotly-plot"
+        for kind, native in (
+            ("raw", "scatter"),
+            ("step", "scatter"),
+            ("area", "scatter"),
+            ("violin", "violin"),
+            ("hbar", "bar"),
+            ("histogram", "histogram"),
+            ("ecdf", "scatter"),
+        ):
+            page.click("#parameter-style-picker")
+            page.locator(f'#study-dropdown-options input[data-choice="{kind}"]').check()
+            page.wait_for_function(
+                "([s,t]) => document.querySelector(s)?.data?.[0]?.type === t",
+                arg=[selector, native],
+            )
+            # The event handler is synchronous; wait for the resulting Plotly layout too.
+            page.wait_for_timeout(100)
+            chart = page.eval_on_selector(selector, "g => ({traces:g.data,layout:g.layout})")
+            assert chart["traces"][0]["x"]
+            assert not str(chart["layout"]["yaxis"]["title"].get("text", "")).startswith("Scale ")
+            if kind == "raw":
+                assert len(chart["traces"][0]["y"]) == 3
+            elif kind == "step":
+                assert chart["traces"][0]["line"]["shape"] == "hv"
+            elif kind == "area":
+                assert chart["traces"][0]["fill"] == "tozeroy"
+            elif kind == "hbar":
+                assert chart["traces"][0]["orientation"] == "h"
+            elif kind == "ecdf":
+                assert chart["traces"][0]["y"][-1] == 1
+        page.click("#parameter-style-picker")
+        page.locator('#study-dropdown-options input[data-choice="violin"]').check()
+        page.wait_for_timeout(150)
+        page.screenshot(path=str(tmp_path / "parameter-violins.png"), full_page=True)
+        page.get_by_role("button", name="Explore", exact=True).click()
+        page.get_by_text("Advanced visualization options", exact=True).click()
+        page.click("#study-chart-kind-picker")
+        page.locator('#study-dropdown-options input[data-choice="histogram"]').check()
+        page.wait_for_function(
+            "document.querySelector('#study-custom-chart .js-plotly-plot')"
+            "?.data?.[0]?.type==='histogram'"
+        )
+        assert not errors
+        browser.close()
+
+
 def test_overview_dropdowns_overlay_localization_and_identity(tmp_path: Path) -> None:
     pytest.importorskip("plotly")
     playwright = pytest.importorskip("playwright.sync_api")
@@ -182,4 +242,110 @@ def test_dropdown_zero_selection_keyboard_and_mobile(tmp_path: Path) -> None:
             json.loads(page.locator("#lf-study-data").text_content() or "{}")["candidates"]
             == sample_analysis()["candidates"]
         )
+        browser.close()
+
+
+def test_parameter_styles_scale_grouping_dispersion_and_persistence(tmp_path: Path) -> None:
+    pytest.importorskip("plotly")
+    playwright = pytest.importorskip("playwright.sync_api")
+    document = sample_analysis()
+    for candidate, broad, narrow, slight in zip(
+        document["candidates"],
+        [0.2, 0.5, 0.4, 0.1],
+        [0.3, 0.4, 0.35, 0.1],
+        [0.49, 0.8, 0.6, 0.1],
+        strict=True,
+    ):
+        candidate["diagnostic_metrics"].update(
+            {"broad": {"mean": broad}, "narrow": {"mean": narrow}, "slight": {"mean": slight}}
+        )
+    original = copy.deepcopy(document)
+    report = write_html(document, tmp_path / "parameter-styles.html")
+    assert document == original
+    with playwright.sync_playwright() as runtime:
+        if not Path(runtime.chromium.executable_path).exists():
+            pytest.skip("Optional Chromium is unavailable.")
+        browser = runtime.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 1080})
+        page.set_default_timeout(8000)
+
+        def choose(control: str, value: str) -> None:
+            page.click(control + "-picker")
+            page.fill("#study-dropdown-query", "")
+            page.locator(f'#study-dropdown-options input[data-choice="{value}"]').check()
+
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(report.as_uri())
+        page.get_by_role("button", name="Parameters", exact=True).click()
+        page.evaluate("""() => {
+            document.getElementById('parameter-select').value = 'width';
+            document.getElementById('parameter-metric').value = 'broad';
+            window.lfResearchServices.save({parameterMetrics:['metric:narrow','metric:slight']});
+            window.lfResearchServices.customCharts.updateParameter();
+        }""")
+        chart = "#parameter-observed .js-plotly-plot"
+        page.wait_for_function(
+            "document.querySelector('#parameter-observed .js-plotly-plot').data?.length===3"
+        )
+        traces = page.eval_on_selector(chart, "c => c.data")
+        assert traces[0]["yaxis"] == traces[1]["yaxis"] == "y"
+        assert traces[2]["yaxis"] == "y2"  # Slight overlap does not force a shared scale.
+        assert traces[0]["error_y"]["array"][1] is None  # One candidate is not SD=0.
+        choose("#parameter-dispersion", "band")
+        page.wait_for_function(
+            "document.querySelector('#parameter-observed .js-plotly-plot').data?.length===9"
+        )
+        traces = page.eval_on_selector(chart, "c => c.data")
+        assert traces[1]["fill"] == "tonexty"
+        assert traces[1]["y"][0] > traces[0]["y"][0]
+        page.screenshot(path=str(tmp_path / "parameter-bands.png"), full_page=True)
+        choose("#parameter-dispersion", "off")
+        page.wait_for_function(
+            "document.querySelector('#parameter-observed .js-plotly-plot').data?.length===3"
+        )
+        assert not page.eval_on_selector(chart, "c => c.data[0].error_y.visible")
+        choose("#parameter-scales", "independent")
+        assert page.eval_on_selector(chart, "c => c.data.map(t=>t.yaxis)") == ["y", "y2", "y3"]
+        choose("#parameter-arrangement", "panels")
+        layout = page.eval_on_selector(chart, "c => c.layout")
+        assert layout["yaxis"]["domain"][0] > layout["yaxis2"]["domain"][1]
+        choose("#parameter-scales", "shared")
+        layout = page.eval_on_selector(chart, "c => c.layout")
+        assert layout["yaxis"]["range"] == layout["yaxis3"]["range"]
+        assert page.eval_on_selector(chart, "c => c.parentElement.clientHeight >= c.clientHeight")
+        page.screenshot(path=str(tmp_path / "parameter-panels.png"), full_page=True)
+        choose("#parameter-style", "bar")
+        assert page.eval_on_selector(chart, "c => c.data.every(t=>t.type==='bar')")
+        assert page.eval_on_selector(chart, "c => c.layout.yaxis.range[0]") <= 0
+        choose("#parameter-style", "box")
+        assert page.eval_on_selector(chart, "c => c.data.every(t=>t.type==='box')")
+        assert page.locator("#parameter-dispersion").is_disabled()
+        choose("#parameter-style", "matrix")
+        page.wait_for_function(
+            "document.querySelector('#parameter-observed .js-plotly-plot')"
+            ".data?.[0]?.type==='heatmap'"
+        )
+        heatmap = page.eval_on_selector(chart, "c => c.data[0]")
+        assert heatmap["customdata"][0][0] == pytest.approx(0.35)
+        assert heatmap["customdata"][0][-1] is None  # Censored data are not fabricated.
+        assert max(value for row in heatmap["z"] for value in row if value is not None) <= 1
+        page.screenshot(path=str(tmp_path / "parameter-heatmap.png"), full_page=True)
+        page.reload()
+        assert page.locator("#parameter-style").input_value() == "matrix"
+        assert page.locator("#parameter-scales").input_value() == "shared"
+        choose("#parameter-style", "line")
+        choose("#parameter-arrangement", "overlay")
+        choose("#parameter-scales", "auto")
+        page.evaluate("""() => {
+            const catalog=window.lfResearchServices.data.research.metric_catalog.metrics;
+            catalog.broad.unit='ratio'; catalog.narrow.unit='seconds';
+            window.lfResearchServices.customCharts.updateParameter();
+        }""")
+        assert page.eval_on_selector(chart, "c => c.data[0].yaxis !== c.data[1].yaxis")
+        page.select_option("#study-language", "es")
+        assert (
+            page.locator("#parameter-style option[value='bar']").inner_text() == "Barras agrupadas"
+        )
+        assert errors == []
         browser.close()

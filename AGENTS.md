@@ -27,6 +27,7 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Inspect project seed streams | `lf seeds [--role confirmation] [--count N]` |
 | Read-only expansion | `lf run CONFIG --dry-run` |
 | Execute | `lf run CONFIG [--on CLUSTER]` |
+| Limited fresh adaptive/fixed Fleet Study | `lf run CONFIG --on-fleet FLEET`; see control-plane limits below |
 | Deliberate new execution | `lf run CONFIG --rerun` |
 | Interactive operation | bare `lf` (TTY Research Console) |
 | Monitor semantic work | Research Console; `lf overview --json` |
@@ -354,8 +355,14 @@ index and exact inherited token; never infer or broaden physical devices from th
 Study telemetry is a bounded read model, not another result store. It references per-Run logs and
 scalar JSONL and never copies checkpoints/outputs. Collection reads are hierarchical:
 `overview --json` exposes only compact Study counts/objective/leader metadata; opening one Study
-loads transport-safe `study/interactive.json`; selected Runs are lazy, analysis/logs are tab-lazy,
-and complete controller history is paged only on explicit Action-history drill-down. Legacy rich
+loads v3 `study/interactive.json` Trial table cells/aggregate states, never all seeds/parameters.
+One Trial loads its own seed/parameter projection; Run curves/logs are selected-Run-only.
+HPO/resources use separate host-precomputed files; Analysis uses an aggregate panel without Run
+records, while explicit HTML export requests full analysis. Provisional post-hoc analysis is
+host-cached on demand outside the scheduling heartbeat; never refit it merely to open HPO.
+All Study views use 512 KiB byte pages plus generation/unchanged checks, not an aggregate 8 MiB
+ceiling. Hidden parent screens must stop polling. Complete controller history is paged only on
+explicit Action-history drill-down. Legacy rich
 summaries must be projected on their execution host rather than transferred whole; and
 `lf show WORK --run KEY --json` returns parameters,
 down-sampled curves, current/best objective and epoch, timing/failure/log plus finalized artifact
@@ -423,6 +430,14 @@ Exhaustive seed/search is serial; adaptive search owns its allocation and schedu
 
 ## Study Analysis and console
 
+Project HTML tabs use `outputs.html_section(name, title=..., section=...)`, an ordinary managed
+file, not a plugin/second runner. Explicit report generation alone collects finalized owned HTML
+with exact fingerprints; remote content is paged/cached, never fetched by overview/HPO polling.
+Group repeated Run documents by section and render encoded HTML lazily in opaque-origin offline
+iframes. Never insert consumer scripts in the parent DOM or relax network/ownership checks.
+Documents embed assets/data; limits are 16 MiB/document and 64 MiB/report. Chart axes identify their
+member metrics; empirical histogram/CDF distributions are presentation, never new HPO evidence.
+
 Study HTML opens Overview, with exact candidate states and contextual importance. Exclude conditional
 parameters from the global chart; retain their branch/support/model score in a separate table, never
 label predictive variation causal responsibility. Interpretation/questions use carousels, complete
@@ -465,6 +480,12 @@ must say observed or predicted; never imply an unpersisted proposal pool was mea
 uses the scientific equivalence margin. Keep per-comparable-Run intrinsic resources separate from
 total controller spend and scientific Pareto separate from resource Pareto. All effects remain
 descriptive/predictive, not causal. Live analysis is provisional; terminal analysis is final.
+
+For sweeps without adaptive INITIALIZE, persisted StudyDesign.space owns the Analysis geometry;
+never infer unconditional required keys from sparse branches. Host readers pass sweep geometry
+explicitly to old immutable runtimes. Empty valid response contexts are insufficient evidence;
+bounded remote errors must preserve the terminal exception, not only the traceback header.
+
 Stable screening stops ordinary optimization, not scientific work: material feasible support and
 interaction debt plus confirmation continue until exhausted or hard-budgeted. Compute
 `scientific_status` from parameters and material interactions. Scalar-objective
@@ -643,28 +664,37 @@ manifest reads and immutable name/version conflict checks.
 
 ## Control-plane invariants
 
-Coordinated Fleet execution is under implementation, NOT a supported `run --on-fleet` route.
-`Fleet`, executor-attested `ClusterOffer`, `GlobalPlacementBroker` and `StudyCoordinator` provide
-tested ownership/persistence contracts. Never reinterpret independent JobGroups as coordinated
-Studies or instantiate another HPO controller on workers. `lf fleets list/show/offers` inspect
-catalogs/resources; `drain/disable/enable` preview/apply catalog controls only, not running production
-Studies. Physical ResourceService observations do not grant dispatch capacity. Transport loss
-preserves leases as unknown; positive owned-Attempt loss proof is mandatory before bounded retry.
-Remaining runner/provider/predictive/decision/TUI integration: `docs/COORDINATED_STUDIES.md`.
-Do not claim end-to-end execution from fake tests.
+Public `lf run CONFIG --on-fleet NAME` supports fresh adaptive/fixed/repeated/automatic paired Studies,
+local coordinator and managed member profiles. Run Work exposes the same targets. Checkpoint/fidelity
+continuation, co-location, recovery/adoption, live expansion and distributed export remain gated; see
+`docs/COORDINATED_STUDIES.md`. Never describe independent JobGroups as a coordinated Study or
+instantiate a second optimizer. Dry-run never acquires grants. Do not claim SSH/command/SLURM
+acceptance from loopback tests.
 
-Internal `WorkRunner(dispatcher=...)` is the common fixed/automatic/adaptive execution boundary,
-not another planner. `PreparedShardExecutor` and `CoordinatedDispatcher` share one execution path.
-The prepared provider boundary reuses ControlPlane/JobService, exact bundle/environment identities,
-canonical typed-file bindings and host-side bounded observations. Native baseline GPU shards require
-owned Job markers, inherited opaque visibility and homogeneous hardware; live GPU offers remain
-gated until member allocation authority is integrated. Do not claim public remote/GPU Fleet launch
-or central adaptive metric streams from the internal local-provider acceptance tests.
-The fixed/automatic planner's callback replaces the unstarted frontier, not just appends new Runs;
-never withdraw an already leased or accepted identity. Coordinator v2 pause freezes acceptance and
-dispatch and drains owned workers without assuming death;
-unknown ownership prevents PAUSED. Preserve exact pre-submit leases, evidence and original clock
-across resume/v1 migration. Public launch/pause/resume/adoption remain pending.
+`WorkRunner(dispatcher=...)`, `PreparedShardExecutor` and `CoordinatedDispatcher` retain one native
+planning/execution boundary. Persistent owned member Jobs execute finite concrete waves and reuse
+native isolated Run/ARI processes. Offers require fresh exact owner heartbeats and all five attested
+code/environment/input/numerical/hardware fields; preparation placeholders never enter GlobalRuns.
+Inherited GPU tokens remain opaque and cannot broaden. Busy baseline waves offer zero spare slots.
+The controller must never compact or read scalar files by resolving execution-host paths locally.
+Native worker retention follows durable envelope publication. Live/terminal show/logs use verified
+member placement and lazy host-side curves; bounded active scalar summaries are display metadata,
+not accepted terminal response evidence. Semantic cancellation stops the parent before enumerating
+exact children.
+Ordered native scalar streams use bounded complete records, byte cursors and exact lease identities.
+Terminal results reach the native planner only after the full stream; interrupted unacknowledged
+appends are recovered, never acknowledged corruption. Native pending-aware acquisition and pruning
+remain central. Stop commands are immutable/idempotent and do not fabricate terminal evidence;
+protected evidence cannot be pruned. Unleased reprioritization audits prior invocations and keeps
+science immutable. Verified scalar mirrors, not remote paths, feed historical calibration.
+Job-history deletion protects Fleet dependencies and previews the whole family; unsupported retry
+must never replay a Fleet as a single-cluster Work, and unsupported export must not omit members.
+
+Fixed/automatic result callbacks replace the unstarted frontier without withdrawing leased or
+accepted identities. Preserve coordinator v2 leases/fences, original clock/budgets, quarantine and
+unknown ownership. Physical observations and missing heartbeats do not prove granted capacity or
+owned-Attempt loss. Internal pause/drain/catalog controls are not public live lifecycle support.
+Keep recent scientific backfill, paired-block acceptance and evidence semantics unchanged.
 
 Keep `Transport` and `Scheduler` provider boundaries. OpenSSH multiplexing reuses a private
 ControlMaster for its configured idle period. Credentials stay in interactive/keyring/env sources

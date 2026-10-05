@@ -2,96 +2,127 @@
 
 [Español](COORDINATED_STUDIES.es.md)
 
-## Status: prepared CPU execution integrated; public distributed execution pending
+## Status: fresh adaptive and fixed Fleet launch; recovery/transfer integration pending
 
-This is the implementation record for the requested coordinated multi-cluster Study. **There is
-not yet a supported `lf run --on-fleet` route.** Do not use independent submissions as a workaround
-and call them coordinated HPO. The native planners now expose one internal execution boundary;
-the public launch path has not been redirected to Fleet execution.
+`lf run CONFIG --on-fleet FLEET` now queues one durable local coordinator for repeated Runs,
+fixed sweeps, automatic paired sweeps and fresh adaptive HPO without fidelity continuation.
+The Research Console's Run Work target selector exposes
+the same `fleet:NAME` route. Scientific Work YAML remains unchanged. This is a **limited public
+capability**, not completion of the full coordinated adaptive-HPO request.
+
 The existing single-cluster route and independent `MultiClusterSubmissionService` remain unchanged.
+Independent submissions are not coordinated HPO.
 
-Implemented and tested:
+### Implemented
 
-- `Fleet`/`FleetMember`: operational roles, membership and per-target caps in `ClusterCatalog`.
-- `FleetResourceService`: reuse `ResourceService` observations, explicitly separate physical facts
-  from executor-attested admission, and report optional/required reachability.
-- `ExecutionEquivalence`: exact verified code, environment, inputs, numerics and hardware stratum.
-- `GlobalRun`: immutable candidate/seed/phase/fidelity identity without placement coordinates.
-- `GlobalPlacementBroker`: hard readiness, freshness, stratum, memory, cap and checkpoint-locality
-  filters; rank by known estimated completion/load, with deterministic name tie-breaking. Unknown
-  times stay unknown in the audit and rank behind fully known estimates; no invented probabilities.
-- `StudyCoordinator`: atomic per-Attempt leases, unique shard assignments, submission-intent fencing,
-  unknown remote states, explicit bounded lost-Attempt retry, restart reconciliation, result-digest
-  validation and contradiction quarantine. Scientific proposals are inputs, not invented here.
-- `ShardExecutor`: a protocol for idempotent submission and factual owned-executor observation.
-  `PreparedShardExecutor` uses real detached `ProcessScheduler` Jobs for already verified
-  fresh local CPU invocations. It requires the current existing interpreter, applies local caps,
-  prevalidates invocations before submission and preserves an ambiguous submit fence. Its prepared
-  provider path delegates to ordinary `ControlPlane` bundle/environment/input preparation and
-  `JobService`; provider IDs are separate from logical Job IDs. It verifies code/environment/input
-  identity, preserves TLS/site GPU wrapping, and observes bounded result batches on their host.
-  This is an internal boundary, not yet a complete remote Fleet driver.
-- `work.shard.execute_concrete_shard`: internal fresh worker using the existing isolated
-  dispatcher, not a second planner. It validates a finite leased queue, stores outcomes immediately,
-  isolates consumer failures and makes completed re-delivery idempotent. It deliberately rejects
-  recovered Attempts and checkpoint continuation until their provider/identity bindings are ready.
-  GPU workers require an exact provider Job, inherited opaque visibility and verified homogeneous
-  hardware. A finite baseline GPU shard uses native ARI; live GPU allocation offers, co-location
-  and the production member-agent lifecycle are not integrated, so GPU offers remain closed.
-  Verified preflight equivalence is a required caller input, not independently
-  established by this internal worker. It is not connected to public submission.
-- `WorkRunner(dispatcher=...)` reuses the same fixed, automatic paired-sweep and adaptive planning
-  functions; no seeds, candidates, convergence or scientific algorithms move into the dispatcher.
-  `CoordinatedDispatcher` connects fixed CPU execution to the coordinator, durable exact
-  invocations, provider reconciliation and the original result/refill callback, including exact
-  unstarted-frontier withdrawals without revoking resident workers. Real two-target direct-CPU
-  integrations cover fixed seeds and automatic complete paired-block refill, producing one
-  Study/Execution and one final analysis. It rejects adaptive
-  execution until central live metric/pruning integration exists.
-- Prepared typed file inputs retain authored parameters in their lease and bind only the runtime
-  location, verified by canonical content/size on both sides. Plain strings are never relocated.
-  Distributed dataset-placement attestation remains gated: shared NAME@VERSION alone is not proof.
-  Unidentified or existing remote environments are not immutable preparation evidence.
-- Coordinator state v2 adds `pausing`, `paused` and `resuming`. Pause freezes accepting proposals and
-  dispatch, drains rather than kills owned workers, accepts terminal results and waits on unknown
-  owners. Proven pre-submit leases survive with the same lease identity. Original creation time
-  can be imported once and cannot be reset. Pre-submit leases remain distinct from unknown remote
-  owners during reconciliation; an expired original budget cannot submit a retained lease after
-  resume. Valid v1 state migrates without rewriting evidence.
-  These are internal lifecycle operations, **not yet public `lf pause/resume` commands**.
-- `lf fleets list/show/offers/drain/disable/enable`: catalog discovery and preview-first operator
-  controls. Catalog controls do not yet manage running production Studies. `offers` reports
-  observation-only readiness, never claims dispatch is ready.
+- One native `WorkRunner` and the original adaptive/fixed/`PairedSweepSequentialAnalyzer` planners. The
+  dispatcher executes exact proposals and invokes the existing result/frontier callbacks; it
+  never creates candidates, seeds or an optimizer on a worker. One Execution and final analysis.
+- One persistent provider Job per member, prepared by ordinary `ControlPlane` and `JobService`.
+  Its owned member runtime receives finite leased waves, reuses native isolated Run processes
+  and ARI, and drains accepted work before releasing its allocation. Waves do not create new
+  GPU claims or another scheduler Job.
+- Fresh member heartbeats under the exact owned Job attest immutable code/environment/file-input/
+  numerical identities plus actual homogeneous hardware. All five identities must match across
+  members before any scientific Run is leased. Preparation placeholders are never placement evidence.
+- Baseline GPU admission uses only inherited opaque tokens, native short-lived hardware/memory
+  probes, per-member caps and physical headroom. No broadening of device grants. A busy wave offers
+  zero spare slots: **GPU co-location and incremental ARI refill inside a Fleet member are pending**.
+  Offers expire; physical `lf fleets offers` observations alone never grant dispatch capacity.
+- The common prepared-provider path retains direct/site-command/SLURM policy, TLS, bundles and
+  immutable managed environments. Loopback CPU and tiny real CUDA acceptance exist; this is not
+  yet end-to-end SSH, site-command or SLURM acceptance.
+- Typed file markers retain authored scientific parameters and verify canonical bytes/size on
+  preparation and worker binding. Large inputs still require the existing project mirror.
+  Distributed dataset attestation remains rejected; matching NAME@VERSION is not enough.
+- Existing atomic coordinator v2 leases, submission fences, unknown ownership, quarantine,
+  caps, original clock/budgets and reconciliation remain authoritative. The global placement wave
+  additionally respects the native global parallelism ceiling. No lease is retried from a lost
+  connection alone.
+- Member Jobs remain in `lf jobs` but do not become independent semantic Works. The parent is
+  shown as `fleet:NAME`; active and terminal per-Run metadata includes exact
+  cluster/Job/shard/lease/Attempt. Native worker Run records project bounded latest/best scalars
+  into the coordinator's existing Study view. `lf show STUDY --run KEY --json` and
+  `lf logs STUDY --run KEY` read live or terminal curves/logs on the verified member owner, lazily.
+  The coordinator never opens a remote path locally. Display summaries do not substitute for
+  the durable scientific scalar stream below.
+- Native `metrics.jsonl` and `training-metrics.jsonl` are transported incrementally in complete,
+  SHA-256-verified records, at most 32 KiB per channel/Run/read, with optional lossless compression.
+  Exact Study/Run/Attempt/lease/member/shard identities fence every read; byte offsets preserve
+  order and deduplicate retransmission. Durable receiver cursors recover unacknowledged appends
+  after interruption; missing/corrupt acknowledged data, gaps and contradictory replay fail closed.
+  Workers retain their native evidence through disconnection. Logs and bulk artifacts are not
+  part of this stream. A terminal result reaches the planner only after its full scalar stream.
+- The same central adaptive planner consumes completed evidence and all leased/queued/running
+  proposals across members. Its existing pending-aware acquisition (BoTorch qLogNEI when available,
+  deterministic mixed-kNN fallback otherwise) is retained. Spare admissible capacity invokes the
+  native bounded scientific frontier, not worker-side/random proposal generation. Unleased
+  reprioritization preserves scientific identity and records the prior invocation/priority.
+- Central pruning reuses native utility/history/calibration rules and sends durable idempotent
+  exact-lease stop requests. Required/startup/confirmation evidence stays protected. Requests
+  stop cooperatively; an unavailable connection is not pruning acknowledgement or terminal evidence.
+  Verified local scalar mirrors feed historical calibration without opening execution-host paths.
+  Checkpoint continuation/recovery is still gated, not inferred from similarly named local paths.
+- `lf cancel STUDY` stops the coordinator before enumerating and cancelling exact member owners.
+  Semantic deletion previews the whole owned Job family and refuses active members. Individual
+  cleanup cannot remove evidence referenced by the family. Remote bulk compaction stays on its
+  execution host; coordinator paths are independently owned.
 
-Still required before exposing coordinated execution:
+### Commands available now
 
-1. Extend the integrated dispatch boundary from prepared fixed CPU work to remote preparation and
-   central adaptive metric/pruning streams. Keep `PairedSweepSequentialAnalyzer` and complete block
-   lookahead as the automatic-sweep authority; local CPU block acceptance is now tested, while
-   production transport/recovery integration is still pending.
-2. Implement owned shard workers through existing `ControlPlane`, bundles/environments,
-   `JobService`, `ProcessScheduler`/`SlurmScheduler`, GPU access policy and local ARI. Shards must
-   receive concrete Run invocations only and never own a second optimizer.
-3. Preflight verified data/environment/numerics/hardware equivalence. Acquire fresh local offers
-   inside exact grants; apply per-member GPU caps locally. An observation from `nvidia-smi` cannot
-   authorize placement.
-4. Integrate remote metric/checkpoint/artifact locality and exact transfer manifests with existing
-   Study telemetry, results, recovery and export. Checkpoints currently block non-local placement;
-   automatic replication is deliberately not implemented or pretended to work.
-5. Add versioned primary/predictive search policy to the **existing** scientific planner, with
-   pending-aware acquisition, budget accounting, stale queued withdrawal and explicit idle reasons.
-   The foundation accepts/audits a predictive Run only with planner/evidence/model revisions and
-   a reason/policy, but it does not generate predictive proposals.
-6. Add `StudyDecision`, explicit upstream decision gating (no arbitrary workflow language), native
-   launch/reconcile CLI, TUI and single scientific HTML with placement provenance/utilization.
-7. Finish provider-adapter integration and the full predictive acceptance cases before calling the
-   feature complete. Real local CPU provider tests do not prove remote/GPU/SLURM/command execution.
-8. Wire public launch/pause/resume/reconcile, single-cluster adoption, live expansion, durable
-   coordinator hosting, distributed export and artifact/checkpoint transfer to these boundaries.
+```bash
+lf run study.yaml --on-fleet research --dry-run --json  # No grant, upload or Job.
+lf run study.yaml --on-fleet research                  # Durable asynchronous hand-off.
+lf show STUDY --json
+lf show STUDY --run trial-00001-seed-4 --json
+lf logs STUDY --run trial-00001-seed-4
+lf cancel STUDY --dry-run
+lf cancel STUDY --apply
+lf delete STUDY                                       # Preview terminal family.
+lf delete STUDY --apply
+```
 
-LambdaForge 0.17.0 releases the tested Fleet catalog and coordination foundations described here.
-It does not yet provide complete multi-cluster Study execution; the integration steps above remain
-pending.
+The coordinator is currently `local`; members must be managed cluster profiles, not the built-in
+local target. Dry-run validates source/signature/design, member roles and credentials, reports caps
+and deferred environment/equivalence checks, and does not probe or acquire GPUs. The durable hand-off
+captures operational profiles and credential references, never credential values. Ordinary
+`--on` and `--on-fleet` are mutually exclusive. `--rerun`, `--restart`, hidden recovery options and
+`--wait-for-submit` are rejected for this route.
+
+### Not implemented yet
+
+Checkpoint stream/continuation and distributed recovery; predictive/lookahead
+policy; member co-location; public pause/resume/reconcile and adoption; coordinator restart recovery;
+live membership expansion/drain; dataset-placement equivalence; checkpoint/artifact transfer,
+compression/resumption and distributed export; full placement/utilization TUI/HTML; StudyDecision
+and dependency gating. Internal coordinator lifecycle/catalog controls are not substitutes for those
+public operations. Fleet retry refuses single-cluster replay; export refuses a coordinator-only
+package that would silently omit member evidence.
+
+The request is therefore **not complete**. Do not describe this limited route as production-ready
+full distributed production readiness or claim provider acceptance from loopback/fake tests.
+
+### Incremental validation (2026-10-05)
+
+Ordered stream regressions cover bounded multi-chunk reads, compression, replay, incomplete records,
+receiver interruption, foreign leases and symlinks. Member regressions cover directed pruning,
+idempotence, immutable commands and protected evidence. Public loopback CPU integration runs the
+native adaptive planner across two prepared allocations and retains one HPO state/final analysis.
+Historical pruning is also exercised using verified mirrors with deliberately absent owner paths.
+These tests do not establish real remote/GPU adaptive acceptance or coordinator restart recovery.
+
+### Validation of this implementation pass (2026-10-04)
+
+- `ruff check .`: passed.
+- `mypy src/lambdaforge`: passed, 558 source files.
+- Complete `pytest`: 1,246 passed; four Lightning warnings in CPU tests.
+- A freshly built, installed wheel passed packaging smoke checks, installed-import verification,
+  `run --help`, scaffolding, validation and read-only dry-run.
+- Public Fleet integration exercised two loopback CPU members, including live Run metrics/logs;
+  separate prepared-provider tests exercised tiny real local CUDA workloads. These are not
+  real SSH/site-command/SLURM acceptance tests. WISDOM and real clusters were not modified or run.
+- GitHub CI was not executed. Passing local checks does not establish the pending capabilities
+  listed above.
 
 ## Fleet catalog
 
@@ -132,7 +163,8 @@ project catalog. Saving a fleet does not save secrets or change Work scientific 
 
 ## Ownership and persistence
 
-The future driver owns a project-scoped coordinator directory below its Execution. `coordinator.json`
+The current local driver owns a project-scoped coordinator below the durable JobStore's
+`fleets/PARENT_JOB/coordinator`, with independently owned native Execution metadata beside it. `coordinator.json`
 is schema version 2 (with a v1 reader) and is atomically fsynced with the existing JSON publisher under the existing
 cross-process file lock. `leadership()` fences the planning loop. Short state transactions never
 hold a lock over network I/O. The state contains immutable initialization/budgets, Run definitions,
@@ -183,6 +215,7 @@ python -m pytest -q tests/work/test_concrete_shard.py
 python -m pytest -q tests/work/test_study_dispatch_boundary.py tests/controlplane/test_coordinator_pause.py
 python -m pytest -q tests/work/test_coordinated_cpu_dispatch.py tests/controlplane/test_prepared_cpu_executor.py
 python -m pytest -q tests/controlplane/test_shard_preparation.py tests/controlplane/test_prepared_provider_dispatch.py
+python -m pytest -q tests/controlplane/test_fleet_study_service.py tests/controlplane/test_member_allocation.py
 ```
 
 The fixed design test supplies 56 candidates × 4 seeds = 224 unique required Runs and fake targets
@@ -201,14 +234,22 @@ Prepared-provider acceptance also exercises actual bundle staging, JobService, a
 supervisor, CPU children and a minimal CUDA tensor child with native ARI. Installation/runtime
 resolution are fixtures; the transport is loopback, not SSH. The GPU test uses explicitly shared
 local access and inherits the supervisor's grant; it skips when CUDA is unavailable. This does not
-establish SLURM/site-command acceptance, managed package installation, production GPU offers or a
-public distributed GPU Study. Input identity/mutation and opaque-grant regressions are separate.
+establish SLURM/site-command acceptance or managed package installation. Persistent-allocation
+cases verify fresh baseline offers, exact Job reuse and drain without releasing the grant between
+waves. Input identity/mutation and opaque-grant regressions are separate.
 
 The prepared-provider tests run four fixed identities or three complete two-candidate paired
 blocks over two detached direct CPU targets, ingest native outcomes centrally and produce one
 final analysis. This is real
 local ProcessScheduler execution, not a fake provider, but it is still an internal prepared-CPU
-test rather than `lf run --on-fleet` acceptance. Dispatcher-injection tests also exercise the
+test. `tests/controlplane/test_fleet_study_service.py` additionally tests the product service's
+real two-member allocations, single final analysis, terminal Run-owner reads, semantic cancellation,
+captured asynchronous request and read-only CLI grammar/preflight. Installation remains a fixture;
+the test does not pretend to be real SSH or complete adaptive Fleet acceptance. The live-read
+fixture holds scientific Runs open until the coordinator has actually read their isolated log
+and step-7 metric through the exact member owner. Foreign seeds/Trials/Attempts/paths are rejected;
+remote display scalars cannot become completed response evidence or trigger local path reads.
+Dispatcher-injection tests also exercise the
 existing native adaptive planner without creating a worker-side optimizer. Pause tests cover
 network partitions, completed-result ingestion, pre-submit races, restart and immutable budgets.
 

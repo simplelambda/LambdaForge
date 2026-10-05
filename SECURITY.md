@@ -18,6 +18,12 @@ required. Do not include real credentials or private datasets.
 
 ## Security model
 
+- Project-contributed report HTML is verified finalized managed output, embedded as encoded data
+  and loaded in opaque-origin sandboxed iframes only on selection. Scripts/downloads are allowed
+  inside the frame; parent access, network, forms and navigation are blocked by sandbox/CSP. Embed
+  assets/data rather than referring to remote/local files. This browser presentation isolation does
+  not sandbox trusted consumer Python. Limits: 16 MiB/document, 64 MiB/report.
+
 - A YAML `run` import names trusted consumer Python and may execute arbitrary code. LambdaForge is
   not a sandbox; configuration must come from the researcher or another trusted source. YAML has no
   expression evaluation, recursive construction, arbitrary function target or secret interpolation.

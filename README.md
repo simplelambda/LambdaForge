@@ -51,14 +51,16 @@ lf help clusters add
 ```
 
 Operational fleets can be inspected with `lf fleets list/show/offers`; `drain/disable/enable`
-preview catalog changes and require `--apply` to save. Coordinated execution is **not yet enabled**:
-the tested lease/reconciliation foundation and remaining work are documented in
-[Coordinated Studies](docs/COORDINATED_STUDIES.md). Independent cluster submissions remain separate
-Studies, not shared HPO. An internal prepared-CPU integration now exercises real direct Jobs and
-one final Study analysis; this does not yet enable remote/GPU Fleet launch or public pause/resume.
-The common prepared executor now reuses ordinary provider preparation, verifies file relocation
-and exposes bounded remote observations; production Fleet GPU offers and adaptive streaming remain
-gated. See the status document for tested boundaries versus pending public integration.
+preview catalog changes and require `--apply` to save. `lf run CONFIG --on-fleet NAME` now
+asynchronously launches one coordinated fresh adaptive/fixed/repeated/automatic paired Study, with a local
+coordinator and prepared managed member Jobs. Run Work offers the same Fleet targets. Owned
+allocations supply expiring baseline CPU/GPU offers and exact execution-equivalence checks;
+members share one planner and final analysis. Live Run logs/curves and finalized artifacts retain their host,
+and semantic cancellation targets the whole owned family.
+Ordered native metric streams and targeted central pruning support fresh adaptive HPO.
+This is a limited route: checkpoint/fidelity continuation, co-location, recovery/adoption, live expansion and
+distributed export remain gated. See [status and tested boundaries](docs/COORDINATED_STUDIES.md).
+Independent cluster submissions remain separate Studies, not shared HPO.
 
 Run bare `lf` in an interactive terminal to open the Research Console. Its Clusters screen adds and
 edits profiles with contextual explanations, secure credential handling and explicit test,
@@ -1262,7 +1264,29 @@ replace a dominant score-by-trial plot (now optional in Trials). Conditional par
 is separated with branch/support/reliability instead of implying global causal responsibility.
 Interpretations and questions use horizontal carousels; complete findings are paged. Controls use
 searchable anchored dropdowns, not metric-selection modals. **Parameters** checkboxes add/remove
-curves in one chart, with independent axes for different/unknown units. **ⓘ** explains interpretation.
+metrics as lines, points, grouped bars, distributions or a heatmap. Choose combined/separate panels,
+automatic overlapping-range, shared or independent scales, and hidden/whisker/band SD. Known
+different units stay separate automatically; grouping unknown units is visual, not scientific.
+**ⓘ** explains interpretation.
+Additional styles include individual Trial points, step/area lines, violins, horizontal bars,
+histograms and empirical cumulative distributions. Axes show the names of the metrics sharing
+each scale. Distributions pool candidate summaries, not independent seeds; boxes/violins compare
+exact parameter values. The Run dashboard also provides epoch distributions and these curve styles.
+
+Projects may contribute their own offline HTML tabs without a LambdaForge domain-specific plugin:
+
+```python
+viewer = self.outputs.html_section("proteins", title="Proteins")
+viewer.write_text(project_generated_html)  # Embed the project's own scripts, data and assets.
+```
+
+**Interactive Study report**, `lf results report` and portable export include finalized declared
+sections automatically. Repeated trials/seeds share a tab with a document selector; optional
+`section="proteins"` groups several named outputs. LambdaForge checks owned paths/checksums and
+loads the HTML only for explicit report generation. Each document runs in an isolated iframe,
+with external requests and parent-page access blocked. Limits: 16 MiB/document, 64 MiB/report.
+See [project HTML tabs](docs/RESEARCH_ANALYSIS.md#project-html-tabs) for standalone renderer usage.
+
 Choose English/Spanish in the header; preferences persist for that file without changing evidence
 or translating authored names. **Research** links prioritized findings to evidence and charts.
 **Metrics & health** organizes labels, categories, units, aliases, constants, missing support and
@@ -1303,14 +1327,21 @@ arrives, and show an explicit retrieval error rather than pretending an empty ta
 Collection screens use deliberately shallow read models. Overview performs one inventory pass per
 direct provider (or only active-job status reads for schedulers without inventory), reads only local
 Dataset registry counts and never transfers every Study candidate/Run index;
-Work and Studies omit resource and Dataset probes altogether. Opening one Study fetches its bounded
-candidate/Run index, while HPO analysis, complete controller history and logs are loaded only when
-their tabs are opened. Epoch curves, artifacts and isolated logs are requested only after opening
+Work and Studies omit resource and Dataset probes altogether. Opening one Study fetches only Trial
+table cells and aggregate counts; its parameters/seeds load when opening one Trial. Precomputed
+HPO, aggregate Analysis, resources, complete controller history and logs load only when requested.
+Epoch curves, artifacts and isolated logs are requested only after opening
 one seed. `lf overview --json` follows the same compact contract; use `lf show WORK` and
 `lf show WORK --run KEY --json` for successive detail levels.
 The worker writes a compact `study/interactive.json` separately from its authoritative rich
-summary; legacy oversized summaries are projected on the execution host, and the complete action
-history is transferred in bounded JSONL pages only after opening Action history. Live redraws retain
+summary. View-specific HPO/resource/Trial files avoid reading the whole summary; provisional
+post-hoc analysis is cached in a separate read process on its execution host, never in the HPO
+heartbeat. Legacy rich indexes are projected on their host. Study reads use 512 KiB pages and
+retain persisted conditional sweep geometry, including in older immutable worker environments.
+Unavailable response contexts mean insufficient evidence, not a failed Study. They use
+unchanged-snapshot markers instead of rejecting valid totals above 8 MiB. Hidden parent screens
+stop polling. Complete action history is transferred in bounded JSONL pages only after opening
+Action history. Live redraws retain
 the selected row, table/log offsets and any manual chart viewport.
 The central scientific route is:
 

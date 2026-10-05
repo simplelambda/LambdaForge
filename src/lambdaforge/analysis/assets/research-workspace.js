@@ -240,8 +240,9 @@ window.LambdaForgeResearchWorkspace = function (services) {
     // Small type/palette/filter menus use the same searchable control, not another UI.
     document.querySelectorAll('select').forEach(select=>{
       const button=make('button');button.type='button';button.className='semantic-select';button.id=select.id?select.id+'-picker':'';
+      if(select.hasAttribute('data-authored'))button.dataset.authored='true';
       const update=()=>{button.textContent=(select.selectedOptions[0]?.textContent||select.value)+' ▾';button.disabled=select.disabled;};
-      button.onclick=()=>dropdown.open(button,{selected:()=>[select.value],items:()=>[...select.options].map(option=>({value:option.value,label:option.textContent,description:'',aliases:[]})),change:value=>{select.value=value;select.dispatchEvent(new Event('input',{bubbles:true}));select.dispatchEvent(new Event('change',{bubbles:true}));update();}});
+      button.onclick=()=>dropdown.open(button,{selected:()=>[select.value],items:()=>[...select.options].map(option=>({value:option.value,label:option.textContent,description:'',aliases:[],authored:select.hasAttribute('data-authored')})),change:value=>{select.value=value;select.dispatchEvent(new Event('input',{bubbles:true}));select.dispatchEvent(new Event('change',{bubbles:true}));update();}});
       select.hidden=true;select.after(button);select.addEventListener('change',update);controls.push(update);update();
     });
     if(!getPrefs().tab)tab('study-overview');

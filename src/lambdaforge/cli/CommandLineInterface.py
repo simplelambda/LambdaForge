@@ -214,6 +214,45 @@ class CommandLineInterface:
 
     @staticmethod
     def _run(arguments: Any) -> int:
+        if getattr(arguments, "on_fleet", None):
+            from lambdaforge.controlplane.FleetStudyService import fleet_preflight
+            from lambdaforge.execution.ResourceRequest import ResourceRequest
+
+            catalog = ClusterCatalog.load(arguments.clusters)
+            fleet = catalog.fleet(arguments.on_fleet)
+            config = WorkConfig.from_yaml(arguments.config)
+            preview = fleet_preflight(config, catalog, fleet)
+            if (
+                arguments.rerun
+                or arguments.restart
+                or arguments.wait_for_submit
+                or any(
+                    getattr(arguments, option, None)
+                    for option in ("resume_execution", "resume_study_path", "accept_code_change")
+                )
+            ):
+                raise ValueError("Fleet execution is asynchronous; restart/rerun are pending.")
+            if arguments.dry_run:
+                payload = preview
+            else:
+                handle = SubmissionService(catalog).enqueue(
+                    arguments.config,
+                    cluster=fleet.coordinator,
+                    fleet=fleet.name,
+                    resources=ResourceRequest(cpu_cores=1),
+                    allow_duplicate=arguments.allow_duplicate,
+                )
+                payload = {**handle.to_dict(), "target": "fleet:" + fleet.name}
+            print(
+                json.dumps(payload, indent=2)
+                if arguments.json
+                else (
+                    f"Fleet {fleet.name}: read-only plan; no GPU grant acquired."
+                    if arguments.dry_run
+                    else f"Submitted {payload['job_id']} to fleet:{fleet.name}"
+                )
+            )
+            return 0
         # Scheduler children invoke the same public CLI.  They execute inline; an interactive
         # top-level invocation is handed to the durable submission worker on every target,
         # including local, so terminal latency does not depend on scientific execution.

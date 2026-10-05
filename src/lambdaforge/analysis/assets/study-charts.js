@@ -78,13 +78,193 @@ window.LambdaForgeStudyCharts = function (services) {
           ticktext: categories.map(label)} : {})}};
   }
 
+  // Descriptive rendering only. Unknown units may share a visual range, not a scientific meaning.
+  function parameterFigure(spec, layout, traces) {
+    const fields = [...new Set([spec.y, ...(spec.metrics || [])])];
+    const colors = ['#58a6ff', '#56d364', '#bc8cff', '#ffa657', '#39c5cf', '#ff7b72'];
+    const series = fields.map((name, index) => {
+      const rows = rowsFor(spec, name);
+      if (spec.normalize && rows.length) {
+        const values = rows.map(row => row.y), low = Math.min(...values), span = Math.max(...values) - low;
+        rows.forEach(row => row.y = span ? (row.y - low) / span : 0);
+      }
+      const groups = !spec.parameterView && spec.aggregate === 'points' && ['step','area'].includes(spec.kind)
+        ? [...rows].sort((a,b) => compare(a.x,b.x)).map(row => ({x:row.x,values:[row.y],trials:[row.candidate.trial],partial:isPartial(row.candidate)})) : grouped(rows);
+      const values = rows.map(row => row.y);
+      const unit = data.research?.metric_catalog?.metrics?.[name.slice(7).replace('__selection__', 'selection_objective')]?.unit;
+      return {name, rows, groups, unit: spec.normalize ? 'visual-normalized' : unit && unit !== 'unknown' ? unit : null,
+        color: colors[index % colors.length], low: values.length ? Math.min(...values) : null,
+        high: values.length ? Math.max(...values) : null};
+    });
+    const compatible = (a, b) => {
+      if (a.unit && b.unit && a.unit !== b.unit) return false;
+      if (a.low === null || b.low === null) return false;
+      const overlap = Math.min(a.high, b.high) - Math.max(a.low, b.low);
+      const smaller = Math.min(a.high - a.low, b.high - b.low);
+      // Contained intervals share naturally; slight overlap must not collapse unrelated ranges.
+      return smaller === 0 ? overlap >= 0 : overlap / smaller >= 0.5;
+    };
+    const scaleGroups = [];
+    for (const item of series) {
+      let group = spec.scales === 'shared' ? scaleGroups[0]
+        : spec.scales === 'independent' ? null : scaleGroups.find(group => group.every(other => compatible(item, other)));
+      if (!group) {group = []; scaleGroups.push(group);}
+      group.push(item); item.scale = scaleGroups.indexOf(group);
+    }
+    const t = text => window.LambdaForgeStudyLocale?.t(text) || text;
+    const metricNames = items => items.map(item => fieldLabel(item.name)).join(' · ');
+    const ranges = scaleGroups.map(group => {
+      const valid = group.filter(item => item.low !== null);
+      if (!valid.length) return undefined;
+      const low = Math.min(...valid.map(item => item.low)), high = Math.max(...valid.map(item => item.high));
+      const padding = (high - low || Math.abs(low) || 1) * 0.08;
+      return [low - padding, high + padding];
+    });
+    if (spec.kind === 'matrix') {
+      const xs = domain(spec.x, series.flatMap(item => item.groups.map(group => group.x)));
+      const groups = series.map(item => new Map(item.groups.map(group => [JSON.stringify(group.x), group])));
+      const raw = groups.map(row => xs.map(x => {const group = row.get(JSON.stringify(x));return group ? mean(group.values) : null;}));
+      const normalized = raw.map(row => {const values = row.filter(finite);if (!values.length) return row;
+        const low = Math.min(...values), span = Math.max(...values) - low;
+        return row.map(value => finite(value) ? (span ? (value - low) / span : 0.5) : null);});
+      traces.push({type:'heatmap', x:xs.map(label), y:series.map(item => fieldLabel(item.name)), z:normalized,
+        customdata:raw, zmin:0, zmax:1, colorscale:'Viridis', hoverongaps:false,
+        colorbar:{title:{text:t('Within-metric range')}},
+        hovertemplate:'%{y}<br>x=%{x}<br>mean=%{customdata:.6g}<extra></extra>'});
+      layout.yaxis = {type:'category', autorange:'reversed'}; layout.xaxis.type = 'category';
+      layout.height = Math.max(500, Math.min(1800, series.length * 55 + 180));
+      return t('Heatmap colours are normalized within each metric; hover shows the original mean. Blank cells are unobserved, not zero.');
+    }
+    if (['histogram', 'ecdf', 'hbar'].includes(spec.kind)) {
+      const panels = spec.arrangement === 'panels' || scaleGroups.length > 1;
+      layout.annotations = []; layout.legend = {orientation:'h', y:-0.18};
+      layout.barmode = spec.kind === 'histogram' ? 'overlay' : 'group';
+      layout.height = panels ? Math.max(500, series.length * 300) : 500;
+      for (const [index, item] of series.entries()) {
+        const suffix = panels && index ? String(index + 1) : '';
+        const refs = {xaxis:'x' + suffix, yaxis:'y' + suffix};
+        const xRange = ranges[item.scale] && [...ranges[item.scale]];
+        if (xRange && spec.kind === 'hbar') {
+          xRange[0] = Math.min(0, xRange[0]); xRange[1] = Math.max(0, xRange[1]);
+          if (spec.dispersion !== 'off') for (const member of scaleGroups[item.scale]) for (const group of member.groups) {
+            const deviation = sd(group.values);
+            if (deviation !== null) {xRange[0] = Math.min(xRange[0], mean(group.values) - deviation);
+              xRange[1] = Math.max(xRange[1], mean(group.values) + deviation);}
+          }
+        }
+        layout['xaxis' + suffix] = {title:{text:panels ? fieldLabel(item.name) : metricNames(series)},
+          ...(xRange ? {range:xRange, autorange:false} : {autorange:true}), anchor:'y' + suffix};
+        layout['yaxis' + suffix] = {title:{text:spec.kind === 'ecdf' ? t('Cumulative fraction')
+          : spec.kind === 'histogram' ? t('Candidate count') : fieldLabel(spec.x)}, anchor:'x' + suffix,
+          ...(spec.kind === 'ecdf' ? {range:[0,1], autorange:false} : {autorange:true}),
+          ...(spec.kind === 'hbar' ? {type:'category'} : {})};
+        if (panels) {
+          const bottom = 1 - (index + 1) / series.length;
+          layout['yaxis' + suffix].domain = [bottom + 0.17 / series.length, bottom + 0.88 / series.length];
+        }
+        const values = item.rows.map(row => row.y).sort((a,b) => a-b);
+        if (spec.kind === 'histogram') traces.push({type:'histogram', name:fieldLabel(item.name),
+          x:values, marker:{color:item.color}, opacity:0.65, ...refs,
+          hovertemplate:'value=%{x}<br>candidates=%{y}<extra>%{fullData.name}</extra>'});
+        else if (spec.kind === 'ecdf') {
+          const xs = unique(values);
+          // A descriptive empirical distribution, not an interpolated probability model.
+          let cursor = 0;
+          const ys = xs.map(x => {while (cursor < values.length && values[cursor] <= x) cursor++;return cursor / values.length;});
+          traces.push({type:'scatter', mode:'lines+markers', name:fieldLabel(item.name), x:xs, y:ys,
+            line:{color:item.color, shape:'hv'}, marker:{color:item.color}, ...refs,
+            hovertemplate:'value≤%{x:.6g}<br>fraction=%{y:.3f}<extra>%{fullData.name}</extra>'});
+        } else traces.push({type:'bar', orientation:'h', name:fieldLabel(item.name), ...refs,
+          x:item.groups.map(group => mean(group.values)), y:item.groups.map(group => label(group.x)),
+          marker:{color:item.color}, offsetgroup:item.name,
+          error_x:{type:'data', array:item.groups.map(group => sd(group.values)), visible:spec.dispersion !== 'off'},
+          hovertemplate:'parameter=%{y}<br>mean=%{x:.6g}<extra>%{fullData.name}</extra>'});
+      }
+      return t('Distributions show recorded candidate summaries, not individual seeds.')
+        + (spec.kind === 'hbar' ? '' : ' ' + t('Parameter values are pooled in this distribution view; use boxes or violins to compare exact values.'));
+    }
+    const panels = spec.arrangement === 'panels', discrete = categorical(series.flatMap(item => item.rows.map(row => row.x)));
+    layout.barmode = 'group'; layout.legend = {orientation:'h', y:-0.22};
+    layout.showlegend = !panels;
+    // Independent panels avoid illegible axis stacks, while preserving optional shared ranges.
+    if (panels) {layout.height = Math.max(500, series.length * 300);layout.annotations = [];}
+    if (!panels && scaleGroups.length > 1) {layout.xaxis.domain = [0, 0.82];layout.margin.r = 100;}
+    for (const [index, item] of series.entries()) {
+      const axisIndex = panels ? index : item.scale, suffix = axisIndex ? String(axisIndex + 1) : '';
+      const refs = {yaxis:'y' + suffix, ...(panels ? {xaxis:'x' + suffix} : {})};
+      const axisName = 'yaxis' + suffix;
+      const yRange = ranges[item.scale] && [...ranges[item.scale]];
+      if (yRange && spec.dispersion !== 'off' && spec.kind !== 'box') {
+        for (const member of scaleGroups[item.scale]) for (const group of member.groups) {
+          const deviation = sd(group.values);
+          if (deviation !== null) {yRange[0] = Math.min(yRange[0], mean(group.values) - deviation);
+            yRange[1] = Math.max(yRange[1], mean(group.values) + deviation);}
+        }
+      }
+      if (yRange && spec.kind === 'bar') {yRange[0] = Math.min(0, yRange[0]);yRange[1] = Math.max(0, yRange[1]);}
+      const title = panels ? fieldLabel(item.name) : metricNames(scaleGroups[item.scale]);
+      layout[axisName] = {title:{text:title, font:{color:scaleGroups[item.scale][0].color}}, automargin:true,
+        ...(yRange ? {range:yRange, autorange:false} : {autorange:true}),
+        ...(!panels && axisIndex ? {overlaying:'y', side:'right', anchor:'free', autoshift:true, showgrid:false} : {})};
+      if (panels) {
+        const bottom = 1 - (index + 1) / series.length;
+        layout[axisName].domain = [bottom + 0.10 / series.length, bottom + 0.85 / series.length];
+        layout[axisName].anchor = 'x' + suffix;
+        layout['xaxis' + suffix] = {title:{text:index === series.length - 1 ? fieldLabel(spec.x) : ''}, anchor:'y' + suffix, autorange:true,
+          ...(discrete ? {type:'category'} : {})};
+        layout.annotations.push({text:fieldLabel(item.name), x:0, y:bottom + 0.94 / series.length,
+          xref:'paper', yref:'paper', showarrow:false, xanchor:'left', font:{color:item.color}});
+      } else if (discrete) layout.xaxis.type = 'category';
+      const xValue = value => discrete ? label(value) : value;
+      if (['box', 'violin', 'raw'].includes(spec.kind)) {
+        traces.push({type:spec.kind === 'raw' ? 'scatter' : spec.kind, mode:'markers', name:fieldLabel(item.name), x:item.rows.map(row => xValue(row.x)),
+          y:item.rows.map(row => row.y), ...(spec.kind === 'violin' ? {points:'all', box:{visible:true}, meanline:{visible:true}, spanmode:'hard'}
+            : spec.kind === 'box' ? {boxpoints:'all'} : {}),
+          ...(spec.kind === 'raw' ? {} : {jitter:0.25, pointpos:0}),
+          marker:{color:item.color, ...(spec.kind === 'raw' ? {symbol:item.rows.map(row => isPartial(row.candidate) ? 'x' : 'circle')} : {})},
+          customdata:item.rows.map(row => row.candidate.trial), ...refs,
+          hovertemplate:'x=%{x}<br>value=%{y:.6g}<br>trial=%{customdata}<extra>%{fullData.name}</extra>'});
+        layout.boxmode = 'group'; layout.violinmode = 'group'; continue;
+      }
+      const groups = item.groups, means = groups.map(group => mean(group.values)), deviations = groups.map(group => sd(group.values));
+      const connected = ['line', 'step', 'area'].includes(spec.kind);
+      const band = spec.dispersion === 'band' && connected && !discrete;
+      // Isolated SD values cannot form an honest ribbon: retain their whisker rather than hide evidence.
+      const whiskers = deviations.map((value, n) => band
+        && (deviations[n - 1] !== null && finite(deviations[n - 1]) || finite(deviations[n + 1])) ? null : value);
+      if (band) {
+        const rgba = item.color.match(/\w\w/g).map(value => parseInt(value, 16)).join(',');
+        for (const sign of [-1, 1]) traces.push({type:'scatter', mode:'lines', x:groups.map(group => xValue(group.x)),
+          y:means.map((value, n) => deviations[n] === null ? null : value + sign * deviations[n]),
+          connectgaps:false, line:{width:0}, showlegend:false, hoverinfo:'skip',
+          ...(sign === 1 ? {fill:'tonexty', fillcolor:`rgba(${rgba},0.18)`} : {}), ...refs});
+      }
+      traces.push({type:spec.kind === 'bar' ? 'bar' : 'scatter', mode:connected ? 'lines+markers' : 'markers',
+        name:fieldLabel(item.name), x:groups.map(group => xValue(group.x)), y:means, ...refs,
+        ...(spec.kind === 'bar' ? {offsetgroup:item.name, alignmentgroup:'parameter-metrics'} : {}),
+        marker:{color:item.color, size:9}, line:{color:item.color, shape:spec.kind === 'step' ? 'hv' : 'linear'},
+        ...(spec.kind === 'area' ? {fill:'tozeroy', fillcolor:item.color + '22'} : {}),
+        error_y:{type:'data', array:whiskers, visible:spec.dispersion !== 'off' && whiskers.some(finite)},
+        customdata:groups.map(group => [group.trials.join(', '), group.values.length, sd(group.values)]),
+        hovertemplate:'x=%{x}<br>mean=%{y:.6g}<br>trial IDs=%{customdata[0]}<br>trials=%{customdata[1]}'
+          + '<br>SD=%{customdata[2]}<extra>%{fullData.name}</extra>'});
+    }
+    return t('Equal-weight candidate summaries; SD is across candidates, not a seed confidence interval.')
+      + ' ' + scaleGroups.map((group, index) => t('Scale') + ' ' + (index + 1) + ': ' + metricNames(group)).join('; ')
+      + (spec.dispersion === 'band' && (discrete || !['line','step','area'].includes(spec.kind)) ? ' ' + t('Shaded bands require numeric X lines; this view uses SD whiskers instead.') : '')
+      + (['box','violin'].includes(spec.kind) ? ' ' + t('Distributions show recorded candidate summaries, not individual seeds.') : '')
+      + (spec.kind === 'violin' ? ' ' + t('Violin density is descriptive smoothing; small samples do not establish a population distribution.') : '');
+  }
+
   function render(spec, target = 'study-custom-chart', statusTarget = 'study-chart-status') {
     const chart = node(target); if (!chart || !spec) return;
     const colorscale = palettes[spec.palette] || 'Viridis';
     const layout = baseLayout(spec.name, fieldLabel(spec.x), fieldLabel(spec.y));
     const rows = rowsFor(spec, spec.y), traces = [];
     let message = '';
-    if(spec.kind==='parallel'){
+    if(spec.parameterView || ['raw','step','area','box','violin','hbar','histogram','ecdf','matrix'].includes(spec.kind)){
+      message = parameterFigure(spec, layout, traces);
+    } else if(spec.kind==='parallel'){
       const parameters=spec.parameters||data.parameters.slice(0,8), valid=data.candidates.filter(candidate=>(isComplete(candidate)||spec.partial)
         &&parameters.every(name=>present(field(candidate,'param:'+name,spec.partial)))&&finite(field(candidate,spec.y,spec.partial)));
       const dimensions=parameters.map(name=>{const a=axis(valid.map(row=>row.parameters[name]),name);return {label:name,values:a.values,...(a.layout.tickvals?{tickvals:a.layout.tickvals,ticktext:a.layout.ticktext}:{})}});
@@ -210,10 +390,18 @@ window.LambdaForgeStudyCharts = function (services) {
       layout.annotations = [{text: 'No matching observations. See the explanation below.', xref: 'paper', yref: 'paper',
         x: 0.5, y: 0.5, showarrow: false}];
     }
-    status(message + (spec.partial ? ' Partial/censored evidence is descriptive only, not final selection.' : ' Completed evidence only.'), statusTarget);
+    status(message + (spec.normalize ? ' Per-metric visual 0–1 normalization (not scientific utility).' : '')
+      + (spec.partial ? ' Partial/censored evidence is descriptive only, not final selection.' : ' Completed evidence only.'), statusTarget);
     // A new graph specification resets stale zoom/camera rather than reusing another metric's scale.
     layout.uirevision = spec.id;
     layout.autosize = true;
+    // Plotly's initial embedded figure has a fixed CSS height; update it for multi-panel figures.
+    if (spec.parameterView) {
+      chart.style.height = layout.height + 'px';
+      for (let wrapper = chart.parentElement; wrapper && wrapper !== document.getElementById(target); wrapper = wrapper.parentElement) {
+        if (wrapper.style.height) wrapper.style.height = 'auto';
+      }
+    }
     Plotly.react(chart, traces, layout, config).then(() => {
       // Initial figures are mounted in hidden tabs; fit the now-visible panel after rendering.
       if (chart.clientWidth) requestAnimationFrame(() => Plotly.Plots.resize(chart));
@@ -224,7 +412,7 @@ window.LambdaForgeStudyCharts = function (services) {
     const joint = isJoint(id('kind').value);
     id('z-control').hidden = !joint;
     id('extra-control').hidden = joint;
-    id('aggregate').disabled = joint;
+    id('aggregate').disabled = joint || ['raw','box','violin','hbar','histogram','ecdf','matrix'].includes(id('kind').value);
   }
 
   function show(savedId) {
@@ -285,7 +473,7 @@ window.LambdaForgeStudyCharts = function (services) {
     'metric:__selection__','metric:__best_observed__','metric:__current_observed__',...['gpu_seconds','duration_seconds','cpu_seconds','peak_vram','peak_ram'].map(n=>'resource:'+n)]);
     if(document.views_version!==1||!Array.isArray(document.views)||document.views.length>50)throw Error('Unsupported views document (maximum 50 views).');
     const allowed=new Set(['id','name','kind','x','y','z','metrics','aggregate','partial','palette','reverse','notes','normalize','parameters']);
-    for(const spec of document.views){if(!spec||typeof spec.name!=='string'||spec.name.length>200||Object.keys(spec).some(name=>!allowed.has(name))||!['scatter','line','bar','scatter3d','heatmap','surface','parallel'].includes(spec.kind)
+    for(const spec of document.views){if(!spec||typeof spec.name!=='string'||spec.name.length>200||Object.keys(spec).some(name=>!allowed.has(name))||!['scatter','line','bar','scatter3d','heatmap','surface','parallel','raw','step','area','box','violin','hbar','histogram','ecdf','matrix'].includes(spec.kind)
       ||!Array.isArray(spec.metrics||[])||(spec.metrics||[]).length>32||![spec.x,spec.y,...(spec.z?[spec.z]:[]),...(spec.metrics||[])].every(field=>fields.has(field))
       ||typeof(spec.notes||'')!=='string'||(spec.notes||'').length>10000||!['points','mean',undefined].includes(spec.aggregate)||![undefined,true,false].includes(spec.partial)||![undefined,true,false].includes(spec.normalize)
       ||![undefined,true,false].includes(spec.reverse)||(spec.palette!==undefined&&!Object.hasOwn(palettes,spec.palette))
@@ -305,8 +493,16 @@ window.LambdaForgeStudyCharts = function (services) {
     if(!metric){const chart=node('parameter-observed');if(chart)Plotly.react(chart,[],baseLayout('No metrics selected. Choose one or more metrics above.'),config);
       status('No metrics selected. Choose one or more metrics above.','parameter-observed-status');document.querySelector('#parameter-values tbody').replaceChildren();return;}
     const extras=getPrefs().parameterMetrics||[];
-    const spec = {id: 'parameter:' + name + ':' + metric + ':' + JSON.stringify(extras), name: 'Observed metric by parameter value',
-      kind: 'line', x: 'param:' + name, y: 'metric:' + metric, metrics:extras, aggregate: 'mean', partial: false,overlay:true};
+    const controls = Object.fromEntries(['style','arrangement','scales','dispersion'].map(key =>
+      [key, document.getElementById('parameter-' + key).value]));
+    save({parameterPlot:controls});
+    const spec = {id: 'parameter:' + name + ':' + metric + ':' + JSON.stringify([extras,controls]), name: 'Observed metric by parameter value',
+      kind:controls.style, arrangement:controls.arrangement, scales:controls.scales, dispersion:controls.dispersion,
+      parameterView:true, x: 'param:' + name, y: 'metric:' + metric, metrics:extras, aggregate: 'mean', partial: false};
+    document.getElementById('parameter-arrangement').disabled = controls.style === 'matrix';
+    document.getElementById('parameter-scales').disabled = controls.style === 'matrix';
+    document.getElementById('parameter-dispersion').disabled = ['matrix','box'].includes(controls.style);
+    document.dispatchEvent(new Event('research-controls-changed'));
     render(spec, 'parameter-observed', 'parameter-observed-status');
     const body = document.querySelector('#parameter-values tbody'); body.replaceChildren();
     document.getElementById('parameter-value-metric').textContent = 'Mean · ' + fieldLabel(spec.y);
@@ -323,6 +519,11 @@ window.LambdaForgeStudyCharts = function (services) {
   }
 
   function mount() {
+    for (const key of ['style','arrangement','scales','dispersion']) {
+      const input = document.getElementById('parameter-' + key), stored = getPrefs().parameterPlot?.[key];
+      if ([...input.options].some(option => option.value === stored)) input.value = stored;
+      input.addEventListener('change', updateParameter);
+    }
     id('kind').addEventListener('change', () => {
       if (isJoint(id('kind').value)) {
         if (id('y').value.startsWith('metric:')) id('y').value = 'param:' + (data.parameters[1] || data.parameters[0] || '');

@@ -23,6 +23,7 @@ from lambdaforge.controlplane.StudyExportService import StudyExportService
 from lambdaforge.controlplane.SubmissionService import SubmissionService
 from lambdaforge.controlplane.WorkService import WorkService
 from lambdaforge.data.DatasetService import DatasetService
+from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.tui.RecentWorkStore import RecentWorkStore
 from lambdaforge.work.config import WorkConfig, WorkYamlError
 from lambdaforge.work.ResultStore import ResultStore
@@ -59,6 +60,10 @@ class ConsoleServices:
     def cluster_names(self) -> tuple[str, ...]:
         return self.catalog.names()
 
+    def fleet_targets(self) -> tuple[str, ...]:
+        """Operational targets, separate from real cluster profile names."""
+        return tuple("fleet:" + name for name in self.catalog.fleet_names())
+
     def validate_work(self, config: Path) -> dict[str, Any]:
         return WorkConfig.validate_file(config).to_dict()
 
@@ -66,6 +71,18 @@ class ConsoleServices:
         return WorkConfig.from_yaml(config).explanation()
 
     def submit_work(self, config: Path, cluster: str) -> dict[str, Any]:
+        if cluster.startswith("fleet:"):
+            fleet = self.catalog.fleet(cluster.removeprefix("fleet:"))
+            return (
+                SubmissionService(self.catalog, self.jobs)
+                .enqueue(
+                    config,
+                    cluster=fleet.coordinator,
+                    fleet=fleet.name,
+                    resources=ResourceRequest(cpu_cores=1),
+                )
+                .to_dict()
+            )
         return SubmissionService(self.catalog, self.jobs).enqueue(config, cluster=cluster).to_dict()
 
     def recent_work_configs(self, *, limit: int = 12) -> tuple[dict[str, str], ...]:
@@ -162,6 +179,49 @@ class ConsoleServices:
         if value is None:
             raise KeyError(f"Job {job_id!r} has no Study telemetry.")
         return value
+
+    def study_trial(self, job_id: str, trial: int) -> dict[str, Any]:
+        return self.jobs.study_trial(job_id, trial)
+
+    def study_trials(self, job_id: str, *, query: str) -> dict[str, Any]:
+        return self.jobs.study_trials(job_id, query=query)
+
+    def study_panel(self, job_id: str, view: str) -> dict[str, Any]:
+        return self.jobs.study_panel(job_id, view)
+
+    def study_analysis(self, job_id: str, *, full: bool = False) -> dict[str, Any]:
+        """Read final analysis, or compute/cache it on its execution host on explicit demand."""
+        return self.jobs.study_panel(job_id, "analysis-report" if full else "analysis")
+
+    def study_report_sections(self, job_id: str) -> list[dict[str, str]]:
+        """Explicit report generation only; ordinary Study views never fetch project HTML."""
+        return self.jobs.study_panel(job_id, "report-sections").get("sections", [])
+
+    def study_hpo(self, job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Present existing live HPO conclusions, without refitting analysis on the controller."""
+        from lambdaforge.analysis.Effects import infer_space
+
+        panel = self.jobs.study_panel(job_id, "hpo")
+        hpo = panel.get("hpo_analysis") or {}
+        initialization = (panel.get("controller") or {}).get("initialization") or {}
+        policy = initialization.get("policy") or {}
+        analysis = {
+            "status": "provisional",
+            "live_hpo": hpo,
+            "search_space": infer_space((), policy.get("parameter_space") or {}),
+            "coverage": {
+                "marginal": {
+                    str(detail["parameter"]): {
+                        "observed_range": detail.get("observed_range"),
+                        "observed_levels": [g.get("value") for g in detail.get("groups", ())],
+                    }
+                    for detail in hpo.get("parameters", ())
+                    if isinstance(detail, Mapping) and detail.get("parameter") is not None
+                }
+            },
+            "scientific_understanding": hpo.get("scientific_understanding") or {},
+        }
+        return panel, analysis
 
     def study_actions(self, job_id: str) -> tuple[dict[str, Any], ...]:
         """Load complete HPO decisions only when a Study workspace requests them."""

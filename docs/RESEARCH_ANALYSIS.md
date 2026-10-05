@@ -215,8 +215,25 @@ normalization. Type/palette/filter menus share the searchable dropdown. Naming, 
   and check another without closing the dropdown. All selections stay checked across searches.
   Uncheck a metric to remove its curve; zero selections shows an explicit empty state. Arrow keys
   navigate and Space toggles a checkbox; Escape/Done/outside click closes the dropdown.
-  The curves share **one chart**: identical declared units share Y, while different/unknown units
-  have separately labelled Y axes. Do not compare heights across independent axes. Explore keeps
+  Choose **Chart style**: lines/points, grouped bars, distributions across Trials with the same X,
+  or a heatmap for many metrics. Pie charts are deliberately absent: unrelated metrics are not
+  additive parts of a whole. **Arrangement** provides one combined chart or separate metric panels.
+  Further native Plotly views include individual Trial points (no averaging), step and area curves,
+  violin distributions with recorded points, horizontal bars, histograms and empirical CDFs.
+  Histogram/CDF views pool all matching candidate summaries rather than grouping parameter values;
+  use boxes/violins for that comparison. Connecting points is descriptive, not a fitted response.
+  Every automatic axis is titled with its member metric names, not an anonymous scale number.
+  **Y scales → Automatic** groups ranges with at least 50% overlap of the narrower interval
+  (including containment); all metrics in a group must agree pairwise. Constants may share a range
+  that contains them. Known different units never group automatically. Unknown units can share
+  a visual scale, not a scientific meaning. Override with independent or explicitly shared scales;
+  separate panels retain the chosen range grouping. Do not compare heights across independent axes.
+  **Dispersion** selects hidden SD, whiskers or a shaded ±SD band on numeric lines. Other styles
+  fall back to whiskers; distributions already expose the observations. SD is empirical variation
+  across candidate summaries, not seed confidence, and remains absent for a single observation.
+  Heatmap colours use per-metric visual min–max normalization, including a neutral colour for
+  constant rows; hover shows original means and missing values stay blank. Settings persist in
+  this generated HTML's browser storage; regenerating the report resets them. Explore keeps
   its unit-aware small-multiple default and optional visual normalization. Selection changes do not
   change scientific aggregation, objective policy or the persisted model response.
 - Observed pair heatmaps and numeric 3D surfaces retain empty untested cells; persisted surrogate
@@ -240,6 +257,45 @@ Save a named view with optional notes. Export/import **research-views.json** to 
 specifications, not evidence. Imports validate version, fields, metric/parameter references and
 size/count limits. Same-file browser preferences retain views, palettes, panel sizes, favourites
 and searches; regenerating creates a new preference scope. No cloud or LLM service is required.
+
+### Project HTML tabs
+
+Domain visualizations belong to the consumer. Inside `Work.run`, declare a finalized managed
+HTML output and write your application's complete document:
+
+```python
+viewer = self.outputs.html_section("predictions", section="proteins", title="Proteins")
+viewer.write_text(render_predictions_html())
+```
+
+The Study's interactive HTML action, `lf results report SELECTOR --output report.html` and portable
+export collect these files only when explicitly requested. A named section creates one navigation
+tab next to Explore/Evidence/Resources. Multiple outputs or Runs in that section get a searchable
+document selector labelled by Trial/seed/output. Shared section titles must agree. No HTML content
+is fetched by overview, HPO, Analysis panels or ordinary polling; remote report reads are paged and
+cached on their owning host, outside the scheduling heartbeat.
+
+Documents are self-contained UTF-8 HTML: embed JavaScript/CSS, visualizations and data (including
+prediction data) in the file; relative asset paths and external requests do not work. LambdaForge
+does not generate domain logic, load NPZ files or expose Python callbacks to the browser. Each
+document uses an opaque-origin `sandbox="allow-scripts allow-downloads"` iframe and a restrictive
+CSP; project scripts cannot access the parent dashboard, local files, other sites or credentials.
+This is presentation isolation, not a sandbox for the trusted Work's Python code. The HTML remains
+interactive inside the frame. Parent preferences/navigation stay independent of project code.
+Managed artifact ownership, exact size and the persisted content fingerprint are verified before
+embedding. Symlinks, missing/changed content and documents exceeding 16 MiB (64 MiB total) fail
+explicitly rather than silently producing empty tabs. Declaration uses the same ordinary output
+lifecycle/retention; no second registry, runner or report plugin system exists.
+
+Standalone integrations can pass documents directly without executing a Work:
+
+```python
+from lambdaforge.analysis.Report import write_html
+
+write_html(analysis, "report.html", sections=[
+    {"name": "proteins", "title": "Proteins", "label": "Trial 3 · seed 7", "html": html_text},
+])
+```
 
 ## 6. Architecture, safety and limitations
 

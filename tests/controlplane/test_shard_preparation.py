@@ -169,7 +169,7 @@ def test_observation_projects_only_requested_results_and_no_invocations(
     _control, shard, invocations = prepared_shard(tmp_path)
     keys = [lease.run.key for lease in shard.leases]
     state = {
-        "manifest": {"shard": shard.to_dict(), "invocations": invocations},
+        "manifest": {"shard": shard.to_dict(), "invocations": list(invocations.values())},
         "results": {key: {"state": "completed", "result": {}} for key in keys},
     }
     atomic_write_json(tmp_path / "worker.json", state)

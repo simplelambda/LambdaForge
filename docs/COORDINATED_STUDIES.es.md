@@ -2,90 +2,126 @@
 
 [English](COORDINATED_STUDIES.md)
 
-## Estado: CPU preparada integrada; ejecución distribuida pública pendiente
+## Estado: lanzamiento Fleet adaptativo nuevo y fijo; recovery/transferencia pendientes
 
-Este documento registra la implementación solicitada. **Aún no existe una ruta soportada
-`lf run --on-fleet`.** Los envíos independientes no son un HPO coordinado. Los planners nativos
-ya comparten un punto interno de despacho; la ruta pública no se ha redirigido a Fleet.
-Se conservan los Studies de un cluster y
-`MultiClusterSubmissionService` independiente.
+`lf run CONFIG --on-fleet FLEET` encola un coordinador local durable para Runs repetidas,
+sweeps fijos, sweeps pareados automáticos y HPO adaptativo nuevo sin continuación de fidelity.
+El selector de destino de Run Work en la Consola ofrece
+la misma ruta `fleet:NAME`. El YAML científico no cambia. Es una **capacidad pública limitada**,
+no la finalización de la petición completa de HPO adaptativo coordinado.
 
-Implementado y probado:
+La ruta de un clúster y `MultiClusterSubmissionService` independiente se conservan.
+Los envíos independientes no son HPO coordinado.
 
-- `Fleet`/`FleetMember`: roles, miembros y límites operacionales en `ClusterCatalog`.
-- `FleetResourceService`: reutiliza `ResourceService`, distingue observación física de admisión
-  acreditada por el executor y muestra disponibilidad de miembros opcionales/obligatorios.
-- `ExecutionEquivalence`: identidad exacta de código, entorno, inputs, numerics y hardware.
-- `GlobalRun`: identidad candidato/seed/fase/fidelity inmutable, independiente del placement.
-- `GlobalPlacementBroker`: filtros de frescura, preparación, equivalencia, memoria, límites y
-  checkpoint local. Orden por terminación estimada/carga cuando se conocen; los tiempos desconocidos
-  permanecen desconocidos y no se inventan probabilidades. Desempate reproducible por nombre.
-- `StudyCoordinator`: leases atómicas por Attempt, shards únicos, fence previo al envío, estado
-  remoto desconocido, retry limitado de pérdida confirmada, reconciliación tras reinicio,
-  validación de digests y cuarentena. Recibe propuestas científicas; no inventa otro optimizer.
-- `ShardExecutor`: contrato de envío idempotente y observación factual. `PreparedShardExecutor`
-  usa ahora Jobs reales y desacoplados de `ProcessScheduler` para CPU local fresca ya verificada.
-  Exige el intérprete existente actual, aplica límites y prevalidación antes del envío, y conserva
-  el fence ante aceptación ambigua. Su ruta preparada delega en bundles/entornos/inputs de
-  `ControlPlane` y en `JobService`, separando Job ID del ID del scheduler. Verifica identidades,
-  conserva TLS/wrappers GPU y obtiene lotes acotados de resultados desde su host. Sigue siendo
-  una frontera interna, no el driver remoto Fleet completo.
-- `work.shard.execute_concrete_shard`: prueba interna de worker CPU fresco que reutiliza el
-  dispatcher aislado, sin otro planner. Valida una cola finita de leases, persiste resultados,
-  aísla fallos científicos y no reejecuta una reentrega terminada. Rechaza Attempts recuperados
-  y continuación desde checkpoint hasta conectar sus garantías de proveedor/identidad. El worker
-  GPU exige Job propio, visibilidad opaca heredada y hardware homogéneo verificado; un shard GPU
-  finito de baseline usa ARI nativo. Faltan offers de asignaciones GPU vivas, co-location y el agente
-  persistente de miembro: los offers GPU siguen cerrados. Exige
-  equivalencia previamente verificada por el llamador; no la acredita esta capa por sí misma ni
-  está conectada al envío público.
-- `WorkRunner(dispatcher=...)` conserva los mismos planners fixed, paired sweep automático y
-  adaptativo. Seeds, candidatos, convergencia y algoritmos científicos no pasan al dispatcher.
-  `CoordinatedDispatcher` integra CPU fixed con leases, invocaciones durables, reconciliación y
-  el callback original de resultados/refill, incluida la retirada exacta de la cola no iniciada
-  sin revocar workers residentes. Las pruebas reales con dos destinos CPU directos cubren seeds
-  fijas y refill de bloques pareados automáticos completos, con un Study/Execution y un análisis
-  final. Rechaza HPO distribuido hasta integrar métricas/pruning central.
-- Los inputs file conservan parámetros authored en la lease: solo se reubica su ruta de ejecución,
-  con verificación canónica de contenido/tamaño en ambos lados. No se reubican strings normales.
-  La verificación de placements de datasets sigue bloqueada: NAME@VERSION igual no acredita bytes.
-  Un entorno remoto existing/no identificado no acredita preparación inmutable.
-- Estado coordinator v2: `pausing`, `paused`, `resuming`. La pausa congela aceptar propuestas/envíos,
-  deja terminar workers propios, ingiere resultados y espera por propietarios desconocidos.
-  Leases anteriores al envío conservan identidad. El reloj original puede importarse una sola vez
-  y no se reinicia. Reconciliar no convierte leases aún no enviadas en propietarios desconocidos;
-  reanudar no permite enviar una lease cuyo presupuesto temporal original caducó. v1 válido
-  migra sin reescribir evidencia. Son operaciones internas:
-  **aún no existen comandos públicos `lf pause/resume`**.
-- `lf fleets list/show/offers/drain/disable/enable`: inspección y cambios de catálogo preview-first.
-  Los controles aún no gobiernan Studies de producción activos. `offers` observa, no declara
-  que exista capacidad concedida ni que esté lista la ejecución.
+### Implementado
 
-Pendiente antes de habilitar ejecución coordinada:
+- Un único `WorkRunner` nativo con los planners adaptive, fixed y `PairedSweepSequentialAnalyzer` originales.
+  El dispatcher ejecuta propuestas exactas y los callbacks de resultado/refill existentes; no crea
+  candidatos, seeds ni otro optimizer en los workers. Una Execution y un análisis final.
+- Un Job de proveedor persistente por miembro, preparado por `ControlPlane`/`JobService`.
+  El runtime de miembro recibe oleadas finitas con leases, reutiliza procesos Run aislados y ARI,
+  y deja terminar lo aceptado antes de liberar su allocation. No crea otro claim GPU ni otro Job
+  del scheduler por cada oleada.
+- Heartbeats frescos del Job propio acreditan código/entorno/inputs file/numerics y hardware
+  homogéneo real. Las cinco identidades deben coincidir entre miembros antes de crear leases
+  científicas. Los placeholders de preparación nunca son evidencia de placement.
+- Admisión GPU baseline con tokens opacos heredados, probes nativos de vida corta, límites por
+  miembro y memoria física libre. Nunca amplía grants. Una oleada ocupada ofrece cero slots:
+  **faltan co-location GPU y refill ARI incremental dentro del miembro Fleet**.
+  Los offers caducan; las observaciones físicas de `lf fleets offers` no autorizan despacho.
+- La ruta preparada conserva políticas direct/site-command/SLURM, TLS, bundles y entornos managed
+  inmutables. Hay aceptación CPU loopback y CUDA real mínima; no acredita aún SSH, site-command
+  ni SLURM de extremo a extremo.
+- Los markers file conservan parámetros científicos authored y verifican bytes/tamaño canónicos
+  durante preparación y binding del worker. Los grandes siguen usando el espejo del proyecto.
+  La acreditación distribuida de datasets se rechaza: NAME@VERSION igual no basta.
+- Leases v2, fences de envío, propietario unknown, cuarentena, límites, reloj/presupuestos originales
+  y reconciliación siguen siendo autoridad. El tamaño global de oleada respeta el paralelismo
+  nativo. Una pérdida de conexión por sí sola nunca autoriza otro Attempt.
+- Jobs miembros visibles en `lf jobs`, pero no como Works semánticos independientes. El padre
+  aparece como `fleet:NAME`; Runs activos y terminados incluyen clúster/Job/shard/lease/Attempt
+  exactos. Los registros nativos del worker proyectan los últimos/mejores escalares acotados en
+  la vista Study existente del coordinador. `lf show STUDY --run KEY --json` y
+  `lf logs STUDY --run KEY` leen curvas/logs vivos o terminales en su miembro verificado,
+  bajo demanda. Nunca se abre localmente una ruta remota. Los resúmenes visuales no sustituyen
+  al stream científico durable descrito a continuación.
+- `metrics.jsonl` y `training-metrics.jsonl` nativos se transportan incrementalmente como registros
+  completos verificados con SHA-256: máximo 32 KiB por canal/Run/lectura y compresión sin pérdida
+  opcional. Cada lectura acredita Study/Run/Attempt/lease/miembro/shard exactos; los offsets preservan
+  orden y deduplican retransmisiones. El cursor durable recupera appends no confirmados tras una
+  interrupción; pérdida/corrupción de bytes confirmados, saltos y replay contradictorio fallan cerrado.
+  El worker conserva evidencia durante desconexiones. No se transportan logs ni artifacts pesados
+  por este stream. El planner recibe resultados terminales solo tras completar sus escalares.
+- El mismo planner adaptativo central consume evidencia terminada y todas las propuestas leased/
+  queued/running entre miembros. Conserva adquisición pending-aware nativa: qLogNEI de BoTorch si
+  está disponible y fallback mixed-kNN determinista. Capacidad admisible libre invoca la frontera
+  científica nativa acotada, nunca propuestas aleatorias de otro optimizer. Repriorizar Runs aún
+  sin lease conserva identidad científica y registra la invocación/prioridad anterior.
+- La poda central reutiliza utility/historial/calibración nativos y envía solicitudes de parada
+  idempotentes con lease exacto. Evidencia required/startup/confirmation sigue protegida. La parada
+  es cooperativa; desconexión no significa ACK ni evidencia pruned. Espejos escalares locales
+  verificados alimentan calibración histórica sin abrir rutas remotas localmente. Continuación/
+  recovery de checkpoints sigue bloqueado, no se deduce de rutas locales con nombres similares.
+- `lf cancel STUDY` detiene primero el coordinador y después sus miembros propios. El borrado
+  semántico previsualiza la familia completa y rechaza miembros activos. La limpieza individual
+  protege evidencia referenciada por la familia. La compactación pesada se hace en su host,
+  nunca escribiendo rutas remotas sobre el coordinador.
 
-1. Ampliar el dispatcher integrado de CPU fixed preparada a preparación remota y streaming central
-   de métricas/pruning. Mantener `PairedSweepSequentialAnalyzer` y bloques completos; la aceptación
-   local CPU de bloques ya está probada, pero falta integrar transporte/recovery de producción.
-2. Implementar workers de shard usando `ControlPlane`, bundles/entornos, `JobService`,
-   `ProcessScheduler`/`SlurmScheduler`, política GPU y ARI local. Solo reciben Runs concretas.
-3. Preflight de datos/entornos/numerics/hardware verificados y offers dentro de grants exactos;
-   aplicar el límite GPU localmente. `nvidia-smi` no otorga permiso de ejecución.
-4. Conectar métricas/checkpoints/artifacts remotos con telemetría, resultados, recovery y export.
-   Por ahora un checkpoint no local bloquea placement; no se finge una réplica automática.
-5. Añadir policy científica primary/predictive versionada al planner **existente**: adquisición
-   pending-aware, presupuestos, retirada de propuestas no iniciadas e información de capacidad
-   ociosa. La base exige revisiones del planner/evidencia/modelo y motivo/policy para aceptar una
-   Run predictive, pero aún no genera tales propuestas.
-6. `StudyDecision`, dependencias explícitas entre decisiones sin lenguaje de workflow arbitrario,
-   lanzamiento/reconcile nativo, TUI y HTML científico único con procedencia/utilización.
-7. Completar adaptadores y aceptación del HPO predictive. Pruebas reales de proveedor CPU local
-   no acreditan ejecución remota/GPU/SLURM/command.
-8. Integrar launch/pause/resume/reconcile públicos, adopción desde un cluster, expansión en vivo,
-   alojamiento durable del coordinador, export distribuido y transferencia de artifacts/checkpoints.
+### Comandos disponibles
 
-LambdaForge 0.17.0 incorpora el catálogo Fleet y las bases de coordinación probadas descritas aquí.
-Todavía no ofrece ejecución completa de Studies multi-cluster; siguen pendientes las integraciones
-indicadas arriba.
+```bash
+lf run study.yaml --on-fleet research --dry-run --json  # Sin grant, upload ni Job.
+lf run study.yaml --on-fleet research                  # Envío asíncrono durable.
+lf show STUDY --json
+lf show STUDY --run trial-00001-seed-4 --json
+lf logs STUDY --run trial-00001-seed-4
+lf cancel STUDY --dry-run
+lf cancel STUDY --apply
+lf delete STUDY                                       # Preview de familia terminal.
+lf delete STUDY --apply
+```
+
+Coordinador `local`; miembros managed, distintos del destino local incorporado. Dry-run valida
+fuente/firma/diseño, roles/credenciales, muestra caps y verificaciones diferidas sin consultar ni
+adquirir GPU. El request durable captura perfiles y referencias de credenciales, no sus valores.
+`--on`/`--on-fleet` son excluyentes. Se rechazan `--rerun`, `--restart`, flags de recovery internos
+y `--wait-for-submit` para esta ruta.
+
+### Pendientes
+
+Stream de checkpoints/continuación y recovery distribuido; predictive/lookahead;
+co-location; pause/resume/reconcile públicos y adopción; recovery tras reinicio del coordinador;
+expansión/drain de miembros en vivo; equivalencia de datasets; transferencia de checkpoints/
+artifacts, compresión/reanudación y export distribuido; TUI/HTML completos de placement/utilización;
+StudyDecision y dependencias. Los controles internos de lifecycle/catálogo no sustituyen esas
+operaciones públicas. Retry Fleet rechaza reiniciar como un solo clúster; export rechaza generar
+un paquete del coordinador que omita silenciosamente la evidencia de los miembros.
+
+La petición **no está terminada**. Esta ruta limitada no es HPO adaptativo distribuido listo para
+producción completo; las pruebas loopback/fake no acreditan todos los proveedores.
+
+### Validación incremental (2026-10-05)
+
+Regresiones del stream cubren lecturas acotadas de varios chunks, compresión, replay, registros
+incompletos, interrupción del receptor, leases ajenas y symlinks. Regresiones del miembro cubren
+poda dirigida, idempotencia, órdenes inmutables y evidencia protegida. La integración pública CPU
+loopback ejecuta el planner adaptativo nativo sobre dos allocations con un único estado HPO/análisis.
+La poda histórica se prueba con espejos verificados y rutas del propietario deliberadamente ausentes.
+No acredita aceptación adaptativa remota/GPU real ni recovery tras reinicio del coordinador.
+
+### Validación de esta implementación (2026-10-04)
+
+- `ruff check .`: correcto.
+- `mypy src/lambdaforge`: correcto, 558 archivos fuente.
+- `pytest` completo: 1.246 pruebas correctas; cuatro avisos de Lightning en pruebas CPU.
+- Una wheel recién construida e instalada pasó los smoke tests de packaging, la verificación
+  del import instalado, `run --help`, scaffolding, validación y dry-run de solo lectura.
+- La integración pública Fleet probó dos miembros CPU loopback, incluidas métricas/logs Run en
+  vivo; pruebas separadas del proveedor preparado ejecutaron cargas CUDA locales reales mínimas.
+  No son pruebas de aceptación SSH/site-command/SLURM reales. No se modificó ni ejecutó WISDOM
+  ni clústeres reales.
+- No se ejecutó CI en GitHub. Las comprobaciones locales no acreditan las capacidades pendientes
+  enumeradas arriba.
 
 ## Catálogo de Fleet
 
@@ -126,7 +162,8 @@ guardan en el proyecto. No se guardan secretos ni se cambia identidad científic
 
 ## Propiedad y persistencia
 
-El futuro driver posee un directorio de coordinator del proyecto bajo su Execution.
+El driver local posee un coordinador del proyecto bajo `fleets/PARENT_JOB/coordinator` del
+JobStore durable, junto a metadata Execution nativa con rutas propias.
 `coordinator.json` versión 2 (con lector v1) se publica atómicamente con fsync usando el publicador JSON y lock
 cross-process existentes. `leadership()` protege el bucle de planificación. Las transacciones
 cortas no mantienen locks durante E/S remota. El estado contiene inicialización/presupuestos,
@@ -177,6 +214,7 @@ python -m pytest -q tests/work/test_concrete_shard.py
 python -m pytest -q tests/work/test_study_dispatch_boundary.py tests/controlplane/test_coordinator_pause.py
 python -m pytest -q tests/work/test_coordinated_cpu_dispatch.py
 python -m pytest -q tests/controlplane/test_shard_preparation.py tests/controlplane/test_prepared_provider_dispatch.py
+python -m pytest -q tests/controlplane/test_fleet_study_service.py tests/controlplane/test_member_allocation.py
 ```
 
 El diseño fijo simulado tiene 56 candidatos × 4 seeds = 224 Runs y capacidades A=2, B=3, C=1.
@@ -194,14 +232,20 @@ No envía un Job a un proveedor, no otorga una GPU y no arranca un optimizer.
 La aceptación preparada también prueba staging real, JobService, supervisor directo desacoplado,
 workers CPU y una operación CUDA mínima con ARI nativo. Resolver/instalar el entorno son fixtures;
 el transporte es loopback, no SSH. El test GPU utiliza acceso local shared explícito e hereda el
-grant del supervisor; se omite sin CUDA. No acredita SLURM/gpu exec, instalación managed real,
-offers GPU de producción ni Study GPU distribuido público. Identidad/mutación de inputs y grants
-opacos tienen regresiones separadas.
+grant del supervisor; se omite sin CUDA. No acredita SLURM/gpu exec ni instalación managed real.
+Los casos persistentes verifican offers baseline frescos, Job exacto reutilizado y drain sin
+liberar el grant entre oleadas. Inputs/grants opacos tienen regresiones separadas.
 
 Las pruebas del proveedor preparado ejecutan cuatro identidades fijas o tres bloques pareados
 completos de dos candidatos en dos destinos CPU directos con Jobs desacoplados; ingieren evidencia
 centralmente y producen un análisis final único.
-Usa ProcessScheduler real local, pero aún no acredita `lf run --on-fleet`. Las pruebas de inyección
+Usa ProcessScheduler real local. `test_fleet_study_service.py` prueba además el servicio público con
+dos allocations reales, análisis único, lectura de Run en su propietario, cancelación semántica,
+request asíncrono capturado y gramática/preflight read-only. Instalar/resolver sigue siendo un
+fixture: no acredita SSH real ni aceptación Fleet adaptativa completa. Un fixture vivo mantiene
+abierto el Run hasta que el coordinador lee su log aislado y métrica del step 7 en su propietario
+exacto. Rechaza seeds/Trials/Attempts/rutas ajenos; los escalares visuales remotos no se convierten
+en evidencia completada ni provocan lecturas locales. Las pruebas de inyección
 ejercitan el planner adaptativo nativo sin crear otro optimizer. La pausa cubre particiones,
 ingestión al terminar, carreras previas al envío, reinicio y presupuestos inmutables.
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
@@ -14,6 +14,7 @@ from lambdaforge.controlplane.ControlPlane import ControlPlane
 from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.JobStore import JobStore
+from lambdaforge.controlplane.PreparedWork import PreparedWork
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.ProjectContext import ProjectContext
 
@@ -49,6 +50,12 @@ def serve(request_path: str | Path) -> int:
         def progress(phase: str) -> None:
             jobs.update_preparation(job_id, phase)
 
+        builder: Callable[[PreparedWork], Sequence[str]] | None = None
+        if value.get("fleet") is not None:
+
+            def builder(prepared: PreparedWork) -> Sequence[str]:
+                return ("lambdaforge.controlplane.FleetStudyService", str(path))
+
         ControlPlane(catalog, jobs=jobs).submit(
             str(value["config"]),
             cluster=cluster,
@@ -58,6 +65,7 @@ def serve(request_path: str | Path) -> int:
             reserved_job_id=job_id,
             allow_duplicate=bool(value.get("allow_duplicate", False)),
             progress=progress,
+            entrypoint_builder=builder,
         )
         return 0
     except Exception as error:

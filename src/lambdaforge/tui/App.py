@@ -778,6 +778,9 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
     def compose(self) -> ComposeResult:
         clusters = self.services.cluster_names()
         options = tuple((name, name) for name in clusters)
+        fleet_targets = getattr(self.services, "fleet_targets", None)
+        if callable(fleet_targets):
+            options += tuple((name, name) for name in fleet_targets())
         with Vertical(classes="modal-card wide-modal", id="work-launch-dialog"):
             yield Label("Run Work", classes="modal-title")
             with VerticalScroll(id="work-launch-body"):

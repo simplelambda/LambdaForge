@@ -186,8 +186,13 @@ class WorkExecutionResult:
 class WorkRunner:
     """Establish runtime, invoke Work.run and finalize owned scientific evidence."""
 
-    def __init__(self, *, dispatcher: StudyDispatcher | None = None) -> None:
+    def __init__(
+        self, *, dispatcher: StudyDispatcher | None = None, execution_root: Path | None = None
+    ) -> None:
         self._dispatcher = dispatcher
+        # Operational namespace only; the exact native scientific/Execution identities do not
+        # change. An external owner must not reuse unrelated local or another Fleet's paths.
+        self._execution_root_override = execution_root.resolve() if execution_root else None
 
     def plan(self, config: WorkConfig, *, rerun: bool = False) -> WorkExecutionPlan:
         """Resolve expansion/identity without constructing a Work or creating state."""
@@ -195,7 +200,9 @@ class WorkRunner:
         self._verify_shared_bundle_inputs(source)
         study_identity = self._study_identity(config)
         execution_id = self._execution_id(study_identity, rerun=rerun)
-        execution_dir = self._execution_root(source, config.name) / execution_id
+        execution_dir = (
+            self._execution_root_override or self._execution_root(source, config.name)
+        ) / execution_id
         levels: list[tuple[Mapping[str, Any], ...]] = []
         for level in config.levels:
             planned = []
@@ -315,7 +322,9 @@ class WorkRunner:
         ):
             raise ValueError("An external dispatcher requires one Study, not composed Work.")
         plan = self.plan(config, rerun=rerun)
-        execution_dir = self._execution_root(plan.source, config.name) / plan.execution_id
+        execution_dir = (
+            self._execution_root_override or self._execution_root(plan.source, config.name)
+        ) / plan.execution_id
         if resume_execution is not None:
             if (
                 len(config.levels) != 1
@@ -660,9 +669,13 @@ class WorkRunner:
             None,
         )
 
-    @staticmethod
-    def _compact_outcomes(outcomes: Sequence[WorkResult]) -> None:
+    def _compact_outcomes(self, outcomes: Sequence[WorkResult]) -> None:
         """Compact only content proven redundant after its result is durable."""
+        if self._dispatcher is not None:
+            # External results name execution-host paths. Never resolve/write/remove those
+            # paths on the coordinator, even if an unrelated local path happens to exist.
+            # The concrete owned worker compacts only after its envelope is durable.
+            return
         for outcome in outcomes:
             try:
                 compact_attempt(outcome)
@@ -8513,6 +8526,10 @@ def _active_checkpoint_available(specification: Mapping[str, Any]) -> bool:
 
 def _result_checkpoint_available(result: WorkResult) -> bool:
     """Return whether a terminal Run retains a non-symlinked owned checkpoint payload."""
+    if result.scalar_mirror_paths:
+        # Execution-host paths are not local checkpoint authority. Fleet checkpoint
+        # continuation remains gated until its owned transfer/binding protocol exists.
+        return False
     try:
         run_root = result.run_dir.resolve().parent.parent
         checkpoint_root = run_root / "checkpoints"
@@ -8546,7 +8563,10 @@ def _request_early_stops(
         resolved = dict(specification)
         resolved.setdefault("trial_index", ordinal)
         resolved.setdefault("seed", None)
-        history = _utility_history((Path(str(specification["hpo_metrics_path"])),), evaluator)
+        paths: tuple[Path, ...] = (Path(str(specification["hpo_metrics_path"])),)
+        if specification.get("hpo_training_metrics_path"):
+            paths += (Path(str(specification["hpo_training_metrics_path"])),)
+        history = _utility_history(paths, evaluator)
         if history and history[-1][0] >= min_step:
             histories.append((resolved, history))
     if not histories:
@@ -8662,7 +8682,7 @@ def _request_early_stops(
             latest_historical[key] = result
     for (trial, seed), result in latest_historical.items():
         history = _utility_history(
-            (result.run_dir / "metrics.jsonl", result.run_dir / "training-metrics.jsonl"),
+            result.scalar_paths,
             evaluator,
         )
         comparable = [(step, value) for step, value in history if step <= common_step]
@@ -8898,7 +8918,7 @@ def _pruner_calibration(
         if result.termination_type != "completed" or result.trial is None:
             continue
         history = _utility_history(
-            (result.run_dir / "metrics.jsonl", result.run_dir / "training-metrics.jsonl"),
+            result.scalar_paths,
             evaluator,
         )
         if history:
@@ -9574,6 +9594,7 @@ def _work_result_from_mapping(value: Mapping[str, Any]) -> WorkResult:
         ),
         value.get("termination", {}),
         value.get("seed_metadata", {}),
+        tuple(Path(path) for path in value.get("scalar_mirror_paths", ())),
     )
 
 

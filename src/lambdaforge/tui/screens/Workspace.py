@@ -564,6 +564,8 @@ class StudyWorkspace(ResearchWorkspace):
                 self._load_analysis(force=self.analysis is None)
             elif event.pane.id == "study-logs":
                 self._load_study_logs(force=True)
+            elif event.pane.id == "study-resources":
+                self._load_resource_panel()
         elif event.tabbed_content.id == "hpo-tabs" and event.pane.id == "hpo-actions-pane":
             self._load_action_history()
 
@@ -651,7 +653,10 @@ class StudyWorkspace(ResearchWorkspace):
         best_parameters = self.query_one("#study-best-parameters", DataTable)
         best_parameters.clear(columns=True)
         best_parameters.add_columns("Parameter", "Value")
-        for name, value in sorted((best_candidate or {}).get("parameters", {}).items()):
+        leader_parameters = self.study.get("leader_parameters") or (best_candidate or {}).get(
+            "parameters", {}
+        )
+        for name, value in sorted(leader_parameters.items()):
             best_parameters.add_row(
                 str(name).replace("_", " ").title(), format_parameter_value(value)
             )
@@ -663,7 +668,9 @@ class StudyWorkspace(ResearchWorkspace):
 
     def _populate_trials(self, candidates: Sequence[Mapping[str, Any]]) -> None:
         query = self.query_one("#trial-filter", Input).value.strip().lower()
-        if query:
+        if query and query == getattr(self, "_filtered_query", None):
+            candidates = self._filtered_candidates
+        elif query:
             candidates = [
                 value
                 for value in candidates
@@ -757,9 +764,19 @@ class StudyWorkspace(ResearchWorkspace):
                 )
             cells.extend(
                 (
-                    str(candidate.get("selection_seed_count", len(runs))),
-                    str(max((int(run.get("latest_step", 0) or 0) for run in runs), default=0)),
-                    str((active or {}).get("gpu_index", "-")),
+                    str(
+                        candidate.get(
+                            "seed_count", candidate.get("selection_seed_count", len(runs))
+                        )
+                    ),
+                    str(
+                        candidate.get(
+                            "latest_step",
+                            max((int(run.get("latest_step", 0) or 0) for run in runs), default=0),
+                        )
+                    ),
+                    ", ".join(map(str, candidate.get("gpu_indices", ())))
+                    or str((active or {}).get("gpu_index", "-")),
                     str(candidate.get("state", "unknown")).upper(),
                 )
             )
@@ -784,6 +801,41 @@ class StudyWorkspace(ResearchWorkspace):
                 value for value in self.study.get("candidates", ()) if isinstance(value, Mapping)
             ]
             self._populate_trials(candidates)
+            if callable(getattr(self.services, "study_trials", None)):
+                self.set_timer(0.25, self._load_trial_filter)
+
+    def _load_trial_filter(self) -> None:
+        if self.app.screen is not self or getattr(self, "_filter_loading", False):
+            return
+        query = self.query_one("#trial-filter", Input).value.strip().lower()
+        if not query:
+            return
+        self._filter_loading = True
+
+        def load() -> None:
+            try:
+                value = self.services.study_trials(self.job_id, query=query)
+                self.app.call_from_thread(self._apply_trial_filter, query, value)
+            except Exception as error:
+                self.app.call_from_thread(
+                    self._show_trial_filter_error,
+                    f"Trial filter unavailable: {type(error).__name__}: {error}",
+                )
+            finally:
+                self._filter_loading = False
+
+        Thread(target=load, daemon=True, name="lambdaforge-tui-trial-filter").start()
+
+    def _show_trial_filter_error(self, message: str) -> None:
+        self.query_one("#study-action-status", Static).update(message)
+
+    def _apply_trial_filter(self, query: str, value: Mapping[str, Any]) -> None:
+        if query != self.query_one("#trial-filter", Input).value.strip().lower():
+            self.set_timer(0.1, self._load_trial_filter)
+            return
+        self._filtered_query = query
+        self._filtered_candidates = value.get("candidates", ())
+        self._populate_trials(self.study.get("candidates", ()))
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "trial-sort":
@@ -1009,7 +1061,7 @@ class StudyWorkspace(ResearchWorkspace):
             )
         live = self.analysis.get("live_hpo", {})
         if not conclusions and isinstance(live, Mapping):
-            conclusions = live.get("parameter_questions", live.get("parameters", ()))
+            conclusions = live.get("parameter_questions") or live.get("parameters", ())
         conclusions_by_name = {
             str(value.get("parameter")): value
             for value in conclusions
@@ -1334,23 +1386,40 @@ class StudyWorkspace(ResearchWorkspace):
         return f"{value} B"
 
     def _load_analysis(self, *, force: bool = False) -> None:
+        view = self.query_one("#study-tabs", TabbedContent).active
         if self._analysis_loading or (
-            not force and time.monotonic() - self._analysis_loaded_at < 10.0
+            not force
+            and getattr(self, "_analysis_view", None) == view
+            and time.monotonic() - self._analysis_loaded_at < 10.0
         ):
             return
         execution = self.work.get("execution_id")
         self._analysis_loading = True
+        self._analysis_view = view
 
         def load() -> None:
             value = None
             analysis_error: Exception | None = None
-            if execution:
+            hpo_loader = getattr(self.services, "study_hpo", None)
+            host_loader = getattr(self.services, "study_analysis", None)
+            if self.job_id and callable(hpo_loader) and view == "study-hpo":
+                try:
+                    panel, value = hpo_loader(self.job_id)
+                    self.app.call_from_thread(self._apply_panel, panel)
+                except Exception as error:
+                    analysis_error = error
+            elif self.job_id and callable(host_loader):
+                try:
+                    value = host_loader(self.job_id)
+                except Exception as error:
+                    analysis_error = error
+            elif execution:
                 try:
                     value = self.services.result_analysis(str(execution))
                 except Exception as error:
                     analysis_error = error
             live_loader = getattr(self.services, "live_study_analysis", None)
-            if value is None and callable(live_loader):
+            if value is None and callable(live_loader) and not callable(host_loader):
                 try:
                     value = live_loader(self.study, job_id=self.job_id or None)
                 except Exception as error:
@@ -1366,6 +1435,35 @@ class StudyWorkspace(ResearchWorkspace):
             self.app.call_from_thread(self._apply_analysis, value)
 
         Thread(target=load, daemon=True, name="lambdaforge-tui-study-analysis").start()
+
+    def _apply_panel(self, panel: Mapping[str, Any]) -> None:
+        scrolls = _scroll_snapshot(self)
+        self.study.update(panel)
+        self._render_workspace()
+        self.call_after_refresh(_restore_scroll_snapshot, self, scrolls)
+
+    def _load_resource_panel(self) -> None:
+        loader = getattr(self.services, "study_panel", None)
+        if not callable(loader) or getattr(self, "_resource_loading", False):
+            return
+        self._resource_loading = True
+
+        def load() -> None:
+            try:
+                value = loader(self.job_id, "resources")
+                self.app.call_from_thread(self._apply_panel, value)
+            except Exception as error:
+                self.app.call_from_thread(
+                    self._show_resource_error,
+                    f"Resource details unavailable: {type(error).__name__}: {error}",
+                )
+            finally:
+                self._resource_loading = False
+
+        Thread(target=load, daemon=True, name="lambdaforge-tui-study-resources").start()
+
+    def _show_resource_error(self, message: str) -> None:
+        self.query_one("#study-resource-content", Static).update(message)
 
     def _load_action_history(self) -> None:
         """Load the complete paged controller history only on explicit drill-down."""
@@ -1723,16 +1821,20 @@ class StudyWorkspace(ResearchWorkspace):
         self._refresh_study(force=False)
 
     def _refresh_study(self, *, force: bool) -> None:
-        if self._refreshing or (
-            not force
-            and str(self.work.get("state"))
-            not in {
-                "running",
-                "preparing",
-                "staging",
-                "queued",
-                "unknown",
-            }
+        if (
+            self.app.screen is not self
+            or self._refreshing
+            or (
+                not force
+                and str(self.work.get("state"))
+                not in {
+                    "running",
+                    "preparing",
+                    "staging",
+                    "queued",
+                    "unknown",
+                }
+            )
         ):
             return
         if not self.job_id:
@@ -1783,7 +1885,7 @@ class StudyWorkspace(ResearchWorkspace):
 
     def _apply_refresh(self, value: Mapping[str, Any]) -> None:
         scrolls = _scroll_snapshot(self)
-        self.study = dict(value)
+        self.study = {**self.study, **dict(value)}
         if value.get("job_state"):
             self.work["state"] = value["job_state"]
         self._last_refresh_error = None
@@ -1798,6 +1900,10 @@ class StudyWorkspace(ResearchWorkspace):
             self._load_study_logs()
         elif active in {"study-hpo", "study-analysis"}:
             self._load_analysis()
+        elif active == "study-resources":
+            self._load_resource_panel()
+        elif active == "study-trials" and callable(getattr(self.services, "study_trials", None)):
+            self._load_trial_filter()
 
     def _load_study_logs(self, *, force: bool = False) -> None:
         if (
@@ -2190,17 +2296,27 @@ class StudyWorkspace(ResearchWorkspace):
         self.app.pop_screen()
 
     def _export_analysis(self, suffix: str) -> None:
-        if self.analysis is None:
+        loader = getattr(self.services, "study_analysis", None)
+        if self.analysis is None and not callable(loader):
             self.notify(
                 "Analysis is still loading; try again when the tables are visible.",
                 severity="warning",
             )
             return
-        analysis = dict(self.analysis)
         path = self._report_path(str(self.work.get("name", "study")), suffix)
+
+        def write() -> Path:
+            # Export is an explicit request for the full model, not the lightweight HPO adapter.
+            analysis = (
+                loader(self.job_id, full=True) if callable(loader) else dict(self.analysis or {})
+            )
+            section_loader = getattr(self.services, "study_report_sections", None)
+            sections = section_loader(self.job_id) if callable(section_loader) else ()
+            return write_html(analysis, path, sections=sections)
+
         self._write_and_open_report(
             "Interactive Study report",
-            lambda: write_html(analysis, path),
+            write,
         )
 
     def action_open_selected(self) -> None:
@@ -2220,6 +2336,7 @@ class StudyWorkspace(ResearchWorkspace):
                     self.study,
                     self.analysis,
                     self._hpo_parameters[row],
+                    services=self.services,
                 )
             )
 
@@ -2256,11 +2373,14 @@ class HpoParameterWorkspace(ResearchWorkspace):
         study: Mapping[str, Any],
         analysis: Mapping[str, Any],
         parameter: str,
+        *,
+        services: Any = None,
     ) -> None:
         self.work = dict(work)
         self.study = dict(study)
         self.analysis = dict(analysis)
         self.parameter = parameter
+        self.services = services
         super().__init__(
             f"Studies / {work.get('name', 'Study')} / HPO · {parameter.replace('_', ' ').title()}"
         )
@@ -2366,11 +2486,19 @@ class HpoParameterWorkspace(ResearchWorkspace):
             path = self._report_path(
                 str(self.work.get("name", "study")), f"{self.parameter}-interactive"
             )
-            analysis = dict(self.analysis)
             parameter = self.parameter
+
+            def write() -> Path:
+                loader = getattr(self.services, "study_analysis", None)
+                job = str(self.work.get("study_job_id") or self.work.get("primary_job_id") or "")
+                analysis = (
+                    loader(job, full=True) if callable(loader) and job else dict(self.analysis)
+                )
+                return write_parameter_html(analysis, parameter, path)
+
             self._write_and_open_report(
                 f"Interactive HPO report · {parameter}",
-                lambda: write_parameter_html(analysis, parameter, path),
+                write,
             )
 
     def _live_detail(self) -> Mapping[str, Any]:
@@ -2600,6 +2728,49 @@ class TrialWorkspace(ResearchWorkspace):
 
     def on_mount(self) -> None:
         self._render_workspace()
+
+        self._trial_loading = False
+        self.set_interval(5.0, self._refresh_trial)
+        self._refresh_trial()
+
+    def _refresh_trial(self) -> None:
+        loader = getattr(self.services, "study_trial", None)
+        if not self.is_current or not callable(loader) or self._trial_loading:
+            return
+        self._trial_loading = True
+        if "runs" not in self.candidate:
+            self.query_one("#trial-header", Static).update(
+                "Loading selected Trial seeds and parameters…"
+            )
+
+        def load() -> None:
+            try:
+                job = str(self.work.get("study_job_id") or self.work.get("primary_job_id") or "")
+                value = loader(job, int(self.candidate["trial"]))
+                self.app.call_from_thread(self._apply_trial, value)
+            except Exception as error:
+                self.app.call_from_thread(
+                    self.query_one("#trial-header", Static).update,
+                    f"Trial refresh unavailable · {type(error).__name__}: {error}",
+                )
+            finally:
+                self._trial_loading = False
+
+        Thread(target=load, daemon=True, name="lambdaforge-tui-trial").start()
+
+    def _apply_trial(self, value: Mapping[str, Any]) -> None:
+        if not self.is_mounted:
+            return
+        scrolls = _scroll_snapshot(self)
+        selected = self.selected_run_key
+        self.candidate = dict(value)
+        self._render_workspace()
+        if selected:
+            for row, run in enumerate(self.candidate.get("runs", ())):
+                if run.get("key") == selected:
+                    self.query_one("#seed-table", DataTable).move_cursor(row=row)
+                    break
+        self.call_after_refresh(_restore_scroll_snapshot, self, scrolls)
 
     def _render_workspace(self) -> None:
         candidate = self.candidate
@@ -2860,7 +3031,7 @@ class SeedWorkspace(ResearchWorkspace):
         )
 
     def _refresh_if_active(self) -> None:
-        if self.active:
+        if self.app.screen is self and self.active:
             self._load()
 
     def _apply_detail(self, detail: Mapping[str, Any]) -> None:

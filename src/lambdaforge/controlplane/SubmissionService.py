@@ -41,6 +41,7 @@ class SubmissionService:
         retry_of: str | None = None,
         allow_duplicate: bool = False,
         metadata: Mapping[str, Any] | None = None,
+        fleet: str | None = None,
     ) -> JobHandle:
         """Persist and launch preparation without blocking on the selected execution target."""
         source = Path(config).expanduser().resolve()
@@ -51,6 +52,20 @@ class SubmissionService:
         if not source.is_file():
             raise FileNotFoundError(f"Configuration does not exist: {source}")
         profile = self.catalog.get(cluster)
+        fleet_preview = None
+        selected_fleet = None
+        if fleet is not None:
+            from lambdaforge.controlplane.FleetStudyService import fleet_preflight
+            from lambdaforge.work.config import WorkConfig
+
+            selected_fleet = self.catalog.fleet(fleet)
+            if cluster != selected_fleet.coordinator:
+                raise ValueError("Fleet submission must use its configured coordinator.")
+            if run_arguments:
+                raise ValueError("Fleet restart/rerun options are not yet supported.")
+            fleet_preview = fleet_preflight(
+                WorkConfig.from_yaml(source), self.catalog, selected_fleet
+            )
         if (
             profile.transport == "ssh"
             and profile.auth.mode == "password"
@@ -66,11 +81,15 @@ class SubmissionService:
         if not allow_duplicate:
             self.jobs.refuse_active_execution(
                 descriptor.scientific_identity,
-                cluster,
+                "fleet:" + fleet if fleet is not None else cluster,
                 name=descriptor.name,
                 source=source,
             )
-        request_resources = resources or ConfigurationResourceResolver.resolve(source)
+        request_resources = (
+            ResourceRequest(cpu_cores=1)
+            if selected_fleet is not None
+            else resources or ConfigurationResourceResolver.resolve(source)
+        )
         handle = self.jobs.reserve(
             cluster=cluster,
             resources=request_resources,
@@ -82,6 +101,11 @@ class SubmissionService:
                 "submission_mode": "asynchronous",
                 "run_arguments": list(run_arguments),
                 **dict(metadata or {}),
+                **(
+                    {"fleet": fleet, "execution_target": "fleet:" + fleet}
+                    if fleet is not None
+                    else {}
+                ),
             },
             job_type=descriptor.job_type,
             group_id=group_id,
@@ -105,6 +129,20 @@ class SubmissionService:
             "job_store": str(self.jobs.store.root),
             "project": self.jobs.store.project.to_dict() if self.jobs.store.project else None,
         }
+        if selected_fleet is not None:
+            payload.update(
+                {
+                    "fleet": selected_fleet.to_dict(),
+                    "fleet_preflight": fleet_preview,
+                    "member_profiles": {
+                        name: self.catalog.get(name).to_dict()
+                        for name in {
+                            cluster,
+                            *(member.cluster for member in selected_fleet.members),
+                        }
+                    },
+                }
+            )
         temporary = request_path.with_name(f".{request_path.name}.{uuid4().hex}.tmp")
         try:
             temporary.write_text(

@@ -1165,12 +1165,33 @@ meaning. LambdaForge therefore keeps one compact study index next to that Job an
 record per internal Run. A Run's existing `work.log`, `metrics.jsonl`, `training-metrics.jsonl` and
 `result.json` remain authoritative; the index references them and folds only latest scalars and
 state. It never copies model checkpoints, output directories or artifact bytes.
-The worker persists the transport-safe index as `study/interactive.json`, separately from the rich
-authoritative summary. Older oversized summaries are projected on their execution host rather than
-downloaded whole; the append-only controller history is paged and loaded only after an explicit
-Action history drill-down. Opening one seed lazily reads only that Run's record, bounded curves and
-log. Consequently a valid large Study does not fail merely because one SSH response exceeds an
-interactive MiB limit.
+Remote reads follow the visible view, not the size of the Execution:
+
+- Overview and the Studies list receive only counts, objective/leader and basic state/cost metadata
+  from `study/overview.json`. They do not download candidate or seed lists.
+- Opening one Study reads `study/interactive.json` (projection v3): Trial table cells, aggregate
+  Run states and one leader's parameter preview. No seed records, curves or HPO state travel here.
+- Opening one Trial reads its `study/trials/trial-XXXXX.json`: parameters and that Trial's seed
+  table. Parameter filtering runs on the execution host, not by downloading every parameter set.
+- Opening one seed reads only its native record, bounded curves, artifacts metadata and log.
+- HPO reads precomputed `study/hpo.json`; Resources reads `study/resources.json`. Full controller
+  history is paged only after an explicit Action history drill-down.
+- Analysis reads the aggregate `study/analysis-panel.json`, without individual Run evidence or the
+  HTML research catalogue. Final analysis is persisted by the worker. Provisional post-hoc analysis
+  is computed/cached on the execution host only when requested, in a separate read process, never
+  in the scheduling heartbeat. HPO itself does not refit this analysis. Explicit HTML export loads
+  the complete analysis instead of substituting the lightweight console model.
+
+Older rich summaries/indexes are projected on their execution host, never downloaded wholesale.
+All Study read views use 512 KiB byte pages with generation checks; unchanged refreshes return only
+a small marker. The per-response safety bound remains, but there is no aggregate 8 MiB rejection
+for a legitimate large Study. Hidden parent views stop polling until they are visible again.
+These are read/presentation changes; HPO decisions and scientific evidence are unchanged.
+Sweep Analysis uses the persisted StudyDesign space, including conditional branches not yet
+completed; it does not reconstruct those conditions from observed rows. Missing valid response
+contexts are reported as insufficient evidence, not a failure of the running Study. The read
+process passes that geometry explicitly to older immutable worker environments, so updating the
+controller does not require restarting the Study to apply this read-side correction.
 
 the Research Console uses this hierarchy:
 
@@ -1352,7 +1373,8 @@ lf show WORK --run trial-00017-seed-4 --json
 lf logs WORK --run trial-00017-seed-4 --tail 300
 ```
 
-`work.items[].study` contains the compact catalogue and exact Run keys. `show --run` returns
+`work.items[].study` contains only compact counts, objective and leader metadata. Open one Study
+and Trial in the console to obtain its Run keys without fetching every Run. `show --run` returns
 structured parameters, latest values, down-sampled curves, bounded log, failure, evidence paths and
 the finalized managed-artifact inventory. Human output highlights each preferred usable artifact
 path; `--json` preserves its checksum, size, role, MIME type, managed/published locations, retention
@@ -1479,13 +1501,18 @@ original byte count and SHA-256, so compactness cannot be mistaken for missing e
 
 Fleet discovery: `lf fleets list/show/offers`; operator catalog controls:
 `lf fleets drain/disable/enable FLEET CLUSTER [--apply]`. Observations do not grant GPUs and these
-controls never stop active Jobs. The coordinated Study ownership foundation is tested, but
-prepared local CPU shards now use real direct Jobs through an internal shared dispatch boundary.
-`run --on-fleet`, remote/GPU shards, public pause/resume and global HPO/TUI integration remain pending.
+controls never stop active Jobs. `lf run CONFIG --on-fleet NAME [--dry-run]` uses a durable local
+coordinator and prepared managed allocations for fresh adaptive/fixed/repeated/automatic paired Studies, with
+one native planner and final analysis. Run Work offers the same Fleet selector. Live/terminal Run
+show/logs resolve the exact member owner; bounded current/best scalar views never read remote
+paths locally. Curves/logs remain lazy; cancel/delete operate on the whole owned family.
+Native ordered scalar streams and exact central pruning support fresh adaptive HPO.
+GPU offers are baseline only; checkpoint/fidelity continuation, co-location, recovery/adoption, live expansion
+and distributed export remain pending and fail closed.
 See [implementation status and contracts](COORDINATED_STUDIES.md) before using fleets.
 The common internal prepared executor delegates to ControlPlane/JobService and verifies immutable
 environment/code identities and canonical input relocation. Host-side result observation is batched;
-this is not yet a public distributed driver or an authority to offer unallocated GPUs.
+physical observations never authorize unallocated GPUs.
 
 Humans configure the same profile in bare `lf` → Clusters. Common fields appear first and focused
 options provide contextual meaning/risk; advanced SSH, environment, path and GPU policy fields stay
@@ -1938,12 +1965,26 @@ decision, not by an internal object that can stay in Python.
 
 ## 16. Study Analysis
 
+Charts include individual Trial points, step/area curves, violins, horizontal bars, histograms and
+empirical CDFs, with metric-labelled shared axes. Projects can add self-contained HTML tabs via
+`self.outputs.html_section("proteins", title="Proteins").write_text(html_text)`; report generation
+collects verified finalized artifacts, not during scheduling. Multiple Runs share a document selector.
+Sandboxed offline frames isolate project JavaScript; embed assets/data (16 MiB/document, 64 MiB/report).
+See [project HTML tabs](RESEARCH_ANALYSIS.md#project-html-tabs) for the contract and standalone API.
+
 Study HTML starts in **Overview**, with candidate states, contextual predictive importance and
 suggested charts. Conditional scores stay in their branch/support table, never global responsibility.
 Interpretation/questions use carousels and full findings are paged. English/Spanish is selectable in
 the header; authored names and exact persisted statements are not translated. Searchable anchored
 dropdowns replace control modals. **Parameters** checkboxes overlay selected curves in one chart
-(different/unknown units retain separate Y axes). Shared explanations are behind **ⓘ**.
+(automatic Y scales group substantially overlapping ranges, never known different units).
+Choose lines, points, grouped bars, candidate distributions or a metric heatmap; **Arrangement**
+switches between one combined chart and one panel per metric. **Y scales** also offers independent
+or explicitly shared ranges. **Dispersion** hides SD or shows whiskers/shaded bands (numeric lines
+only; other views use whiskers). SD is across candidate summaries, not seed uncertainty; it is absent
+with fewer than two observations. Heatmap colours normalize each metric visually; hover retains
+original means and missing cells stay blank. These settings survive reopening the same generated
+HTML. Shared explanations are behind **ⓘ**.
 There is an **Analyze / By / Compare with**
 Explore view and removable metric chips. All explicit axis/chart settings remain in **Advanced
 visualization options**. Configured questions are first-class inspectable cards; Metrics & health
@@ -2099,7 +2140,8 @@ recovery/export. Schema version 8 adds `research` while retaining prior scientif
 Test metrics, including derived/composite components, cannot govern objective/constraints.
 Provisional discovery excludes test evidence, while terminal reports may inspect it. Unknown
 semantics remain explicit; discovery is not causal inference or new HPO confidence. Distinct Y
-units use small multiples in Explore and independent same-chart Y axes in Parameters; visual
+units use small multiples in Explore and distinct Y axes in Parameters; unknown units may share a
+visual scale when observed ranges substantially overlap, without claiming unit equivalence. Visual
 normalization is opt-in. Saved views support notes and validated
 JSON import/export. [The full research guide](RESEARCH_ANALYSIS.md) contains numbered instructions,
 YAML examples, algorithm limits, statistical caveats and legacy behavior.

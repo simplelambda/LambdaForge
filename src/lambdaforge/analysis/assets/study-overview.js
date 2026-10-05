@@ -153,7 +153,7 @@ window.LambdaForgeStudyOverview = function (services) {
         'Each curve joins means at exact tested parameter values. The remaining parameters were not held constant, so this is an observed association, not a causal experiment.',
         'Error bars show dispersion across candidates, not uncertainty over seeds. Hover for support counts and exact trial identities. Missing values are never replaced with zero.',
         'Metric summaries retain their persisted aggregation. Selecting more metrics does not recompute an objective or choose a different best epoch.',
-        'Different or unknown units are displayed on labelled independent axes in the same chart. Comparing heights across those axes is not a comparison of scientific value.']],
+        'Automatic scales group substantially overlapping ranges without assuming scientific equivalence. Known different units stay separate. Choose independent/shared scales and combined/separate panels; do not compare heights across independent axes.']],
       ['#study-coverage','How to read coverage',[
         'Coverage describes where observations exist, not how likely the optimum is to be there. Conditional parameters must be interpreted only in their active branch.',
         'Attempted and censored evidence can cover search locations without resolving complete response evidence. A successful Study can remain scientifically unresolved.']]

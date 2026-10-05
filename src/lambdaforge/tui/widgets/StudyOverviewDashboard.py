@@ -51,6 +51,10 @@ class StudyOverviewDashboard(Vertical):
             for run in candidate.get("runs", ())
             if isinstance(run, Mapping)
         )
+        if isinstance(study.get("run_states"), Mapping):
+            states = Counter(
+                {str(state): int(count) for state, count in study["run_states"].items()}
+            )
         objective = study.get("objective", {})
         self.query_one("#study-objective-title", Label).update(
             f"{objective_display_name(objective)} by trial"

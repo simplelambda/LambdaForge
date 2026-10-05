@@ -31,6 +31,49 @@ def _files(value: Any) -> dict[str, None]:
     return output
 
 
+def prepared_equivalence(source: Path, prepared: PreparedWork) -> ExecutionEquivalence:
+    """Derive preparation identities, leaving hardware explicitly UNATTESTED until allocation.
+
+    This is a preparation request, never dispatch evidence. The owner replaces only hardware
+    with its actual granted stratum before the coordinator creates any GlobalRun.
+    """
+    from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
+
+    manifest = json.loads(prepared.bundle.manifest_path.read_text(encoding="utf-8"))
+    config = WorkConfig.from_yaml(source)
+    if len(config.levels) != 1 or len(config.levels[0].runs) != 1:
+        raise ValueError("Fleet preparation requires one Study definition.")
+    definition = config.levels[0].runs[0]
+    identity = []
+    for configured in sorted(_files(definition.parameters)):
+        path = Path(configured)
+        path = path if path.is_absolute() else source.parent / path
+        digest, size = canonical_fingerprint(path)
+        identity.append(
+            {
+                "configured": configured,
+                "sha256": digest,
+                "size_bytes": size,
+                "algorithm": CANONICAL_FINGERPRINT_ALGORITHM,
+            }
+        )
+    equivalence = ExecutionEquivalence(
+        ScientificIdentity.from_payload(manifest["code_identity"]).digest,
+        str(prepared.bundle.environment_id or "unattested"),
+        ScientificIdentity.from_payload({"file_inputs": identity}).digest,
+        ScientificIdentity.from_payload(
+            {
+                "native_runtime": LambdaForgeVersion.CURRENT,
+                "objective": dict(definition.objective or {}),
+            }
+        ).digest,
+        "unattested",
+    )
+    # Reuse the same immutable code/environment/file checks; no permissive launch shortcut.
+    prepared_input_bindings(source, prepared, equivalence)
+    return equivalence
+
+
 def prepared_input_bindings(
     source: Path,
     prepared: PreparedWork,

@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from lambdaforge.analysis.Effects import reference_set
+from lambdaforge.analysis.Effects import (
+    AnalysisSurrogate,
+    analyze_effects,
+    reference_set,
+    response_curve,
+    validate_surrogate,
+)
 from lambdaforge.analysis.Report import (
     write_html,
     write_metric_html,
@@ -211,6 +217,88 @@ def test_categorical_and_conditional_parameters_keep_inactivity_explicit() -> No
     assert heads["inactive_fraction"] == pytest.approx(0.5)
     assert heads["full_fidelity_count"] == 12
     assert heads["observed_range"] == [2.0, 8.0]
+
+
+@pytest.mark.parametrize("status", ["provisional", "final"])
+@pytest.mark.parametrize("design_location", ["design", "summary", "study_designs"])
+def test_sweep_analysis_uses_persisted_conditional_geometry(
+    status: str, design_location: str
+) -> None:
+    source = _study(
+        [
+            ({"family": "max"}, 0.5),
+            ({"family": "attention", "variant": "simple", "heads": 4}, 0.6),
+            ({"family": "gem", "power": 1.0}, 0.7),
+        ]
+    )
+    design = {
+        "type": "sweep",
+        "space": {
+            "family": {"values": ["max", "attention", "gem", "unobserved"]},
+            "variant": {"values": ["simple", "gated"], "when": {"family": "attention"}},
+            "heads": {"values": [4, 8], "when": {"family": "attention"}},
+            "power": {"values": [1.0, 2.0], "when": {"family": "gem"}},
+        },
+    }
+    source[design_location] = (
+        {"study_design": design}
+        if design_location == "summary"
+        else [design]
+        if design_location == "study_designs"
+        else design
+    )
+    before = json.dumps(source, sort_keys=True)
+    analysis = StudyAnalysis.compute(source, status=status, provisional_bootstrap_replicates=20)
+    assert analysis["search_space"]["variant"]["when"] == {"family": "attention"}
+    assert analysis["search_space"]["family"]["values"] == design["space"]["family"]["values"]
+    assert analysis["surrogate"]["observations"] == 3
+    assert analysis["candidate_pool_resolution"]["invalid_observed_candidates"] == 0
+    assert analysis["response_curves"]["family"]["points"]
+    assert json.dumps(source, sort_keys=True) == before
+
+
+def test_response_without_valid_context_is_insufficient_not_an_empty_mean() -> None:
+    rows = [
+        {"parameters": {"family": "max"}, "mean": 0.5},
+        {"parameters": {"family": "attention", "variant": "simple"}, "mean": 0.6},
+        {"parameters": {"family": "gem", "power": 1.0}, "mean": 0.7},
+    ]
+    # Historical observed-only inference lacks conditions: no row has every dimension.
+    space = build_space(rows)
+    response = response_curve(
+        "family",
+        rows,
+        model=AnalysisSurrogate(rows, space),
+        space=space,
+        fingerprint="missing-geometry",
+        mode="max",
+    )
+    assert response == {
+        "kind": "categorical-adjusted",
+        "status": "insufficient",
+        "reason": "no_valid_completed_contexts",
+        "points": [],
+    }
+    effects = analyze_effects(
+        rows, space=space, mode="max", fingerprint="missing-geometry", provisional=True
+    )
+    assert effects["status"] == "insufficient"
+    assert effects["observations"] == 0
+    assert validate_surrogate(rows, space)["observations"] == 0
+    json.dumps(effects, allow_nan=False)
+
+
+def test_categorical_response_does_not_publish_nonfinite_predictions() -> None:
+    space = build_space([], {"family": {"values": ["max", "attention"]}})
+    rows = [{"parameters": {"family": "max", "unknown": 1}, "mean": 0.5}]
+    model = AnalysisSurrogate(rows, space)
+    assert not model.rows
+    response = response_curve(
+        "family", rows, model=model, space=space, fingerprint="invalid-context", mode="max"
+    )
+    assert response["status"] == "insufficient"
+    assert response["points"] == []
+    json.dumps(response, allow_nan=False)
 
 
 def test_composite_objective_uses_objective_utility_and_resource_pareto() -> None:

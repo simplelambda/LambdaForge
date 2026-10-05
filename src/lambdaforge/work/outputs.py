@@ -138,6 +138,35 @@ class OutputCollection:
         )
         return output
 
+    def html_section(
+        self,
+        name: str,
+        *,
+        title: str | None = None,
+        section: str | None = None,
+        filename: str = "index.html",
+    ) -> ManagedOutput:
+        """Declare self-contained project HTML for an isolated Study report tab.
+
+        Write the document with ``write_text``. Repeated Runs share the same tab;
+        ``section`` optionally groups several named HTML outputs in that tab.
+        Documents must embed their own assets/data; external requests are blocked.
+        HTML is collected only when explicitly generating a report, never by HPO.
+        """
+        selected_section = section or name
+        selected_title = title or selected_section
+        if not isinstance(selected_section, str) or not 1 <= len(selected_section.strip()) <= 80:
+            raise ValueError("HTML section must have a non-empty name of at most 80 characters.")
+        if not isinstance(selected_title, str) or not 1 <= len(selected_title.strip()) <= 120:
+            raise ValueError("HTML section title must contain 1–120 characters.")
+        return self.file(
+            name,
+            filename=filename,
+            role="html-section",
+            media_type="text/html",
+            metadata={"html_section": {"name": selected_section, "title": selected_title}},
+        )
+
     def directory(
         self,
         name: str,

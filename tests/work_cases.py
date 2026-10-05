@@ -77,6 +77,22 @@ class AdaptiveScoreWork(lf.Work):
         return {"score": quality}
 
 
+class FleetObservableWork(lf.Work):
+    """Synthetic live read-model fixture; a test observer releases the native Run."""
+
+    def run(self, quality: float, release: str) -> dict[str, float]:
+        import time
+
+        self.log("live Fleet scientific output")
+        self.metrics.log("score", quality, step=7)
+        deadline = time.monotonic() + 45
+        while not Path(release).is_file():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Test observer did not read the active Run")
+            time.sleep(0.05)
+        return {"score": quality}
+
+
 class FlatAdaptiveScoreWork(lf.Work):
     """Constant-objective fixture for candidate-budget termination tests."""
 

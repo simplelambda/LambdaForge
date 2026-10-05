@@ -79,7 +79,7 @@ class PasswordSshTransport(Transport):
         except TimeoutError as error:
             raise RemoteCommandTimeout(remote, float(deadline or 0)) from error
         except Exception as error:
-            raise RuntimeError(
+            raise ConnectionError(
                 f"Password SSH command failed for {self.host!r}: {SecretRedactor.redact(error)}"
             ) from None
 

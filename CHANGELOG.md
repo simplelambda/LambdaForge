@@ -10,20 +10,66 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore conditional sweep Analysis from the persisted StudyDesign space, including live reads
+  against older immutable worker environments. Sparse branch evidence remains insufficient rather
+  than crashing on an empty response mean; bounded remote diagnostics retain the final exception.
+
 ### Added
+
+- Extended offline Parameters/Explore and Run chart styles: individual points, step/area lines,
+  violins, horizontal comparisons, histograms and empirical cumulative distributions; automatic
+  axes identify their metrics. Project-owned `outputs.html_section()` declares self-contained
+  interactive HTML tabs, grouped by section and Run, integrated into reports/portable exports.
+  Explicit paged collection only, verified owned artifacts, lazy opaque-origin offline iframes.
+
+- Hierarchical Study reads: collection counts only, compact Trial table cells, lazy per-Trial
+  seeds/parameters and selected-Run evidence; separate precomputed HPO/resources and aggregate
+  Analysis panels. Host-owned parameter filtering, on-demand host-cached provisional analysis,
+  full analysis only for explicit HTML export and no hidden-parent polling. Project legacy indexes
+  before transfer and page legitimate large views in 512 KiB packets, preserving per-response
+  safety and snapshot-generation checks without the aggregate 8 MiB rejection.
+
+- Parameter HTML chart styles (lines, points, grouped bars, candidate distributions and metric
+  heatmaps), automatic overlapping-range scale grouping, shared/independent metric panels and
+  configurable SD whiskers/bands/visibility. Persist presentation settings per report, retain
+  raw hover values and missing evidence, and provide English/Spanish controls without changing HPO.
+
+- Enable fresh adaptive Fleet Studies through the existing central HPO planner. Add exact-lease,
+  bounded ordered native scalar streams with verified compression, durable cursors, replay
+  deduplication and interrupted-append recovery. Drain terminal scalars before delivering results.
+  Forward native calibrated pruning through idempotent directed stop requests; preserve protected
+  evidence and use verified mirrors for historical curves. Audit unleased reprioritization and
+  reuse the native scientific frontier for spare admissible capacity. Checkpoint continuation,
+  distributed recovery, co-location and remaining Fleet protocols are still pending.
+
+- Add limited public `lf run --on-fleet` and Research Console launch for fixed/repeated/automatic
+  paired Studies. One local durable coordinator prepares persistent managed member allocations;
+  exact hardware/identity attestation and fresh owned baseline CPU/GPU offers precede leasing.
+  Reuse the native planner, ARI, bounded result ingestion and one final analysis. Honor global
+  parallelism without prematurely expiring earlier members' offers during sequential probes.
+- Preserve exact live/terminal per-Run member placement for show/logs/artifacts; hide member Jobs from
+  semantic Work lists, cancel the owned family and protect referenced history during deletion.
+  Isolate coordinator Execution paths; keep remote compaction/scalar reads on their owner.
+  Project native active-Run latest/best metrics without copying scalar history; selected Run
+  logs/curves remain lazy and verifiably available before completion. Reject foreign live identities
+  and paths. A corrupt drain receipt cannot prevent attempts to drain other owned members.
+  Checkpoint continuation, co-location, recovery/adoption, live expansion and distributed export remain
+  explicitly gated. Unsupported retry/export refuse silent single-cluster replay/incomplete packages.
 
 - Generalize the internal adapters to one `PreparedShardExecutor`/`CoordinatedDispatcher` path.
   Prepared entrypoints reuse ControlPlane and JobService while retaining TLS, GPU site wrappers,
   immutable environment/code/input validation and exact submission fencing. Relocate only verified
   typed file markers and observe bounded result batches on the execution host. Native baseline GPU
-  shards require owned provider grants and verified hardware; production GPU offers, central adaptive
-  streaming and public Fleet launch/recovery remain pending, not inferred from these integrations.
+  shards require owned provider grants and verified hardware. The limited public route above adds
+  persistent baseline offers and central adaptive streaming; public Fleet recovery remains pending.
 - Share one internal Study execution-dispatch boundary across the existing fixed, automatic paired
   sweep and adaptive planners. Prepared local CPU Fleet execution now uses detached ProcessScheduler
   Jobs, exact invocation persistence and central result ingestion to produce one final analysis;
   fixed seeds and automatic paired-block refill are tested. Honor the native planner's unstarted
   frontier replacement without withdrawing resident workers or accepted evidence.
-  Remote/GPU/adaptive streaming and public `run --on-fleet` integration are still pending.
+  The public prepared-member route above extends that CPU integration with adaptive streaming.
 - Add durable coordinator v2 pause/resume intent, drain-to-paused reconciliation and exact pre-submit
   lease retention. Preserve original adopted wall-time/budgets and migrate valid v1 state without
   altering evidence. Pre-submit reconciliation retains unspent leases; resumed leases cannot cross

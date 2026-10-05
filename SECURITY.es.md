@@ -17,6 +17,12 @@ mínima, impacto y si requiere entrada no confiable. Nunca adjuntes credenciales
 
 ## Modelo de seguridad
 
+- HTML aportado por el proyecto es output gestionado finalizado/verificado, incrustado como datos
+  codificados y cargado solo al seleccionarlo en iframes de origen opaco. Permiten scripts/descargas
+  dentro del iframe; sandbox/CSP bloquean acceso al padre, red, formularios y navegación. Incrusta
+  recursos/datos, no referencias a archivos/sitios externos. Este aislamiento de presentación no
+  aísla Python confiable del consumidor. Límites: 16 MiB/documento, 64 MiB/informe.
+
 - Un `run` YAML importa Python consumidor confiable y puede ejecutar código arbitrario. LambdaForge
   no es sandbox. YAML no evalúa expresiones, construye objetos recursivos, ejecuta funciones
   arbitrarias ni interpola secretos.

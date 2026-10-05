@@ -1706,6 +1706,143 @@ def test_study_heavy_analysis_and_logs_are_loaded_only_for_their_tabs() -> None:
     asyncio.run(exercise())
 
 
+def test_native_study_views_fetch_trials_and_panels_only_on_navigation() -> None:
+    from textual.widgets import DataTable
+
+    from lambdaforge.study_projection import study_table, trial_detail
+
+    rich = {
+        "study_telemetry_version": 1,
+        "strategy": "adaptive",
+        "objective": {"metric": "score", "mode": "max"},
+        "counts": {"candidates": 1, "active_runs": 1},
+        "candidates": [
+            {
+                "trial": 1,
+                "parameters": {"width": 64},
+                "state": "running",
+                "best_objective": 0.8,
+                "runs": [
+                    {
+                        "key": "trial-00001-seed-4",
+                        "seed": 4,
+                        "state": "running",
+                        "latest_step": 23,
+                        "gpu_index": 0,
+                    }
+                ],
+            }
+        ],
+    }
+
+    class HierarchicalServices(FakeServices):
+        def study(self, job_id):
+            self.calls.append(("study", job_id))
+            return study_table(rich)
+
+        def study_trial(self, job_id, trial):
+            self.calls.append(("study_trial", trial))
+            return trial_detail(rich["candidates"][0])
+
+        def study_hpo(self, job_id):
+            self.calls.append(("study_hpo", job_id))
+            return {"hpo_analysis": {"parameters": []}}, {"live_hpo": {}, "search_space": {}}
+
+        def study_analysis(self, job_id):
+            self.calls.append(("study_analysis", job_id))
+            return {"findings": []}
+
+        def study_panel(self, job_id, view):
+            self.calls.append(("study_panel", view))
+            return {"admission": {"current": {"status": "waiting"}}}
+
+    services = HierarchicalServices()
+    work = {
+        "work_id": "work-hierarchy",
+        "name": "hierarchy",
+        "state": "running",
+        "primary_job_id": "job-hierarchy",
+        "study_expected": True,
+        "study": {"detail_level": "overview", "study_telemetry_version": 1},
+    }
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(services)
+        async with app.run_test(size=(120, 38)) as pilot:
+            screen = StudyWorkspace(work, services)
+            app.push_screen(screen)
+            await pilot.pause(0.3)
+            assert ("study", "job-hierarchy") in services.calls
+            assert not any(
+                c[0] in {"study_trial", "study_hpo", "study_analysis", "study_panel"}
+                for c in services.calls
+            )
+            assert screen.query_one("#trial-table", DataTable).row_count == 1
+            app.push_screen(
+                TrialWorkspace(
+                    work,
+                    screen.study["candidates"][0],
+                    services,
+                    objective=rich["objective"],
+                )
+            )
+            await pilot.pause(0.2)
+            assert ("study_trial", 1) in services.calls
+            assert app.screen.query_one("#seed-table", DataTable).row_count == 1
+            # The hidden parent no longer refreshes its index behind a Trial/Seed screen.
+            before = services.calls.count(("study", "job-hierarchy"))
+            screen._refresh_study(force=True)
+            await pilot.pause(0.1)
+            assert services.calls.count(("study", "job-hierarchy")) == before
+            app.pop_screen()
+            screen.query_one("#study-tabs", TabbedContent).active = "study-hpo"
+            await pilot.pause(0.2)
+            assert ("study_hpo", "job-hierarchy") in services.calls
+            assert not any(c[0] == "study_analysis" for c in services.calls)
+            screen.query_one("#study-tabs", TabbedContent).active = "study-resources"
+            await pilot.pause(0.2)
+            assert ("study_panel", "resources") in services.calls
+            screen.query_one("#study-tabs", TabbedContent).active = "study-analysis"
+            await pilot.pause(0.2)
+            assert ("study_analysis", "job-hierarchy") in services.calls
+
+    asyncio.run(exercise())
+
+
+def test_hpo_facade_presents_precomputed_host_evidence_without_refitting(monkeypatch) -> None:
+    from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
+
+    def no_fit(*args, **kwargs):
+        pytest.fail("Opening HPO must not refit post-hoc analysis on the controller")
+
+    monkeypatch.setattr(StudyAnalysis, "compute", no_fit)
+    panel = {
+        "controller": {
+            "initialization": {
+                "policy": {
+                    "parameter_space": {
+                        "learning_rate": {"range": [0.0001, 0.01], "scale": "log"},
+                    }
+                }
+            }
+        },
+        "hpo_analysis": {
+            "parameters": [
+                {
+                    "parameter": "learning_rate",
+                    "observed_range": [0.001, 0.005],
+                }
+            ]
+        },
+    }
+    facade = object.__new__(ConsoleServices)
+    facade.jobs = SimpleNamespace(study_panel=lambda job_id, view: panel)
+    loaded, analysis = facade.study_hpo("job-one")
+    assert loaded == panel
+    assert analysis["search_space"]["learning_rate"]["low"] == 0.0001
+    assert analysis["coverage"]["marginal"]["learning_rate"]["observed_range"] == [0.001, 0.005]
+
+
 def test_pruned_seed_keeps_best_partial_evidence_without_final_score() -> None:
     class PrunedServices(FakeServices):
         def study_run(self, job_id, run_key, *, tail=2_000, curve_points=200):

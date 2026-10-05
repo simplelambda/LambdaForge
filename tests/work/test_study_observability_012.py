@@ -87,11 +87,13 @@ def test_study_telemetry_folds_live_metrics_without_copying_run_evidence(
     assert training.read_text(encoding="utf-8").count("val_loss") == 2
     interactive = json.loads((tmp_path / "study" / "interactive.json").read_text())
     assert interactive["detail_level"] == "interactive"
-    assert interactive["candidates"][0]["runs"][0]["latest_step"] == 2
+    assert interactive["candidates"][0]["latest_step"] == 2
     # The compact index retains only owned references needed by the lazy selected-Run route;
     # scalar history and latest-metric dictionaries remain outside the overview payload.
-    assert interactive["candidates"][0]["runs"][0]["metrics_path"] == str(metrics)
-    assert "latest_metrics" not in interactive["candidates"][0]["runs"][0]
+    assert "runs" not in interactive["candidates"][0]
+    detail = json.loads((tmp_path / "study" / "trials" / "trial-00001.json").read_text())
+    assert detail["runs"][0]["metrics_path"] == str(metrics)
+    assert "latest_metrics" not in detail["runs"][0]
 
 
 def test_interactive_study_projection_omits_per_run_bulk() -> None:
@@ -142,9 +144,7 @@ def test_interactive_projection_omits_metric_dictionaries_at_large_scale() -> No
                     "key": f"trial-{trial}-seed-1",
                     "state": "running",
                     "latest_step": 10,
-                    "latest_metrics": {
-                        f"metric_{index}": index / 100 for index in range(100)
-                    },
+                    "latest_metrics": {f"metric_{index}": index / 100 for index in range(100)},
                 }
             ],
         }
@@ -222,9 +222,9 @@ def test_job_service_reprojects_a_large_legacy_interactive_index(tmp_path: Path)
     projected = service.study("job-legacy")
 
     assert projected is not None
-    assert projected["interactive_projection_version"] == 2
+    assert projected["interactive_projection_version"] == 3
     assert "latest_metrics" not in projected["candidates"][0]
-    assert "latest_metrics" not in projected["candidates"][0]["runs"][0]
+    assert "runs" not in projected["candidates"][0]
     assert len(json.dumps(projected)) < len(json.dumps(legacy)) / 5
 
 
@@ -266,7 +266,9 @@ def test_study_telemetry_exposes_common_terminal_diagnostics_only(tmp_path: Path
     assert "score" not in diagnostic
     assert diagnostic["surface_quality"]["mean"] == pytest.approx(0.5)
     assert diagnostic["surface_quality"]["n"] == 2
-    assert interactive["candidates"][0]["diagnostic_metrics"] == diagnostic
+    assert "diagnostic_metrics" not in interactive["candidates"][0]
+    detail = json.loads((tmp_path / "study" / "trials" / "trial-00001.json").read_text())
+    assert detail["diagnostic_metrics"] == diagnostic
 
 
 def test_study_snapshot_exposes_initial_design_and_coverage_state(tmp_path: Path) -> None:
@@ -1230,8 +1232,7 @@ def test_job_service_returns_downsampled_curves_and_only_the_selected_run_log(
         "PROMOTE",
     ]
     large_history = [
-        {"action": "PROPOSE", "trial": index, "reason": "x" * 4_096}
-        for index in range(300)
+        {"action": "PROPOSE", "trial": index, "reason": "x" * 4_096} for index in range(300)
     ]
     (study_root / "controller-history.jsonl").write_text(
         "".join(json.dumps(action) + "\n" for action in large_history),

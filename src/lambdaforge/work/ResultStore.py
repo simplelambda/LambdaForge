@@ -371,7 +371,15 @@ class ResultStore:
         recompute: bool = False,
     ) -> Path:
         """Export the same analysis consumed by CLI/TUI to one offline HTML file."""
-        return write_html(self.analysis(selector, recompute=recompute), output)
+        from lambdaforge.study_projection import read_html_sections
+
+        selected = self.select(selector)
+        execution_dir = self._execution_dir(Path(str(selected["_manifest_path"])).resolve())
+        return write_html(
+            self.analysis(selector, recompute=recompute),
+            output,
+            sections=read_html_sections(selected.get("runs", ()), execution_dir),
+        )
 
     def export(
         self,
@@ -491,7 +499,15 @@ class ResultStore:
             if analysis is not None:
                 atomic_json(reports / "study-analysis.json", analysis)
                 try:
-                    write_html(analysis, reports / "study-analysis.html")
+                    from lambdaforge.study_projection import read_html_sections
+
+                    write_html(
+                        analysis,
+                        reports / "study-analysis.html",
+                        sections=read_html_sections(
+                            selected.get("runs", ()), execution_dir, relocate=True
+                        ),
+                    )
                 except RuntimeError as error:
                     _write_basic_analysis_html(analysis, reports / "study-analysis.html")
                     warnings.append(

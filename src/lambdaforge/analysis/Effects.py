@@ -75,7 +75,11 @@ class AnalysisSurrogate:
 def validate_surrogate(
     candidates: Sequence[Mapping[str, Any]], space: Mapping[str, Mapping[str, Any]]
 ) -> dict[str, Any]:
-    rows = [value for value in candidates if _finite(value.get("mean"))]
+    rows = [
+        value
+        for value in candidates
+        if _finite(value.get("mean")) and valid_point(value.get("parameters", {}), space)
+    ]
     if len(rows) < 3:
         return {
             "backend": "mixed-knn",
@@ -138,7 +142,11 @@ def analyze_effects(
     surrogate_diagnostics: Mapping[str, Any] | None = None,
     coverage_quality: str | None = None,
 ) -> dict[str, Any]:
-    rows = [value for value in candidates if _finite(value.get("mean"))]
+    rows = [
+        value
+        for value in candidates
+        if _finite(value.get("mean")) and valid_point(value.get("parameters", {}), space)
+    ]
     if len(rows) < 2 or not space:
         return _empty_effects(len(rows))
     model = AnalysisSurrogate(rows, space)
@@ -302,6 +310,8 @@ def response_curve(
                 if assigned is None:
                     continue
                 category_prediction, category_uncertainty, _distance = model.predict(assigned)
+                if not _finite(category_prediction) or not _finite(category_uncertainty):
+                    continue
                 values.append(category_prediction)
                 uncertainties.append(category_uncertainty)
             if not values:
@@ -317,6 +327,13 @@ def response_curve(
                     ),
                 )
             )
+        if not raw:
+            return {
+                "kind": "categorical-adjusted",
+                "status": "insufficient",
+                "reason": "no_valid_completed_contexts",
+                "points": [],
+            }
         center = statistics.fmean(value for _level, value, _uncertainty, _support in raw)
         return {
             "kind": "categorical-adjusted",

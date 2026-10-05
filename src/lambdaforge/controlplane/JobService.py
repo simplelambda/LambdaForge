@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import sys
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
@@ -214,11 +215,17 @@ class JobService:
         job_type: str = "command",
         group_id: str | None = None,
         retry_of: str | None = None,
+        job_id: str | None = None,
     ) -> JobHandle:
         """Persist a controller-side submission before slow preparation begins."""
         profile = self.catalog.get(cluster)
         now = datetime.now(timezone.utc).isoformat()
-        job_id = self.new_id()
+        job_id = job_id or self.new_id()
+        self.store._validate_id(job_id)
+        if not job_id.startswith("job-"):
+            raise ValueError("LambdaForge job ids must start with 'job-'.")
+        if (self.store.root / (job_id + ".json")).exists():
+            raise ValueError("An owned reservation cannot overwrite an existing Job.")
         record_metadata = dict(metadata or {})
         record_metadata.setdefault("attempt", self._attempt_number(retry_of))
         record = JobRecord(
@@ -259,7 +266,7 @@ class JobService:
             record
             for record in self.store.records()
             if record.job_id != exclude_job_id
-            and record.cluster == cluster
+            and record.metadata.get("execution_target", record.cluster) == cluster
             and not record.state.terminal
             and scientific_identity
             in {
@@ -283,10 +290,12 @@ class JobService:
             return
         selected = active[0]
         revision = scientific_identity.removeprefix("sha256:")[:12]
+        target_option = "--on-fleet" if cluster.startswith("fleet:") else "--on"
+        target = cluster.removeprefix("fleet:") if target_option == "--on-fleet" else cluster
         rerun = (
-            shlex.join(("lf", "run", str(source), "--on", cluster, "--allow-duplicate"))
+            shlex.join(("lf", "run", str(source), target_option, target, "--allow-duplicate"))
             if source is not None
-            else "lf run CONFIG --on " + shlex.quote(cluster) + " --allow-duplicate"
+            else "lf run CONFIG " + target_option + " " + shlex.quote(target) + " --allow-duplicate"
         )
         raise LambdaForgeError(
             diagnostic(
@@ -577,7 +586,9 @@ class JobService:
 
     def study(self, job_id: str) -> dict[str, Any] | None:
         """Return one bounded live/terminal study snapshot for machine clients and the TUI."""
-        record = self.get(job_id, refresh=False)
+        # Root screens are hidden while this workspace is open. Refresh only this provider Job
+        # state, without having get() fetch its Study table a second time.
+        record = self.get(job_id, include_study=False)
         _profile, transport, _scheduler = self._provider(record)
         value = self._load_study_summary(record, transport)
         return {**value, "job_state": record.state.value} if value is not None else None
@@ -609,6 +620,35 @@ class JobService:
             byte_offset = next_offset
             line_offset += len(page)
         return tuple(actions)
+
+    def study_trial(self, job_id: str, trial: int) -> dict[str, Any]:
+        """Read only one Trial's parameters and seed table, never epoch history."""
+        record = self.get(job_id, refresh=False)
+        _profile, transport, _scheduler = self._provider(record)
+        value = self._load_study_summary(record, transport, view="trial", trial=trial)
+        if value is None:
+            raise KeyError(f"Trial {trial} has no telemetry in Job {job_id}.")
+        return value
+
+    def study_trials(self, job_id: str, *, query: str) -> dict[str, Any]:
+        """Filter a Trial table on the execution host, including candidate parameters."""
+        record = self.get(job_id, refresh=False)
+        _profile, transport, _scheduler = self._provider(record)
+        value = self._load_study_summary(record, transport, query=query)
+        if value is None:
+            raise KeyError(f"Job {job_id} has no Study telemetry.")
+        return value
+
+    def study_panel(self, job_id: str, view: str) -> dict[str, Any]:
+        """Fetch persisted HPO/resources, or host-owned post-hoc analysis, explicitly."""
+        if view not in {"hpo", "resources", "analysis", "analysis-report", "report-sections"}:
+            raise ValueError("Unknown Study panel.")
+        record = self.get(job_id, refresh=False)
+        _profile, transport, _scheduler = self._provider(record)
+        value = self._load_study_summary(record, transport, view=view)
+        if value is None:
+            raise KeyError(f"Job {job_id} has no {view} telemetry.")
+        return value
 
     @staticmethod
     def _read_jsonl_page(
@@ -689,44 +729,28 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             raise ValueError("curve_points must be between 10 and 500.")
         record = self.get(job_id, refresh=False)
         _profile, transport, _scheduler = self._provider(record)
-        summary = self._load_study_summary(record, transport)
-        if summary is None:
+        detail = self._load_study_summary(
+            record, transport, view="run", trial=int(run_key.split("-")[1]), run=run_key
+        )
+        if detail is None:
             raise KeyError(f"Job {job_id} has no study telemetry.")
-        selected: dict[str, Any] | None = None
-        candidate_parameters: dict[str, Any] = {}
-        for candidate in summary.get("candidates", ()):
-            if not isinstance(candidate, Mapping):
-                continue
-            for run in candidate.get("runs", ()):
-                if isinstance(run, Mapping) and run.get("key") == run_key:
-                    selected = dict(run)
-                    candidate_parameters = dict(candidate.get("parameters", {}))
-                    break
-            if selected is not None:
-                break
-        if selected is None:
+        selected = detail.get("run")
+        candidate_parameters = dict(detail.get("parameters", {}))
+        if not isinstance(selected, dict) or selected.get("key") != run_key:
             raise KeyError(f"Unknown study Run {run_key!r} in Job {job_id}.")
-        # The interactive Study index intentionally omits machine paths, failure tracebacks and
-        # other per-Run bulk.  Resolve those fields only for the Run the user opened.
-        run_record_path = (
-            PurePosixPath(record.work_dir).parent / "study" / "runs" / f"{run_key}.json"
-        )
-        run_record_text, run_record_truncated = self._read_bounded_file(
-            transport, run_record_path, limit=2 * 1024 * 1024
-        )
-        if run_record_truncated:
-            raise RuntimeError(
-                f"Study Run metadata exceeds the 2 MiB safety limit: {run_record_path}"
-            )
-        if run_record_text:
-            try:
-                run_record = json.loads(run_record_text)
-            except (json.JSONDecodeError, TypeError) as error:
-                raise RuntimeError(
-                    f"Corrupt Study Run metadata for {run_key!r}: {run_record_path}"
-                ) from error
-            if isinstance(run_record, Mapping):
-                selected.update(run_record)
+        # The selected-Run route has already read its native record on the execution host.
+        # Do not transfer it twice or fetch the surrounding Study/Trial catalogue.
+        placement = selected.get("placement")
+        if isinstance(placement, Mapping):
+            owner = self.get(str(placement.get("job_id", "")), refresh=False)
+            if (
+                owner.metadata.get("fleet_role") != "member"
+                or owner.metadata.get("fleet_parent_job") != record.job_id
+                or owner.cluster != placement.get("cluster")
+            ):
+                raise ValueError("Study Run placement belongs to another provider owner.")
+            record = owner
+            _profile, transport, _scheduler = self._provider(owner)
         log_path = self._owned_study_path(record, selected.get("log_path"))
         run_dir = self._owned_study_path(record, selected.get("run_dir"))
         result_path = run_dir / "result.json" if run_dir is not None else None
@@ -805,7 +829,7 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             series.setdefault(str(observation["name"]), []).append(
                 {"step": int(observation["step"]), "value": float(observation["value"])}
             )
-        objective = summary.get("objective", {})
+        objective = detail.get("objective", {})
         objective = objective if isinstance(objective, Mapping) else {}
         objective_metric = str(objective.get("metric", ""))
         objective_mode = str(objective.get("mode", "max"))
@@ -837,6 +861,7 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             "job_id": job_id,
             "cluster": record.cluster,
             "key": run_key,
+            "placement": dict(placement) if isinstance(placement, Mapping) else None,
             "trial": selected.get("trial"),
             "seed": selected.get("seed"),
             "state": selected.get("state"),
@@ -931,91 +956,146 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             )
         return artifacts
 
-    def _load_study_summary(self, record: JobRecord, transport: Any) -> dict[str, Any] | None:
-        root = PurePosixPath(record.work_dir).parent / "study"
-        interactive_path = str(root / "interactive.json")
-        path = str(root / "summary.json")
-        cached = self._study_projection_cache.get(record.job_id)
-        cached_fingerprint = cached[0] if cached is not None else ""
-        # Selection, symlink validation, fingerprinting and projection happen in one bounded
-        # host-side read.  An unchanged refresh returns only a tiny marker.
-        script = r"""
-import json,os,sys
-interactive,summary,known=sys.argv[1:]
-known="" if known=="-" else known
-selected=interactive if os.path.isfile(interactive) else summary
-if not os.path.isfile(selected) or os.path.islink(selected):
- print(json.dumps({"missing":True},separators=(",",":")));raise SystemExit
-st=os.stat(selected);fingerprint=f"{st.st_mtime_ns}:{st.st_size}"
-if fingerprint==known:
- print(json.dumps(
-  {"unchanged":True,"fingerprint":fingerprint},separators=(",",":")
- ))
- raise SystemExit
-with open(selected,encoding="utf-8") as stream:value=json.load(stream)
-try:
- from lambdaforge.study_projection import interactive_study
- value=interactive_study(value)
-except (ImportError,AttributeError):
-  fields=(
-   "study_telemetry_version","name","execution_id","strategy","design","objective",
-   "planned_runs","planned_candidates","status","design_status","scientific_status",
-   "finish_reason","counts","cost","initial_design","coverage_state","hpo_analysis",
-   "finished","created_at_utc","updated_at_utc"
-  )
-  candidate_fields=(
-   "trial","parameters","state","selection_objective","selection_seed_count",
-   "selection_standard_error","current_objective","best_objective","partially_censored",
-   "pareto_optimal","cost","feasibility","confirmation_status","diagnostic_metrics"
-  )
-  run_fields=(
-   "key","seed","phase","purpose","target_questions","fidelity","state",
-   "current_observed_objective","best_observed_objective","final_objective",
-   "objective_status","objective_censoring","latest_step","best_step","best_objective",
-   "duration_seconds","gpu_index","gpu_token","termination_type","prune_reason",
-   "scientific_continuation","evidence_requirement","run_dir","log_path",
-   "metrics_path","training_metrics_path"
-  )
-  candidates=[
-   {
-    **{k:c[k] for k in candidate_fields if k in c},
-    "runs":[
-     {k:r[k] for k in run_fields if k in r}
-     for r in c.get("runs",[]) if isinstance(r,dict)
-    ]
-   }
-   for c in value.get("candidates",[]) if isinstance(c,dict)
-  ]
-  value={k:value[k] for k in fields if k in value}|{
-   "detail_level":"interactive","interactive_projection_version":2,"candidates":candidates
-  }
-print(json.dumps({"fingerprint":fingerprint,"value":value},separators=(",",":")))
-"""
-        loaded = transport.run(
-            ("python3", "-c", script, interactive_path, path, cached_fingerprint or "-"),
-            timeout=30.0,
+    def _load_study_summary(
+        self,
+        record: JobRecord,
+        transport: Any,
+        *,
+        view: str = "interactive",
+        trial: int = 0,
+        run: str = "",
+        query: str = "",
+    ) -> dict[str, Any] | None:
+        """Transfer only the requested host-side projection in bounded verified pages."""
+        import base64
+
+        from lambdaforge import study_projection
+
+        root = str(PurePosixPath(record.work_dir).parent / "study")
+        cache_key = f"{record.job_id}:{view}:{trial}:{run}:{query}"
+        cached = self._study_projection_cache.get(cache_key)
+        # The stdlib reader travels with the controller: old installed workers receive the same
+        # current projection, never a legacy full payload. Prefer the recorded compatible Python;
+        # a cluster's system python3 can be older than the supported managed runtime.
+        script = Path(study_projection.__file__).read_text(encoding="utf-8") + (
+            "\nimport sys\n"
+            "json.dump(projection_page(sys.argv[1],json.loads(sys.argv[2])),sys.stdout,"
+            "separators=(',',':'))\n"
         )
-        if loaded.returncode != 0 or not loaded.stdout.strip():
-            return None
-        limit = 8 * 1024 * 1024
-        if len(loaded.stdout.encode("utf-8")) > limit:
-            raise RuntimeError("Compact Study telemetry exceeds its 8 MiB safety limit.")
-        try:
-            envelope = json.loads(loaded.stdout)
-        except (json.JSONDecodeError, TypeError) as error:
-            raise RuntimeError(f"Corrupt study telemetry for {record.job_id}.") from error
-        if not isinstance(envelope, Mapping) or envelope.get("missing"):
-            return None
-        if envelope.get("unchanged"):
-            return dict(cached[1]) if cached is not None else None
-        value = envelope.get("value")
-        if not isinstance(value, dict) or value.get("study_telemetry_version") != 1:
-            raise RuntimeError(f"Unsupported study telemetry for {record.job_id}.")
-        fingerprint = str(envelope.get("fingerprint", ""))
-        self._study_projection_cache[record.job_id] = (fingerprint, dict(value))
-        if len(self._study_projection_cache) > 32:
-            self._study_projection_cache.pop(next(iter(self._study_projection_cache)))
-        return value
+        profile = self.catalog.get(record.cluster)
+        python = sys.executable if profile.transport == "local" else profile.python
+        for index in range(1, len(record.command) - 1):
+            if record.command[index] == "-m" and record.command[index + 1].startswith(
+                "lambdaforge"
+            ):
+                python = record.command[index - 1]
+                break
+        prefix: tuple[str, ...] = (python,)
+        if profile.transport == "local":
+            if os.path.isabs(python) and not Path(python).is_file():
+                prefix = (sys.executable,)
+        else:
+            assert profile.storage is not None
+            storage = record.metadata.get("provider_storage") or {}
+            state_root = storage.get("state_root", profile.storage.state_root)
+            # Read-only argv dispatch: no site GPU wrapper/claim, no shell interpolation of data.
+            # A collected historical environment may use the active managed interpreter instead.
+            choose = """
+preferred=$1; fallback=$2; first_pointer=$3; second_pointer=$4; shift 4
+if command -v "$preferred" >/dev/null 2>&1; then exec "$preferred" "$@"; fi
+for pointer in "$first_pointer" "$second_pointer"; do
+ if [ -r "$pointer" ]; then
+  IFS= read -r active < "$pointer"
+  if [ -x "$active" ]; then exec "$active" "$@"; fi
+ fi
+done
+exec "$fallback" "$@"
+"""
+            prefix = (
+                "sh",
+                "-c",
+                choose,
+                "study-reader",
+                python,
+                profile.python,
+                str(PurePosixPath(state_root) / "active-environment"),
+                str(PurePosixPath(profile.workspace) / ".lambdaforge" / "active-environment"),
+            )
+        for _attempt in range(3):
+            offset = 0
+            fingerprint = cached[0] if cached is not None else ""
+            chunks: list[bytes] = []
+            while True:
+                request = {
+                    "view": view,
+                    "trial": trial,
+                    "run": run,
+                    "query": query,
+                    "offset": offset,
+                    "fingerprint": fingerprint,
+                }
+                result = transport.run(
+                    (*prefix, "-c", script, root, json.dumps(request)),
+                    timeout=120.0 if view.startswith("analysis") else 30.0,
+                )
+                if result.returncode != 0:
+                    detail = result.stderr.strip() or result.stdout.strip()
+                    if len(detail) > 1800:
+                        detail = detail[:400] + "\n…\n" + detail[-1400:]
+                    raise RuntimeError(f"Could not read Study {view}: {detail}")
+                if len(result.stdout.encode("utf-8")) > 1024 * 1024:
+                    raise RuntimeError("Study read response exceeded its per-page safety limit.")
+                try:
+                    envelope = json.loads(result.stdout)
+                except json.JSONDecodeError as error:
+                    raise RuntimeError("Corrupt Study page response.") from error
+                if not isinstance(envelope, dict):
+                    raise RuntimeError("Invalid Study page response.")
+                if envelope.get("missing"):
+                    return None
+                if envelope.get("unchanged"):
+                    if offset or cached is None or envelope.get("fingerprint") != cached[0]:
+                        raise RuntimeError("Invalid unchanged Study generation.")
+                    return dict(cached[1])
+                if envelope.get("restart"):
+                    cached = None
+                    break
+                current = str(envelope.get("fingerprint", ""))
+                if offset and fingerprint != current:
+                    raise RuntimeError("Study page changed generation without a restart.")
+                fingerprint = current
+                try:
+                    chunk = base64.b64decode(envelope["data"], validate=True)
+                except (ValueError, TypeError, KeyError) as error:
+                    raise RuntimeError("Corrupt Study page encoding.") from error
+                next_offset = envelope.get("next_offset")
+                if (
+                    len(chunk) > 512 * 1024
+                    or not isinstance(next_offset, int)
+                    or isinstance(next_offset, bool)
+                    or not isinstance(envelope.get("eof"), bool)
+                    or envelope.get("offset") != offset
+                    or next_offset != offset + len(chunk)
+                ):
+                    raise RuntimeError("Invalid Study page cursor.")
+                chunks.append(chunk)
+                if envelope.get("eof"):
+                    try:
+                        value = json.loads(b"".join(chunks))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                        raise RuntimeError("Corrupt Study projection.") from error
+                    if not isinstance(value, dict):
+                        raise RuntimeError("Invalid Study projection.")
+                    if view == "interactive" and value.get("study_telemetry_version") != 1:
+                        raise RuntimeError("Unsupported Study telemetry.")
+                    self._study_projection_cache[cache_key] = (fingerprint, value)
+                    if len(self._study_projection_cache) > 32:
+                        self._study_projection_cache.pop(next(iter(self._study_projection_cache)))
+                    return value
+                if next_offset <= offset:
+                    raise RuntimeError("Study pagination made no forward progress.")
+                offset = next_offset
+        raise RuntimeError("Study changed during reading; retry on the next refresh.")
 
     def _owned_study_path(self, record: JobRecord, value: Any) -> PurePosixPath | None:
         if not isinstance(value, str) or not value:
@@ -1709,11 +1789,24 @@ json.dump(out,sys.stdout)
         return cast(dict[str, Any], plan)
 
     def recovery_dependents(self, job_id: str) -> tuple[str, ...]:
-        """History owners cannot be cleaned while a recovery still references their bytes."""
+        """History owners cannot be cleaned while recovery/Fleet evidence references them."""
+        records = self.store.records()
+        # Storage may inspect an owned provider directory absent from this controller index.
+        # Search known references without requiring that directory's own local Job record.
+        parent = next(
+            (
+                record.metadata.get("fleet_parent_job")
+                for record in records
+                if record.job_id == job_id
+            ),
+            None,
+        )
         return tuple(
             record.job_id
-            for record in self.store.records()
+            for record in records
             if job_id in record.metadata.get("recovery_dependencies", ())
+            or record.metadata.get("fleet_parent_job") == job_id
+            or record.job_id == parent
         )
 
     def retry(
@@ -1721,6 +1814,11 @@ json.dump(out,sys.stdout)
     ) -> JobHandle:
         """Create a new auditable job from one terminal job's exact request."""
         previous = self.get(job_id)
+        if previous.metadata.get("fleet") or previous.metadata.get("fleet_role") == "member":
+            raise ValueError(
+                "Fleet recovery is not integrated yet. Refusing to restart the Study as a "
+                "single-cluster execution or replay a member as an independent Work."
+            )
         if previous.state not in {JobState.FAILED, JobState.CANCELLED, JobState.TIMEOUT}:
             raise ValueError(
                 "Retry applies only to failed, cancelled or timed-out attempts. "

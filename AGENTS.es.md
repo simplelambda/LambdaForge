@@ -23,6 +23,7 @@ runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada 
 | Consultar streams de seed | `lf seeds [--role confirmation] [--count N]` |
 | Plan sin efectos | `lf run CONFIG --dry-run` |
 | Ejecutar | `lf run CONFIG [--on CLUSTER]` |
+| Study Fleet fixed/pareado limitado | `lf run CONFIG --on-fleet FLEET`; límites de control plane abajo |
 | Nueva Execution deliberada | `lf run CONFIG --rerun` |
 | Operación interactiva | `lf` sin argumentos (Consola en TTY) |
 | Monitorizar | Consola de investigación; `lf overview --json` |
@@ -263,8 +264,14 @@ snapshot `.surrogate_belief` emitido por el sampler real.
 La telemetría de estudio es un modelo de lectura acotado, no otro almacén de resultados. Referencia
 logs y JSONL escalares por Run y nunca copia checkpoints/outputs. Las lecturas de colección son
 jerárquicas: `overview --json` solo expone contadores/objetivo/líder compactos; abrir un Study carga
-`study/interactive.json` transportable; Runs seleccionadas, análisis y logs son lazy y el historial
-completo se pagina solo al abrir Action history. Un resumen legacy rico se proyecta en su host, no
+`study/interactive.json` v3 solo contiene celdas de Trials/estados agregados, nunca todas sus seeds
+o parámetros. Un Trial carga su proyección de seeds/parámetros; curvas/logs solo de la Run elegida.
+HPO/recursos usan ficheros precomputados propios; Analysis recibe agregados sin registros por Run
+y exportar HTML solicita el análisis completo. Post-hoc provisional cacheado bajo demanda en el
+host, fuera del heartbeat; nunca reajustarlo solo para abrir HPO. Todas las vistas de Study usan
+páginas de 512 KiB con generación/marcador sin cambios, no un límite agregado de 8 MiB. Vistas
+padre ocultas dejan de sondear. El historial completo se pagina solo al abrir Action history.
+Un resumen legacy rico se proyecta en su host, no
 se transfiere entero; y
 `lf show WORK --run CLAVE --json` devuelve parámetros,
 curvas reducidas, objective y época actual/óptima, tiempos/fallo/log y rutas/checksums/retención de
@@ -364,6 +371,13 @@ tensorial preciso y pruebas focalizadas.
 
 ## Análisis de estudios y consola
 
+Pestañas HTML propias: `outputs.html_section(name, title=..., section=...)` es un fichero gestionado,
+no otro runner/plugin. Solo generar informe lee HTML finalizado propio con fingerprint exacto;
+contenido remoto paginado/cacheado, nunca en overview/HPO. Agrupa documentos por sección e incrusta
+HTML codificado bajo demanda en iframes offline de origen opaco. Nunca insertes scripts del consumidor
+en el DOM padre ni relajes red/ownership. Datos/recursos deben ir incrustados; límites 16 MiB/documento
+y 64 MiB/informe. Ejes identifican sus métricas; histogramas/CDF son presentación, no evidencia HPO nueva.
+
 El HTML empieza en Overview, con estados exactos e importancia contextual. Excluye parámetros
 condicionales del gráfico global; conserva rama/soporte/score modelado aparte, nunca como
 responsabilidad causal. Interpretaciones/preguntas usan carruseles, hallazgos completos se paginan
@@ -403,6 +417,13 @@ La fiabilidad combina soporte, calidad CV, cobertura y extrapolación. Indica si
 es observada/predicha y no atribuyas resolución a un pool no persistido. Confirmación usa el margen
 de equivalencia. Separa coste intrínseco por Run de gasto total del controlador y Pareto científico
 de Pareto de recursos. Todo sigue siendo predictivo/descriptivo, no causal.
+
+En sweeps sin INITIALIZE adaptativo, StudyDesign.space persistido define la geometría de Analysis;
+no infieras claves obligatorias incondicionales de ramas incompletas. El lector del host pasa esa
+geometría explícitamente a runtimes antiguos e inmutables. Contextos de respuesta válidos ausentes
+significan evidencia insuficiente. Errores remotos acotados conservan la excepción final, no solo
+la cabecera del traceback.
+
 Un screening estable detiene optimización ordinaria, no trabajo científico: confirmation y deuda
 material/factible de soporte e interacciones continúan hasta agotarse o alcanzar un presupuesto
 duro. Calcula `scientific_status` con parámetros e interacciones materiales. Los
@@ -532,28 +553,33 @@ separada.
 
 ## Identidad y aislamiento por proyecto
 
-La ejecución Fleet coordinada está en implementación: NO existe aún `run --on-fleet` soportado.
-`Fleet`, `ClusterOffer` acreditada localmente, `GlobalPlacementBroker` y `StudyCoordinator`
-implementan contratos probados de propiedad/persistencia. Nunca reinterpretar JobGroups
-independientes como HPO coordinado ni crear otro optimizer en los workers. `lf fleets
-list/show/offers` inspecciona; `drain/disable/enable` preview/apply cambia el catálogo, no Studies
-de producción activos. Observar recursos físicos no concede capacidad. Perder conexión conserva
-leases desconocidas; retry requiere prueba positiva de pérdida del Attempt propio. Pendientes
-runner/proveedores/predictive/decisiones/TUI: `docs/COORDINATED_STUDIES.es.md`. Pruebas fake no
-demuestran ejecución end-to-end.
+La ruta pública `lf run CONFIG --on-fleet NAME` admite Studies adaptativos nuevos/fixed/repetidos/pareados
+automáticos, coordinador local y miembros managed. Run Work ofrece los mismos destinos.
+Continuación de checkpoints/fidelity, co-location, recovery/adopción, expansión y export distribuido siguen bloqueados:
+`docs/COORDINATED_STUDIES.es.md`. No llamar Study coordinado a JobGroups independientes ni crear
+otro optimizer. Dry-run no adquiere grants; pruebas loopback no acreditan SSH/command/SLURM.
 
-`WorkRunner(dispatcher=...)` es el punto interno compartido fixed/automático/adaptativo, no otro
-planner. `PreparedShardExecutor` y `CoordinatedDispatcher` comparten una ruta de ejecución.
-La frontera preparada reutiliza ControlPlane/JobService, identidades exactas, bindings file
-canónicos y observaciones acotadas en el host. Shards GPU baseline exigen Job propio, visibilidad
-opaca heredada y hardware homogéneo; los offers GPU quedan bloqueados hasta integrar la autoridad
-de asignación de miembro. Los tests del proveedor local no acreditan lanzamiento público Fleet
-remoto/GPU ni streaming adaptativo central. El callback fixed/automático reemplaza la cola
-no iniciada, no solo añade Runs; no retirar identidades con lease o ya aceptadas. La pausa v2
-congela aceptación/envíos y deja
-terminar workers propios sin asumir muerte; propiedad desconocida impide PAUSED. Mantener leases
-previas al envío, evidencia y reloj original al reanudar/migrar v1. Launch/pause/resume/adopción
-públicos siguen pendientes.
+`WorkRunner(dispatcher=...)`, `PreparedShardExecutor` y `CoordinatedDispatcher` conservan un único
+punto nativo. Jobs miembros persistentes ejecutan oleadas concretas con procesos Run/ARI nativos
+aislados. Los offers exigen heartbeat fresco del propietario y código/entorno/inputs/numerics/
+hardware exactos acreditados; placeholders no pasan a GlobalRun. Tokens GPU heredados opacos,
+sin ampliarlos. Una oleada baseline ocupada ofrece cero slots. El coordinador nunca compacta ni
+lee streams resolviendo rutas remotas localmente. Retención en el worker tras persistir el envelope.
+Show/logs vivos/terminales usan el miembro verificado y curvas remotas lazy. Los resúmenes escalares
+activos acotados son metadata visual, no evidencia terminal aceptada. Cancelación semántica detiene
+primero el padre y enumera hijos exactos. Borrado protege dependencias y previsualiza la familia;
+retry no reinicia Fleet como Work de un clúster y export no omite miembros silenciosamente.
+Streams escalares nativos ordenados usan registros completos acotados, cursores por bytes y leases
+exactas. El planner nativo recibe resultados terminales solo tras completar el stream; recupera
+appends no confirmados, nunca corrupción confirmada. Adquisición pending-aware y poda nativas
+siguen centrales. Órdenes de parada inmutables/idempotentes no inventan evidencia terminal ni podan
+evidencia protegida. Repriorizar Runs sin lease audita invocaciones previas y conserva la ciencia.
+Espejos escalares verificados, no rutas remotas, alimentan la calibración histórica.
+
+Los callbacks fixed/automático reemplazan cola no iniciada sin retirar leases/resultados aceptados.
+Conservar leases/fences v2, reloj/presupuestos originales, cuarentena y propiedad unknown.
+Observación física/heartbeat ausente no prueban grant ni pérdida del Attempt. Lifecycle/catálogo
+internos no son soporte público de pausa/expansión. Conservar backfill y semántica de bloques/evidencia.
 
 El `pyproject.toml` más cercano, no el entorno virtual activo, selecciona `ProjectContext`.
 `[tool.lambdaforge].project_id` es un ID estable opcional de 1–80 caracteres; si falta se deriva de
