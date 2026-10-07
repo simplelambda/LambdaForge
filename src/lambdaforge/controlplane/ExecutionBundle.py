@@ -23,6 +23,7 @@ class ExecutionBundle:
     offline: bool = False
     environment_policy: Mapping[str, Any] | None = None
     shared_inputs: tuple[Mapping[str, Any], ...] = ()
+    product_inputs: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if self.environment_policy is not None:
@@ -35,6 +36,9 @@ class ExecutionBundle:
             self,
             "shared_inputs",
             tuple(FrozenJsonMapping(value) for value in self.shared_inputs),
+        )
+        object.__setattr__(
+            self, "product_inputs", tuple(FrozenJsonMapping(value) for value in self.product_inputs)
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,4 +54,9 @@ class ExecutionBundle:
             "offline": self.offline,
             "environment_policy": copy.deepcopy(self.environment_policy or {}),
             "shared_inputs": [copy.deepcopy(value) for value in self.shared_inputs],
+            **(
+                {"product_inputs": [dict(value) for value in self.product_inputs]}
+                if self.product_inputs
+                else {}
+            ),
         }

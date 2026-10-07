@@ -82,7 +82,7 @@ def test_native_results_report_collects_registered_sections(tmp_path: Path) -> N
     selected = {"_manifest_path": str(tmp_path / "result.json"), "runs": [run]}
     store = SimpleNamespace(
         select=lambda _selector: selected,
-        _execution_dir=lambda _manifest: tmp_path,
+        _evidence_dir=lambda _manifest: tmp_path,
         analysis=lambda _selector, **_kwargs: sample_analysis(),
     )
     report = ResultStore.report(store, "study", tmp_path / "native.html")

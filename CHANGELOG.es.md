@@ -11,6 +11,13 @@ metadata empaquetada.
 
 ### Corregido
 
+- Primera base de reforma: clasificación operativa compartida, actividad/evidencia/salud separadas,
+  historial físico conservado durante retry, contadores acumulados y protección frente a respuestas
+  antiguas. Errores CUDA genéricos ya no parecen OOM recuperables; retry en espera no ocupa un slot
+  activo. Registro bilingüe explicita los pendientes de la reforma de productos/Fleet.
+  Finalización nativa usa últimos resultados lógicos y deuda de composición, conservando historial.
+  Previews de storage/clean ya no crean raíces, locks ni leases; apply conserva revalidación y locks.
+
 - Inventario de datasets descubre todas las ubicaciones en la consola sin modificar registros ni
   ocultar identidades divergentes. Preflight, contratos científicos, verificadores del proyecto y
   publicación de candidatos conservados mantienen checksums exactos. Publicación fallida conserva
@@ -42,6 +49,36 @@ metadata empaquetada.
   media vacía; los diagnósticos remotos acotados conservan la excepción final.
 
 ### Añadido
+
+- `DatasetEquivalenceCertificate` sella la comparación nativa completa como ScientificReport
+  versionado en el mismo ProductRegistry: IDs exactos de referencia/candidato, ciencia/verificador/
+  política/evidencia explícitos y provenance operativa separada. No certifica datos no resueltos,
+  corruptos ni científicamente distintos. No fusiona identidades de bytes, infiere transitividad ni
+  cambia resolución dataset Work ordinaria; resolución YAML por contrato sigue pendiente.
+
+- Contratos/registro de productos inmutables, promoción de archivos independientes verificados y
+  `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide`. Conserva origen y attestations,
+  rechaza corrupción e importa idempotentemente sin ejecutar Studies. StudyDecision nativa conserva
+  selección final y Analysis compatible sin refit. Inputs Work tipados fijan contenido/contrato y
+  Attempts reales registran consumo; catálogo de worker propio del proyecto y preflight remoto de
+  metadata. Un Study individual declara publicación nativa con feedback acotado, fallos conservados
+  y retry solo de publicación bajo locks. Export Study de un host incluye bundles publicados;
+  `lf import PACKAGE [--apply]` verifica inventarios completos y registra evidencia original read-only,
+  sin ejecución ni refit de Analysis. Products en consola pagina metadata/auditorías y permite
+  verificar/exportar e importar Studies con confirmación y feedback. Faltan espera/replanificación
+  e import/export Fleet completo. ModelSet local
+  agrupa/ordena snapshots evaluados con constraints/empates, promueve solo pesos elegidos y no
+  sustituye su evaluación por best/last de una Run. Raíces file/cache/checkpoint
+  diferidas; leases de workers activos conservan protección GC. Guías bilingües detallan pendientes.
+
+- Borrado local de resultados verifica ownership y estado terminal, serializa import/borrado y
+  adquiere el lock nativo del controlador. Snapshots importados en running son evidencia borrable,
+  no procesos activos. Retira padres Work propios vacíos sin seguir enlaces; conserva roots,
+  contenido ajeno, Executions hermanas y productos publicados independientes.
+
+- Exports Work/HPO/métricas/clustering/Analysis/productos lazy con el mecanismo existente. Ayuda
+  CLI y metadata de productos ya no inicializan Torch, runner ni Analysis; ejecución/resultados/
+  export cargan sus servicios nativos cuando se necesitan.
 
 - `lf storage status/reconcile`: consulta de cambios sin mutación y actualización explícita del
   inventario diagnóstico. Copias de publicación/snapshots reservan bytes adicionales en el volumen

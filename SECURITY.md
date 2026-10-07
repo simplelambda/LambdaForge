@@ -45,8 +45,18 @@ required. Do not include real credentials or private datasets.
   paths and owns an external artifact by safe copy; `self.outputs.dataset` accepts only run-owned
   local assets or explicit URIs, rejects
   traversal/symlinks, hashes assets, verifies staging and atomically publishes before registration.
-  Ordinary YAML strings are never guessed to be paths; only explicit `file`/`dataset` markers
+  Ordinary YAML strings are never guessed to be paths; only explicit `file`/`dataset`/`product` markers
   authorize resolution and staging.
+- Product names/contracts are immutable bindings; publication verifies independent artifact copies
+  and preserves original producer provenance. Study/product import verifies complete exact inventories
+  and rejects unsafe paths, links and corruption without importing consumer Python or running a
+  Study. Hashes are not signatures: obtain packages from a trusted source. Imported Study evidence
+  is read-only, not native recovery authority. Loading a report does not open its HTML automatically.
+- Dataset equivalence certificates preserve both exact content IDs and the complete explicit
+  project comparison contract/verifier/policy. Building invokes trusted project verifier Python;
+  loading/importing never executes that recorded verifier. A certificate is historical scientific
+  approval, not byte equality, current integrity, authenticated truth or permission to ignore
+  checksums. Verify the candidate's actual bytes separately. Ordinary Work dataset inputs remain exact.
 - Managed cache/checkpoint files reject absolute/traversing keys and symbolic links, publish only
   after validation, `fsync`, SHA-256 and atomic replacement, and expose a read-only path-like
   handle. `Work.map` persists their logical key/content evidence rather than controller paths.
@@ -58,7 +68,11 @@ required. Do not include real credentials or private datasets.
   child of the configured job root. Published datasets, shared caches/environments and other Work
   are outside this operation; dataset deletion remains a separate manifest-checked command. A
   minimal completion receipt contains no scientific outputs and makes a repeated deletion safe.
-- Interactive history deletion requires a second explicit key, never removes active Jobs and runs
+- Native ResultStore deletion revalidates terminal status/ownership under the controller lock and
+  serializes with import. Imported running snapshots are deletable evidence, not active processes.
+  Empty-parent pruning uses descriptor-relative directory operations where supported, never follows
+  links or removes the configured root; unsupported platforms retain the empty parent.
+- Interactive history deletion requires a second explicit confirmation, never removes active Jobs and runs
   the same exact-root storage operation as the CLI. Per-Job absolute local roots prevent a later
   invocation from deleting below a different current directory. Whole-history cleanup retains the
   local record whenever its owned workspace could not be removed safely.

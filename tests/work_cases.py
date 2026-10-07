@@ -69,6 +69,20 @@ class SeedWork(lf.Work):
         return {"seed": self.seed, "score": score}
 
 
+class ScoredModelSnapshotWork(lf.Work):
+    """Tiny CPU-only fixture binds a model snapshot to its own evaluated metrics."""
+
+    def run(self, width: int = 64) -> dict[str, float]:
+        score = float(self.seed or 0) / 10
+        self.checkpoints.save_json("weights.json", {"width": width, "seed": self.seed})
+        self.outputs.from_checkpoint(
+            "model", "weights.json", metadata={"metrics": {"score": score}, "step": 2}
+        )
+        # Deliberately different current metric: selection must use the scored snapshot.
+        self.metrics.log("score", -score, step=3)
+        return {"score": -score}
+
+
 class AdaptiveScoreWork(lf.Work):
     """Deterministic objective fixture for adaptive seed allocation tests."""
 
@@ -358,3 +372,23 @@ class FixedRecoveryWork(lf.Work):
         self.metrics.log("score", score, step=3)
         self.outputs.file("report", filename="report.json").write_json({"seed": self.seed})
         return {"score": score}
+
+
+class ProductConsumerWork(lf.Work):
+    """Tiny product consumer uses public metadata/verified promoted artifacts only."""
+
+    def run(self, selection: object, artifact: str | None = None) -> dict[str, object]:
+        from lambdaforge.products import ProductInput
+
+        assert isinstance(selection, ProductInput)
+        summary = {
+            "content_id": selection.content_id,
+            "contract": selection.product.contract.identifier,
+            "payload": dict(selection.payload),
+        }
+        if artifact is not None:
+            self.outputs.file("copy", filename="copy.bin").write_bytes(
+                selection.artifact(artifact).read_bytes()
+            )
+        self.outputs.value("source_product", summary)
+        return summary

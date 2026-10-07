@@ -85,6 +85,23 @@ class ClusterStoragePolicy:
         return str(PurePosixPath(self.cache_root) / "runtimes")
 
     @property
+    def product_root(self) -> str:
+        """Independent durable project products, never inside disposable cache or Job roots."""
+        selected = PurePosixPath(self.state_root) / "products"
+        if any(
+            selected.is_relative_to(PurePosixPath(root))
+            for root in (
+                self.cache_root,
+                self.run_root,
+            )
+        ):
+            raise ValueError(
+                "Durable product storage cannot be inside cache/run storage; "
+                "configure storage.state_root independently."
+            )
+        return str(selected)
+
+    @property
     def job_root(self) -> str:
         return self.run_root
 

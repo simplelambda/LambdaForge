@@ -15,7 +15,7 @@ from collections.abc import Mapping, MutableSequence, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import fmean, stdev
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lambdaforge.analysis.Report import write_html
 from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
@@ -24,6 +24,10 @@ from lambdaforge.ProjectContext import ProjectContext
 from lambdaforge.work.config import WorkConfig
 from lambdaforge.work.failure import render_scientific_failures, scientific_failures
 from lambdaforge.work.models import atomic_json
+from lambdaforge.work.state import StudyState
+
+if TYPE_CHECKING:
+    from lambdaforge.products.models import StudyProduct
 
 
 class ResultStore:
@@ -45,11 +49,36 @@ class ResultStore:
                 continue
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                continue  # A concurrent confirmed deletion can remove an inventory entry.
             except (OSError, ValueError, TypeError) as error:
                 raise RuntimeError(f"Corrupt Work result manifest: {path}") from error
             if not isinstance(value, dict) or value.get("execution_result_version") != 1:
                 raise RuntimeError(f"Unsupported Work result manifest: {path}")
+            if "lifecycle" not in value:
+                value["lifecycle"] = StudyState.from_execution(
+                    value.get("summary", {}),
+                    value.get("runs", ()),
+                    status=str(value.get("status", "unknown")),
+                ).to_dict()
             value["_manifest_path"] = str(path)
+            if (path.parent / "import.json").exists() or (path.parent / "import.json").is_symlink():
+                from lambdaforge.work.StudyImport import relative_run_path
+
+                receipt = _read_mapping(path.parent / "import.json")
+                if (
+                    receipt.get("study_import_version") != 1
+                    or receipt.get("execution_id") != value.get("execution_id")
+                    or receipt.get("scientific_fingerprint") != value.get("scientific_fingerprint")
+                    or receipt.get("evidence_root") != "portable/execution"
+                    or (path.parent / "import.json").resolve() != path.parent / "import.json"
+                ):
+                    raise ValueError("Corrupt Study import ownership receipt.")
+                value["imported"] = dict(receipt)
+                for run in value.get("runs", ()):
+                    run["run_dir"] = str(
+                        path.parent / "portable/execution" / relative_run_path(run)
+                    )
             records.append(value)
         return tuple(records)
 
@@ -77,26 +106,234 @@ class ResultStore:
             )
         return dict(matches[0])
 
+    def execution_directory(self, selector: str) -> Path:
+        """Resolve one live local owned Execution for explicit post-Study operations."""
+        selected = self.select(selector)
+        if selected.get("already_deleted"):
+            raise ValueError(f"Work Execution {selector!r} was already deleted.")
+        manifest = Path(str(selected["_manifest_path"])).absolute()
+        if manifest.resolve() != manifest:
+            raise ValueError("Execution manifest cannot be symbolic.")
+        return self._evidence_dir(manifest)
+
+    def import_export(
+        self, source: str | Path, *, product_root: str | Path | None = None, apply: bool = False
+    ) -> dict[str, Any]:
+        """Verify/register a portable Study without executing or modifying original evidence."""
+        from lambdaforge.products.registry import ProductRegistry
+        from lambdaforge.work.StudyImport import StudyImport
+
+        return StudyImport.inspect(source, self.root, ProductRegistry(product_root), apply=apply)
+
+    def _evidence_dir(self, manifest: Path) -> Path:
+        root = self._execution_dir(manifest)
+        if (root / "import.json").exists():
+            evidence = root / "portable" / "execution"
+            if evidence.resolve() != evidence or not evidence.is_dir():
+                raise ValueError("Imported Study evidence root is missing or symbolic.")
+            return evidence
+        return root
+
+    def decision(self, selector: str, *, name: str, contract: str) -> StudyProduct:
+        """Seal native selection/valid cached conclusions without computing or publishing them."""
+        from lambdaforge.products.decision import build_study_decision
+
+        selected = self.select(selector)
+        root = self.execution_directory(selector)
+        definition = _analysis_definition(_read_mapping(root / "configuration.json"))
+        path = root / "analysis.json"
+        if path.is_symlink():
+            raise ValueError("Study Analysis must be an owned non-symbolic regular file.")
+        analysis = _read_mapping(path) if path.exists() else None
+        return build_study_decision(
+            selected,
+            name=name,
+            contract=contract,
+            analysis=analysis,
+            authored_space=StudyAnalysis.authored_space(definition),
+        )
+
+    def finalize_products(
+        self, selector: str, *, product_root: str | Path | None = None, apply: bool = False
+    ) -> dict[str, Any]:
+        """Retry only declared post-Study publication from owned immutable evidence."""
+        from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
+
+        root = self.execution_directory(selector)
+        if self.select(selector).get("imported"):
+            raise ValueError(
+                "Imported evidence cannot run producer finalization; import its sealed products."
+            )
+        if apply:
+            with CrossProcessFileLock(
+                root / ".controller.lock",
+                shared=False,
+                timeout_seconds=5,
+                poll_interval_seconds=0.05,
+            ):
+                return self._finalize_products(root, product_root=product_root, apply=True)
+        return self._finalize_products(root, product_root=product_root, apply=False)
+
+    def product_status(self, selector: str) -> dict[str, Any]:
+        """Read bounded publication feedback without hashing weights or recomputing selection."""
+        from lambdaforge.products.registry import ProductRegistry
+
+        root = self.execution_directory(selector)
+        path = root / "products.json"
+        if not path.exists() and not path.is_symlink():
+            return {"execution_id": root.name, "status": "not_declared", "items": []}
+        value = ProductRegistry._read(path)
+        if (
+            type(value.get("product_publication_version")) is not int
+            or value["product_publication_version"] != 1
+            or value.get("execution_id") != self.select(selector)["execution_id"]
+            or value.get("status") not in {"pending", "published", "failed"}
+            or not isinstance(value.get("items"), list)
+            or len(value["items"]) > 128
+            or any(
+                not isinstance(item, Mapping)
+                or not isinstance(item.get("name"), str)
+                or item.get("status") not in {"pending", "published", "failed"}
+                for item in value["items"]
+            )
+        ):
+            raise ValueError("Corrupt native product publication feedback.")
+        return {**value, "record_path": str(path)}
+
+    @staticmethod
+    def _finalize_products(
+        root: Path, *, product_root: str | Path | None, apply: bool
+    ) -> dict[str, Any]:
+        from lambdaforge.products.publication import publish_declared_products
+        from lambdaforge.products.registry import ProductRegistry
+
+        configuration = _read_mapping(root / "configuration.json")
+        if "products" not in configuration:
+            raise ValueError(
+                "This Execution declares no products; use products decide/select explicitly."
+            )
+        analysis_path = root / "analysis.json"
+        if analysis_path.resolve() != analysis_path:
+            raise ValueError("Study Analysis cannot be symbolic.")
+        # Read the exact persisted envelope, not observer-added display projections.
+        return publish_declared_products(
+            configuration,
+            _read_mapping(root / "result.json"),
+            root,
+            ProductRegistry(product_root),
+            analysis=_read_mapping(analysis_path) if analysis_path.exists() else None,
+            authored_space=StudyAnalysis.authored_space(_analysis_definition(configuration)),
+            apply=apply,
+        )
+
     def delete(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
         """Preview/apply exact-root deletion while preserving shared/durable-independent data."""
         selected = self.select(selector)
         if selected.get("already_deleted"):
             return {**selected, "applied": apply}
-        manifest = Path(str(selected.pop("_manifest_path"))).resolve()
+        manifest = Path(str(selected.pop("_manifest_path"))).absolute()
+        if manifest.resolve() != manifest:
+            raise ValueError("Deletion requires a non-symbolic owned Execution path.")
         execution_dir = self._execution_dir(manifest)
+        self._validate_deletion(selected, execution_dir)
         payload = {
             "work": selected,
             "execution_dir": str(execution_dir),
             "applied": apply,
             "already_deleted": False,
             "will_remove": ["result envelopes", "Attempts", "owned artifacts", "checkpoints"],
-            "preserved": ["published datasets", "shared environments", "reconstructible cache"],
+            "preserved": [
+                "published datasets",
+                "published products",
+                "shared environments",
+                "reconstructible cache",
+                "configured result root",
+            ],
         }
         if apply:
-            self._write_receipt(payload)
-            if execution_dir.exists():
-                shutil.rmtree(execution_dir)
+            from contextlib import nullcontext
+
+            from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
+
+            # The catalog lock serializes import/delete; the native controller lock prevents
+            # deleting during execution, recovery or publication. Preview acquires neither.
+            with CrossProcessFileLock(
+                self.root / ".study-import.lock",
+                shared=False,
+                timeout_seconds=30,
+                poll_interval_seconds=0.02,
+            ):
+                current = self.select(str(selected["execution_id"]))
+                if current.get("already_deleted"):
+                    return {**current, "applied": True}
+                controller = (
+                    nullcontext()
+                    if current.get("imported")
+                    else CrossProcessFileLock(
+                        execution_dir / ".controller.lock",
+                        shared=False,
+                        timeout_seconds=0.1,
+                        poll_interval_seconds=0.01,
+                    )
+                )
+                with controller:
+                    current = self.select(str(selected["execution_id"]))
+                    self._validate_deletion(current, execution_dir)
+                    payload["work"] = {
+                        key: value for key, value in current.items() if key != "_manifest_path"
+                    }
+                    self._write_receipt(payload)
+                    shutil.rmtree(execution_dir)
+                payload["removed_empty_work_directory"] = self._prune_work_parent(execution_dir)
         return payload
+
+    @staticmethod
+    def _validate_deletion(selected: Mapping[str, Any], directory: Path) -> None:
+        """Require persisted ownership and terminal state, not a guessed observer status."""
+        if selected.get("execution_id") != directory.name:
+            raise ValueError("Execution deletion identity differs from its owned directory.")
+        if selected.get("imported"):
+            return  # An imported running snapshot is evidence, not a local running controller.
+        if selected.get("status") not in {
+            "succeeded",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "completed_with_failures",
+        }:
+            raise ValueError(
+                "Cannot delete active or unverifiable Execution evidence; cancel/reconcile first."
+            )
+        origin = directory / "execution.json"
+        if origin.resolve() != origin or not origin.is_file():
+            raise ValueError("Deletion requires a regular persisted Execution ownership record.")
+        value = _read_mapping(origin)
+        if (
+            value.get("execution_id") != directory.name
+            or value.get("scientific_fingerprint") != selected.get("scientific_fingerprint")
+            or value.get("ownership", {}).get("execution_dir") != "owned"
+        ):
+            raise ValueError("Execution deletion ownership/identity evidence is inconsistent.")
+
+    def _prune_work_parent(self, execution_dir: Path) -> bool:
+        """Remove only the now-empty owned Work parent; never the configured root or links.
+
+        Use a root descriptor so swapping the child for a symlink cannot redirect deletion.
+        Platforms without safe descriptor-relative directory operations retain the empty parent.
+        """
+        if os.rmdir not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            return False
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            try:
+                os.rmdir(execution_dir.parent.name, dir_fd=descriptor)
+            except OSError as error:
+                if error.errno in {errno.ENOTEMPTY, errno.EEXIST, errno.ENOENT, errno.ENOTDIR}:
+                    return False
+                raise
+            return True
+        finally:
+            os.close(descriptor)
 
     def source(self, selector: str) -> Path:
         """Return the verified authored YAML path recorded for one local Execution."""
@@ -104,7 +341,12 @@ class ResultStore:
         if selected.get("already_deleted"):
             raise ValueError(f"Work Execution {selector!r} was already deleted.")
         manifest = Path(str(selected["_manifest_path"])).resolve()
-        execution_dir = self._execution_dir(manifest)
+        execution_dir = self._evidence_dir(manifest)
+        if selected.get("imported"):
+            source = execution_dir / "authored.yaml"
+            if source.resolve() != source or not source.is_file():
+                raise FileNotFoundError("Imported Study has no authored YAML snapshot.")
+            return source
         execution_manifest = execution_dir / "execution.json"
         try:
             value = json.loads(execution_manifest.read_text(encoding="utf-8"))
@@ -118,6 +360,11 @@ class ResultStore:
     def configuration(self, selector: str) -> WorkConfig:
         """Reconstruct the immutable submitted Work config for an exact local retry."""
         selected = self.select(selector)
+        if selected.get("imported"):
+            raise ValueError(
+                "Imported Study evidence is read-only; recovery requires its original "
+                "owned Execution."
+            )
         if selected.get("already_deleted"):
             raise ValueError(f"Work Execution {selector!r} was already deleted.")
         execution_dir = self._execution_dir(Path(str(selected["_manifest_path"])).resolve())
@@ -145,7 +392,7 @@ class ResultStore:
         if selected.get("already_deleted"):
             raise ValueError(f"Work Execution {selector!r} was already deleted.")
         manifest = Path(str(selected["_manifest_path"])).resolve()
-        execution_dir = self._execution_dir(manifest)
+        execution_dir = self._evidence_dir(manifest)
         chunks: list[str] = []
         for run in selected.get("runs", ()):
             if not isinstance(run, Mapping):
@@ -316,7 +563,19 @@ class ResultStore:
         if selected.get("already_deleted"):
             raise ValueError(f"Work Execution {selector!r} was already deleted.")
         manifest = Path(str(selected["_manifest_path"])).resolve()
-        execution_dir = self._execution_dir(manifest)
+        execution_dir = self._evidence_dir(manifest)
+        if selected.get("imported"):
+            if recompute:
+                raise ValueError(
+                    "Imported evidence cannot refit or rewrite its persisted Analysis."
+                )
+            for candidate in (
+                execution_dir / "analysis.json",
+                execution_dir.parent / "reports" / "study-analysis.json",
+            ):
+                if candidate.is_file() and candidate.resolve() == candidate:
+                    return _read_mapping(candidate)
+            raise ValueError("No persisted Analysis was included in this Study export.")
         configuration = _read_mapping(execution_dir / "configuration.json")
         definition = _analysis_definition(configuration)
         objective = definition.get("objective")
@@ -340,7 +599,7 @@ class ResultStore:
         """Read a valid persisted summary without triggering expensive analysis."""
         selected = self.select(selector)
         manifest = Path(str(selected["_manifest_path"])).resolve()
-        path = self._execution_dir(manifest) / "analysis.json"
+        path = self._evidence_dir(manifest) / "analysis.json"
         if not path.is_file() or path.is_symlink():
             return None
         value = _read_mapping(path)
@@ -360,7 +619,7 @@ class ResultStore:
         selected = self.select(selector)
         if selected.get("already_deleted"):
             raise ValueError(f"Work Execution {selector!r} was already deleted.")
-        execution_dir = self._execution_dir(Path(str(selected["_manifest_path"])).resolve())
+        execution_dir = self._evidence_dir(Path(str(selected["_manifest_path"])).resolve())
         return ResourceSchedulerReplay.from_execution(execution_dir).replay(policy)
 
     def report(
@@ -374,7 +633,7 @@ class ResultStore:
         from lambdaforge.study_projection import read_html_sections
 
         selected = self.select(selector)
-        execution_dir = self._execution_dir(Path(str(selected["_manifest_path"])).resolve())
+        execution_dir = self._evidence_dir(Path(str(selected["_manifest_path"])).resolve())
         return write_html(
             self.analysis(selector, recompute=recompute),
             output,
@@ -392,6 +651,7 @@ class ResultStore:
         link_evidence: bool = False,
         profile: str = "full",
         omissions: Sequence[Mapping[str, Any]] = (),
+        product_root: str | Path | None = None,
     ) -> dict[str, Any]:
         """Create one atomic portable package for a final Execution or live snapshot.
 
@@ -407,6 +667,11 @@ class ResultStore:
             selected = self._select_execution_snapshot(selector, captured_status)
         if selected.get("already_deleted"):
             raise ValueError(f"Work Execution {selector!r} was already deleted.")
+        if selected.get("imported"):
+            raise ValueError(
+                "This is already portable imported evidence. Copy its verified portable/ package "
+                "rather than generating a new producer provenance record."
+            )
         manifest = Path(str(selected["_manifest_path"])).resolve()
         execution_dir = self._execution_dir(manifest)
         execution_id = str(selected.get("execution_id") or execution_dir.name)
@@ -550,6 +815,9 @@ class ResultStore:
                 encoding="utf-8",
             )
             inventory = _inventory(stage)
+            products = self._export_products(execution_dir, stage, product_root)
+            if products:
+                inventory = _inventory(stage)
             export_manifest = {
                 "lambdaforge_export_version": 2,
                 "created_at_utc": captured_at.isoformat(),
@@ -559,6 +827,7 @@ class ResultStore:
                 "status": status,
                 "attempt_state": status,
                 "execution_status": execution_status if finalized else None,
+                "lifecycle": selected.get("lifecycle"),
                 "export_kind": export_kind,
                 "profile": profile,
                 "finalized": finalized,
@@ -574,6 +843,7 @@ class ResultStore:
                 "file_count": len(inventory),
                 "size_bytes": sum(int(item["size_bytes"]) for item in inventory),
                 "published_artifact_files": published,
+                "products": products,
                 "warnings": warnings,
                 "omitted_source_files": [dict(value) for value in omissions],
                 "excluded_shared_state": [
@@ -608,6 +878,37 @@ class ResultStore:
             "warnings": warnings,
             "profile": profile,
         }
+
+    @staticmethod
+    def _export_products(
+        execution_dir: Path, stage: Path, product_root: str | Path | None
+    ) -> Sequence[dict[str, Any]]:
+        """Seal actually published products, never rerun selection or silently omit their bytes."""
+        from lambdaforge.products.bundle import ProductBundle
+        from lambdaforge.products.registry import ProductRegistry
+
+        path = execution_dir / "products.json"
+        if not path.exists() and not path.is_symlink():
+            return []
+        record = ProductRegistry._read(path)
+        if record.get("product_publication_version") != 1:
+            raise ValueError("Unsupported product publication record during Study export.")
+        registry = ProductRegistry(product_root)
+        output = []
+        seen: set[str] = set()
+        for item in record.get("items", ()):
+            if item.get("status") != "published":
+                continue
+            product = registry.show(item["name"])
+            if product.content_id != item["content_id"] or product.name in seen:
+                raise ValueError("Study published product identity differs or is duplicated.")
+            seen.add(product.name)
+            relative = "products/" + hashlib.sha256(product.name.encode("utf-8")).hexdigest()
+            ProductBundle.export(registry, product.name, stage / relative, apply=True)
+            output.append(
+                {"path": relative, "name": product.name, "content_id": product.content_id}
+            )
+        return output
 
     def _select_execution_snapshot(
         self, selector: str, captured_status: str | None

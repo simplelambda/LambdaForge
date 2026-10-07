@@ -46,29 +46,13 @@ class StudyAnalysis:
         status: str | None = None,
         provisional_bootstrap_replicates: int = 500,
     ) -> dict[str, Any]:
-        policy = cls._search_policy(source)
-        if authored_space is None and isinstance(policy.get("parameter_space"), Mapping):
-            authored_space = dict(policy["parameter_space"])
-        if authored_space is None:
-            # Fixed/paired sweeps have no adaptive INITIALIZE policy. Their normalized design
-            # still owns geometry; inferring it from sparse rows loses conditional branches.
-            design_space = cls._study_design(source).get("space")
-            if isinstance(design_space, Mapping):
-                authored_space = dict(design_space)
-        normalized_objective = cls.objective(source, objective)
+        normalized_objective, candidates, runs, policy, authored_space, fingerprint = (
+            cls._prepare_evidence(source, objective=objective, authored_space=authored_space)
+        )
         mode = str(normalized_objective["mode"])
-        candidates, runs = normalize_evidence(source, normalized_objective)
         semantics = source.get("analysis_semantics")
         if not isinstance(semantics, Mapping) or not semantics.get("semantics_version"):
             semantics = resolve_semantics()
-        stable_input = {
-            "execution_id": source.get("execution_id"),
-            "objective": normalized_objective,
-            "candidates": candidates,
-            "authored_space": dict(authored_space or {}),
-            "scientific_policy": policy,
-        }
-        fingerprint = evidence_fingerprint(stable_input)
         resolved_status = status or cls._status(source, runs)
         bootstrap_replicates = (
             2000 if resolved_status == "final" else provisional_bootstrap_replicates
@@ -223,6 +207,9 @@ class StudyAnalysis:
                 "study_fingerprint": source.get("scientific_fingerprint"),
                 "evidence_fingerprint": fingerprint,
                 "status": resolved_status,
+                "lifecycle": dict(source["lifecycle"])
+                if isinstance(source.get("lifecycle"), Mapping)
+                else None,
                 "analysis_semantics_identity": semantics.get("identity"),
             },
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -322,6 +309,57 @@ class StudyAnalysis:
             },
         }
         return _portable_analysis_value(analysis)
+
+    @classmethod
+    def _prepare_evidence(
+        cls,
+        source: Mapping[str, Any],
+        *,
+        objective: Mapping[str, Any] | None = None,
+        authored_space: Mapping[str, Any] | None = None,
+    ) -> tuple[
+        dict[str, Any],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        dict[str, Any],
+        Mapping[str, Any] | None,
+        str,
+    ]:
+        """Normalize the existing analysis identity without fitting/resampling or filesystem I/O."""
+        policy = cls._search_policy(source)
+        if authored_space is None and isinstance(policy.get("parameter_space"), Mapping):
+            authored_space = dict(policy["parameter_space"])
+        if authored_space is None:
+            design_space = cls._study_design(source).get("space")
+            if isinstance(design_space, Mapping):
+                authored_space = dict(design_space)
+        normalized_objective = cls.objective(source, objective)
+        candidates, runs = normalize_evidence(source, normalized_objective)
+        fingerprint = evidence_fingerprint(
+            {
+                "execution_id": source.get("execution_id"),
+                "objective": normalized_objective,
+                "candidates": candidates,
+                "authored_space": dict(authored_space or {}),
+                "scientific_policy": policy,
+            }
+        )
+        return normalized_objective, candidates, runs, policy, authored_space, fingerprint
+
+    @classmethod
+    def evidence_identity(
+        cls,
+        source: Mapping[str, Any],
+        *,
+        objective: Mapping[str, Any] | None = None,
+        authored_space: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Read-only identity used by compute and consumers of its persisted conclusions.
+
+        This normalizes structured observations only; it does not open scalar streams, fit a
+        model or evaluate the scientific planner. Existing analysis fingerprints are unchanged.
+        """
+        return cls._prepare_evidence(source, objective=objective, authored_space=authored_space)[-1]
 
     @staticmethod
     def _study_design(source: Mapping[str, Any]) -> dict[str, Any]:

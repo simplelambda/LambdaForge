@@ -1466,6 +1466,28 @@ deliberate user action, never in an endless automatic loop.
 
 ## 9. Results and metadata
 
+Study telemetry and Execution envelopes include a versioned `lifecycle` projection with independent
+`operational`, `evidence` and `health` fields. `running / pending_recovery / degraded` is not terminal
+scientific failure. `stopped / complete / degraded` retains prior physical failures after recovery.
+Waiting retries are queued, not occupied process slots. Physical display history stays bounded while
+cumulative counters remain available; legacy truncated history is explicitly incomplete. Older
+Execution envelopes can be projected in memory without creating files or guessing missing Attempts.
+See [the reform ledger](ARCHITECTURAL_REFORM.md) for implemented boundaries and remaining migrations.
+This does not change objective fitting, censored pruning evidence, exact identity or budget rules.
+Native finalization resolves latest Attempts of each logical evidence cell before projecting the
+legacy terminal label; failed physical history is not itself a failed recovered Run. Phases and
+fidelities remain separate. Storage/clean previews do not create cache or lock metadata; apply
+revalidates ownership and targets under locks instead of trusting an earlier preview.
+
+[Durable products](PRODUCTS.md) documents native `lf products` publication, ModelSet selection,
+StudyDecision, verified portable product bundles and typed `with` product dependencies. Metadata
+resolution is read-only; actual Attempts record consumers and model bytes are verified only on
+explicit access. Product catalogs are project-owned, not disposable Job or cache content. This
+does not yet implement automatic dependency waiting/replanning or complete distributed Fleet export.
+`lf import PACKAGE` verifies single-host exports; `--apply` registers portable evidence and sealed
+products without execution. Original provenance remains intact; imported records are read-only,
+not native recovery state. Console **Products → Import Study…** exposes the same confirmed workflow.
+
 Each Attempt writes `result.json`, `environment.json`, `work.log`, metrics JSONL, optional progress,
 outputs and artifacts. An Execution writes `execution.json` and aggregate `result.json` atomically.
 

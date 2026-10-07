@@ -153,6 +153,53 @@ registration can be removed with explicit `--apply`. Choose the reference as a r
 majority or discovery order; preserve divergent bytes and publish them under an explicit new version
 after reviewing scientific evidence.
 
+## Durable equivalence certificates
+
+`DatasetEquivalenceCertificate` reuses the immutable ProductRegistry as a `ScientificReport` with
+the reserved `lambdaforge/dataset-equivalence:v1` contract. It runs the existing whole-dataset
+comparison before sealing approval; it does not accept an arbitrary approval JSON as proof.
+The certificate binds both exact content IDs, the complete scientific declaration, verifier ID,
+variable policy and comparison evidence. Operational roots, comparison timestamp and producing
+Execution/operation provenance are separate from scientific/content identity.
+
+```python
+from lambdaforge.data import DatasetEquivalenceCertificate
+from lambdaforge.products import ProductRegistry
+from my_project.dataset_checks import verify_member
+
+certificate = DatasetEquivalenceCertificate.build(
+    "/published/reference", "/sealed/reconstruction",
+    name="corpus-reconstruction-check-v1",
+    scientific_contract=science_declaration,  # The full explicit dataset contract.
+    verifier=verify_member,
+    verifier_id="my_project.verify_member:v1",
+    policy=variable_specific_policy,
+    producer={
+        "execution_id": "<recorded producing Execution or comparison operation>",
+        "evidence_fingerprint": "<recorded source/comparison identity>",
+    },
+)
+registry = ProductRegistry()
+preview = certificate.publish(registry)  # No locks/files/registry changes.
+certificate.publish(registry, apply=True)
+restored = DatasetEquivalenceCertificate.load(registry, certificate.product.name)
+```
+
+Unresolved, scientifically different or corrupt comparisons cannot be certified. Byte-identical
+copies still need an explicit scientific declaration for a scientific certificate. Historical
+manifests need the same explicit content-bound `scientific_contracts` assertions as `compare`.
+Reports above the catalog's 512 KiB metadata bound fail explicitly; no evidence is truncated.
+`lf products show/provenance/export/import` and Console Products inspect/transport these records.
+The recorded verifier is never executed on load/import.
+
+Certificates are trusted project assertions, not cryptographic authenticity or transitive equality.
+`accepts(reference_content_id=..., candidate_content_id=..., scientific_contract=...)` tests only
+that exact recorded pair and contract; it is not a current integrity check. Verify the materialized
+candidate separately with `DatasetOperations.verify(root, candidate_content_id)` before use.
+Never substitute the reference's content ID for the candidate's or overwrite an immutable version.
+Automatic contract-aware Work YAML resolution is **not implemented yet**: ordinary typed dataset
+inputs still require exact content. No certificate silently changes that behavior.
+
 ## Required WISDOM changes (not performed by LambdaForge)
 
 For `wisdom-dna-reduced@6`, the three reported hashes are distinct exact representations. Matching

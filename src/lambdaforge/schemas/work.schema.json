@@ -21,6 +21,7 @@
     "execution": {"$ref": "#/$defs/execution"},
     "objective": {"$ref": "#/$defs/objective"},
     "analysis": {"$ref": "#/$defs/analysis"},
+    "products": {"$ref": "#/$defs/productPublications"},
     "steps": {
       "type": "array",
       "minItems": 1,
@@ -48,10 +49,44 @@
     {"required": ["steps"], "not": {"anyOf": [
       {"required": ["run"]}, {"required": ["with"]}, {"required": ["seeds"]},
       {"required": ["replicates"]}, {"required": ["search"]}, {"required": ["sweep"]},
-      {"required": ["execution"]}, {"required": ["objective"]}, {"required": ["analysis"]}
+      {"required": ["execution"]}, {"required": ["objective"]}, {"required": ["analysis"]},
+      {"required": ["products"]}
     ]}}
   ],
   "$defs": {
+    "productPublications": {
+      "type": "object", "minProperties": 1, "maxProperties": 128,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 256},
+      "additionalProperties": {"oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["kind", "contract"],
+         "properties": {"kind": {"const": "StudyDecision"},
+                        "contract": {"$ref": "#/$defs/productContract"}}},
+        {"type": "object", "additionalProperties": false,
+         "required": ["kind", "contract", "select"],
+         "properties": {"kind": {"const": "ModelSet"},
+                        "contract": {"$ref": "#/$defs/productContract"},
+                        "select": {"$ref": "#/$defs/modelSelection"}}}
+      ]}
+    },
+    "productContract": {"type": "string", "maxLength": 256,
+                        "pattern": "^[a-z][a-z0-9_-]*(/[a-z][a-z0-9_-]*)*:v[1-9][0-9]*$"},
+    "modelSelection": {
+      "type": "object", "additionalProperties": false, "required": ["rank_by"],
+      "properties": {
+        "rank_by": {"type": "string", "minLength": 1, "maxLength": 256},
+        "artifact": {"type": "string", "minLength": 1, "maxLength": 256},
+        "mode": {"enum": ["min", "max"]},
+        "group_by": {"type": "array", "uniqueItems": true,
+                     "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+        "top_k": {"type": "integer", "minimum": 1},
+        "tie_policy": {"enum": ["stable", "include_equivalent"]},
+        "practical_margin": {"type": ["number", "null"], "minimum": 0},
+        "constraints": {"type": "object", "additionalProperties": {
+          "type": "object", "additionalProperties": false, "minProperties": 1,
+          "properties": {"min": {"type": "number"}, "max": {"type": "number"}}
+        }}
+      }
+    },
     "activationScalar": {"type": ["string", "number", "boolean", "null"]},
     "activationCondition": {
       "type": "object", "minProperties": 1,

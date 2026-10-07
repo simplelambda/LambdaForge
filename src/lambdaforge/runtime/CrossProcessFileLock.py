@@ -26,9 +26,12 @@ class CrossProcessFileLock:
         shared: bool,
         timeout_seconds: float,
         poll_interval_seconds: float,
+        create: bool = True,
     ) -> None:
         if not isinstance(shared, bool):
             raise TypeError("shared must be a bool.")
+        if not isinstance(create, bool):
+            raise TypeError("create must be a bool.")
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
@@ -45,6 +48,7 @@ class CrossProcessFileLock:
             raise ValueError("poll_interval_seconds must be a positive number.")
         self.path = Path(path)
         self.shared = shared
+        self.create = create
         self.timeout_seconds = float(timeout_seconds)
         self.poll_interval_seconds = float(poll_interval_seconds)
         self._handle: BinaryIO | None = None
@@ -71,7 +75,7 @@ class CrossProcessFileLock:
             raise RuntimeError("Cross-process file lock is already acquired.")
         handle = self._open_safe_handle()
         handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
+        if handle.tell() == 0 and self.create:
             handle.write(b"\0")
             handle.flush()
             os.fsync(handle.fileno())
@@ -89,7 +93,8 @@ class CrossProcessFileLock:
 
     def _open_safe_handle(self) -> BinaryIO:
         """Open lock metadata only below a real directory and never through a link."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.create:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
         parent_metadata = self.path.parent.lstat()
         parent_attributes = getattr(parent_metadata, "st_file_attributes", 0)
@@ -112,7 +117,7 @@ class CrossProcessFileLock:
             ):
                 raise ValueError(f"Lock path is not a safe regular file: {self.path}.")
 
-        handle = self.path.open("a+b")
+        handle = self.path.open("a+b" if self.create else "rb")
         try:
             opened = os.fstat(handle.fileno())
             after = self.path.lstat()
@@ -148,6 +153,7 @@ class CrossProcessFileLock:
         return {
             "path": self.path,
             "shared": self.shared,
+            "create": self.create,
             "timeout_seconds": self.timeout_seconds,
             "poll_interval_seconds": self.poll_interval_seconds,
             "_handle": None,
@@ -157,6 +163,7 @@ class CrossProcessFileLock:
     def __setstate__(self, state: dict[str, object]) -> None:
         """Restore an unlocked lease in the receiving process."""
         self.__dict__.update(state)
+        self.create = bool(state.get("create", True))
         self._handle = None
         self._windows_overlapped = None
 

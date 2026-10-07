@@ -17,7 +17,6 @@ class CheckpointCollection:
 
     def __init__(self, root: Path) -> None:
         self._root = root.resolve()
-        self._root.mkdir(parents=True, exist_ok=True)
         self._store = ManagedFileStore(self._root, scope="checkpoint")
 
     def path(self, name: str, *, create_parent: bool = True) -> Path:
@@ -64,9 +63,10 @@ class CheckpointCollection:
 
     def pin(self, name: str, *, reason: str = "researcher-retained") -> Path:
         """Keep one owned checkpoint beyond terminal retention; outputs remain preferable."""
-        selected = owned_path(self._root, name, must_exist=True)
+        selected = owned_path(self._root, name)
         if selected == self._root:
             raise ValueError("Pin a named checkpoint, not the collection root.")
+        selected = owned_path(self._root, name, must_exist=True)
         self._update_policy(
             lambda policy: policy.setdefault("pins", {}).__setitem__(
                 selected.relative_to(self._root).as_posix(), str(reason)
@@ -112,9 +112,10 @@ class CheckpointCollection:
 
         records = {}
         for name in names:
-            source = owned_path(self._root, name, must_exist=True)
+            source = owned_path(self._root, name)
             if source == self._root:
                 raise ValueError("Release named checkpoints, not the collection root.")
+            source = owned_path(self._root, name, must_exist=True)
             digest, size = fingerprint(source)
             records[source.relative_to(self._root).as_posix()] = {
                 "sha256": digest,

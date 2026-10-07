@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.diagnostics.failure import classify_failure
 from lambdaforge.ImmutableJson import FrozenJsonMapping
 from lambdaforge.work.atomic import atomic_write_json
 
@@ -238,6 +239,9 @@ class WorkResult:
             "environment_manifest": self.environment_manifest,
             "logs": self.logs,
             "failure": copy.deepcopy(dict(self.failure)) if self.failure is not None else None,
+            "failure_disposition": (
+                classify_failure(self.failure).to_dict() if self.failure is not None else None
+            ),
             "resumed_from_checkpoint": self.resumed_from_checkpoint,
             "job_id": self.job_id,
             "pruned": self.pruned,

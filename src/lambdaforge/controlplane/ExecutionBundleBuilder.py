@@ -53,7 +53,9 @@ class ExecutionBundleBuilder:
         values = config.to_dict()
         staged: list[tuple[Path, str]] = []
         shared_inputs: list[dict[str, Any]] = []
+        product_inputs: list[dict[str, Any]] = []
         project_root = self._project_root(source.parent) or source.parent
+        values = self._pin_products(values, source.parent, product_inputs)
         path_context: dict[str, Any] | None = None
         if profile.name != "local":
             values = self._stage_files(
@@ -84,6 +86,7 @@ class ExecutionBundleBuilder:
             "staged": [(relative, self._fingerprint(path)) for path, relative in staged],
             "shared_inputs": shared_inputs,
             "path_context": path_context,
+            **({"product_inputs": product_inputs} if product_inputs else {}),
         }
         digest = hashlib.sha256(
             json.dumps(identity_payload, sort_keys=True, default=str).encode()
@@ -144,7 +147,33 @@ class ExecutionBundleBuilder:
             offline=environment.offline if environment else False,
             environment_policy=environment.dependency_policy if environment else None,
             shared_inputs=tuple(shared_inputs),
+            product_inputs=tuple(product_inputs),
         )
+
+    @staticmethod
+    def _pin_products(
+        values: Mapping[str, Any],
+        source_dir: Path,
+        required: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Freeze logical aliases to exact independent content; never stage model bytes."""
+        from lambdaforge.products.dependency import ProductRequirement, resolve_product_input
+
+        def visit(item: Any) -> Any:
+            if isinstance(item, Mapping):
+                if set(item) == {"product"}:
+                    requirement = ProductRequirement.from_mapping(item["product"])
+                    product, _manifest = resolve_product_input(item["product"], source_dir)
+                    pinned = {**requirement.to_dict(), "name": product.content_id}
+                    if pinned not in required:
+                        required.append(pinned)
+                    return {"product": pinned}
+                return {str(key): visit(value) for key, value in item.items()}
+            if isinstance(item, list | tuple):
+                return [visit(value) for value in item]
+            return item
+
+        return visit(values)
 
     def _stage_files(
         self,

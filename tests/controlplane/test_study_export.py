@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.jobs import JobRecord, JobState
 from lambdaforge.controlplane.LocalTransport import LocalTransport
 from lambdaforge.controlplane.StudyExportService import (
@@ -96,7 +97,7 @@ def test_study_export_downloads_bounded_job_evidence(
     class Catalog:
         def get(self, cluster: str) -> SimpleNamespace:
             assert cluster == "local"
-            return SimpleNamespace(python=sys.executable)
+            return ClusterProfile("local", python=sys.executable)
 
     class Factory:
         def transport(self, profile: object) -> LocalTransport:
@@ -183,7 +184,7 @@ def test_study_export_captures_pre_execution_attempt(tmp_path: Path) -> None:
 
     class Catalog:
         def get(self, cluster: str) -> SimpleNamespace:
-            return SimpleNamespace(python=sys.executable)
+            return ClusterProfile("local", python=sys.executable)
 
     class Factory:
         def transport(self, profile: object) -> LocalTransport:

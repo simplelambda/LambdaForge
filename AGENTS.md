@@ -35,7 +35,10 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Low-level jobs | `lf jobs list/show/logs/cancel/retry/delete`; `lf jobs clear [--apply]` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
 | Dataset reconstruction/publication | `lf datasets preflight/compare/publish-candidate`; `docs/DATASET_RECONSTRUCTION.md` |
+| Explicit durable dataset equivalence | `lambdaforge.data.DatasetEquivalenceCertificate`; `docs/DATASET_RECONSTRUCTION.md` |
+| Durable products / decisions / selection | `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`; `docs/PRODUCTS.md` |
 | Results | `lf results list/show/compare/analyze/report/replay`; portable Study: `lf export SELECTOR --output DIR` |
+| Import portable evidence, never execute | `lf import PACKAGE [--apply]`; `docs/PRODUCTS.md` |
 | Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Cluster profiles | Research Console; `lf clusters add/set/unset/...` for automation |
 | Inspect/reconcile storage | `lf storage status/reconcile [--on CLUSTER]`; reconcile `--apply` updates only the ledger |
@@ -47,6 +50,26 @@ tracebacks. Local and remote run both return after durable asynchronous preparat
 `--wait-for-submit` is explicit; `--dry-run` is direct and read-only. Never parse prose or secrets.
 
 ## Writing Work
+
+Lifecycle foundations: `diagnostics/failure.py` owns operational failure classification, using
+existing ErrorCategory/RetryDisposition. Retry eligibility never bypasses ARI/headroom/budgets;
+consumer EOFError/ValueError and generic CUDA kernel errors are not lost-worker/OOM permission.
+`work/state.py` owns aggregate lifecycle projection and shared required-evidence accounting;
+`work/attempt_history.py` preserves bounded display history with cumulative physical counters.
+Presentation consumes `lifecycle`, never invents recovery or refunds prior Attempts. Follow
+`docs/ARCHITECTURAL_REFORM.md` for remaining reform boundaries. `lambdaforge.products` and
+`lf products` implement explicit contracts/catalog/byte promotion/product transport, documented
+in `docs/PRODUCTS.md`; local `products select` uses same-snapshot metrics and preserves latest Attempts.
+`products decide` preserves native selection without HPO refit. Typed product Work inputs resolve
+contract/expectations, workers receive a project-owned durable root and actual Attempts record
+consumption. Single native Study YAML may declare `products` (StudyDecision/ModelSet); persist
+training first, publish before compaction and retry only publication via `products finalize` under
+ownership locks. Publication failure does not rewrite scientific Run evidence. Dependency waiting/
+replanning, composed/Fleet promotion
+and full Fleet lifecycle are not implemented merely because they appear in the plan.
+`lf import PACKAGE [--apply]` verifies/registers native single-host exports and sealed products.
+Original records remain in `portable/`, placement in `import.json`; imported evidence is read-only,
+not executable recovery. Provider export never samples product bytes. See `docs/PRODUCTS.md`.
 
 Study recovery (adaptive, repeated seeds or fixed sweep) is `lf retry STUDY` or **Resume Study…**
 in its console workspace. `--dry-run --json` exposes reuse/retry/pending evidence without launching.
@@ -90,7 +113,8 @@ resources:
 ```
 
 Python signatures and docstrings own parameter truth. Use only the typed markers `{file: ...}`,
-`{dataset: NAME@VERSION}` and `{from: STEP.OUTPUT}`. Plain strings are never guessed as paths.
+`{dataset: NAME@VERSION}`, `{from: STEP.OUTPUT}` and
+`{product: {name: NAME, contract: CONTRACT, expect: {...}}}` (`expect` is optional). Plain strings are never guessed as paths.
 Every project class must be importable from its installed consumer package.
 
 Work properties are available only during execution:

@@ -81,7 +81,6 @@ class WorkCache:
                 poll_interval_seconds=0.05,
             )
             self._gc_lease.acquire()
-        self._root.mkdir(parents=True, exist_ok=True)
         self._store = ManagedFileStore(
             self._root,
             scope="cache",

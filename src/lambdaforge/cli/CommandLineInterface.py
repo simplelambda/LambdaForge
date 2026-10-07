@@ -28,13 +28,12 @@ from lambdaforge.controlplane.JobService import JobService
 from lambdaforge.controlplane.OverviewService import OverviewService
 from lambdaforge.controlplane.ResourceService import ResourceService
 from lambdaforge.controlplane.StorageService import StorageService
-from lambdaforge.controlplane.StudyExportService import StudyExportService
 from lambdaforge.controlplane.SubmissionService import SubmissionService
 from lambdaforge.controlplane.WorkService import WorkService
 from lambdaforge.diagnostics import DiagnosticContext
 from lambdaforge.ProjectContext import ProjectContext
 from lambdaforge.reproducibility.SeedProvider import SeedProvider
-from lambdaforge.work import ResultStore, WorkConfig, WorkRunner
+from lambdaforge.work import WorkConfig
 
 
 class CommandLineInterface:
@@ -150,6 +149,8 @@ class CommandLineInterface:
         if arguments.command == "run":
             return cls._run(arguments)
         if arguments.command == "export":
+            from lambdaforge.controlplane.StudyExportService import StudyExportService
+
             catalog = ClusterCatalog.load(arguments.clusters)
             payload = StudyExportService(catalog).export(
                 arguments.selector, arguments.output, profile=arguments.profile
@@ -165,6 +166,21 @@ class CommandLineInterface:
             cls._render(
                 payload,
                 human,
+                arguments.json,
+            )
+            return 0
+        if arguments.command == "import":
+            from lambdaforge.work.ResultStore import ResultStore
+
+            payload = ResultStore(arguments.results_root).import_export(
+                arguments.source, product_root=arguments.products_root, apply=arguments.apply
+            )
+            cls._render(
+                payload,
+                f"Study {payload['name']}: {payload['status']}\n"
+                f"Captured state: {payload['captured_state']}\n"
+                f"Evidence: {payload['path']}\n"
+                f"Products: {len(payload['products'])}; no computation will be launched.",
                 arguments.json,
             )
             return 0
@@ -228,6 +244,10 @@ class CommandLineInterface:
             return cls._work_operation(arguments)
         if arguments.command == "results":
             return cls._results(arguments)
+        if arguments.command == "products":
+            from lambdaforge.cli.products import run_product_command
+
+            return run_product_command(arguments)
         raise ValueError(f"Unknown command: {arguments.command}")
 
     @staticmethod
@@ -279,6 +299,8 @@ class CommandLineInterface:
             and os.environ.get("LAMBDAFORGE_BUNDLE") == "1"
         )
         if supervised or (arguments.on == "local" and arguments.dry_run):
+            from lambdaforge.work.runner import WorkRunner
+
             config = WorkConfig.from_yaml(arguments.config)
             target_capacity: Mapping[str, Any] | None = None
             if arguments.dry_run and not supervised:
@@ -381,6 +403,8 @@ class CommandLineInterface:
 
     @staticmethod
     def _work_operation(arguments: Any) -> int:
+        from lambdaforge.work.ResultStore import ResultStore
+
         catalog = ClusterCatalog.load(arguments.clusters)
         works = WorkService(catalog)
         local = ResultStore()
@@ -490,6 +514,8 @@ class CommandLineInterface:
                     for level in configuration.levels
                     for definition in level.runs
                 )
+                from lambdaforge.work.runner import WorkRunner
+
                 outcome = WorkRunner().run(
                     configuration,
                     dry_run=arguments.dry_run,
@@ -599,6 +625,8 @@ class CommandLineInterface:
 
     @staticmethod
     def _results(arguments: Any) -> int:
+        from lambdaforge.work.ResultStore import ResultStore
+
         store = ResultStore(arguments.root)
         if arguments.result_command == "replay":
             payload = store.resource_replay(arguments.selector, policy=arguments.policy)

@@ -116,6 +116,11 @@ CONSOLE_ACTIONS = (
     _action("dataset", "members", "datasets", service="dataset_members", selection=True),
     _action("dataset", "delete", "datasets", destructive=True, selection=True),
     _action("result", "list", "results", status="IMPLEMENTED", handler="navigate"),
+    _action("product", "list", "products", status="IMPLEMENTED", handler="navigate"),
+    _action(
+        "study", "import", "products", status="IMPLEMENTED", handler="study_import",
+        service="import_study",
+    ),
     _action(
         "result",
         "analyze",

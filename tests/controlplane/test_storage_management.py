@@ -33,6 +33,49 @@ def descriptor(root: Path) -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize("operation", ["status", "reconcile", "gc", "prune_environments"])
+@pytest.mark.parametrize("populated", [False, True])
+def test_storage_read_only_operations_do_not_create_roots_or_lock_files(
+    tmp_path: Path, operation: str, populated: bool
+) -> None:
+    config = descriptor(tmp_path)
+    if populated:
+        content = tmp_path / "cache/work/entry/content"
+        content.parent.mkdir(parents=True)
+        content.write_bytes(b"cached")
+        (content.parent.parent / ".entry.lease").write_bytes(b"")
+    before = {path: path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    if operation == "gc":
+        StorageOperations.gc(config, {}, apply=False)
+    elif operation == "prune_environments":
+        StorageOperations.prune_environments(config, (), apply=False)
+    else:
+        getattr(StorageOperations, operation)(config)
+    assert {
+        path: path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")
+    } == before
+
+
+def test_job_compaction_preview_never_creates_execution_writer_metadata(tmp_path: Path) -> None:
+    job_id = "job-test"
+    attempt = (
+        tmp_path
+        / "jobs"
+        / job_id
+        / "work/.lambdaforge/runs/work/execution-test"
+        / "runs/run-test/attempts/attempt-0001"
+    )
+    artifacts = attempt / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "partial.bin").write_bytes(b"interrupted output")
+    before = {path: path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    preview = StorageOperations.compact_job(descriptor(tmp_path), job_id, apply=False)
+    assert preview["reclaimable_bytes"] == len(b"interrupted output")
+    assert {
+        path: path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")
+    } == before
+
+
 def owner(name: str) -> ProcessIdentity:
     return ProcessIdentity.create(os.getpid(), os.getpgrp(), psutil.Process().cmdline(), name)
 
@@ -111,9 +154,9 @@ def test_publication_pressure_never_inventories_researcher_destination_for_gc(
     monkeypatch.setenv("LAMBDAFORGE_STORAGE_POLICY", json.dumps(config))
     capacity(monkeypatch, [60])
     collected: list[dict] = []
-    monkeypatch.setattr(StorageOperations, "gc", lambda descriptor, *_args, **_kw: (
-        collected.append(descriptor)
-    ))
+    monkeypatch.setattr(
+        StorageOperations, "gc", lambda descriptor, *_args, **_kw: collected.append(descriptor)
+    )
     with pytest.raises(OSError, match="No partial publication"):
         with StorageAdmission.transaction(tmp_path / "research/job-evidence", 40, purpose="copy"):
             pytest.fail("Insufficient space cannot begin a copy")
@@ -151,9 +194,11 @@ def test_gc_audit_counts_actual_collection_not_a_plan_that_became_busy(
     def busy():
         raise TimeoutError("A worker acquired the cache after preview")
 
-    monkeypatch.setattr(StorageOperations, "_work_cache_lock", lambda _path: (
-        SimpleNamespace(acquire=busy, release=lambda: None)
-    ))
+    monkeypatch.setattr(
+        StorageOperations,
+        "_work_cache_lock",
+        lambda _path: SimpleNamespace(acquire=busy, release=lambda: None),
+    )
     result = StorageOperations.gc(descriptor(tmp_path), {}, apply=True)
     assert len(result["candidates"]) == 1 and result["reclaimed_bytes"] == 0
     record = json.loads((tmp_path / "state/storage-gc.jsonl").read_text())
@@ -177,9 +222,7 @@ def test_storage_cli_routes_preserve_preview_and_explain_drift(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("content", ["not json", '{"storage_ledger_version":9,"categories":{}}'])
-def test_reconcile_rejects_corrupt_ledger_without_overwriting(
-    tmp_path: Path, content: str
-) -> None:
+def test_reconcile_rejects_corrupt_ledger_without_overwriting(tmp_path: Path, content: str) -> None:
     state = tmp_path / "state"
     state.mkdir()
     ledger = state / "storage-ledger.json"
@@ -226,9 +269,15 @@ def test_stale_runtime_build_reclaims_only_its_owned_temporary(tmp_path: Path) -
     (unknown / "large.bin").write_bytes(b"keep uncertain ownership")
     marker = tmp_path / "cache/.python-runtime-python-test.lock"
     marker.mkdir()
-    (marker / "owner.json").write_text(json.dumps({
-        "pid": 2147483647, "host": socket.gethostname(), "heartbeat": time.time() - 3600,
-    }))
+    (marker / "owner.json").write_text(
+        json.dumps(
+            {
+                "pid": 2147483647,
+                "host": socket.gethostname(),
+                "heartbeat": time.time() - 3600,
+            }
+        )
+    )
     preview = StorageOperations.gc(config, {})
     assert [row["path"] for row in preview["candidates"]] == [str(abandoned)]
     StorageOperations.gc(config, {}, apply=True)
@@ -241,21 +290,32 @@ def test_dead_build_controller_does_not_reclaim_running_or_inaccessible_child(
 ) -> None:
     marker = tmp_path / "cache/.environment-build-env-test.lock"
     marker.mkdir(parents=True)
-    (marker / "owner.json").write_text(json.dumps({
-        "pid": 2147483647, "host": socket.gethostname(), "heartbeat": time.time() - 3600,
-    }))
-    child = SimpleNamespace(cmdline=lambda: [
-        str(tmp_path / "cache/environments/.env-test.tmp-build/bin/python"), "-m", "pip", "install",
-    ])
+    (marker / "owner.json").write_text(
+        json.dumps(
+            {
+                "pid": 2147483647,
+                "host": socket.gethostname(),
+                "heartbeat": time.time() - 3600,
+            }
+        )
+    )
+    child = SimpleNamespace(
+        cmdline=lambda: [
+            str(tmp_path / "cache/environments/.env-test.tmp-build/bin/python"),
+            "-m",
+            "pip",
+            "install",
+        ]
+    )
     monkeypatch.setattr(psutil, "process_iter", lambda: iter((child,)))
     assert not StorageOperations._orphan_lease(marker)
 
     def inaccessible():
         raise psutil.AccessDenied(1)
 
-    monkeypatch.setattr(psutil, "process_iter", lambda: iter((
-        SimpleNamespace(cmdline=inaccessible),
-    )))
+    monkeypatch.setattr(
+        psutil, "process_iter", lambda: iter((SimpleNamespace(cmdline=inaccessible),))
+    )
     assert not StorageOperations._orphan_lease(marker)
     monkeypatch.setattr(psutil, "process_iter", lambda: iter(()))
     assert StorageOperations._orphan_lease(marker)
@@ -270,18 +330,26 @@ def test_invalid_complete_environment_is_never_replaced_behind_live_jobs(
 
     environment(tmp_path, "env-existing")
     provider = ManagedEnvironmentProvider()
-    monkeypatch.setattr(provider, "_verify_reusable", lambda *_args: (
-        CommandResult(1, stderr="corrupt Python inventory")
-    ))
+    monkeypatch.setattr(
+        provider,
+        "_verify_reusable",
+        lambda *_args: CommandResult(1, stderr="corrupt Python inventory"),
+    )
     bundle = ExecutionBundle(
-        "bundle", tmp_path, tmp_path / "config.yaml", tmp_path / "manifest.json", 0,
+        "bundle",
+        tmp_path,
+        tmp_path / "config.yaml",
+        tmp_path / "manifest.json",
+        0,
         environment_id="env-existing",
     )
     profile = ClusterProfile(
-        "test", transport="local", workspace=str(tmp_path), python="python3",
-        environment="managed", storage=ClusterStoragePolicy.from_mapping(
-            descriptor(tmp_path), workspace=str(tmp_path)
-        ),
+        "test",
+        transport="local",
+        workspace=str(tmp_path),
+        python="python3",
+        environment="managed",
+        storage=ClusterStoragePolicy.from_mapping(descriptor(tmp_path), workspace=str(tmp_path)),
     )
     with pytest.raises(RuntimeError, match="prefix was preserved"):
         provider.prepare(profile, LocalTransport(), bundle, remote_bundle_dir=tmp_path)

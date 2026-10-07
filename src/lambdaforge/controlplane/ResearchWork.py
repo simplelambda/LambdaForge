@@ -161,6 +161,7 @@ def study_overview(value: Mapping[str, Any]) -> dict[str, Any]:
         "planned_candidates": value.get("planned_candidates"),
         "status": value.get("status"),
         "design_status": value.get("design_status"),
+        "lifecycle": copy.deepcopy(value.get("lifecycle")),
         "scientific_status": value.get("scientific_status"),
         "finish_reason": value.get("finish_reason"),
         "required_runs": value.get("required_runs"),

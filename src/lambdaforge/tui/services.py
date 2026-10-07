@@ -165,6 +165,47 @@ class ConsoleServices:
             for record in self.results.list()
         ]
 
+    def product_rows(self, *, offset: int = 0) -> list[dict[str, Any]]:
+        """One bounded catalog page; never touch model bytes or scientific fitting."""
+        from lambdaforge.products import ProductRegistry
+
+        return [
+            {
+                "name": value.name,
+                "kind": value.kind,
+                "contract": value.contract.to_dict(),
+                "content_id": value.content_id,
+                "scientific_id": value.scientific_id,
+                "artifact_count": len(value.artifacts),
+                "size_bytes": sum(item.size_bytes for item in value.artifacts),
+            }
+            for value in ProductRegistry().list(offset=offset, limit=100)
+        ]
+
+    def product_detail(self, selector: str, *, offset: int = 0) -> dict[str, Any]:
+        from lambdaforge.products import ProductRegistry
+
+        registry = ProductRegistry()
+        return {
+            "product": registry.show(selector).to_dict(),
+            "provenance": registry.provenance(selector, offset=offset, limit=20),
+            "consumers": registry.consumers(selector, offset=offset, limit=20),
+            "offset": offset,
+        }
+
+    def verify_product(self, selector: str) -> dict[str, Any]:
+        from lambdaforge.products import ProductRegistry
+
+        return ProductRegistry().verify(selector)
+
+    def export_product(self, selector: str, destination: Path) -> dict[str, Any]:
+        from lambdaforge.products import ProductBundle, ProductRegistry
+
+        return ProductBundle.export(ProductRegistry(), selector, destination, apply=True)
+
+    def import_study(self, source: Path, *, apply: bool = False) -> dict[str, Any]:
+        return self.results.import_export(source, apply=apply)
+
     def analyze(self, selector: str, *, recompute: bool = False) -> dict[str, Any]:
         return self.results.analysis(selector, recompute=recompute)
 

@@ -30,6 +30,10 @@ def validate_execution(path: Path, *, seed_stream: Any = None) -> dict[str, Any]
     """Validate an exact execution directory, never a guessed latest sibling."""
     if not path.is_absolute() or path.is_symlink() or path.resolve() != path:
         raise ValueError("Recovery requires an absolute, non-symlinked execution directory.")
+    if (path / "import.json").exists() or (path / "import.json").is_symlink():
+        raise ValueError(
+            "Imported Study evidence is read-only; recover the original owned Execution."
+        )
     manifest = read_owned_json(path / "execution.json")
     if manifest.get("execution_id") != path.name or not path.name.startswith("execution-"):
         raise ValueError("Recovery execution identity does not match its owned directory.")
@@ -307,5 +311,7 @@ def latest_outcomes(outcomes: Sequence[WorkResult]) -> tuple[WorkResult, ...]:
             result.study_phase,
             int((result.fidelity or {}).get("target", 0)),
         )
-        latest[key] = result
+        previous = latest.get(key)
+        if previous is None or result.attempt_number > previous.attempt_number:
+            latest[key] = result
     return tuple(latest.values())

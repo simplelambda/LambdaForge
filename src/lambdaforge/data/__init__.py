@@ -27,6 +27,7 @@ _NAMES = (
     "DataIdentityProviderRegistry",
     "DatasetArtifact",
     "DatasetComparison",
+    "DatasetEquivalenceCertificate",
     "DatasetDeletionPlan",
     "DatasetIdIdentityProvider",
     "DatasetIdentity",

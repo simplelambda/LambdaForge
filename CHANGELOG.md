@@ -12,6 +12,15 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- First architectural lifecycle foundation: shared operational failure classification, distinct
+  activity/evidence/health Study projections, preserved failed Attempts across retry, cumulative
+  physical display counters and late-observation protection. Generic CUDA kernel errors no longer
+  masquerade as recoverable GPU OOMs; waiting retries do not occupy active process slots.
+  Native finalization uses latest logical outcomes and composed required-evidence debt, keeping
+  physical history. Storage/cleanup previews no longer create roots, writer locks or cache leases;
+  apply still revalidates under locks.
+  The English/Spanish reform ledger explicitly tracks the larger unimplemented product/Fleet scope.
+
 - Dataset inventory discovers all configured Console locations without mutating registries or
   hiding divergent identities. Added publication preflight, explicit scientific contracts,
   project-owned reconstruction verification and bytes-only candidate publication with exact
@@ -45,6 +54,39 @@ metadata rather than invented release numbers.
   than crashing on an empty response mean; bounded remote diagnostics retain the final exception.
 
 ### Added
+
+- `DatasetEquivalenceCertificate` seals the existing complete native comparison as a versioned
+  ScientificReport in the same ProductRegistry, with exact reference/candidate IDs, explicit
+  science/verifier/policy/evidence and separate operational provenance. Unresolved/corrupt or truly
+  different data cannot be certified. Certificates never merge byte identities, infer transitivity
+  or change ordinary Work dataset resolution; contract-aware YAML resolution remains pending.
+
+- Immutable explicit product contracts/catalog, exact independent artifact promotion and native
+  `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide`. Portable products preserve their
+  original producer and complete attestations, reject corrupted bytes and import idempotently without
+  executing a Study. Deterministic local ModelSet selection groups/ranks explicitly scored model
+  snapshots with constraints/ties, copies selected weights only and never substitutes latest/best
+  Run metrics for checkpoint evaluation. Native StudyDecision preserves finalized selection and
+  matching Analysis without refit; typed Work dependencies pin content/contract identities and
+  actual Attempts record consumer audits. Single-Study YAML declares native decision/model publication
+  with bounded feedback, retained publication failures and publication-only retry under ownership
+  locks. Worker catalogs are project-owned, remote preflight is metadata-only.
+  Native single-host Study exports include published product bundles; `lf import PACKAGE [--apply]`
+  verifies complete inventories and registers read-only original evidence without execution or
+  Analysis refitting. Console Products pages metadata/audits and provides explicit verification,
+  export and confirmed Study import with visible worker feedback. Dependency waiting/replanning
+  and complete Fleet import/export remain pending. Managed-file/cache/checkpoint roots initialize lazily;
+  active-worker cache ownership leases retain their existing GC protection. English/Spanish guides
+  document current scope and pending integration explicitly.
+
+- Local result deletion now verifies ownership and terminal state, serializes import/delete and
+  acquires the native controller lock before removal. Imported running snapshots remain deletable
+  as evidence only. Empty owned Work parents are removed without following links; configured roots,
+  foreign content, sibling Executions and independently published products remain intact.
+
+- Lazy public Work/HPO/metrics/clustering/Analysis/product exports reuse the existing import
+  mechanism. CLI help and product metadata imports no longer initialize Torch, the executor or
+  scientific Analysis; actual execution/results/export still load their native services on demand.
 
 - Native `lf storage status/reconcile` with read-only drift inspection and explicit diagnostic-ledger
   update. Managed publication/snapshot copies reserve extra bytes on the destination filesystem,

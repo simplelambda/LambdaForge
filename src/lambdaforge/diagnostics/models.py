@@ -93,6 +93,57 @@ class RetryDisposition(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class FailureDisposition:
+    """One operational classification; eligibility is not permission to retry.
+
+    The existing dispatcher still owns budgets, placement and checkpoint validation. Neither a
+    resource failure nor a lost process supplies a scientific objective observation.
+    """
+
+    category: ErrorCategory
+    reason: str
+    action: str
+    retryable: RetryDisposition
+    automatic_recovery_eligible: bool = False
+    termination_type: str = "scientific_failed"
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> FailureDisposition:
+        """Read a versioned native disposition without coercing a string into retry permission."""
+        eligible = value.get("automatic_recovery_eligible", False)
+        if (
+            type(value.get("failure_disposition_version")) is not int
+            or value["failure_disposition_version"] != 1
+            or not isinstance(eligible, bool)
+        ):
+            raise ValueError("Invalid persisted FailureDisposition version or retry eligibility.")
+        for field in ("reason", "action", "termination_type"):
+            if not isinstance(value.get(field), str) or not value[field] or len(value[field]) > 128:
+                raise ValueError(f"Invalid persisted FailureDisposition {field}.")
+        return cls(
+            ErrorCategory(value["category"]),
+            value["reason"],
+            value["action"],
+            RetryDisposition(value["retryable"]),
+            eligible,
+            value["termination_type"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "failure_disposition_version": 1,
+            "category": self.category.value,
+            "reason": self.reason,
+            "action": self.action,
+            "retryable": self.retryable.value,
+            "automatic_recovery_eligible": self.automatic_recovery_eligible,
+            "termination_type": self.termination_type,
+            "objective_evidence": False,
+            "budget_accounting": "retain_physical_attempt_cost",
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ErrorDiagnostic:
     """Represent WHAT/WHY/IMPACT/FIX/NEXT ACTION without preformatted walls of text."""
 
@@ -109,6 +160,7 @@ class ErrorDiagnostic:
     job_id: str | None = None
     diagnostic_path: str | None = None
     details: tuple[str, ...] = ()
+    failure_disposition: FailureDisposition | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "impact", tuple(str(value) for value in self.impact))
@@ -158,6 +210,9 @@ class ErrorDiagnostic:
             "job_id": self.job_id,
             "diagnostic_record": self.diagnostic_path,
             "details": list(self.details),
+            "failure_disposition": (
+                self.failure_disposition.to_dict() if self.failure_disposition else None
+            ),
         }
 
 
@@ -183,6 +238,7 @@ def diagnostic(
     operation: str | None = None,
     job_id: str | None = None,
     details: Sequence[str] = (),
+    failure_disposition: FailureDisposition | None = None,
 ) -> ErrorDiagnostic:
     """Construct a normalized diagnostic without adding a class for each sentence."""
     return ErrorDiagnostic(
@@ -199,4 +255,5 @@ def diagnostic(
         job_id,
         None,
         tuple(details),
+        failure_disposition,
     )

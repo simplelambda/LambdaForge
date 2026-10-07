@@ -122,6 +122,10 @@ class StorageOperations:
         apply: bool = False,
     ) -> dict[str, Any]:
         """Serialize cache collection against another collector on the same cluster."""
+        if not apply:
+            # Advisory snapshot only. Apply recomputes under ownership locks; a preview must
+            # not create an otherwise absent cache root or a persistent lock file.
+            return {**cls._gc(descriptor, references, apply=False), "apply_revalidates": True}
         roots = cls._roots(descriptor)
         cache_root = roots["environments"].parent
         cache_root.mkdir(parents=True, exist_ok=True)
@@ -146,7 +150,8 @@ class StorageOperations:
         """Remove only obsolete LambdaForge environments after a verified replacement exists."""
         roots = cls._roots(descriptor)
         cache_root = roots["environments"].parent
-        cache_root.mkdir(parents=True, exist_ok=True)
+        if apply:
+            cache_root.mkdir(parents=True, exist_ok=True)
         lock = CrossProcessFileLock(
             cache_root / ".gc.lock",
             shared=False,
@@ -154,7 +159,8 @@ class StorageOperations:
             poll_interval_seconds=0.01,
         )
         try:
-            lock.acquire()
+            if apply:
+                lock.acquire()
         except TimeoutError:
             return {
                 "candidates": [],
@@ -211,7 +217,8 @@ class StorageOperations:
                 "blocked_reason": None,
             }
         finally:
-            lock.release()
+            if apply:
+                lock.release()
 
     @classmethod
     def delete_job(
@@ -298,7 +305,8 @@ class StorageOperations:
                     poll_interval_seconds=0.005,
                 )
                 try:
-                    lock.acquire()
+                    if apply:
+                        lock.acquire()
                     checkpoint_candidates = checkpoint_plan(execution, grace_seconds=grace)
                     candidates.extend({**item, "job_id": job_id} for item in checkpoint_candidates)
                     if apply:
@@ -306,7 +314,8 @@ class StorageOperations:
                 except TimeoutError:
                     pass  # A recovery writer owns this Execution; never compete with it.
                 finally:
-                    lock.release()
+                    if apply:
+                        lock.release()
             from lambdaforge.work.retention import (
                 compact_attempt,
                 compact_incomplete_attempt,
@@ -333,7 +342,8 @@ class StorageOperations:
                     poll_interval_seconds=0.005,
                 )
                 try:
-                    writer.acquire()
+                    if apply:
+                        writer.acquire()
                 except TimeoutError:
                     continue
                 try:
@@ -390,7 +400,8 @@ class StorageOperations:
                         reclaimed += removed
                     candidates.extend(planned_candidates)
                 finally:
-                    writer.release()
+                    if apply:
+                        writer.release()
         return {
             "job_id": job_id,
             "candidates": candidates,
@@ -666,21 +677,25 @@ class StorageOperations:
         return payload
 
     @staticmethod
-    def _work_cache_lock(path: Path) -> CrossProcessFileLock:
+    def _work_cache_lock(path: Path, *, create: bool = True) -> CrossProcessFileLock:
         # Lease outside the removable tree survives collector/worker races.
         return CrossProcessFileLock(
             path.parent / f".{path.name}.lease",
             shared=False,
             timeout_seconds=0.01,
             poll_interval_seconds=0.005,
+            create=create,
         )
 
     @classmethod
     def _work_cache_busy(cls, path: Path) -> bool:
-        lease = cls._work_cache_lock(path)
+        lease = cls._work_cache_lock(path, create=False)
         try:
             lease.acquire()
-        except TimeoutError:
+        except FileNotFoundError:
+            return False  # No lease at this snapshot; apply always revalidates under a new lease.
+        except OSError:
+            # Contention and uninspectable ownership both protect the cache, never prove death.
             return True
         finally:
             lease.release()

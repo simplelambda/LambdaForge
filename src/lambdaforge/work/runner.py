@@ -33,6 +33,8 @@ from lambdaforge._version import VERSION
 from lambdaforge.data.DatasetReference import DatasetReference
 from lambdaforge.data.DatasetRegistry import DatasetRegistry
 from lambdaforge.data.DatasetResolver import DatasetResolver
+from lambdaforge.diagnostics.failure import classify_failure
+from lambdaforge.diagnostics.models import LambdaForgeError
 from lambdaforge.EnvironmentManifest import EnvironmentManifest
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.hpo.AdaptiveResources import (
@@ -119,6 +121,7 @@ from lambdaforge.work.recovery import (
 )
 from lambdaforge.work.retention import compact_attempt
 from lambdaforge.work.runtime import WorkRuntime
+from lambdaforge.work.state import StudyState, execution_evidence
 from lambdaforge.work.study import StudyTelemetry, study_run_key
 
 _GPU_ADMISSION_POLL_SECONDS = 1.0
@@ -177,6 +180,7 @@ class WorkExecutionResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the durable human/machine execution view."""
+        runs = [result.to_dict() for result in self.runs]
         return {
             "execution_result_version": 1,
             "name": self.name,
@@ -184,7 +188,10 @@ class WorkExecutionResult:
             "scientific_fingerprint": self.scientific_fingerprint,
             "status": self.status,
             "execution_dir": str(self.execution_dir),
-            "runs": [result.to_dict() for result in self.runs],
+            "runs": runs,
+            "lifecycle": StudyState.from_execution(
+                self.summary, runs, status=self.status
+            ).to_dict(),
             "outputs": {name: dict(values) for name, values in self.outputs.items()},
             "summary": dict(self.summary),
         }
@@ -241,6 +248,11 @@ class WorkRunner:
                     )
             levels.append(tuple(planned))
         existing = execution_dir / "result.json"
+        if (execution_dir / "import.json").exists() or (execution_dir / "import.json").is_symlink():
+            raise ValueError(
+                "This Execution is imported portable evidence, not an executable workspace. "
+                "Use --rerun for deliberate new science, not implicit imported recovery."
+            )
         reusable = False
         if existing.is_file() and not rerun:
             try:
@@ -328,6 +340,11 @@ class WorkRunner:
             or not config.levels[0].runs[0].study_expected
         ):
             raise ValueError("An external dispatcher requires one Study, not composed Work.")
+        if self._dispatcher is not None and "products" in config.raw:
+            raise ValueError(
+                "Declared Fleet product promotion is not integrated yet. "
+                "Refusing to start a Study whose model publication cannot be fulfilled."
+            )
         plan = self.plan(config, rerun=rerun)
         execution_dir = (
             self._execution_root_override or self._execution_root(plan.source, config.name)
@@ -372,11 +389,14 @@ class WorkRunner:
             return plan
         from lambdaforge.controlplane.StorageAdmission import StorageAdmission
 
-        with StorageAdmission.worker_lease(config.resources.storage_bytes), CrossProcessFileLock(
-            execution_dir / ".controller.lock",
-            shared=False,
-            timeout_seconds=0.1,
-            poll_interval_seconds=0.01,
+        with (
+            StorageAdmission.worker_lease(config.resources.storage_bytes),
+            CrossProcessFileLock(
+                execution_dir / ".controller.lock",
+                shared=False,
+                timeout_seconds=0.1,
+                poll_interval_seconds=0.01,
+            ),
         ):
             return self._run_plan(
                 config,
@@ -433,6 +453,13 @@ class WorkRunner:
                 stream.flush()
                 os.fsync(stream.fileno())
         self._write_execution_manifest(config, plan, execution_dir, recovering=recovering)
+        if "products" in config.raw and not (execution_dir / "products.json").exists():
+            from lambdaforge.products.publication import pending_publications
+
+            atomic_json(
+                execution_dir / "products.json",
+                pending_publications(config.raw, plan.execution_id),
+            )
         return self._run_levels(config, plan, execution_dir, restart=restart, recovering=recovering)
 
     @staticmethod
@@ -490,6 +517,11 @@ class WorkRunner:
                     if definition.study_design is not None
                 ],
                 "resolved_configuration": config.resolved_configuration(),
+                **(
+                    {"expected_products": config.raw["products"]}
+                    if "products" in config.raw
+                    else {}
+                ),
                 "resources": config.resources.to_dict(),
                 "ownership": {
                     "execution_dir": "owned",
@@ -601,7 +633,8 @@ class WorkRunner:
                         level_results.extend(ordered[index])
             outcomes.extend(level_results)
             by_definition: dict[str, list[WorkResult]] = {}
-            for result in level_results:
+            logical_level_results = latest_outcomes(level_results)
+            for result in logical_level_results:
                 by_definition.setdefault(result.name, []).append(result)
             for name, results in by_definition.items():
                 if len(results) != 1:
@@ -620,19 +653,12 @@ class WorkRunner:
                             for name, record in selected.datasets.items()
                         },
                     }
-            if any(not result.ok for result in level_results):
+            if any(not result.ok for result in logical_level_results):
                 break
-        status = "succeeded" if outcomes and all(result.ok for result in outcomes) else "failed"
-        for level in config.levels:
-            for definition in level.runs:
-                design = definition.study_design
-                if (
-                    design is not None
-                    and design.kind in {"repeated", "sweep"}
-                    and design.replication == "fixed"
-                ):
-                    if sum(run.name == definition.name for run in outcomes) < definition.run_count:
-                        status = "failed"  # Required pending evidence is not successful completion.
+        summary = self._summary(config, outcomes)
+        status = StudyState.from_execution(
+            summary, [result.to_dict() for result in outcomes], status="completed"
+        ).final_status
         execution_result = WorkExecutionResult(
             config.name,
             plan.execution_id,
@@ -641,7 +667,7 @@ class WorkRunner:
             execution_dir,
             tuple(outcomes),
             named_outputs,
-            self._summary(config, outcomes),
+            summary,
         )
         atomic_json(existing, execution_result.to_dict())
         study_definitions = [
@@ -681,6 +707,19 @@ class WorkRunner:
                     file=sys.stderr,
                     flush=True,
                 )
+        if "products" in config.raw:
+            from lambdaforge.products.publication import finalize_native_products
+            from lambdaforge.products.registry import ProductRegistry
+
+            finalize_native_products(
+                config.raw,
+                execution_result.to_dict(),
+                execution_dir,
+                ProductRegistry(
+                    os.environ.get("LAMBDAFORGE_PRODUCT_ROOT")
+                    or self._project_root(plan.source.parent) / ".lambdaforge/products"
+                ),
+            )
         self._publish_job_result(execution_result)
         self._compact_outcomes(outcomes)
         return execution_result
@@ -719,6 +758,9 @@ class WorkRunner:
 
     @staticmethod
     def _summary(config: WorkConfig, outcomes: Sequence[WorkResult]) -> Mapping[str, Any]:
+        # Final scientific evidence uses latest physical outcomes of each native evidence cell.
+        # Earlier failures/prunes remain in result envelopes, never survivor-only scientific data.
+        outcomes = latest_outcomes(outcomes)
         objectives = [
             (definition.name, definition.objective)
             for level in config.levels
@@ -732,50 +774,59 @@ class WorkRunner:
             "pruned_runs": sum(result.pruned for result in outcomes),
         }
         study_designs = [
-            definition.study_design
+            (definition.name, definition.study_design)
             for level in config.levels
             for definition in level.runs
             if definition.study_design is not None
         ]
         if study_designs:
-            design = study_designs[0]
+            _, design = study_designs[0]
             summary["study_design"] = design.to_dict()
-            observed = {
-                (
-                    int((result.trial or {"index": 0})["index"]),
-                    result.seed,
-                ): result
-                for result in outcomes
-            }
-            observed_candidates = {
-                int((result.trial or {"index": 0})["index"]) for result in outcomes
-            }
-            required = tuple(
-                requirement
-                for requirement in design.evidence.required
-                if design.kind != "adaptive" or requirement.candidate in observed_candidates
-            )
-            completed = sum(
-                (requirement.candidate, requirement.seed) in observed
-                and observed[(requirement.candidate, requirement.seed)].termination_type
-                == "completed"
-                for requirement in required
-            )
-            attempted = sum(
-                (requirement.candidate, requirement.seed) in observed
-                and (
-                    observed[(requirement.candidate, requirement.seed)].termination_type
-                    in {"completed", "performance_pruned"}
+            evidence_by_work = {
+                name: execution_evidence(
+                    [
+                        {
+                            "trial": result.trial,
+                            "seed": result.seed,
+                            "status": result.status,
+                            "termination_type": result.termination_type,
+                            "attempt_number": result.attempt_number,
+                            "pruned": result.pruned,
+                            "study_phase": result.study_phase,
+                            "fidelity": result.fidelity,
+                        }
+                        for result in outcomes
+                        if result.name == name
+                    ],
+                    design.to_dict(),
                 )
-                for requirement in required
-            )
+                for name, design in study_designs
+            }
+            completion_evidence = {
+                key: sum(value[key] for value in evidence_by_work.values())
+                for key in (
+                    "required_runs",
+                    "required_completed",
+                    "required_pruned",
+                    "required_missing",
+                    "required_failed",
+                )
+            }
+            if len(evidence_by_work) > 1:
+                summary["evidence_by_work"] = evidence_by_work
+            required = completion_evidence["required_runs"]
+            completed = completion_evidence["required_completed"]
+            attempted = completed + completion_evidence["required_pruned"]
             summary["evidence"] = {
-                "required_runs": len(required),
+                "required_runs": required,
                 "required_completed": completed,
                 "required_attempted": attempted,
-                "required_missing": max(0, len(required) - attempted),
-                "evidence_completion_fraction": (completed / len(required) if required else 1.0),
-                "design_status": "complete" if attempted == len(required) else "incomplete",
+                "required_missing": completion_evidence["required_missing"],
+                "required_failed": completion_evidence["required_failed"],
+                "evidence_completion_fraction": (completed / required if required else 1.0),
+                "design_status": (
+                    "complete" if not completion_evidence["required_missing"] else "incomplete"
+                ),
             }
         adaptive_definitions = [
             definition
@@ -1994,6 +2045,20 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
     primary: Any = None
     failure: Mapping[str, Any] | None = None
     try:
+        for input_name, recorded_input in inputs.items():
+            if recorded_input.kind == "product":
+                from lambdaforge.products.registry import ProductRegistry
+
+                ProductRegistry(recorded_input.path.parents[2]).record_consumer(
+                    recorded_input.logical_source,
+                    {
+                        "execution_id": str(specification["execution_id"]),
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "input": input_name,
+                        "scientific_fingerprint": identity,
+                    },
+                )
         run_environment = {
             "LAMBDAFORGE_TRAINING_METRICS_PATH": str(training_metrics_path),
             "LAMBDAFORGE_PROGRESS_PATH": str(run_dir / "progress.json"),
@@ -2041,9 +2106,14 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         primary = None
         failure = {
             "type": type(error).__name__,
+            "exception_types": [base.__name__ for base in type(error).__mro__[:16]],
             "message": str(error),
+            "phase": "run work",
+            "errno": error.errno if isinstance(error, OSError) else None,
             "traceback": traceback.format_exc(),
         }
+        if isinstance(error, LambdaForgeError):
+            failure["diagnostic"] = error.diagnostic.to_dict()
         from lambdaforge.diagnostics import work_failure_diagnostic
 
         failure = {
@@ -5504,17 +5574,8 @@ def _retry_specification(
     controller_error: BaseException,
 ) -> dict[str, Any] | None:
     """Retry only evidence of a lost worker, never arbitrary consumer exceptions."""
-    name = type(controller_error).__name__
-    message = str(controller_error).lower()
-    retryable = name in {
-        "BrokenProcessPool",
-        "ChildProcessError",
-        "ConnectionResetError",
-        "EOFError",
-    } or any(
-        marker in message
-        for marker in ("terminated abruptly", "worker process", "killed by signal", "lost process")
-    )
+    disposition = classify_failure(controller_error, phase="worker-process")
+    retryable = disposition.reason == "lost_worker"
     return (
         _new_retry(specification, reason=reason, policy=policy, telemetry=telemetry)
         if retryable
@@ -5572,16 +5633,7 @@ def _is_gpu_memory_failure(result: WorkResult) -> bool:
         return False
     if result.ok or result.pruned or not isinstance(result.failure, Mapping):
         return False
-    kind = str(result.failure.get("type", ""))
-    message = str(result.failure.get("message", "")).lower()
-    return kind in {"OutOfMemoryError", "CUDAOutOfMemoryError"} or any(
-        marker in message
-        for marker in (
-            "cuda out of memory",
-            "cublas_status_alloc_failed",
-            "hip out of memory",
-        )
-    )
+    return classify_failure(result.failure).reason == "gpu_memory_allocation"
 
 
 def _new_retry(
@@ -5688,11 +5740,15 @@ def _controller_failure_result(
     now = datetime.now(timezone.utc).isoformat()
     failure = {
         "type": type(error).__name__,
+        "exception_types": [base.__name__ for base in type(error).__mro__[:16]],
         "message": str(error),
         "phase": "worker-process",
         "traceback": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
     }
     resources = _work_resources(ResourceRequest.from_mapping(definition["resources"]).to_dict())
+    termination_type, termination = _run_termination(
+        status="failed", failure=failure, stop_path=None
+    )
     result = WorkResult(
         name=str(definition["name"]),
         work_class=str(definition["work_class"]),
@@ -5737,12 +5793,8 @@ def _controller_failure_result(
             if isinstance(specification.get("hpo_fidelity"), Mapping)
             else None
         ),
-        termination_type="resource_failed",
-        termination={
-            "type": "resource_failed",
-            "failure_type": type(error).__name__,
-            "reason": str(error),
-        },
+        termination_type=termination_type,
+        termination=termination,
         seed_metadata=(
             dict(specification["seed_metadata"])
             if isinstance(specification.get("seed_metadata"), Mapping)
@@ -9496,15 +9548,13 @@ def _run_termination(
     if status == "succeeded":
         return "completed", {"type": "completed"}
     failure_type = str((failure or {}).get("type", ""))
-    message = str((failure or {}).get("message", "")).lower()
-    resource = failure_type in {"OutOfMemoryError", "CUDAOutOfMemoryError"} or any(
-        marker in message for marker in ("out of memory", "cuda error", "resource exhausted")
-    )
-    selected = "resource_failed" if resource else "scientific_failed"
+    disposition = classify_failure(failure)
+    selected = disposition.termination_type
     return selected, {
         "type": selected,
         "failure_type": failure_type or None,
         "reason": str((failure or {}).get("message", "")) or None,
+        "failure_disposition": disposition.to_dict(),
     }
 
 
@@ -9728,6 +9778,14 @@ def _resolve_inputs(
 
     def resolve(item: Any, name: str) -> tuple[Any, Any]:
         if isinstance(item, Mapping):
+            if set(item) == {"product"}:
+                from lambdaforge.products.dependency import product_identity, resolve_product_input
+
+                product, manifest = resolve_product_input(item["product"], source_dir)
+                inputs[name] = WorkInput(
+                    name, "product", product.content_id, manifest, content_id=product.content_id
+                )
+                return product, dict(product_identity(product))
             if set(item) == {"file"}:
                 configured = str(item["file"])
                 path = Path(configured)
@@ -9785,6 +9843,11 @@ def _resolve_inputs(
 def _identity_values(value: Any, source_dir: Path) -> Any:
     """Resolve typed input identity while retaining output references as logical values."""
     if isinstance(value, Mapping):
+        if set(value) == {"product"}:
+            from lambdaforge.products.dependency import product_identity, resolve_product_input
+
+            product, _manifest = resolve_product_input(value["product"], source_dir)
+            return dict(product_identity(product))
         if set(value) == {"file"}:
             configured = str(value["file"])
             path = Path(configured)

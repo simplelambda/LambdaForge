@@ -15,6 +15,32 @@ from tests.fixtures.FileLockHolderJob import FileLockHolderJob
 class TestCrossProcessFileLock:
     """Verify validation, compatibility, contention and crash release."""
 
+    def test_existing_only_probe_never_creates_or_writes_lock_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "absent" / "probe.lock"
+        probe = CrossProcessFileLock(
+            path, shared=False, timeout_seconds=0.1, poll_interval_seconds=0.01, create=False
+        )
+        with pytest.raises(FileNotFoundError):
+            probe.acquire()
+        assert not path.parent.exists()
+        path.parent.mkdir()
+        path.write_bytes(b"")
+        with probe:
+            assert path.read_bytes() == b""
+            with pytest.raises(TimeoutError):
+                CrossProcessFileLock(
+                    path,
+                    shared=False,
+                    timeout_seconds=0.1,
+                    poll_interval_seconds=0.01,
+                    create=False,
+                ).acquire()
+        assert path.read_bytes() == b""
+        restored = pickle.loads(pickle.dumps(probe))
+        assert restored.create is False
+
     @pytest.mark.parametrize(
         ("argument", "value", "error_type"),
         [

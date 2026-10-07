@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true")
 
     export_study = commands.add_parser(
-        "export", help="Download one succeeded Work/Study as a portable evidence package."
+        "export", help="Export a portable evidence snapshot of any Work/Study state."
     )
     export_study.add_argument(
         "selector", help="Exact Work ID, unambiguous Work name, revision or underlying Job ID."
@@ -133,6 +133,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _cluster_selector(export_study)
     export_study.add_argument("--json", action="store_true")
+
+    import_study = commands.add_parser(
+        "import", help="Verify/register a portable Study and its products; never execute it."
+    )
+    import_study.add_argument("source", type=Path)
+    import_study.add_argument("--results-root", type=Path)
+    import_study.add_argument("--products-root", type=Path)
+    import_study.add_argument(
+        "--apply", action="store_true", help="Register after exact verification."
+    )
+    import_study.add_argument("--json", action="store_true")
 
     doctor = commands.add_parser("doctor", help="Diagnose a local or remote runtime.")
     doctor.add_argument("--on", default="local")
@@ -420,6 +431,70 @@ def build_parser() -> argparse.ArgumentParser:
     replicate.add_argument("--destination", required=True)
     replicate.add_argument("--apply", action="store_true")
     replicate.add_argument("--json", action="store_true")
+
+    products = commands.add_parser(
+        "products", help="Inspect and publish durable scientific products."
+    )
+    product_commands = products.add_subparsers(dest="product_command", required=True)
+    for operation in (
+        "list",
+        "show",
+        "verify",
+        "provenance",
+        "publish",
+        "export",
+        "import",
+        "select",
+        "decide",
+        "consumers",
+        "finalize",
+        "status",
+    ):
+        product_operation = product_commands.add_parser(operation)
+        product_operation.add_argument("--root", type=Path)
+        product_operation.add_argument("--json", action="store_true")
+        if operation in {
+            "show",
+            "verify",
+            "provenance",
+            "consumers",
+            "export",
+            "select",
+            "decide",
+            "finalize",
+            "status",
+        }:
+            product_operation.add_argument("selector")
+        if operation in {"list", "provenance", "consumers"}:
+            product_operation.add_argument("--offset", type=int, default=0)
+            product_operation.add_argument("--limit", type=int, default=100)
+        if operation == "publish":
+            product_operation.add_argument("manifest", type=Path)
+            product_operation.add_argument(
+                "--file",
+                action="append",
+                default=[],
+                metavar="NAME=PATH",
+                help="Explicit source of one declared artifact; copied and verified on apply.",
+            )
+            product_operation.add_argument("--apply", action="store_true")
+        if operation == "export":
+            product_operation.add_argument("--output", type=Path, required=True)
+            product_operation.add_argument("--apply", action="store_true")
+        if operation == "import":
+            product_operation.add_argument("source", type=Path)
+            product_operation.add_argument("--apply", action="store_true")
+        if operation in {"select", "decide"}:
+            product_operation.add_argument("--name", required=True)
+            product_operation.add_argument("--contract", required=True)
+            if operation == "select":
+                product_operation.add_argument("--policy", type=Path, required=True)
+            product_operation.add_argument("--results-root", type=Path)
+            product_operation.add_argument("--apply", action="store_true")
+        if operation in {"finalize", "status"}:
+            product_operation.add_argument("--results-root", type=Path)
+        if operation == "finalize":
+            product_operation.add_argument("--apply", action="store_true")
 
     results = commands.add_parser("results", help="Inspect persisted Work results.")
     result_commands = results.add_subparsers(dest="result_command", required=True)

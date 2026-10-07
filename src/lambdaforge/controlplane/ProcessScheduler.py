@@ -95,6 +95,7 @@ class ProcessScheduler(Scheduler):
             "gpu_access": self.profile.gpu_access.to_dict(),
             "storage": self.storage.to_dict(),
             "cache_root": self.storage.cache_root,
+            "product_root": self._product_root(work_dir),
             "lease_root": str(
                 PurePosixPath(self.storage.lease_root or self.storage.state_root) / "gpu-leases"
             ),
@@ -125,6 +126,13 @@ class ProcessScheduler(Scheduler):
 
             return str(DatasetRegistry.project_path(work_dir))
         return str(PurePosixPath(self.storage.state_root) / "datasets.json")
+
+    def _product_root(self, work_dir: str | Path) -> str:
+        if self.profile.transport == "local":
+            from lambdaforge.ProjectContext import ProjectContext
+
+            return str(ProjectContext.discover(work_dir).root / ".lambdaforge" / "products")
+        return self.storage.product_root
 
     def state(self, scheduler_id: str) -> JobState:
         value = self._state_payload(scheduler_id)

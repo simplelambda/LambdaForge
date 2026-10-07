@@ -39,6 +39,7 @@ from lambdaforge.controlplane.TorchInstallationPlan import TorchInstallationPlan
 from lambdaforge.execution import ResourceRequest
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 from lambdaforge.reproducibility import CodeIdentity
+from lambdaforge.work import WorkRunner
 
 
 class TrustTransport(Transport):
@@ -298,7 +299,7 @@ def test_top_level_local_run_enqueues_instead_of_running_inline(
     monkeypatch.delenv("LAMBDAFORGE_EXECUTION_MODE", raising=False)
     monkeypatch.setitem(CommandLineInterface._run.__globals__, "SubmissionService", EnqueueOnly)
     monkeypatch.setattr(
-        CommandLineInterface._run.__globals__["WorkRunner"],
+        WorkRunner,
         "run",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not run inline")),
     )
@@ -342,7 +343,7 @@ def test_supervised_local_child_runs_inline_without_recursive_submission(
 
     monkeypatch.setenv("LAMBDAFORGE_EXECUTION_MODE", "worker")
     monkeypatch.setitem(CommandLineInterface._run.__globals__, "SubmissionService", NeverEnqueue)
-    monkeypatch.setattr(CommandLineInterface._run.__globals__["WorkRunner"], "run", run)
+    monkeypatch.setattr(WorkRunner, "run", run)
     arguments = SimpleNamespace(
         config=config,
         on="local",
@@ -543,6 +544,7 @@ def test_tls_environment_reaches_the_scientific_scheduler_command(
     command = factory.provider.command
     assert command[0] == "env"
     assert "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" in command
+    assert "LAMBDAFORGE_PRODUCT_ROOT=/work/user/.lambdaforge/state/products" in command
     assert "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt" in command
     assert "LAMBDAFORGE_CACHE_ROOT=/work/user/.lambdaforge/cache" in command
     python_index = command.index("/managed/env/bin/python")

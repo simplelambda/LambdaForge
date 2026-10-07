@@ -18,6 +18,7 @@ from uuid import uuid4
 import yaml
 
 from lambdaforge.controlplane.SecretRedactor import SecretRedactor
+from lambdaforge.diagnostics.failure import classify_failure
 from lambdaforge.diagnostics.models import (
     ErrorCategory,
     ErrorDiagnostic,
@@ -939,17 +940,26 @@ def work_failure_diagnostic(
     elif error:
         summary = str(error)
     invocation = DiagnosticContext.from_argv(("run", str(source)))
+    disposition = classify_failure(error if isinstance(error, Mapping) else None)
+    resource_failure = disposition.reason == "gpu_memory_allocation"
     return diagnostic(
-        ErrorCategory.EXECUTION,
+        disposition.category,
         f"Work {name!r} failed after execution started.",
         summary,
-        reason="The configured Work class raised an unhandled exception.",
+        reason=(
+            "A GPU allocation failed; this Attempt supplies no final objective evidence."
+            if resource_failure
+            else "The configured Work class raised an unhandled exception."
+        ),
         impact=("No successful terminal result was published for this Attempt.",),
         fixes=(
-            "Inspect the Work traceback, correct its cause, then retry the same configuration.",
+            "Inspect resource evidence: recovery still requires budget and safer placement."
+            if resource_failure
+            else "Inspect the Work traceback, correct its cause, then retry this configuration.",
         ),
         commands=(("Retry after fixing", invocation.command),),
         context=context,
-        retryable=RetryDisposition.AFTER_FIX,
+        retryable=disposition.retryable,
         operation="run work",
+        failure_disposition=disposition,
     )

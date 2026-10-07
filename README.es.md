@@ -116,8 +116,9 @@ resources:
 ```
 
 La clase debe heredar `Work` y `run()` es su única entrada. La firma y el docstring de Python
-definen parámetros, tipos y valores por defecto. Solo `{file: ...}`, `{dataset: NOMBRE@VERSION}` y
-`{from: paso.salida}` tienen semántica especial; una cadena normal nunca se interpreta como ruta.
+definen parámetros, tipos y valores por defecto. Solo `{file: ...}`, `{dataset: NOMBRE@VERSION}`,
+`{from: paso.salida}` y `{product: {name: NOMBRE, contract: CONTRATO}}` tienen semántica especial;
+una cadena normal nunca se interpreta como ruta.
 `{file: ...}` declara una entrada que ya existe: LambdaForge la resuelve respecto al YAML, calcula
 su hash y la copia automáticamente al remoto si está bajo el límite configurado. Las entradas
 grandes del proyecto pueden usar un mirror remoto explícito; los corpus compartidos estables
@@ -1364,6 +1365,25 @@ Antes de reconstruir datasets usa `lf datasets preflight` y `self.outputs.datase
 [Reconstrucción de datasets](docs/DATASET_RECONSTRUCTION.es.md) explica identidad científica
 explícita, verificación del proyecto, checksums exactos y recuperación de publicación sin recalcular.
 Datasets en la consola descubre todas las ubicaciones configuradas y señala contenido divergente.
+
+La telemetría separa `lifecycle.operational`, `.evidence` y `.health`. Un retry puede estar en espera
+y degradado sin perder el fallo físico anterior; una Run recuperada puede tener éxito conservando
+su historial. Overview del Study muestra estas dimensiones y las proyecciones compactas las llevan
+sin descargar Attempts. [Reforma arquitectónica](docs/ARCHITECTURAL_REFORM.es.md) registra auditoría,
+implementación y pendientes; no declara terminada la reforma de Fleet/productos.
+
+Contratos y catálogo durable están disponibles mediante `lambdaforge.products` y
+`lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`. Bytes promovidos independientes
+sobreviven al productor; import verifica, es idempotente y no ejecuta cómputo. Véase
+[la capa de productos](docs/PRODUCTS.es.md): ModelSet local selecciona snapshots evaluados explícitos;
+StudyDecision conserva selección nativa e inputs tipados resuelven contratos y registran consumo
+real. Un Study individual declara `products` para publicar al finalizar; retry de publicación no
+repite entrenos. `lf import PACKAGE --json` verifica un export nativo de Study de un host sin mutación;
+`lf import PACKAGE --apply` registra su evidencia y productos sellados sin ejecutar código ni
+recalcular Analysis. Conserva procedencia original; la evidencia importada no es estado de recovery.
+**Products** en la consola muestra contratos/artifacts/auditorías y ofrece **Import Study…** con
+preview y confirmación. Promoción compuesta/Fleet, espera/replanificación e import Fleet completo
+siguen pendientes.
 
 El nombre de un Work es una etiqueta, no su identidad. El mismo YAML puede ejecutarse a la vez en
 local y en uno o más clústeres; las tablas y acciones destructivas usan el `work_id` exacto, por lo

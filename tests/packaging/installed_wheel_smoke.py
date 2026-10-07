@@ -32,6 +32,10 @@ def main() -> None:
         "share/lambdaforge/docs/STORAGE.es.md",
         "share/lambdaforge/docs/DATASET_RECONSTRUCTION.md",
         "share/lambdaforge/docs/DATASET_RECONSTRUCTION.es.md",
+        "share/lambdaforge/docs/ARCHITECTURAL_REFORM.md",
+        "share/lambdaforge/docs/ARCHITECTURAL_REFORM.es.md",
+        "share/lambdaforge/docs/PRODUCTS.md",
+        "share/lambdaforge/docs/PRODUCTS.es.md",
     ):
         matches = tuple(
             item
@@ -47,6 +51,30 @@ def main() -> None:
     assert scripts["lf"] == scripts["lambdaforge"]
     assert lambdaforge.__all__ == ["Work", "__version__", "clustering"]
     assert Work.__module__ == "lambdaforge.work.Work"
+    from lambdaforge.products import (
+        ProductBundle,
+        ProductContract,
+        ProductInput,
+        ProductPublication,
+        ProductRegistry,
+        StudyProduct,
+        build_study_decision,
+        publish_declared_products,
+    )
+
+    assert ProductContract("example/report:v1", ("sources",)).identifier == "example/report:v1"
+    assert callable(ProductBundle.import_bundle)
+    assert callable(ProductRegistry.resolve)
+    assert callable(StudyProduct.from_dict)
+    assert callable(ProductInput.artifact)
+    assert callable(ProductPublication.from_mapping)
+    assert callable(build_study_decision)
+    assert callable(publish_declared_products)
+    from lambdaforge.data import DatasetEquivalenceCertificate
+    from lambdaforge.work import ResultStore
+
+    assert callable(DatasetEquivalenceCertificate.build)
+    assert callable(ResultStore.import_export)
     print(lambdaforge.__version__)
 
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from lambdaforge.work import WorkConfig, WorkRunner
+from lambdaforge.work import WorkConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +27,8 @@ class ConfigurationDescriptor:
     @classmethod
     def from_path(cls, path: str | Path) -> ConfigurationDescriptor:
         """Validate a Work document and derive metadata without executing it."""
+        from lambdaforge.work.runner import WorkRunner
+
         source = Path(path).expanduser().resolve()
         config = WorkConfig.from_yaml(source)
         plan = WorkRunner().plan(config)

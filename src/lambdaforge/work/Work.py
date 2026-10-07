@@ -5,24 +5,21 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
-from lambdaforge.work.cache import WorkCache
-from lambdaforge.work.checkpoints import CheckpointCollection
-from lambdaforge.work.models import (
-    WorkConfiguration,
-    WorkFidelity,
-    WorkInput,
-    WorkResources,
-    WorkTrial,
-)
-from lambdaforge.work.outputs import OutputCollection
-from lambdaforge.work.runtime import (
-    MetricCollection,
-    ProgressReporter,
-    WorkRuntime,
-)
-from lambdaforge.work.tools import ToolService
+if TYPE_CHECKING:
+    from lambdaforge.work.cache import WorkCache
+    from lambdaforge.work.checkpoints import CheckpointCollection
+    from lambdaforge.work.models import (
+        WorkConfiguration,
+        WorkFidelity,
+        WorkInput,
+        WorkResources,
+        WorkTrial,
+    )
+    from lambdaforge.work.outputs import OutputCollection
+    from lambdaforge.work.runtime import MetricCollection, ProgressReporter, WorkRuntime
+    from lambdaforge.work.tools import ToolService
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -80,7 +77,7 @@ class Work:
 
     @property
     def inputs(self) -> Mapping[str, WorkInput]:
-        """Immutable explicitly typed file/dataset inputs, excluding ordinary scalar parameters."""
+        """Immutable typed file/dataset/product provenance, excluding ordinary scalar parameters."""
         return self._bound().inputs
 
     @property

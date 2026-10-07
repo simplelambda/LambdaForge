@@ -43,6 +43,11 @@ from lambdaforge.tui.screens.Base import DataScreen, EntitySelected
 from lambdaforge.tui.screens.ClusterScreen import ClusterScreen
 from lambdaforge.tui.screens.DatasetScreen import DatasetScreen
 from lambdaforge.tui.screens.OverviewScreen import OverviewScreen
+from lambdaforge.tui.screens.ProductScreen import (
+    ProductScreen,
+    ProductWorkspace,
+    StudyImportWorkspace,
+)
 from lambdaforge.tui.screens.ResultsScreen import ResultsScreen
 from lambdaforge.tui.screens.StudyScreen import StudyScreen
 from lambdaforge.tui.screens.WorkScreen import WorkScreen
@@ -1125,6 +1130,7 @@ class LambdaForgeApp(App[None]):
                         ("Studies", "studies"),
                         ("Clusters", "clusters"),
                         ("Datasets", "datasets"),
+                        ("Products", "products"),
                         ("Results", "results"),
                     ):
                         yield Button(label, id=f"nav-{target}", classes="nav-button", flat=True)
@@ -1148,9 +1154,13 @@ class LambdaForgeApp(App[None]):
                 yield ClusterScreen(self.services.cluster_rows, id="clusters")
                 yield DatasetScreen(self.services.dataset_rows, id="datasets")
                 yield ResultsScreen(self.services.result_rows, id="results")
+                yield ProductScreen(self.services.product_rows, id="products")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "products-import":
+            self.push_screen(StudyImportWorkspace(self.services))
+            return
         if event.button.id == "nav-exit":
             self.exit()
             return
@@ -1239,6 +1249,8 @@ class LambdaForgeApp(App[None]):
             self.push_screen(DatasetWorkspace(message.value, self.services))
         elif message.kind == "result":
             self.push_screen(ResultWorkspace(message.value, self.services))
+        elif message.kind == "product":
+            self.push_screen(ProductWorkspace(message.value, self.services))
 
     def on_resource_dashboard_export_requested(
         self, message: ResourceDashboard.ExportRequested
@@ -1278,6 +1290,9 @@ class LambdaForgeApp(App[None]):
             return
         self.show_screen(action.screen)
         if action.handler == "navigate":
+            return
+        if action.handler == "study_import":
+            self.push_screen(StudyImportWorkspace(self.services))
             return
         if action.handler == "cluster_add":
             self.push_screen(ClusterEditor(self.services), self._cluster_saved)

@@ -150,7 +150,8 @@ resources:
   time: 2h
 ```
 
-Only `{file: ...}`, `{dataset: ...}` and `{from: step.output}` have special meaning. A plain YAML
+Only `{file: ...}`, `{dataset: ...}`, `{from: step.output}` and explicit
+`{product: {name: NAME, contract: CONTRACT}}` have special meaning. A plain YAML
 string is always a string. Small typed files/directories are hashed and automatically staged for
 remote work. Large project inputs may instead use an explicit remote project mirror; stable shared
 corpora should normally be published/materialized as immutable datasets rather than copied into
@@ -1474,6 +1475,27 @@ Before expensive reconstruction, use `lf datasets preflight` and `self.outputs.d
 [Dataset reconstruction](docs/DATASET_RECONSTRUCTION.md) covers explicit scientific declarations,
 project-owned comparison, unchanged exact checksums and publication-only recovery. Console Datasets
 discovers all configured cluster locations; divergent content remains visible as a conflict.
+
+Study telemetry now exposes `lifecycle.operational`, `.evidence` and `.health` separately. Recovery
+can be waiting/degraded without losing prior failed Attempt evidence, and a recovered Run can be
+successful while its physical history remains visible. Console Study Overview shows these dimensions;
+compact projections carry them without loading Attempt files.
+[Architectural reform](docs/ARCHITECTURAL_REFORM.md) records the current implementation, audit and
+remaining work—not a completed Fleet/products rewrite.
+
+Durable product contracts and the local catalog are available through `lambdaforge.products` and
+`lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`. Exact independently promoted bytes
+survive the producer's deletion; import is verified/idempotent and never launches computation.
+See [the product layer](docs/PRODUCTS.md) for working APIs and explicit remaining boundaries:
+local ModelSet selection uses explicit scored snapshots, StudyDecision preserves native selection,
+and typed Work inputs resolve product contracts and record actual consumption. A single Study can
+declare `products` for native finalization; publication-only retry preserves all training evidence.
+`lf import PACKAGE --json` verifies a native single-host Study export without mutation;
+`lf import PACKAGE --apply` registers its evidence and sealed products without executing code or
+recomputing Analysis. Original provenance stays intact; imported evidence is not recovery state.
+Console **Products** browses contracts/artifacts/audits and offers **Import Study…** with preview
+and confirmation. Composed/Fleet promotion, dependency waiting/replanning and complete Fleet import
+remain pending.
 
 Work names are display labels, not identities. The same authored Work may run locally and on one or
 more clusters at the same time; tables and destructive actions use the exact `work_id`, so equal

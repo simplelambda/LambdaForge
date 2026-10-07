@@ -170,6 +170,8 @@ class ProcessSupervisor:
             cache_root = request.get("cache_root")
             if cache_root:
                 environment["LAMBDAFORGE_CACHE_ROOT"] = str(cache_root)
+            if request.get("product_root"):
+                environment["LAMBDAFORGE_PRODUCT_ROOT"] = str(request["product_root"])
             dataset_registry = request.get("dataset_registry")
             if dataset_registry is not None:
                 environment["LAMBDAFORGE_DATASET_REGISTRY"] = str(dataset_registry)

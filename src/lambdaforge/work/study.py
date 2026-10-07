@@ -13,11 +13,14 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from lambdaforge.diagnostics.failure import classify_failure
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility, aggregate_constraint, pareto_front
 from lambdaforge.hpo.ScientificConclusions import scientific_status
 from lambdaforge.hpo.StudyInsights import StudyInsightAnalyzer
 from lambdaforge.study_projection import panel_detail, study_table, trial_detail
+from lambdaforge.work.attempt_history import attempt_number, retain_attempt
 from lambdaforge.work.models import WorkResult, atomic_json
+from lambdaforge.work.state import StudyState, required_evidence
 
 
 class StudyTelemetry:
@@ -246,45 +249,12 @@ class StudyTelemetry:
     def _persist_terminal_semantics(self, snapshot: Mapping[str, Any]) -> dict[str, Any]:
         """Persist execution, design and scientific completion as separate truths."""
         index = self._index()
-        requirements = {
-            str(value.get("key")): value
-            for value in (index.get("design") or {}).get("evidence", {}).get("requirements", ())
-            if isinstance(value, Mapping) and value.get("required") is True
-        }
-        if (index.get("design") or {}).get("type") == "adaptive":
-            # Adaptive minimum replication becomes debt only when the candidate is proposed.
-            # The normalized plan can describe every possible public trial up to the candidate
-            # budget, but an explicit early Run/time/convergence boundary must not turn never-
-            # proposed candidates into fictitious missing experiments.
-            proposed_candidates = {
-                int(candidate["trial"])
-                for candidate in snapshot.get("candidates", ())
-                if isinstance(candidate, Mapping) and candidate.get("trial") is not None
-            }
-            requirements = {
-                key: value
-                for key, value in requirements.items()
-                if value.get("candidate") in proposed_candidates
-            }
-        states: dict[str, str] = {}
-        for candidate in snapshot.get("candidates", ()):
-            if not isinstance(candidate, Mapping):
-                continue
-            for run in candidate.get("runs", ()):
-                if not isinstance(run, Mapping):
-                    continue
-                requirement = run.get("evidence_requirement")
-                if isinstance(requirement, Mapping) and requirement.get("key"):
-                    if requirement.get("required") is True:
-                        requirements.setdefault(str(requirement["key"]), dict(requirement))
-                    states[str(requirement["key"])] = str(run.get("state", "scheduled"))
-        succeeded = sum(states.get(key) == "succeeded" for key in requirements)
-        pruned = sum(states.get(key) == "pruned" for key in requirements)
-        failed = sum(states.get(key) in {"failed", "infeasible"} for key in requirements)
-        missing_keys = sorted(
-            key for key in requirements if states.get(key) not in {"succeeded", "pruned"}
-        )
-        required = len(requirements)
+        evidence = required_evidence(snapshot, index.get("design") or {})
+        succeeded = evidence["required_completed"]
+        pruned = evidence["required_pruned"]
+        failed = evidence["required_failed"]
+        missing_keys = evidence["missing_requirement_keys"]
+        required = evidence["required_runs"]
         design_status = "complete" if not missing_keys else "incomplete"
         scientific = snapshot.get("hpo_analysis")
         resolved_scientific_status = (
@@ -390,25 +360,7 @@ class StudyTelemetry:
         """Publish one process-owned state record; no shared-file lock is required."""
         key = study_run_key(specification)
         previous = self._run_state(key)
-        history = [
-            dict(value)
-            for value in previous.get("attempt_history", ())
-            if isinstance(value, Mapping)
-        ]
         previous_attempt = previous.get("attempt_id")
-        if previous_attempt and not any(
-            value.get("attempt_id") == previous_attempt for value in history
-        ):
-            history.append(
-                {
-                    "attempt_id": previous_attempt,
-                    "phase": previous.get("phase"),
-                    "state": previous.get("state"),
-                    "termination_type": previous.get("termination_type"),
-                    "termination": dict(previous.get("termination", {})),
-                    "finished_at_utc": previous.get("finished_at_utc"),
-                }
-            )
         self._write_run(
             key,
             {
@@ -427,6 +379,7 @@ class StudyTelemetry:
                     else {}
                 ),
                 "state": "running",
+                "duration_seconds": 0.0,
                 "trial": int(specification["trial_index"]),
                 "seed": specification.get("seed"),
                 "seed_metadata": (
@@ -447,10 +400,10 @@ class StudyTelemetry:
                 "gpu_index": specification.get("gpu_index"),
                 "gpu_token": specification.get("gpu_slot"),
                 "failure": None,
+                "failure_disposition": None,
                 "finished_at_utc": None,
                 "prune_reason": None,
                 "attempt_id": run_dir.name,
-                "attempt_history": history[-8:],
                 "scientific_continuation": bool(specification.get("hpo_scientific_continuation")),
                 "continued_from_attempt": (
                     previous_attempt if specification.get("hpo_scientific_continuation") else None
@@ -513,6 +466,9 @@ class StudyTelemetry:
                     }
                     if isinstance(result.failure, Mapping)
                     else None
+                ),
+                "failure_disposition": (
+                    classify_failure(result.failure).to_dict() if result.failure else None
                 ),
                 "prune_reason": result.prune_reason,
                 "termination_type": result.termination_type,
@@ -584,6 +540,10 @@ class StudyTelemetry:
             "termination_type",
             "termination",
             "prune_reason",
+            "attempt_history",
+            "attempt_statistics",
+            "archived_attempt_id",
+            "failure_disposition",
         }
         updates = {name: value for name, value in observation.items() if name in fields}
         if any(previous.get(name) != value for name, value in updates.items()):
@@ -672,7 +632,15 @@ class StudyTelemetry:
                 "phase": specification.get("hpo_phase", "search"),
                 "fidelity": dict(specification.get("hpo_fidelity", {})),
                 "parameters": dict(specification.get("trial_parameters", {})),
-                "failure": {"type": type(error).__name__, "message": str(error)},
+                "failure": {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                    "phase": "worker-process",
+                },
+                "failure_disposition": classify_failure(error, phase="worker-process").to_dict(),
+                "termination_type": classify_failure(
+                    error, phase="worker-process"
+                ).termination_type,
                 "finished_at_utc": _now(),
                 "updated_at_utc": _now(),
             },
@@ -828,8 +796,8 @@ class StudyTelemetry:
                     observed_runs.append(merged)
                     selected = str(merged.get("state", "scheduled"))
                     completed += selected in {"succeeded", "failed", "pruned"}
-                    active += selected in {"running", "retrying"}
-                    queued += selected == "scheduled"
+                    active += selected == "running"
+                    queued += selected in {"scheduled", "retrying"}
                     paused += selected == "paused"
                     failed += selected == "failed"
                     pruned += selected == "pruned"
@@ -890,7 +858,7 @@ class StudyTelemetry:
             candidates = [value for value in index.get("candidates", ()) if isinstance(value, dict)]
             for candidate in candidates:
                 candidate["pareto_optimal"] = False
-            for trial in pareto_front(candidates, objective):
+            for trial in pareto_front(candidates, objective) if objective else ():
                 for candidate in candidates:
                     if candidate.get("trial") == trial:
                         candidate["pareto_optimal"] = True
@@ -1021,6 +989,10 @@ class StudyTelemetry:
                 "surrogate_belief": surrogate_belief,
                 "updated_at_utc": _now(),
             }
+            snapshot.update(required_evidence(snapshot, index.get("design") or {}))
+            # Compact mirrors preserve lifecycle without downloading any Attempt history.
+            snapshot["missing_requirement_keys"] = snapshot["missing_requirement_keys"][:100]
+            snapshot["lifecycle"] = StudyState.from_snapshot(snapshot).to_dict()
             atomic_json(self.root / "summary.json", snapshot)
             # Interactive readers consume this bounded index.  The full summary remains local to
             # the worker/result pipeline and may grow with rich per-Run diagnostics.
@@ -1062,8 +1034,12 @@ class StudyTelemetry:
 
     def _write_run(self, key: str, updates: Mapping[str, Any]) -> None:
         path = self.root / "runs" / f"{key}.json"
-        current = self._read(path)
-        atomic_json(path, {**current, **dict(updates), "key": key})
+        current = retain_attempt(self._read(path))
+        incoming = attempt_number(updates.get("attempt_id"))
+        if incoming and incoming < attempt_number(current.get("attempt_id")):
+            return  # A delayed provider observation cannot undo a newer physical Attempt.
+        merged = retain_attempt({**current, **dict(updates), "key": key})
+        atomic_json(path, merged)
 
     def _run_state(self, key: str) -> dict[str, Any]:
         return self._read(self.root / "runs" / f"{key}.json")

@@ -87,6 +87,12 @@ class StudyExportService:
         expected_execution = self._expected_execution(record)
         export_profile = profile
         cluster_profile = self.catalog.get(record.cluster)
+        assert cluster_profile.storage is not None
+        product_root = cluster_profile.storage.product_root
+        if cluster_profile.transport == "local":
+            from lambdaforge.products.registry import ProductRegistry
+
+            product_root = str(ProductRegistry().root)
         transport = self.factory.transport(cluster_profile)
         remote_archive = str(
             PurePosixPath(record.work_dir).parent / f".lambdaforge-export-{uuid4().hex}.zip"
@@ -115,6 +121,8 @@ class StudyExportService:
                         record.job_id,
                         export_profile,
                         *recovery_arguments,
+                        "--product-root",
+                        product_root,
                     ),
                     timeout=3600.0,
                 )
@@ -199,6 +207,7 @@ class StudyExportService:
                         for value in profile_record.get("omitted", ())
                         if isinstance(value, Mapping)
                     ),
+                    product_root=downloaded / "product-registry",
                 )
             else:
                 result = _export_pre_execution_snapshot(
@@ -484,10 +493,18 @@ def _extract_safe(archive: Path, destination: Path) -> None:
     """Extract only regular ZIP members below the destination."""
     root = destination.resolve()
     with zipfile.ZipFile(archive, "r") as package:
+        names: set[str] = set()
         for member in package.infolist():
             path = Path(member.filename)
-            if path.is_absolute() or ".." in path.parts:
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or "\\" in member.filename
+                or path.as_posix() != member.filename.rstrip("/")
+                or path.as_posix() in names
+            ):
                 raise ValueError(f"Unsafe path in Study export archive: {member.filename}")
+            names.add(path.as_posix())
             mode = member.external_attr >> 16
             if mode and (mode & 0o170000) not in {0, 0o040000, 0o100000}:
                 raise ValueError(
@@ -507,9 +524,14 @@ def _extract_safe(archive: Path, destination: Path) -> None:
 
 
 _ARCHIVE_SCRIPT = r"""
-import json,os,sys,zipfile
+import hashlib,json,os,re,sys,zipfile
 from pathlib import Path
 
+product_root=None
+if "--product-root" in sys.argv:
+ index=sys.argv.index("--product-root")
+ if index+2!=len(sys.argv): raise SystemExit("invalid product-root export arguments")
+ product_root=Path(sys.argv[index+1]); del sys.argv[index:]
 authored_job=Path(sys.argv[1]); job=authored_job.resolve(); output=Path(sys.argv[2])
 expected="" if sys.argv[3]=="-" else sys.argv[3]; job_id=sys.argv[4]; profile=sys.argv[5]
 if profile not in {"default","full"}: raise SystemExit("invalid export profile")
@@ -580,6 +602,49 @@ execution=selected[0] if selected else None
 if execution is not None:
  entries.append((execution,f"runs/{execution.parent.name}/{execution.name}"))
 
+# Only products published by this Execution, not all other Studies' catalogs or caches.
+# The receiving native ProductBundle service validates schemas, content and origins before sealing.
+if execution is not None and (execution/"products.json").exists():
+ publication_path=execution/"products.json"; check(publication_path)
+ if publication_path.stat().st_size>512*1024:
+  raise SystemExit("oversized product publication record")
+ publication=json.loads(publication_path.read_text())
+ if publication.get("product_publication_version")!=1:
+  raise SystemExit("invalid product publication record")
+ published=[item for item in publication.get("items",[]) if item.get("status")=="published"]
+ request=job/"request.json"
+ if request.is_file():
+  check(request)
+  request_value=json.loads(request.read_text())
+  if request_value.get("product_root"): product_root=Path(request_value["product_root"])
+ if published and (product_root is None or not product_root.is_absolute()
+     or product_root.resolve()!=product_root):
+  raise SystemExit("published products require their exact owned project product root")
+ seen_products=set()
+ for item in published:
+  identity=item.get("content_id","")
+  if not isinstance(identity,str) or not re.fullmatch(r"sha256:[0-9a-f]{64}",identity):
+   raise SystemExit("invalid published product content identity")
+  key=identity.split(":",1)[1]; obj=product_root/"objects"/key
+  product_name=item.get("name")
+  if not isinstance(product_name,str) or not product_name:
+   raise SystemExit("invalid published product name")
+  alias=hashlib.sha256(product_name.encode("utf-8")).hexdigest()+".json"
+  entries.append((product_root/"names"/alias,"product-registry/names/"+alias))
+  if key in seen_products: continue
+  seen_products.add(key)
+  metadata=obj/"manifest.json"; check(metadata)
+  if metadata.stat().st_size>512*1024: raise SystemExit("oversized published product manifest")
+  value=json.loads(metadata.read_text())
+  entries.append((metadata,"product-registry/objects/"+key+"/manifest.json"))
+  entries.append((obj/"provenance","product-registry/objects/"+key+"/provenance"))
+  for artifact in value.get("artifacts",[]):
+   raw=artifact.get("path"); relative=Path(raw) if isinstance(raw,str) else None
+   if (relative is None or relative.is_absolute() or ".." in relative.parts
+       or "\\" in raw or relative.as_posix()!=raw):
+    raise SystemExit("unsafe published product artifact path")
+   entries.append((obj/relative,"product-registry/objects/"+key+"/"+raw))
+
 seen=set()
 payloads=[]
 if execution is not None:
@@ -644,6 +709,8 @@ def sampled_jsonl(path,limit=4096):
 def add(archive,source,name):
  check(source)
  if source.is_file():
+  if name.startswith("product-registry/"):
+   archive.write(source,arcname=name); return
   if profile=="default" and source.name in raw_resource_names:
    size,digest=digest_file(source); summary=jsonl_summary(source)
    omitted.append({"path":name,"reason":"summarized high-frequency resource telemetry",
@@ -663,6 +730,7 @@ def add(archive,source,name):
  for child in sorted(source.rglob("*"),key=lambda value:value.relative_to(source).as_posix()):
   relative=child.relative_to(source).as_posix(); arcname=name.rstrip("/")+"/"+relative
   if child.is_dir(): archive.writestr(arcname.rstrip("/")+"/",b"")
+  elif arcname.startswith("product-registry/"): archive.write(child,arcname=arcname)
   elif profile=="default" and child.name in raw_resource_names:
    size,digest=digest_file(child); summary=jsonl_summary(child)
    omitted.append({"path":arcname,"reason":"summarized high-frequency resource telemetry",

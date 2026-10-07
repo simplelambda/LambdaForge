@@ -31,6 +31,9 @@ runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada 
 | Jobs de bajo nivel | `lf jobs list/show/logs/cancel/retry/delete/clear`; `lf doctor --on CLUSTER` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
 | Reconstruir/publicar datasets | `lf datasets preflight/compare/publish-candidate`; `docs/DATASET_RECONSTRUCTION.es.md` |
+| Productos durables / decisiones / selección | `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`; `docs/PRODUCTS.es.md` |
+| Equivalencia durable explícita de datasets | `lambdaforge.data.DatasetEquivalenceCertificate`; `docs/DATASET_RECONSTRUCTION.es.md` |
+| Importar evidencia, no ejecutar | `lf import PACKAGE [--apply]`; `docs/PRODUCTS.es.md` |
 | Resultados | `lf results list/show/compare/analyze/report/replay`; Study portable: `lf export SELECTOR --output DIR` |
 | Perfiles de clúster | Consola; `lf clusters add/set/unset/...` para automatización |
 | Consultar/reconciliar almacenamiento | `lf storage status/reconcile [--on CLUSTER]`; reconcile `--apply` solo actualiza inventario |
@@ -41,6 +44,24 @@ remotos devuelven control tras crear el registro durable de preparación salvo q
 `--wait-for-submit`; `--dry-run` es directo y sin efectos.
 
 ## Contrato Work
+
+Base de lifecycle: `diagnostics/failure.py` clasifica fallos con ErrorCategory/RetryDisposition
+existentes. Elegibilidad de retry no evita ARI/headroom/presupuestos; EOFError/ValueError del
+consumidor y errores CUDA genéricos no autorizan retry por worker perdido/OOM. `work/state.py`
+deriva lifecycle y obligaciones; `work/attempt_history.py` conserva historial visible acotado y
+contadores físicos acumulados. Presentación consume `lifecycle`, no inventa recovery ni devuelve
+costes. Consultar `docs/ARCHITECTURAL_REFORM.es.md`. `lambdaforge.products` y `lf products`
+implementan contratos/registro/promoción/transporte/selección local explícitos (`docs/PRODUCTS.es.md`);
+selección usa métricas del mismo snapshot y últimos Attempts. `products decide` conserva selección
+nativa sin refit. Inputs product tipados resuelven contrato/expectativas, workers reciben raíz propia
+del proyecto y Attempts reales registran consumo. Study individual declara `products`; primero
+evidencia, luego publicación antes de compactar. `products finalize` reintenta solo publicación bajo
+lock; fallar al publicar no altera la ciencia. Espera/replanificación de dependencias,
+promoción compuesta/Fleet y lifecycle Fleet siguen pendientes,
+no están implementados por aparecer en el plan.
+`lf import PACKAGE [--apply]` verifica/registra exports nativos de un host y productos sellados.
+Originales en `portable/`, ubicación en `import.json`; evidencia importada es read-only, no recovery
+ejecutable. Export de provider nunca muestrea bytes de productos. Ver `docs/PRODUCTS.es.md`.
 
 ActivationCondition es la autoridad inmutable AND de igualdad/pertenencia compartida por
 ParameterSpace. `when: {parent: valor}` y `{parent: {eq: valor}}` normalizan igual; `in` requiere
@@ -68,7 +89,8 @@ historial de Attempts fallidos. Cubre un único Study por Execution y no migra e
 Recuperar el Study no garantiza continuar una época: el Work debe implementar restauración de checkpoints.
 
 La firma y el docstring de `run()` son la verdad de parámetros. Los únicos marcadores especiales
-son `{file: ...}`, `{dataset: NOMBRE@VERSION}` y `{from: PASO.SALIDA}`. Las vistas inmutables son
+son `{file: ...}`, `{dataset: NOMBRE@VERSION}`, `{from: PASO.SALIDA}` y
+`{product: {name: NOMBRE, contract: CONTRATO, expect: {...}}}` (`expect` opcional). Las vistas inmutables son
 `name`, `config`, `inputs`, `resources`, `seed`, `trial`, `source_dir` y `resuming`. Los servicios
 gestionados son `outputs.file/directory/value/dataset`, `metrics.log/log_many`,
 `checkpoints.file/exists/save_json/load_json`, `cache.put/get/file/fetch/rate_limit`, `tools.require/run`,

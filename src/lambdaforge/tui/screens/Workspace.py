@@ -256,17 +256,27 @@ class ExportDirectoryPicker(ModalScreen[Path | None]):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        title: str = "Export experiment",
+        purpose: str = (
+            "Choose the local parent directory. LambdaForge creates a new, named folder "
+            "there and never overwrites an earlier export."
+        ),
+        confirm_label: str = "Export here",
+    ) -> None:
         super().__init__()
         self.selected = (root or Path.cwd()).expanduser().resolve()
+        self.dialog_title = title
+        self.purpose = purpose
+        self.confirm_label = confirm_label
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal-card wide-modal"):
-            yield Label("Export experiment", classes="modal-title")
-            yield Static(
-                "Choose the local parent directory. LambdaForge creates a new, named folder "
-                "there and never overwrites an earlier export."
-            )
+            yield Label(self.dialog_title, classes="modal-title")
+            yield Static(self.purpose)
             with Horizontal():
                 yield Input(value=str(self.selected), id="export-directory-location")
                 yield Button("Open", id="export-directory-open")
@@ -274,7 +284,7 @@ class ExportDirectoryPicker(ModalScreen[Path | None]):
             yield DirectoryTree(self.selected, id="export-directory-tree")
             with Horizontal(classes="modal-actions"):
                 yield Button("Cancel", id="export-directory-cancel")
-                yield Button("Export here", id="export-directory-confirm", variant="success")
+                yield Button(self.confirm_label, id="export-directory-confirm", variant="success")
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -619,11 +629,20 @@ class StudyWorkspace(ResearchWorkspace):
         attention.append(f"† {counts.get('pruned_runs', 0)} censored/pruned Runs retained")
         if self.study.get("required_missing"):
             attention.append(f"⚠ {self.study['required_missing']} required Run(s) remain missing")
+        lifecycle = self.study.get("lifecycle")
+        lifecycle = lifecycle if isinstance(lifecycle, Mapping) else {}
         self.query_one("#study-overview-state", Static).update(
             "[b]STATE[/b]\n"
             f"Execution: {str(self.study.get('status', self.work.get('state', 'unknown'))).upper()}\n"
             f"Design: {str(self.study.get('design_status', 'in progress')).upper()} · "
             f"Science: {str(self.study.get('scientific_status', 'unresolved')).upper()}"
+            + (
+                f"\nActivity: {str(lifecycle.get('operational', 'unknown')).replace('_', ' ')} · "
+                f"Evidence: {str(lifecycle.get('evidence', 'unknown')).replace('_', ' ')} · "
+                f"Health: {str(lifecycle.get('health', 'unknown')).replace('_', ' ')}"
+                if lifecycle
+                else ""
+            )
         )
         self.query_one("#study-overview-trials", Static).update(
             "[b]TRIALS & RUNS[/b]\n"

@@ -289,8 +289,8 @@ class ManagedFileStore:
         self.data_root = (data_root or self.root).resolve()
         self.records_root = self.root / ".managed" / "records"
         self.locks_root = self.root / ".managed" / "locks"
-        for directory in (self.root, self.data_root, self.records_root, self.locks_root):
-            directory.mkdir(parents=True, exist_ok=True)
+        # Opening a service or restoring a missing key is read-only. Atomic writers and the
+        # per-key writer lock create their own parents only when content is actually built.
 
     def file(
         self,

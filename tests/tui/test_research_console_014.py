@@ -63,6 +63,9 @@ class FakeServices:
     def result_rows(self):
         return []
 
+    def product_rows(self, *, offset=0):
+        return []
+
     def dataset_members(self, selector, *, limit=200):
         self.calls.append(("dataset_members", selector))
         return {
@@ -1127,6 +1130,8 @@ def test_cli_parity_inventory_covers_every_public_family() -> None:
         "job",
         "dataset",
         "result",
+        "product",
+        "study",
     }
     result_operations = {value["operation"] for value in CLI_PARITY["result"]}
     cluster_operations = {value["operation"] for value in CLI_PARITY["cluster"]}

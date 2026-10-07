@@ -50,6 +50,7 @@ _TOP_FIELDS = frozenset(
         "objective",
         "analysis",
         "steps",
+        "products",
     }
 )
 _RUN_FIELDS = frozenset(
@@ -257,7 +258,7 @@ class WorkConfig:
                 WorkLevel(
                     (
                         _run_definition(
-                            data,
+                            {key: value for key, value in data.items() if key != "products"},
                             default_name=name,
                             inherited_resources=None,
                             project=project,
@@ -275,6 +276,7 @@ class WorkConfig:
                 "execution",
                 "objective",
                 "analysis",
+                "products",
             }
             if unsupported:
                 raise ValueError(
@@ -328,6 +330,18 @@ class WorkConfig:
                     "Work already owns and schedules its fixed resource allocation."
                 )
         config = cls(name, levels, source_path, data)
+        if "products" in data:
+            from lambdaforge.products.publication import publication_declarations
+
+            declarations = publication_declarations(data["products"])
+            definition = levels[0].runs[0]
+            if not definition.study_expected:
+                raise ValueError("products publication requires a Study with search/sweep/seeds.")
+            if (
+                any(item.kind == "StudyDecision" for item in declarations)
+                and definition.objective is None
+            ):
+                raise ValueError("StudyDecision publication requires an explicit objective.")
         errors = config.validation_errors(check_inputs=True)
         if errors:
             raise ValueError("Invalid Work configuration:\n  - " + "\n  - ".join(errors))
@@ -377,6 +391,23 @@ class WorkConfig:
                 except Exception as error:
                     errors.append(str(error))
                 for parameter, marker in _markers(definition.parameters):
+                    if "product" in marker:
+                        try:
+                            from lambdaforge.products.dependency import (
+                                ProductRequirement,
+                                resolve_product_input,
+                            )
+
+                            ProductRequirement.from_mapping(marker["product"])
+                            if check_inputs:
+                                resolve_product_input(
+                                    marker["product"],
+                                    self.source.parent if self.source else Path.cwd(),
+                                )
+                        except Exception as error:
+                            errors.append(
+                                f"Parameter {parameter!r} product cannot be resolved: {error}"
+                            )
                     if "file" in marker and check_inputs:
                         source_dir = self.source.parent if self.source else Path.cwd()
                         path = Path(str(marker["file"]))
@@ -522,7 +553,7 @@ class WorkConfig:
                     }
                 )
             levels.append(current)
-        return {
+        explanation = {
             "name": self.name,
             "levels": levels,
             "planned_runs": self.planned_runs,
@@ -530,6 +561,9 @@ class WorkConfig:
             "resolved_configuration": self.resolved_configuration(),
             "preflight": self.preflight(),
         }
+        if "products" in self.raw:
+            explanation["products"] = _plain(self.raw["products"])
+        return explanation
 
     def preflight(self) -> dict[str, Any]:
         """Return bounded design/time facts without listing individual Run identities."""
@@ -1475,7 +1509,7 @@ def _is_marker(value: Any) -> bool:
     return (
         isinstance(value, Mapping)
         and len(value) == 1
-        and next(iter(value), None) in {"file", "dataset", "from"}
+        and next(iter(value), None) in {"file", "dataset", "from", "product"}
     )
 
 

@@ -111,6 +111,10 @@ def test_catalog_namespaces_remote_storage_but_keeps_grants_and_auth_shared(tmp_
     assert left.storage.run_root == f"/remote/.lambdaforge/projects/{first.project_id}/jobs"
     assert left.storage.cache_root != right.storage.cache_root
     assert left.storage.state_root != right.storage.state_root
+    assert left.storage.product_root != right.storage.product_root
+    assert left.storage.product_root == left.storage.state_root + "/products"
+    assert not Path(left.storage.product_root).is_relative_to(left.storage.run_root)
+    assert not Path(left.storage.product_root).is_relative_to(left.storage.cache_root)
     assert left.storage.lease_root == right.storage.lease_root == "/remote/.lambdaforge/state"
     assert left.auth == right.auth
     assert a.inspect("gpu")["profile"] == profile.to_dict()
@@ -132,6 +136,15 @@ def test_custom_remote_storage_is_scoped_while_local_paths_stay_project_relative
     local_b = ClusterCatalog({"local": profile}, project=second).get("local").storage
     assert local_a and local_b
     assert local_a == local_b == policy
+
+
+def test_product_root_rejects_disposable_parent_without_creating_paths(tmp_path: Path) -> None:
+    policy = ClusterStoragePolicy(
+        str(tmp_path / "cache" / "state"), str(tmp_path / "cache"), str(tmp_path / "jobs")
+    )
+    with pytest.raises(ValueError, match="Durable product storage"):
+        _ = policy.product_root
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_legacy_remote_job_retains_its_paths_after_project_scoping(tmp_path: Path) -> None:

@@ -55,6 +55,7 @@ def test_submit_returns_and_reconnects_to_durable_state(tmp_path: Path) -> None:
             sys.executable,
             "-c",
             "import os,time; print(os.environ['LAMBDAFORGE_CACHE_ROOT'], flush=True); "
+            "print(os.environ['LAMBDAFORGE_PRODUCT_ROOT'], flush=True); "
             "time.sleep(1)",
         ),
         ResourceRequest(),
@@ -73,6 +74,9 @@ def test_submit_returns_and_reconnects_to_durable_state(tmp_path: Path) -> None:
     request = reconnected.inventory()[0]["request"]
     assert request["job_id"] == job_id
     assert request["cache_root"] == str(tmp_path / "cache")
+    assert request["product_root"] == str(tmp_path / ".lambdaforge" / "products")
+    assert request["product_root"] in reconnected.logs(job_id)
+    assert not Path(request["product_root"]).exists()
 
 
 def test_inventory_projects_study_without_transferring_candidates_or_runs(tmp_path: Path) -> None:

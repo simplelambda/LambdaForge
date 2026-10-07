@@ -47,6 +47,7 @@ class DataScreen(Vertical):
                 "Select a row for details. Press ? for contextual help.",
                 id="screen-detail",
                 classes="detail-panel",
+                markup=False,
             ),
             Static(
                 "Waiting for the first update",

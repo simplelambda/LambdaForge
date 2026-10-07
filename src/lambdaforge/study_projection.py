@@ -189,6 +189,7 @@ def study_table(value: Mapping[str, Any]) -> dict[str, Any]:
         "planned_candidates",
         "status",
         "design_status",
+        "lifecycle",
         "scientific_status",
         "finish_reason",
         "required_runs",

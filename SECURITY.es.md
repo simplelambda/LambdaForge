@@ -42,7 +42,18 @@ mínima, impacto y si requiere entrada no confiable. Nunca adjuntes credenciales
 - `outputs.file/directory` asigna storage del Attempt y solo registra un conjunto completamente
   finalizado. `outputs.artifact` copia de forma segura una ruta externa. `outputs.dataset` exige
   assets del Run o URI explícita, rechaza traversal/symlinks, hashea, verifica staging y publica
-  atómicamente. Una cadena YAML solo es ruta con un marcador `file` o `dataset` explícito.
+  atómicamente. Cadenas YAML ordinarias no se interpretan como rutas; resolución/staging requieren
+  marcadores explícitos `file`, `dataset` o `product`.
+- Nombres/contratos de productos son bindings inmutables; promoción verifica copias independientes
+  y conserva provenance original. Import Study/productos comprueba inventarios exactos completos y
+  rechaza rutas inseguras, enlaces y corrupción sin importar Python consumidor ni ejecutar Studies.
+  Hashes no son firmas: usa fuentes confiables. Evidencia Study importada es read-only, no autoridad
+  de recovery. Leer un informe no abre automáticamente su HTML.
+- Certificados de equivalencia de dataset conservan ambos content IDs exactos y contrato/verificador/
+  política explícitos completos. Construir invoca Python confiable del verificador del proyecto;
+  leer/importar nunca lo ejecuta. Un certificado es aprobación científica histórica, no igualdad de
+  bytes, integridad actual, verdad autenticada ni permiso para omitir checksums. Verifica por separado
+  bytes actuales del candidato. Inputs dataset Work ordinarios siguen exigiendo contenido exacto.
 - Los ficheros gestionados de cache/checkpoint rechazan claves absolutas o con traversal, symlinks y
   contenido no regular. Publican tras validación, `fsync`, SHA-256 y reemplazo atómico y exponen un
   handle path-like de solo lectura. `Work.map` guarda key/huella/tamaño, nunca rutas del controlador.
@@ -53,7 +64,11 @@ mínima, impacto y si requiere entrada no confiable. Nunca adjuntes credenciales
 - `lf delete WORK` es preview-first, rechaza Attempts activos y solo elimina una raíz exacta de Job
   o Execution. Datasets, caches/entornos compartidos y otros Works están fuera; un recibo mínimo
   permite repetir la operación de forma segura.
-- El borrado interactivo exige una segunda tecla explícita, nunca elimina Jobs activos y usa la
+- Borrado nativo ResultStore revalida estado terminal/ownership bajo lock del controlador y
+  serializa con import. Snapshots importados running son evidencia borrable, no procesos activos.
+  Retirar padres vacíos usa operaciones relativas a descriptor donde se admiten, no sigue enlaces
+  ni borra roots; plataformas sin esta garantía conservan el padre vacío.
+- El borrado interactivo exige una segunda confirmación explícita, nunca elimina Jobs activos y usa la
   misma operación de raíz exacta que la CLI. Las raíces locales absolutas por Job evitan borrar
   desde otro directorio actual; la limpieza global conserva el registro si su workspace no pudo
   eliminarse de forma segura.

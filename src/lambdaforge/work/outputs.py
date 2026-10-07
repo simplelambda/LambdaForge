@@ -508,13 +508,23 @@ class OutputCollection:
         *,
         role: str = "model",
         release: bool = False,
+        metadata: Mapping[str, Any] | None = None,
     ) -> Path:
-        """Seal a checkpoint into an independent durable artifact, without scratch trees."""
+        """Seal a checkpoint into an independent artifact, without scratch trees.
+
+        For post-Study selection, explicitly bind this snapshot's own metric values/step through
+        ``metadata={"metrics": {...}, "step": epoch}``; generic Run metrics cannot prove them.
+        """
         from lambdaforge.work.snapshot import copy_file, copy_tree
 
-        source = owned_path(self._runtime.checkpoints._root, checkpoint, must_exist=True)
+        annotations = dict(metadata or {})
+        if "checkpoint_source" in annotations:
+            raise ValueError("Checkpoint artifact metadata cannot replace its owned source.")
+
+        source = owned_path(self._runtime.checkpoints._root, checkpoint)
         if source == self._runtime.checkpoints._root:
             raise ValueError("Publish a named checkpoint, not the collection root.")
+        source = owned_path(self._runtime.checkpoints._root, checkpoint, must_exist=True)
         selected = self._new_name(name)
         destination = owned_path(
             self._runtime.run_dir, Path("artifacts") / self._safe_name(selected)
@@ -539,7 +549,7 @@ class OutputCollection:
             digest,
             size,
             None,
-            {"checkpoint_source": checkpoint},
+            {"checkpoint_source": checkpoint, **annotations},
         )
         if release:
             self._runtime.checkpoints._publication_committed(

@@ -1323,6 +1323,28 @@ a intentarse por esta acción deliberada del usuario, nunca en un bucle automát
 
 ## 9. Resultados y metadata
 
+Telemetría y resultados de Execution incluyen `lifecycle` versionado con `operational`, `evidence`
+y `health` independientes. `running / pending_recovery / degraded` no significa fallo científico
+terminal. `stopped / complete / degraded` conserva fallos físicos anteriores tras recovery. Retries
+en espera son cola, no procesos activos. El historial visible está acotado pero conserva contadores
+acumulados; historias antiguas truncadas se señalan como incompletas. Los envelopes antiguos se
+pueden proyectar en memoria sin crear ficheros ni inventar Attempts ausentes. El
+[registro de reforma](ARCHITECTURAL_REFORM.es.md) detalla fronteras implementadas y migraciones
+pendientes. No cambian ajuste de objetivos, censura de pruning, identidad exacta ni presupuestos.
+La finalización resuelve los últimos Attempts de cada celda lógica antes de calcular el estado
+terminal compatible: un fallo físico antiguo no invalida una Run recuperada. Fases y fidelidades
+permanecen separadas. Previews de storage/clean no crean cachés ni locks; apply revalida propiedad
+y objetivos bajo locks, no confía en un preview anterior.
+
+[Productos durables](PRODUCTS.es.md) documenta publicación `lf products`, selección ModelSet,
+StudyDecision, bundles portables verificados e inputs product tipados en `with`. Resolver metadata
+es de solo lectura; Attempts reales registran consumidores y pesos se verifican al acceder
+explícitamente. Catálogos propios del proyecto, no de Jobs/cachés desechables. Espera/replanificación
+automática de dependencias y export Fleet completo todavía no están implementados.
+`lf import PACKAGE` verifica exports de un host; `--apply` registra evidencia y productos sin ejecutar.
+Procedencia original intacta; registros importados son read-only, no recovery nativo. Consola
+**Products → Import Study…** ofrece el mismo flujo confirmado.
+
 Cada Attempt escribe `result.json`, `environment.json`, `work.log`, JSONL de métricas, progreso,
 outputs y artefactos. La Execution escribe `execution.json`, su configuración inmutable y un
 `result.json` agregado. Se preservan identidad, paquete/código consumidor, argumentos lógicos,

@@ -241,6 +241,9 @@ class ControlPlane:
         if transport is not None and bundle.shared_inputs:
             notify("inputs")
             self._verify_shared_inputs(transport, effective_profile, bundle.shared_inputs)
+        if transport is not None and bundle.product_inputs:
+            notify("inputs")
+            self._verify_product_inputs(transport, effective_profile, bundle.product_inputs)
         work_dir: str | Path
         if cluster == "local":
             work_dir = Path(config_path).resolve().parent
@@ -352,6 +355,7 @@ class ControlPlane:
                     "LAMBDAFORGE_DATASET_REGISTRY="
                     f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
                     f"LAMBDAFORGE_CACHE_ROOT={storage.cache_root}",
+                    f"LAMBDAFORGE_PRODUCT_ROOT={storage.product_root}",
                     "LAMBDAFORGE_STORAGE_POLICY=" + json.dumps(storage.to_dict()),
                     f"LAMBDAFORGE_CLUSTER={cluster}",
                     f"LAMBDAFORGE_GPU_ACCESS_MODE={gpu_mode}",
@@ -609,6 +613,80 @@ except Exception as error:
                     f"{'; '.join(differences)}. Synchronize the remote mirror before retrying; "
                     "LambdaForge will not run against stale or partial input data."
                 )
+
+    @staticmethod
+    def _verify_product_inputs(
+        transport: Transport,
+        profile: ClusterProfile,
+        inputs: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Check bounded imported metadata/placement on its host, never download model bytes."""
+        from lambdaforge.products.models import StudyProduct
+        from lambdaforge.products.registry import _encoded
+
+        assert profile.storage is not None
+        probe = """
+import json, pathlib, re, sys
+try:
+    root = pathlib.Path(sys.argv[1])
+    content = sys.argv[2]
+    if (not root.is_absolute() or root.resolve() != root
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}', content)):
+        raise ValueError('unsafe product root/identity')
+    owned = root / 'objects' / content[7:]
+    manifest = owned / 'manifest.json'
+    if (manifest.resolve() != manifest or not manifest.is_file()
+            or manifest.stat().st_size > 512 * 1024):
+        raise ValueError('missing/unsafe/bounded product manifest')
+    text = manifest.read_text(encoding='utf-8')
+    value = json.loads(text)
+    for artifact in value.get('artifacts', []):
+        relative = artifact['path']
+        if (not isinstance(relative, str) or '\\\\' in relative or ':' in relative
+                or any(part in ('', '.', '..') for part in relative.split('/'))):
+            raise ValueError('unsafe product artifact path')
+        path = owned / relative
+        if (not path.is_relative_to(owned) or path.resolve() != path or not path.is_file()
+                or path.stat().st_size != artifact['size_bytes']):
+            raise ValueError('missing/unsafe product artifact placement')
+    print(text)
+except Exception as error:
+    print(f'{type(error).__name__}: {error}', file=sys.stderr)
+    raise SystemExit(2)
+"""
+        for expected in inputs:
+            result = transport.run(
+                (
+                    *profile.command_prefix,
+                    profile.python,
+                    "-c",
+                    probe,
+                    profile.storage.product_root,
+                    str(expected["name"]),
+                ),
+                timeout=30,
+            )
+            if result.returncode:
+                raise ValueError(
+                    f"Product {expected['name']} is not materialized on {profile.name}: "
+                    f"{result.stderr.strip()[-300:]}. Export/import the exact product into "
+                    f"{profile.storage.product_root}; model bytes are never copied implicitly."
+                )
+            if len(result.stdout.encode("utf-8")) > 512 * 1024 + 1:
+                raise ValueError("Remote product metadata exceeds its bounded contract.")
+            product = StudyProduct.from_dict(json.loads(result.stdout))
+            if (
+                product.content_id != expected["name"]
+                or product.contract.identifier != expected["contract"]
+            ):
+                raise ValueError(
+                    "Remote product content/contract differs from the frozen dependency."
+                )
+            for key, value in expected.get("expect", {}).items():
+                if key not in product.scientific_meaning or _encoded(value) != _encoded(
+                    product.scientific_meaning[key]
+                ):
+                    raise ValueError(f"Remote product scientific expectation differs for {key!r}.")
 
     @staticmethod
     def _project_root(start: Path) -> Path | None:

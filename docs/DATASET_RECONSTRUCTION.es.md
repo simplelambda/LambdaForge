@@ -152,6 +152,53 @@ rechazan; solo una inscripción cuyo directorio se demuestra ausente puede retir
 El investigador elige la referencia, no el orden de descubrimiento ni la mayoría. Conserva los bytes
 divergentes y publícalos bajo versión nueva explícita después de revisar su evidencia.
 
+## Certificados de equivalencia durables
+
+`DatasetEquivalenceCertificate` reutiliza ProductRegistry inmutable como `ScientificReport` con
+contrato reservado `lambdaforge/dataset-equivalence:v1`. Ejecuta la comparación existente de todo
+el dataset antes de sellar la aprobación; no acepta un JSON arbitrario como prueba. Fija ambos
+content IDs exactos, declaración científica completa, verificador, política por variable y evidencia.
+Raíces operativas, fecha de comparación y procedencia de la Execution/operación productora quedan
+separadas de identidad científica/contenido.
+
+```python
+from lambdaforge.data import DatasetEquivalenceCertificate
+from lambdaforge.products import ProductRegistry
+from my_project.dataset_checks import verify_member
+
+certificate = DatasetEquivalenceCertificate.build(
+    "/published/reference", "/sealed/reconstruction",
+    name="corpus-reconstruction-check-v1",
+    scientific_contract=science_declaration,  # Contrato completo explícito del dataset.
+    verifier=verify_member,
+    verifier_id="my_project.verify_member:v1",
+    policy=variable_specific_policy,
+    producer={
+        "execution_id": "<Execution u operación de comparación productora registrada>",
+        "evidence_fingerprint": "<identidad registrada de fuentes/comparación>",
+    },
+)
+registry = ProductRegistry()
+preview = certificate.publish(registry)  # No crea locks/archivos ni cambia registros.
+certificate.publish(registry, apply=True)
+restored = DatasetEquivalenceCertificate.load(registry, certificate.product.name)
+```
+
+Comparaciones no resueltas, científicamente distintas o corruptas no se certifican. Incluso bytes
+idénticos necesitan declaración científica explícita para obtener certificado científico. Los
+manifiestos antiguos requieren las mismas assertions `scientific_contracts` ligadas a content IDs
+que `compare`. Informes mayores que los 512 KiB de metadata del catálogo fallan explícitamente;
+nunca se recorta evidencia. `lf products show/provenance/export/import` y Products de la consola
+consultan/transportan estos registros. Leer/importar no ejecuta el verificador registrado.
+
+Son assertions de un proyecto de confianza, no autenticidad criptográfica ni igualdad transitiva.
+`accepts(reference_content_id=..., candidate_content_id=..., scientific_contract=...)` solo consulta
+el par y contrato exactos registrados; no verifica integridad actual. Antes de usar el candidato
+materializado comprueba por separado `DatasetOperations.verify(root, candidate_content_id)`.
+Nunca le atribuyas el content ID de referencia ni sobrescribas una versión inmutable.
+La resolución automática Work YAML por contrato **todavía no está implementada**: inputs dataset
+tipados ordinarios siguen exigiendo contenido exacto. Ningún certificado cambia eso implícitamente.
+
 ## Cambios necesarios en WISDOM (no realizados aquí)
 
 Los tres hashes comunicados para `wisdom-dna-reduced@6` representan contenido exacto distinto.
