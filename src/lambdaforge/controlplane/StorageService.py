@@ -37,7 +37,8 @@ class StorageService:
         assert profile.storage is not None
         try:
             categories = self._invoke(cluster, "status", profile.storage.to_dict())
-            return StorageReport(cluster, True, categories)
+            filesystems = categories.pop("filesystems", {})
+            return StorageReport(cluster, True, categories, filesystems=filesystems)
         except Exception as error:
             return StorageReport(cluster, False, {}, f"{error.__class__.__name__}: {error}")
 
@@ -50,6 +51,15 @@ class StorageService:
                 values[futures[future]] = future.result()
         return tuple(values[name] for name in sorted(values))
 
+    def reconcile(self, cluster: str = "local", *, apply: bool = False) -> dict[str, Any]:
+        """Measure owned roots explicitly; optionally update a diagnostic ledger only."""
+        profile = self.catalog.get(cluster)
+        assert profile.storage is not None
+        return {
+            "cluster": cluster,
+            **self._invoke(cluster, "reconcile", profile.storage.to_dict(), apply=apply),
+        }
+
     def gc(self, cluster: str = "local", *, apply: bool = False) -> StorageGcPlan:
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
@@ -60,19 +70,23 @@ class StorageService:
             for record in records
             for job_id in record.metadata.get("recovery_dependencies", ())
         }
+        dependency_records = tuple(record for record in records if record.job_id in retained)
         references = {
-            "bundles": [record.bundle_id for record in active if record.bundle_id],
+            "bundles": [
+                record.bundle_id for record in (*active, *dependency_records) if record.bundle_id
+            ],
             "environments": [
                 str(record.metadata["environment_id"])
-                for record in active
+                for record in (*active, *dependency_records)
                 if record.metadata.get("environment_id") not in {None, "existing"}
             ],
             "runtimes": [
                 str(record.metadata["python_runtime_id"])
-                for record in active
+                for record in (*active, *dependency_records)
                 if record.metadata.get("python_runtime_id")
             ],
             "stage_cache": [],
+            "protected_jobs": sorted(retained),
             "terminal_jobs": [
                 record.job_id
                 for record in records
@@ -91,6 +105,12 @@ class StorageService:
             int(payload["reclaimable_bytes"]),
             apply,
             str(payload["blocked_reason"]) if payload.get("blocked_reason") else None,
+            categories=payload.get("categories", {}),
+            protected_items=tuple(payload.get("protected_items", ())),
+            reclaimed_bytes=int(payload.get("reclaimed_bytes", 0)),
+            quota_unresolved_bytes=int(payload.get("quota_unresolved_bytes", 0)),
+            filesystems_before=payload.get("filesystems_before", {}),
+            filesystems_after=payload.get("filesystems_after", {}),
         )
 
     def environments(self, cluster: str = "local") -> tuple[dict[str, Any], ...]:
@@ -120,10 +140,14 @@ class StorageService:
         """Prune superseded environment caches while retaining every live job reference."""
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
+        records = self.jobs.list(cluster=cluster, refresh=False)
+        retained = {
+            job_id
+            for record in records
+            for job_id in record.metadata.get("recovery_dependencies", ())
+        }
         active = tuple(
-            record
-            for record in self.jobs.list(cluster=cluster, refresh=False)
-            if not record.state.terminal
+            record for record in records if not record.state.terminal or record.job_id in retained
         )
         protected = {
             *keep,
@@ -200,6 +224,8 @@ class StorageService:
         if cluster == "local":
             if operation == "status":
                 return StorageOperations.status(descriptor)
+            if operation == "reconcile":
+                return StorageOperations.reconcile(descriptor, apply=apply)
             if operation == "prune-environments":
                 return StorageOperations.prune_environments(
                     descriptor,
@@ -224,11 +250,11 @@ class StorageService:
             operation,
             json.dumps(descriptor, separators=(",", ":")),
         ]
-        if operation in {"gc", "prune-environments", "delete-job", "compact-job"}:
+        if operation in {"gc", "prune-environments", "delete-job", "compact-job", "reconcile"}:
             arguments.extend(
                 (json.dumps(references or {}, separators=(",", ":")), str(apply).lower())
             )
-        result = transport.run(tuple(arguments), timeout=60.0)
+        result = transport.run(tuple(arguments), timeout=600.0)
         if result.returncode:
             raise RuntimeError(result.stderr.strip())
         payload = json.loads(result.stdout)

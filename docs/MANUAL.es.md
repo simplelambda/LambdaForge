@@ -115,12 +115,18 @@ avance, mientras `metrics.log` conserva evidencia científica.
 |---|---|---:|---:|---:|
 | bytes/texto/JSON pequeño reconstruible | `cache.put/get` | se reutiliza | sí | no |
 | fichero descargable/calculable | `cache.file/fetch` | se reutiliza | sí | no |
-| estado secuencial para reanudar | `checkpoints.file/save_json` | sí | no | evidencia de resume |
+| estado secuencial para reanudar | `checkpoints.file/save_json` | sí | solo cuando deje de ser requerido, según retención | evidencia de resume |
 | fichero/árbol científico final | `outputs.file/directory` | pertenece al Attempt | solo duplicado publicado verificado | sí |
 | intermedio desechable | `temp_dir` | no | automático | no |
 
 `cache.path`, `checkpoints.path` y escrituras directas bajo `run_dir` son escapes avanzados. El
 usuario que los elige también asume validación, atomicidad y registro.
+
+Los checkpoints son recuperación, no modelos permanentes. `checkpoints.pin(name, reason=...)`
+protege estado propio nombrado; `unpin(name)` solo cambia metadata. Publica modelos con
+`outputs.from_checkpoint(name, checkpoint, release=True)` o datasets desde `source_checkpoint`.
+Liberar exige publicación independiente verificada y finalización correcta de Execution.
+La [guía de almacenamiento](STORAGE.es.md) contiene ejemplos y retención.
 
 ### 4.2 ManagedFile y cache
 
@@ -371,6 +377,19 @@ Python con `self.outputs.dataset(name=..., version=..., members=...)`. Los miemb
 JSONL, se copian y hashean assets, se valida el índice, se calcula identidad independiente de ruta,
 se promociona staging atómicamente y se registra placement. Reutilizar nombre/versión con otro
 contenido se rechaza; DatasetArtifact v1 sigue siendo legible.
+
+### 6.1 Reutilizar, reconstruir y recuperar publicación
+
+Antes del cálculo costoso usa `lf datasets preflight NOMBRE@VERSION --intent publish|reuse|rebuild
+--on CLUSTER`. El Work productor llama primero a `outputs.dataset_preflight(...)`: no se pueden
+inferir nombres de outputs desde Python arbitrario antes de `run()`.
+`outputs.dataset(..., intent="rebuild", scientific_identity=...)` sella un candidato fijado y no
+registrado; checksums exactos intactos. `lf datasets compare RAIZ_A RAIZ_B --on CLUSTER
+--verifier proyecto.modulo:funcion --policy policy.json --output report.json` verifica todos los
+bytes antes del verificador científico. `lf datasets publish-candidate RAIZ --version NUEVA
+--on CLUSTER` previsualiza recuperación solo de publicación; `--apply` publica sin recalcular.
+La consola descubre todas las ubicaciones configuradas y señala conflictos de identidad.
+[Reconstrucción de datasets](DATASET_RECONSTRUCTION.es.md): contratos, seguridad, retención y WISDOM.
 
 ## 7. Secuencia, paralelismo, seeds y búsqueda
 
@@ -1257,7 +1276,7 @@ compatibles activan `resuming`. `--restart` elimina checkpoints del Run. `--reru
 Execution deliberada. El control plane rechaza un duplicado activo de misma identidad/destino salvo
 `--allow-duplicate`.
 
-### Recuperar un Study adaptativo interrumpido
+### Recuperar un Study interrumpido
 
 `lf retry STUDY` y **Resume Study…** en su ventana usan el mismo servicio de recuperación.
 El selector identifica un Attempt fallido/cancelado/con timeout del clúster original. Se consulta
@@ -1266,7 +1285,17 @@ Execution original bajo propiedad del framework. No se copian pesos ni artefacto
 reintentar: solo índices pequeños de consola y referencias a decisiones. Logs, métricas,
 checkpoints y evidencia siguen referenciados en su ubicación original.
 
-Se restauran candidatos propuestos, números de Trial, expansión determinista, seeds, acciones
+La operación cubre Studies adaptativos, seeds repetidas y sweeps fijos. Los diseños fijos leen
+el diseño inmutable y Attempts propios, consideran el último resultado y reutilizan Runs correctas;
+no requieren ni inventan estado de controlador adaptativo. `lf retry STUDY --dry-run --json`
+expone `recovery_plan`: `reuse_runs`, `retry_runs`, `pending_runs`, seed/Trial/acción por celda
+y presupuestos físicos gastados. Una seed fallida recibe otro Attempt de la misma Run lógica,
+no un experimento nuevo; las Runs sin empezar siguen siendo obligatorias. Recuperar el Study no
+garantiza continuar una época: se ofrecen checkpoints compatibles, pero el Work debe restaurarlos.
+Sin ese soporte, solo se reinicia la Run incompleta. Diseños/entradas incompatibles y checkpoints
+con rutas inseguras se rechazan.
+
+Para Studies adaptativos se restauran candidatos propuestos, números de Trial, expansión determinista, seeds, acciones
 pendientes, obligaciones del diseño inicial, convergencia y confirmación. Resultados completos y
 podados conservan su evidencia. Runs fallidas y acciones interrumpidas se reencolan una vez como
 nuevos Attempts: usan un checkpoint compatible cuando existe y empiezan de nuevo si no existe.
@@ -1285,7 +1314,9 @@ Si la corrección invalida resultados previos, crea otro Study. `execution.json`
 Un bloqueo entre procesos impide escribir simultáneamente el mismo controlador. Las dependencias
 de recuperación protegen los Jobs originales de GC y borrado individual; borrar todo el historial
 terminal del Work previsualiza y elimina la cadena junta. Estado ausente/corrupto y rutas ajenas o
-con enlaces fallan de forma segura. La recuperación cubre un único Study adaptativo por Execution
+con enlaces fallan de forma segura. Los adaptativos siguen requiriendo `hpo-control/state.json`
+compatible; los diseños fijos requieren sus registros propios de diseño/Attempts. La recuperación
+cubre un único Study por Execution
 en el mismo clúster; un fallo de preparación sin estado de Study permite el retry normal del envío.
 Los reintentos automáticos siguen limitados a infraestructura: errores consumidores solo vuelven
 a intentarse por esta acción deliberada del usuario, nunca en un bucle automático infinito.
@@ -1368,13 +1399,32 @@ El acceso a GPU se configura una vez por clúster:
 | `auto` | `scheduler` con SLURM; `exclusive` en un host de procesos directo |
 | `scheduler` | el batch scheduler posee reserva y aislamiento |
 | `exclusive` | espera lease LambdaForge y evita uso externo observado |
-| `shared` | coordina Jobs LambdaForge, pero admite una GPU ocupada externamente |
+| `shared` | los Jobs pueden compartir GPUs; cada Study coordina comprobación y arranque entre proyectos |
 | `command` | no crea lease directo; antepone un argv de claim/launcher del centro |
 
 ```bash
 lf clusters set host-libre gpu_access.mode shared
 lf clusters set citius-gpu gpu_access '{mode: command, command_prefix: [gpu, exec]}'
 ```
+
+En un host directo compartido, los Studies no reservan exclusivamente todas sus GPUs durante
+la vida del Job. Las nuevas Runs prefieren una GPU permitida sin procesos de cómputo observados
+(también se consideran otros Studies/usuarios); si están ocupadas, se conserva el empaquetado
+best-fit del planificador de recursos. Locks breves por dispositivo serializan la comprobación
+actualizada de VRAM y el arranque, con separación temporal entre Studies. No son otra reserva de
+memoria. Las aplicaciones ajenas no participan en estos locks: no se garantiza aislamiento ni
+ausencia de OOM. Las concesiones del centro y leases exclusivos siguen siendo autoritativos;
+nunca se añade una GPU fuera del subconjunto permitido.
+
+Los Studies de seeds repetidas usan el mismo dispatcher: un candidato con diez seeds tiene diez
+Runs independientes obligatorias, no un límite de paralelismo de uno. `execution.max_parallel`,
+`runs_per_gpu`, la seguridad de memoria/ARI y la asignación agregada CPU/RAM del Job siguen
+limitando la concurrencia. Varios Jobs necesitan **recursos del host**, no solo VRAM libre: reservar
+46 núcleos en un host de 48 deja dos para otros Jobs, así que otra solicitud de 32 queda en cola
+correctamente. Ajusta deliberadamente los recursos de futuras ejecuciones, sin sobreasignar el
+host. Builds del mismo entorno gestionado esperan durante el aprovisionamiento y reutilizan su
+finalización verificada; la limpieza opcional de entornos obsoletos se pospone si Jobs activos
+mantienen un lease de caché.
 
 El comando es argv y nunca un string de shell. En CITIUS, `gpu exec` es el modo gpuctl preferido
 para una GPU: su reserva coincide con la vida del comando. Para un Work multi-GPU, o si se necesita
@@ -1570,18 +1620,28 @@ raíces/symlinks inseguros y es idempotente. Esto permite recuperar con segurida
 anteriores tras actualizar. YAML es código confiable y puede importar Python arbitrario;
 LambdaForge no es sandbox.
 
+**Clear storage…** en el clúster usa la misma autoridad preview/apply, confirma categorías y muestra
+feedback en segundo plano. **Clear output** no limpia disco. La [guía](STORAGE.es.md) describe reservas
+por volumen, margen, presión, quotas/LRU, gracia/pins/publicación, Fleet/SLURM y límites actuales.
+Los sondeos normales solo leen filesystem/leases, nunca recorren datasets ni Runs.
+`lf storage status --on CLUSTER` inventaría uso explícitamente. `lf storage reconcile --on CLUSTER`
+informa cambios; `--apply` actualiza atómicamente el inventario diagnóstico y nunca elimina ciencia.
+Los snapshots de publicación gestionados reservan en el volumen destino, no en el de la Run.
+
 En la Consola de investigación, `d` confirma el borrado del Work terminal o Attempt seleccionado y `D` confirma la
 limpieza de todo el historial terminal. Los Jobs activos nunca se borran. La operación se ejecuta
 fuera del loop de teclado, elimina workspace, eventos y registro de envío exactos y conserva
 datasets publicados, caches, entornos y Jobs ajenos. `lf jobs clear` presenta la operación y
 `lf jobs clear --apply` la aplica; un fallo conserva el registro local afectado.
 
-Al terminar existe una retención automática más estrecha: elimina únicamente artefactos
+Al terminar existe una retención automática más estrecha: elimina artefactos
 gestionados parciales de Attempts fallidos/interrumpidos y duplicados internos verificados de
 outputs publicados. Conserva toda evidencia ligera requerida por la Consola de investigación, `lf logs`, resultados y
 reproducción; `retention.json` registra bytes recuperados. Los entornos inmutables sustituidos
 también se podan tras activar un reemplazo verificado, excepto el activo y los referenciados por
-Jobs vivos. Bootstrap y preparación automática comparten la regla; la procedencia del Attempt
+Jobs vivos/recuperados. Checkpoints correctos sin pin solo son elegibles según gracia/publicación;
+la recuperación fallida/interrumpida se conserva. Bootstrap y preparación automática comparten
+la regla; la procedencia del Attempt
 permanece aunque se recojan bytes reconstruibles del entorno.
 
 ## 12. Referencia CLI
@@ -1602,6 +1662,7 @@ permanece aunque se recojan bytes reconstruibles del entorno.
 | `datasets ...` | inspección/verificación/placement/borrado de versiones |
 | `results list/show/compare/analyze/report` | consultar, analizar y exportar evidencia |
 | `clean` | preview/aplicación de GC reconstruible |
+| `storage status/reconcile` | uso/cambios explícitos; reconcile `--apply` solo actualiza el inventario diagnóstico |
 
 `lf help`, `lf --help`, `lf help clusters add` y los `--help` anidados terminan con código cero.
 Los fallos tienen categorías/códigos estables. `--json` es para tooling y `--debug` añade traceback.

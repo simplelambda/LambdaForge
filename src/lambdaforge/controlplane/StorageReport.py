@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -14,6 +14,7 @@ class StorageReport:
     online: bool
     categories: dict[str, dict[str, Any]]
     error: str | None = None
+    filesystems: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -21,4 +22,5 @@ class StorageReport:
             "online": self.online,
             "categories": self.categories,
             "error": self.error,
+            "filesystems": self.filesystems,
         }

@@ -437,6 +437,17 @@ class NativeInstallTransport(Transport):
         values = tuple(command)
         with self._lock:
             self.commands.append(values)
+            if "lambdaforge-cache-build-release" in " ".join(values):
+                self.files.pop(values[-2], None)
+                self.directories.discard(str(Path(values[-2]).parent))
+                return CommandResult(0)
+            if "lambdaforge-environment-build-lease" in " ".join(values):
+                target = values[-2]
+                if target in self.directories:
+                    return CommandResult(75)
+                self.directories.add(target)
+                self.files[f"{target}/owner.json"] = values[-1]
+                return CommandResult(0)
             if values[:2] == ("test", "-f"):
                 return CommandResult(0 if values[2] in self.files else 1)
             if values and values[0] == "mkdir":

@@ -306,7 +306,7 @@ class DatasetIndex:
                 unresolved = dataset_root / asset.path
                 resolved = unresolved.resolve(strict=False)
                 if (
-                    unresolved.is_symlink()
+                    any(path.is_symlink() for path in (unresolved, *unresolved.parents))
                     or not resolved.is_relative_to(dataset_root)
                     or not resolved.exists()
                 ):

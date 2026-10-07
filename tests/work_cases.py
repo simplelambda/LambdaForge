@@ -338,3 +338,23 @@ class RecoverableStudyWork(lf.Work):
             raise RuntimeError("consumer bug after checkpoint")
         self.metrics.log("score", 0.5 + choice / 10, step=4)
         return {"score": 0.5 + choice / 10}
+
+
+class FixedRecoveryWork(lf.Work):
+    """Small owned evidence with a deliberately recoverable per-seed consumer failure."""
+
+    def run(
+        self, fail_seed: int = 54, failures: int = 1, choice: int = 0, source: Path | None = None
+    ) -> dict[str, float]:
+        count = (
+            self.checkpoints.load_json("attempts.json")["count"]
+            if self.checkpoints.exists("attempts.json")
+            else 0
+        )
+        self.checkpoints.save_json("attempts.json", {"count": count + 1})
+        if self.seed == fail_seed and choice == 0 and count < failures:
+            raise RuntimeError("deliberate seed failure after application checkpoint")
+        score = float(choice)
+        self.metrics.log("score", score, step=3)
+        self.outputs.file("report", filename="report.json").write_json({"seed": self.seed})
+        return {"score": score}

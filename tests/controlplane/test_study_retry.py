@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,9 @@ from lambdaforge.controlplane.JobStore import JobStore
 from lambdaforge.controlplane.LocalTransport import LocalTransport
 from lambdaforge.controlplane.ResearchWork import aggregate_research_work
 from lambdaforge.controlplane.StorageService import StorageService
+from lambdaforge.work import WorkConfig, WorkRunner
 from lambdaforge.work.models import atomic_json
+from lambdaforge.work.runner import _execute_run
 
 
 @pytest.fixture
@@ -175,3 +178,70 @@ def test_preview_fails_closed_for_foreign_execution(
     atomic_json(Path(previous.work_dir).parent / "result.json", {"execution_dir": str(foreign)})
     with pytest.raises(ValueError, match="outside"):
         jobs.retry_preview(previous.job_id)
+
+
+def test_fixed_preview_and_retry_handoff_preserve_nine_runs_without_adaptive_state(
+    recovery_jobs: tuple[JobService, JobRecord, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs, previous, _execution = recovery_jobs
+    source = Path(str(previous.config_path))
+    source.write_text(
+        "name: recovery\nrun: tests.work_cases.FixedRecoveryWork\n"
+        "seeds: [4, 7, 32, 54, 65, 94, 109, 124, 142, 167]\n"
+        "objective: {metric: score, mode: max}\nresources: {cpu: 1}\n"
+        "execution: {failure_retries: 0}\n"
+    )
+    config = WorkConfig.from_yaml(source)
+
+    def dispatch(values: Any, **kwargs: Any) -> tuple[Any, ...]:
+        return tuple(_execute_run(value) for value in values)
+
+    result = WorkRunner(
+        dispatcher=dispatch,
+        execution_root=Path(previous.work_dir) / ".lambdaforge" / "runs" / "recovery",
+    ).run(config)
+    atomic_json(Path(previous.work_dir).parent / "result.json", result.to_dict())
+    before = {path: path.read_bytes() for path in result.execution_dir.rglob("*") if path.is_file()}
+    preview = jobs.retry_preview(previous.job_id)
+    assert preview["strategy"] == "repeated"
+    assert (preview["reuse_runs"], preview["retry_runs"], preview["pending_runs"]) == (9, 1, 0)
+    assert not (result.execution_dir / "hpo-control" / "state.json").exists()
+    registry = {path: path.read_bytes() for path in jobs.store.root.rglob("*") if path.is_file()}
+    planned = jobs.retry(previous.job_id, dry_run=True)
+    assert planned.state == JobState.PLANNED
+    assert planned.recovery_plan["reuse_runs"] == 9
+    assert registry == {
+        path: path.read_bytes() for path in jobs.store.root.rglob("*") if path.is_file()
+    }
+    launches: list[Any] = []
+    actual_popen = subprocess.Popen
+
+    def launch(command: Any, *args: Any, **kwargs: Any) -> Any:
+        if "lambdaforge.controlplane.SubmissionWorker" in command:
+            launches.append(command)
+            return SimpleNamespace(pid=1234)
+        return actual_popen(command, *args, **kwargs)
+
+    monkeypatch.setattr("subprocess.Popen", launch)
+    handles, errors = [], []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(jobs.retry, previous.job_id) for _ in range(2)]
+        for future in futures:
+            try:
+                handles.append(future.result())
+            except Exception as error:
+                errors.append(str(error))
+    assert len(handles) == 1 and len(errors) == 1
+    assert any(word in errors[0] for word in ("active", "already", "duplicate"))
+    handle = handles[0]
+    record = jobs.get(handle.job_id, refresh=False)
+    assert record.metadata["recovery_execution_dir"] == str(result.execution_dir)
+    assert record.metadata["recovery_owner_job"] == previous.job_id
+    assert "--resume-execution" in record.metadata["run_arguments"]
+    with pytest.raises(Exception, match="active|already|duplicate"):
+        jobs.retry(previous.job_id)
+    assert len(launches) == 1
+    assert before == {
+        path: path.read_bytes() for path in result.execution_dir.rglob("*") if path.is_file()
+    }

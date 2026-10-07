@@ -102,6 +102,8 @@ class ProcessSupervisor:
         gpu_access: Mapping[str, Any] = {}
         gpu_mode = "exclusive"
         try:
+            if not cls._wait_for_storage(job_dir, request, supervisor):
+                return 0
             if bool(request.get("stage_source", False)):
                 source = Path(str(request["source_work_dir"])).resolve()
                 if not source.is_dir() or source.is_symlink():
@@ -136,11 +138,16 @@ class ProcessSupervisor:
             environment["LAMBDAFORGE_CLUSTER"] = str(request.get("cluster", "local"))
             environment["LAMBDAFORGE_JOB_ID"] = job_id
             environment["LAMBDAFORGE_EXECUTION_MODE"] = "worker"
+            if isinstance(request.get("storage"), Mapping):
+                environment["LAMBDAFORGE_STORAGE_POLICY"] = json.dumps(request["storage"])
+                environment["LAMBDAFORGE_STORAGE_RESERVED"] = "1"
             environment["LAMBDAFORGE_PROGRESS_PATH"] = str(job_dir / "progress.json")
             environment["LAMBDAFORGE_JOB_RESULT_PATH"] = str(job_dir / "result.json")
             environment["LAMBDAFORGE_STUDY_PATH"] = str(job_dir / "study")
             environment["LAMBDAFORGE_GPU_ACCESS_MODE"] = gpu_mode
             environment["LAMBDAFORGE_REQUESTED_GPUS"] = str(gpu_count)
+            if gpu_mode == "shared":
+                environment["LAMBDAFORGE_GPU_ADMISSION_ROOT"] = str(request["lease_root"])
             raw_visibility = gpu_access.get("visibility_command", ())
             visibility = (
                 tuple(str(value) for value in raw_visibility)
@@ -239,15 +246,86 @@ class ProcessSupervisor:
             storage = request.get("storage")
             if isinstance(storage, Mapping):
                 try:
+                    from lambdaforge.controlplane.StorageAdmission import StorageAdmission
                     from lambdaforge.controlplane.StorageOperations import StorageOperations
 
+                    StorageAdmission.release(storage, supervisor)
                     StorageOperations.compact_job(storage, job_id, apply=True)
+                    StorageOperations.gc({**storage, "automatic_gc": True}, {}, apply=True)
                 except Exception as error:
                     # Retention must never replace the authoritative scientific exit state.
                     cls._update_state(
                         job_dir,
                         {"retention_warning": f"{type(error).__name__}: {error}"},
                     )
+
+    @classmethod
+    def _wait_for_storage(
+        cls, job_dir: Path, request: Mapping[str, Any], supervisor: ProcessIdentity
+    ) -> bool:
+        """Queue disk commitments without consuming CPU/GPU leases or killing siblings."""
+        from lambdaforge.controlplane.StorageAdmission import StorageAdmission
+        from lambdaforge.controlplane.StorageOperations import StorageOperations
+
+        descriptor = request.get("storage")
+        if not isinstance(descriptor, Mapping):
+            return True  # Legacy direct requests have no authoritative storage descriptor.
+        resources = cls._required_mapping(request.get("resources", {}), "resources")
+        requested = int(resources.get("storage_bytes", 0))
+        last_gc = float("-inf")
+        while True:
+            if (cls._read_json(job_dir / "state.json") or {}).get("state") == "cancelled":
+                return False
+            observation = StorageAdmission.reserve(descriptor, supervisor, requested)
+            if observation.get("admitted"):
+                cls._update_state(job_dir, {"storage_admission": observation})
+                return True
+            if time.monotonic() - last_gc >= 60:
+                last_gc = time.monotonic()
+                try:
+                    deficit = max(
+                        0,
+                        requested
+                        + int(observation.get("reserved_bytes", 0))
+                        + int(observation["safety_bytes"])
+                        - int(observation["free_bytes"]),
+                    )
+                    cache_observation = StorageAdmission.filesystem(
+                        Path(str(descriptor["cache_root"])), descriptor
+                    )
+                    StorageOperations.gc(
+                        {
+                            **descriptor,
+                            "automatic_gc": True,
+                            "target_reclaim_bytes": deficit
+                            if cache_observation["device"] == observation["device"]
+                            else 0,
+                        },
+                        {},
+                        apply=True,
+                    )
+                except (OSError, TimeoutError):
+                    pass  # Live leases/another collector must not fail the queued Job.
+                observation = StorageAdmission.reserve(descriptor, supervisor, requested)
+                if observation.get("admitted"):
+                    cls._update_state(job_dir, {"storage_admission": observation})
+                    return True
+            cls._update_state(
+                job_dir,
+                {
+                    "state": JobState.QUEUED.value,
+                    "updated_at_utc": cls._now(),
+                    "heartbeat_at_utc": cls._now(),
+                    "storage_admission": observation,
+                    "message": (
+                        f"Waiting: storage admission; requested {requested} bytes, "
+                        f"physical free {observation['free_bytes']}, "
+                        f"reserved {observation.get('reserved_bytes', 'unknown')}, "
+                        f"safety {observation['safety_bytes']} bytes."
+                    ),
+                },
+            )
+            time.sleep(2.0)
 
     @classmethod
     def _release_external_gpu(
@@ -526,9 +604,12 @@ class ProcessSupervisor:
             state = cls._read_json(job_dir / "state.json") or {}
             if state.get("state") == JobState.CANCELLED.value:
                 return ()
-            allocated = cls._acquire_gpus(
-                lease_root, supervisor, count, allow_external_use=allow_external_use
-            )
+            try:
+                allocated = cls._acquire_gpus(
+                    lease_root, supervisor, count, allow_external_use=allow_external_use
+                )
+            except TimeoutError:
+                allocated = None  # Ordinary host lease contention keeps the Job queued.
             if allocated is not None:
                 return allocated
             cls._update_state(
@@ -555,7 +636,10 @@ class ProcessSupervisor:
         ram_bytes = int(resources.get("ram_bytes", 0))
         root = Path(str(request["resource_lease_root"])).resolve()
         while True:
-            allocated = cls._acquire_capacity(root, supervisor, cpu_count, ram_bytes)
+            try:
+                allocated = cls._acquire_capacity(root, supervisor, cpu_count, ram_bytes)
+            except TimeoutError:
+                allocated = None
             if allocated is not None:
                 return allocated
             state = cls._read_json(job_dir / "state.json") or {}
@@ -675,16 +759,30 @@ class ProcessSupervisor:
                     if isinstance(raw, Mapping) and ProcessIdentity.from_mapping(raw).matches():
                         continue
                     path.unlink(missing_ok=True)
+                if not allow_external_use and cls._shared_gpu_leased(root, index):
+                    continue
                 if index not in occupied:
                     available.append(index)
             if len(available) < count:
                 return None
-            selected = tuple(available[:count])
+            loads = cls._gpu_loads() if allow_external_use else {}
+            selected = tuple(
+                sorted(
+                    available,
+                    key=lambda index: (*loads.get(index, (float("inf"), float("inf"))), index),
+                )[:count]
+            )
             for index in selected:
                 cls._write_json(
-                    root / f"gpu-{index}.json",
+                    root
+                    / (
+                        f"gpu-{index}-shared-{supervisor.job_id}.json"
+                        if allow_external_use
+                        else f"gpu-{index}.json"
+                    ),
                     {
                         "lease_version": 1,
+                        "mode": "shared" if allow_external_use else "exclusive",
                         "gpu": index,
                         "job_id": supervisor.job_id,
                         "supervisor_identity": supervisor.to_dict(),
@@ -692,6 +790,19 @@ class ProcessSupervisor:
                     },
                 )
             return selected
+
+    @classmethod
+    def _shared_gpu_leased(cls, root: Path, index: int) -> bool:
+        """Shared access blocks a new exclusive grant, not another shared Job."""
+        active = False
+        for path in root.glob(f"gpu-{index}-shared-*.json"):
+            value = cls._read_json(path)
+            raw = value.get("supervisor_identity") if value else None
+            if isinstance(raw, Mapping) and ProcessIdentity.from_mapping(raw).matches():
+                active = True
+            else:
+                path.unlink(missing_ok=True)
+        return active
 
     @classmethod
     def _release_gpus(cls, root: Path, job_id: str, indices: Sequence[int]) -> None:
@@ -704,10 +815,42 @@ class ProcessSupervisor:
             poll_interval_seconds=0.05,
         ):
             for index in indices:
-                path = root / f"gpu-{index}.json"
-                value = cls._read_json(path)
-                if value and value.get("job_id") == job_id:
-                    path.unlink(missing_ok=True)
+                for path in (
+                    root / f"gpu-{index}.json",
+                    root / f"gpu-{index}-shared-{job_id}.json",
+                ):
+                    value = cls._read_json(path)
+                    if value and value.get("job_id") == job_id:
+                        path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _gpu_loads() -> dict[int, tuple[float, float]]:
+        """Rank permitted devices by live utilization and occupied VRAM, not index."""
+        try:
+            result = subprocess.run(
+                (
+                    "nvidia-smi",
+                    "--query-gpu=index,utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {}  # Ranking is optional; the Run's physical admission probe is not.
+        loads: dict[int, tuple[float, float]] = {}
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                try:
+                    index, utilization, used, total = (
+                        float(value.strip()) for value in line.split(",")
+                    )
+                    loads[int(index)] = (utilization, used / max(1.0, total))
+                except ValueError:
+                    continue
+        return loads
 
     @staticmethod
     def _gpu_indices() -> tuple[int, ...]:
@@ -719,9 +862,16 @@ class ProcessSupervisor:
         )
         if result.returncode:
             return ()
-        return tuple(
+        indices = tuple(
             int(line.strip()) for line in result.stdout.splitlines() if line.strip().isdigit()
         )
+        inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if inherited is None:
+            return indices
+        # A numeric inherited grant is already a physical subset. Never broaden it with
+        # nvidia-smi's host-wide inventory; UUID/MIG grants belong to the command launcher.
+        permitted = {int(value) for value in inherited.split(",") if value.strip().isdigit()}
+        return tuple(index for index in indices if index in permitted)
 
     @staticmethod
     def _externally_occupied_gpus() -> set[int]:

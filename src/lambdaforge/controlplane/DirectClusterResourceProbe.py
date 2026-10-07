@@ -14,7 +14,9 @@ class DirectClusterResourceProbe(ClusterResourceProbe):
     """Use standard Python, optional psutil and nvidia-smi without a system agent."""
 
     def probe(self, profile: ClusterProfile, transport: Transport) -> ResourceSnapshot:
-        workspace = repr(profile.workspace)
+        assert profile.storage is not None
+        workspace = repr(profile.storage.run_root)
+        storage = repr(profile.storage.to_dict())
         code = (
             "import json,os,shutil\n"
             "value={'cpu_total':os.cpu_count(),'cpu_load':None,'ram_total_bytes':None,"
@@ -32,6 +34,29 @@ class DirectClusterResourceProbe(ClusterResourceProbe):
             " path=parent\n"
             "disk=shutil.disk_usage(path)\n"
             "value.update(disk_total_bytes=disk.total,disk_free_bytes=disk.free)\n"
+            f"storage={storage}\n"
+            "try:\n"
+            " from lambdaforge.controlplane.StorageAdmission import StorageAdmission\n"
+            " value['storage']=StorageAdmission.observe(storage)\n"
+            "except ImportError:\n"
+            " from pathlib import Path\n"
+            " volumes={}\n"
+            " for key in ('state_root','cache_root','run_root','dataset_root'):\n"
+            "  if not storage.get(key): continue\n"
+            "  p=Path(storage[key])\n"
+            "  while not p.exists() and p!=p.parent: p=p.parent\n"
+            "  st=os.statvfs(p); total=st.f_blocks*st.f_frsize; free=st.f_bavail*st.f_frsize\n"
+            "  device=str(p.stat().st_dev); safety=storage.get('safety',{})\n"
+            "  floor=max(int(safety.get('min_free',0)),"
+            "int(total*float(safety.get('min_free_percent',5))/100))\n"
+            "  volume=volumes.setdefault(device,{'roots':[],'capacity_bytes':total,"
+            "'free_bytes':free,'safety_bytes':floor,'free_inodes':st.f_favail,"
+            "'reserved_bytes':None,'admissible_bytes':None,"
+            "'pressure':'CRITICAL' if free<=floor//2 or st.f_files>0 and st.f_favail==0 "
+            "else 'HARD_PRESSURE' if free<floor else 'SOFT_PRESSURE' if free<2*floor "
+            "else 'NORMAL'})\n"
+            "  volume['roots'].append(key)\n"
+            " value['storage']=volumes\n"
             "print(json.dumps(value))\n"
         )
         result = transport.run((*profile.command_prefix, profile.python, "-c", code), timeout=20.0)

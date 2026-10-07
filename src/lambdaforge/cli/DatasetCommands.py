@@ -25,6 +25,37 @@ class DatasetCommands:
                 value.to_dict()
                 for value in service.list(cluster=arguments.on, all_clusters=arguments.all)
             ]
+        elif operation == "preflight":
+            payload = service.publication_preflight(
+                arguments.dataset, cluster=arguments.on, intent=arguments.intent
+            )
+        elif operation == "compare":
+            policy = json.loads(arguments.policy.read_text()) if arguments.policy else None
+            payload = service.compare_reconstruction(
+                arguments.left,
+                arguments.right,
+                cluster=arguments.on,
+                verifier=arguments.verifier,
+                policy=policy,
+                scientific_contracts=json.loads(arguments.contracts.read_text())
+                if arguments.contracts
+                else None,
+            )
+            if arguments.output:
+                from lambdaforge.work.models import atomic_json
+
+                if arguments.output.exists():
+                    raise FileExistsError(
+                        "Comparison report already exists; choose a fresh output path."
+                    )
+                atomic_json(arguments.output, payload)
+        elif operation == "publish-candidate":
+            payload = service.publish_candidate(
+                arguments.root,
+                cluster=arguments.on,
+                version=arguments.version,
+                apply=arguments.apply,
+            )
         elif operation == "show":
             payload = service.describe(arguments.dataset, cluster=arguments.on)
         elif operation == "add":
@@ -95,7 +126,14 @@ class DatasetCommands:
             )
         for warning in service.discovery_warnings:
             print(f"Warning: dataset discovery degraded: {warning}", file=sys.stderr)
-        return 0
+        return (
+            2
+            if operation == "preflight" and not payload["allowed"]
+            else 1
+            if operation == "compare"
+            and payload["status"] in {"invalid", "different", "unresolved"}
+            else 0
+        )
 
     @staticmethod
     def _partition(value: str) -> tuple[str, str]:
@@ -112,6 +150,40 @@ class DatasetCommands:
         default_source: str | None = None,
         verbose: bool = False,
     ) -> None:
+        if operation == "preflight":
+            print(f"Dataset: {payload['dataset']} · {payload['intent']}")
+            print(f"Preflight: {'ALLOWED' if payload['allowed'] else 'BLOCKED'}")
+            print(payload["reason"])
+            for placement in payload["locations"]:
+                print(f"  {placement['cluster']} · {placement['content_id']}")
+                print(f"    {placement['root']}")
+            if payload.get("next"):
+                print(f"Next: {payload['next']}")
+            return
+        if operation == "compare":
+            print(f"Dataset comparison: {payload['status'].upper()}")
+            for side in ("left", "right"):
+                print(f"{side.title()}: {payload[side]['root']}")
+                print(f"  Content: {payload[side]['content_id']}")
+            print(f"Exact byte equality: {payload['byte_equal']}")
+            print(f"Scientific equivalence: {payload['scientifically_equivalent']}")
+            if payload.get("reason"):
+                print(payload["reason"])
+            print(f"Changed members checked: {len(payload['members'])}")
+            if payload.get("errors"):
+                for group in payload["errors"]:
+                    for error in group[:5]:
+                        print(f"  {error}")
+            print("No registered content was changed. Use --json for complete evidence.")
+            return
+        if operation == "publish-candidate":
+            print(f"Dataset: {payload['dataset']}")
+            print(f"Content: {payload['content_id']}")
+            print(f"Saved candidate: {payload['candidate']}")
+            print(f"Destination: {payload['destination']}")
+            print("Published." if payload["applied"] else "Preview only; add --apply to publish.")
+            print("Consumer computation and previous Attempt history are unchanged.")
+            return
         if operation == "list":
             print("DATASET  MEMBERS  PLACEMENTS  CONTENT")
             for record in payload:

@@ -171,6 +171,12 @@ def print_storage(payload: list[dict[str, Any]]) -> None:
             continue
         for name, usage in report["categories"].items():
             print(f"  {name:<18} {usage['bytes']:>12} bytes {usage['files']:>8} files")
+        for usage in report.get("filesystems", {}).values():
+            print(
+                f"  {' / '.join(usage['roots'])}: {usage['pressure']} · "
+                f"free {usage['free_bytes']} · reserved {usage['reserved_bytes']} · "
+                f"admissible {usage['admissible_bytes']} bytes"
+            )
 
 
 def set_dotted(value: dict[str, Any], path: str, replacement: Any) -> None:

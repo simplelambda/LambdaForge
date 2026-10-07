@@ -206,6 +206,24 @@ class CommandLineInterface:
             )
             cls._render(plan.to_dict(), cls._clean_summary(plan.to_dict()), arguments.json)
             return 0
+        if arguments.command == "storage":
+            storage_service = StorageService(ClusterCatalog.load(arguments.clusters))
+            if arguments.storage_command == "status":
+                storage_report = storage_service.status(arguments.on)
+                if arguments.json:
+                    print(json.dumps(storage_report.to_dict(), indent=2))
+                else:
+                    from lambdaforge.cli.common import print_storage
+
+                    print_storage([storage_report.to_dict()])
+                return 0 if storage_report.online else 1
+            storage_snapshot = storage_service.reconcile(arguments.on, apply=arguments.apply)
+            cls._render(
+                storage_snapshot,
+                cls._storage_reconcile_summary(storage_snapshot),
+                arguments.json,
+            )
+            return 0
         if arguments.command in {"show", "logs", "cancel", "retry", "delete"}:
             return cls._work_operation(arguments)
         if arguments.command == "results":
@@ -466,19 +484,28 @@ class CommandLineInterface:
                     )
                     print(json.dumps(payload, indent=2))
                     return 0
+                configuration = local.configuration(arguments.selector)
+                is_study = any(
+                    definition.study_expected
+                    for level in configuration.levels
+                    for definition in level.runs
+                )
                 outcome = WorkRunner().run(
-                    local.configuration(arguments.selector),
+                    configuration,
                     dry_run=arguments.dry_run,
                     resume_execution=(
-                        Path(str(local_record["execution_dir"]))
-                        if (
-                            Path(str(local_record["execution_dir"])) / "hpo-control" / "state.json"
-                        ).is_file()
-                        else None
+                        Path(str(local_record["execution_dir"])) if is_study else None
                     ),
                     accept_code_change=arguments.accept_code_change,
                 )
                 payload = outcome.to_dict()
+                if arguments.dry_run and is_study:
+                    from lambdaforge.work.recovery import fixed_recovery_preview
+
+                    if configuration.levels[0].runs[0].search_policy is None:
+                        payload["recovery_plan"] = fixed_recovery_preview(
+                            Path(str(local_record["execution_dir"]))
+                        )
             else:
                 selected = works.show(arguments.selector)
                 job_id = selected.primary_job_id
@@ -754,8 +781,49 @@ class CommandLineInterface:
         return "\n".join(lines)
 
     @staticmethod
+    def _storage_reconcile_summary(payload: Mapping[str, Any]) -> str:
+        lines = [
+            f"Storage measured on {payload['cluster']}; "
+            + ("diagnostic ledger updated." if payload["applied"] else "read-only preview."),
+            f"Ledger: {payload['ledger_path']}",
+            "category                 bytes      files    delta bytes  delta files",
+        ]
+        for name, usage in payload["categories"].items():
+            drift = payload["drift"][name]
+            lines.append(
+                f"{name:<20} {usage['bytes']:>12} {usage['files']:>10} "
+                f"{drift['bytes_delta']:>+14} {drift['files_delta']:>+12}"
+            )
+        if not payload["baseline_available"]:
+            lines.append("No previous baseline: deltas show the initial measurement.")
+        lines.append(
+            "Overlapping categories are not additive; physical free space is authoritative."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
     def _clean_summary(payload: Mapping[str, Any]) -> str:
-        verb = "Removed" if payload.get("applied") else "Would remove"
         count = len(payload.get("candidates", []))
         reclaimable = payload.get("reclaimable_bytes", 0)
-        return f"{verb} {count} safe storage entries ({reclaimable} bytes)."
+        lines = [
+            (
+                f"Safe storage cleanup: {payload.get('reclaimed_bytes', 0)} bytes reclaimed "
+                f"({count} planned entries; busy references remain protected)."
+                if payload.get("applied")
+                else f"Would remove {count} safe storage entries ({reclaimable} bytes)."
+            )
+        ]
+        for category, item in payload.get("categories", {}).items():
+            lines.append(
+                f"  {category.replace('_', ' ')}: {item['reclaimable_bytes']} bytes "
+                f"({item['items']} entries)"
+            )
+        if payload.get("protected_items"):
+            lines.append(
+                f"Protected: {len(payload['protected_items'])} referenced or owned entries."
+            )
+        if payload.get("quota_unresolved_bytes"):
+            lines.append(
+                f"Quota remains exceeded by {payload['quota_unresolved_bytes']} protected bytes."
+            )
+        return "\n".join(lines)

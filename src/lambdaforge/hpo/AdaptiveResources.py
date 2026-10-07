@@ -1336,6 +1336,7 @@ class GPUResourceState:
     external_bytes: int
     active: tuple[ActiveResourceCommitment, ...] = ()
     run_cap: int = 1
+    external_busy: bool | None = None
 
     @property
     def future_committed_bytes(self) -> int:
@@ -1627,7 +1628,7 @@ class GPUPlacementPlanner:
         for action in ranked:
             if len(admitted) >= max_launches:
                 break
-            choices: list[tuple[int, int, float, float, int]] = []
+            choices: list[tuple[int, float, int, float, float, int]] = []
             device_notes: list[dict[str, Any]] = []
             for position, device in enumerate(mutable):
                 prediction = action.prediction_for(device)
@@ -1661,6 +1662,7 @@ class GPUPlacementPlanner:
                         "total_bytes": device.total_bytes,
                         "physical_free_bytes": device.free_bytes,
                         "external_bytes": device.external_bytes,
+                        "observed_compute_busy": device.external_busy,
                         "future_committed_bytes": device.future_committed_bytes,
                         "predicted_headroom_bytes": device.predicted_headroom_bytes,
                         "admission_headroom_bytes": device.admission_headroom_bytes,
@@ -1674,11 +1676,20 @@ class GPUPlacementPlanner:
                 if state == "ADMITTED":
                     # A granted idle GPU is a missing baseline lane, not spare space that may be
                     # ignored by best-fit packing.  Fill idle devices before co-locating; within
-                    # the same occupancy class, least non-negative slack remains best fit.  This
-                    # also makes the protected-lane invariant mean "baseline concurrency" rather
+                    # locally idle class, prefer a GPU with no observed compute processes.
+                    # Other Studies/users are not invisible idle lanes. When every device is
+                    # busy (or observation is unavailable), preserve best-fit heavy-run packing.
+                    # This makes the protected-lane invariant mean "baseline concurrency" rather
                     # than "leave one accelerator empty".
                     choices.append(
-                        (int(bool(device.active)), slack, -probability, duration, position)
+                        (
+                            int(bool(device.active)),
+                            float(device.external_busy is True) if not device.active else 0.0,
+                            slack,
+                            -probability,
+                            duration,
+                            position,
+                        )
                     )
             if not choices:
                 infeasible = bool(device_notes) and all(
@@ -1713,7 +1724,7 @@ class GPUPlacementPlanner:
                     )
                 )
                 continue
-            _occupied, _slack, negative_probability, _duration, selected = min(choices)
+            _occupied, _external, _slack, negative_probability, _duration, selected = min(choices)
             device = mutable[selected]
             selected_prediction = action.prediction_for(device)
             baseline_lane = not device.active
@@ -1741,12 +1752,15 @@ class GPUPlacementPlanner:
                 device.external_bytes,
                 (*device.active, commitment),
                 device.run_cap,
+                device.external_busy,
             )
             higher = next(
                 (item for item in blocked if item.scientific_value > action.scientific_value), None
             )
             admission_reason = (
-                "protected baseline progress on an otherwise idle GPU"
+                "baseline progress alongside external compute after physical memory validation"
+                if baseline_lane and device.external_busy is True
+                else "protected baseline progress on an otherwise idle GPU"
                 if baseline_lane
                 else "highest-value feasible action"
                 if higher is None

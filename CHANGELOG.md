@@ -12,11 +12,53 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Dataset inventory discovers all configured Console locations without mutating registries or
+  hiding divergent identities. Added publication preflight, explicit scientific contracts,
+  project-owned reconstruction verification and bytes-only candidate publication with exact
+  checksums. Publication failures preserve artifacts/checkpoints and sealed candidates; scientific
+  equivalence never replaces a version. Added English/Spanish guidance, including WISDOM changes.
+
+- Python-runtime builds share the atomic cache-GC ownership handshake with managed environments;
+  bounded heartbeat/release cannot replace unknown owners or mask provisioning failures. Invalid
+  immutable complete prefixes are preserved instead of being removed underneath referenced Jobs.
+  Stale local build ownership does not evict a still-running pip/Conda child.
+
+- Coordinated fixed/paired Studies count the coordinator's persisted physical Attempts when
+  enforcing budgets; member-owned Runs cannot disappear from local-only accounting.
+- Managed-environment marker acquisition/reuse is atomic with cache GC. Bootstrap pruning protects
+  recovered/unknown references and incomplete prefixes. Absent local PIDs cannot reclaim foreign-host
+  storage leases.
+
+- Native/Console Study recovery supports repeated seeds and fixed sweeps without requiring adaptive
+  controller state. Reuse successful Runs, retry only unfinished logical Runs as new Attempts,
+  retain original evidence/failure history and spent budgets, and expose a metadata-only dry-run plan.
+  Application checkpoint restoration remains distinct from guaranteed epoch continuation.
+
+- Repeated-seed Study parallelism uses the required Run count, not a one-candidate budget.
+  Shared direct Jobs no longer exclusively hold their entire GPU subset: cross-Study admission
+  locks/rechecks/staggering and compute-idle preference preserve memory safety and best-fit packing.
+  Managed-environment contention waits through installation; optional cleanup defers under active
+  cache leases. CPU/RAM ceilings and site/exclusive GPU grants remain intact.
+
 - Restore conditional sweep Analysis from the persisted StudyDesign space, including live reads
   against older immutable worker environments. Sparse branch evidence remains insufficient rather
   than crashing on an empty response mean; bounded remote diagnostics retain the final exception.
 
 ### Added
+
+- Native `lf storage status/reconcile` with read-only drift inspection and explicit diagnostic-ledger
+  update. Managed publication/snapshot copies reserve extra bytes on the destination filesystem,
+  attempt reference-safe same-volume GC before space failure and retain original evidence.
+
+- Filesystem-specific Job storage commitments, configurable absolute/percentage safety reserve,
+  inode checks, pressure observation and queued admission with throttled safe GC. Native scheduler
+  workers share the authority; Fleet offers require known storage fit and SLURM supports optional
+  site scratch mapping without inventing scheduler reservations.
+- Reference-aware package/environment cache quotas/LRU, per-item reasons, protected/reclaimable
+  categories and crash-resumable deletion. Terminal checkpoint grace, pin/unpin and verified
+  independent checkpoint-to-output/dataset publication avoid redundant trees using CoW where
+  supported, safe copies otherwise. Console **Clear storage…** confirms native background cleanup;
+  storage fields/pressure are visible. EN/ES guides state pending provisioning/code-layer features.
 
 - Extended offline Parameters/Explore and Run chart styles: individual points, step/area lines,
   violins, horizontal comparisons, histograms and empirical cumulative distributions; automatic

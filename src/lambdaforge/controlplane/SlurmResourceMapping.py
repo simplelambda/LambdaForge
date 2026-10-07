@@ -7,7 +7,7 @@ import re
 import string
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from lambdaforge.execution.ResourceRequest import ResourceRequest
 from lambdaforge.ImmutableJson import FrozenJsonMapping
@@ -19,12 +19,13 @@ class SlurmResourceMapping:
 
     rules: Mapping[str, Any] = field(default_factory=dict)
 
-    DEFAULTS = {
+    DEFAULTS: ClassVar[dict[str, dict[str, Any]]] = {
         "processes": {"option": "ntasks", "value": "{processes}"},
         "cpu": {"option": "cpus-per-task", "value": "{cpu_per_process}"},
         "memory": {"option": "mem", "value": "{memory_mib}M"},
         "gpu": {"option": "gpus", "value": "{gpus}"},
         "time": {"option": "time", "value": "{minutes}"},
+        "storage": {"option": "tmp", "value": "{storage_mib}", "omit": True},
     }
     RULE_ALLOWED = {
         "processes": {"processes"},
@@ -32,6 +33,7 @@ class SlurmResourceMapping:
         "memory": {"memory_bytes", "memory_mib", "memory_gib"},
         "gpu": {"gpus"},
         "time": {"seconds", "minutes", "hours"},
+        "storage": {"storage_bytes", "storage_mib", "storage_gib"},
     }
 
     def __post_init__(self) -> None:
@@ -76,6 +78,9 @@ class SlurmResourceMapping:
             "seconds": math.ceil(resources.runtime_seconds or 0),
             "minutes": max(1, math.ceil((resources.runtime_seconds or 0) / 60)),
             "hours": max(1, math.ceil((resources.runtime_seconds or 0) / 3600)),
+            "storage_bytes": resources.storage_bytes,
+            "storage_mib": math.ceil(resources.storage_bytes / 1048576),
+            "storage_gib": math.ceil(resources.storage_bytes / (1024**3)),
         }
         requested = {
             "processes": True,
@@ -83,10 +88,11 @@ class SlurmResourceMapping:
             "memory": resources.ram_bytes > 0,
             "gpu": resources.gpu_count > 0,
             "time": resources.runtime_seconds is not None,
+            "storage": resources.storage_bytes > 0,
         }
         directives: list[str] = []
         warnings: list[str] = []
-        for name in ("processes", "cpu", "memory", "gpu", "time"):
+        for name in ("processes", "cpu", "memory", "gpu", "time", "storage"):
             if not requested[name]:
                 continue
             rule = self.rules[name]

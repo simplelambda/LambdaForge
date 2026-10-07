@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -181,6 +182,62 @@ def test_cold_start_is_one_run_per_gpu_until_evidence_exists() -> None:
     assert len(admitted) == 2
     assert {value.target_gpu for value in admitted} == {0, 1}
     assert {value.admission_mode for value in admitted} == {"BASELINE_ADMISSION"}
+
+
+def test_independent_study_prefers_idle_gpu_over_external_best_fit() -> None:
+    planner = GPUPlacementPlanner(ResourceDemandModel())
+    admitted, _ = planner.place(
+        (action("c1", 8 * GIB, 1.0),),
+        (
+            replace(gpu(0, free=40, external=40), external_busy=True),
+            replace(gpu(1, free=79, external=1), external_busy=False),
+        ),
+        max_launches=1,
+    )
+    assert admitted[0].target_gpu == 1
+    # With GPU1 now externally occupied by that Study, a third controller prefers GPU2.
+    admitted, _ = planner.place(
+        (action("c2", 8 * GIB, 1.0),),
+        (
+            replace(gpu(0, free=40, external=40), external_busy=True),
+            replace(gpu(1, free=60, external=20), external_busy=True),
+            replace(gpu(2), external_busy=False),
+        ),
+        max_launches=1,
+    )
+    assert admitted[0].target_gpu == 2
+
+
+def test_shared_launch_rechecks_physical_memory_before_worker_creation(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    from lambdaforge.execution import ResourceRequest
+    from lambdaforge.work import runner
+
+    monkeypatch.setenv("LAMBDAFORGE_GPU_ADMISSION_ROOT", str(tmp_path))
+    monkeypatch.setattr(runner, "_gpu_memory_inventory", lambda count: ((GIB, 80 * GIB),))
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("A stale fit must not create a worker.")
+
+    monkeypatch.setattr(runner, "ProcessPoolExecutor", forbidden)
+    candidate = CandidateResourceAction(
+        "c1", {"trial_index": 1}, 1.0, prediction("c1", 20 * GIB, lower_bound=20 * GIB)
+    )
+    assert (
+        runner._launch_gpu_run(
+            {},
+            token="0",
+            slot=0,
+            resources=ResourceRequest(gpu_count=1),
+            action=candidate,
+            device=gpu(),
+            model=ResourceDemandModel(),
+        )
+        is None
+    )
+    assert not list(tmp_path.glob("*.json"))
 
 
 def test_three_gpu_runtime_baselines_allow_a_real_one_to_two_probe() -> None:

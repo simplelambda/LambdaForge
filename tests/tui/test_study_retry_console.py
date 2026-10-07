@@ -15,11 +15,25 @@ from tests.tui.test_research_console_014 import FakeServices  # noqa: E402
 
 
 @pytest.mark.parametrize("accept_code_change", [False, True])
-def test_resume_dialog_submits_once_and_exposes_compatibility(accept_code_change: bool) -> None:
+@pytest.mark.parametrize("strategy", ["adaptive", "repeated", "sweep"])
+def test_resume_dialog_submits_once_and_exposes_compatibility(
+    accept_code_change: bool, strategy: str
+) -> None:
     class Services(FakeServices):
         def retry_preview(self, job_id):
             self.calls.append(("retry_preview", job_id))
-            return {"resumable": True, "completed_attempts": 20, "pending_actions": 2}
+            return (
+                {"resumable": True, "completed_attempts": 20, "pending_actions": 2}
+                if strategy == "adaptive"
+                else {
+                    "resumable": True,
+                    "strategy": strategy,
+                    "reuse_runs": 9,
+                    "retry_runs": 1,
+                    "pending_runs": 0,
+                    "runs": [{"trial": 1, "seed": 54, "action": "retry"}],
+                }
+            )
 
         def retry_job(self, job_id, *, accept_code_change=False):
             self.calls.append(("retry_job", (job_id, accept_code_change)))
@@ -46,6 +60,8 @@ def test_resume_dialog_submits_once_and_exposes_compatibility(accept_code_change
             await pilot.click("#study-retry")
             await pilot.pause()
             assert isinstance(app.screen, StudyRetryConfirmation)
+            if strategy != "adaptive":
+                assert "Reuse 9" in str(app.screen.query_one("#retry-plan-summary").render())
             app.screen.query_one("#retry-compatible-code", Checkbox).value = accept_code_change
             await pilot.click("#retry-confirm")
             await pilot.pause()

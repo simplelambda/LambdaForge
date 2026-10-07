@@ -124,6 +124,10 @@ lambdaforge = [
     "docs/CONDITIONAL_STUDIES.es.md",
     "docs/COORDINATED_STUDIES.md",
     "docs/COORDINATED_STUDIES.es.md",
+    "docs/STORAGE.md",
+    "docs/STORAGE.es.md",
+    "docs/DATASET_RECONSTRUCTION.md",
+    "docs/DATASET_RECONSTRUCTION.es.md",
 ]
 
 [tool.pytest.ini_options]

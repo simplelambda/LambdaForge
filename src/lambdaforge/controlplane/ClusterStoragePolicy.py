@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from math import isfinite
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -19,14 +20,24 @@ class ClusterStoragePolicy:
     cache_max_bytes: int | None = None
     cache_max_age_seconds: float | None = None
     lease_root: str | None = None
+    safety_min_free_bytes: int = 0
+    safety_min_free_percent: float = 5.0
+    terminal_grace_seconds: float = 172800.0
 
     @classmethod
     def from_mapping(
         cls, value: Mapping[str, Any] | None, *, workspace: str
     ) -> ClusterStoragePolicy:
         source = dict(value or {})
+        safety = source.get("safety", {})
+        terminal = source.get("terminal_jobs", {})
+        if not isinstance(safety, Mapping) or not isinstance(terminal, Mapping):
+            raise TypeError("storage.safety and storage.terminal_jobs must be mappings.")
         base = PurePosixPath(workspace) / ".lambdaforge"
         return cls(
+            safety_min_free_bytes=cls._bytes(safety.get("min_free", 0)),
+            safety_min_free_percent=float(safety.get("min_free_percent", 5.0)),
+            terminal_grace_seconds=cls._duration(terminal.get("grace_period", 172800)),
             lease_root=str(source["lease_root"]) if source.get("lease_root") else None,
             state_root=str(source.get("state_root", base / "state")),
             cache_root=str(source.get("cache_root", base / "cache")),
@@ -52,8 +63,14 @@ class ClusterStoragePolicy:
                 raise ValueError(f"storage.{name} cannot be empty.")
         if self.cache_max_bytes is not None and self.cache_max_bytes <= 0:
             raise ValueError("storage.cache_max_size must be positive.")
-        if self.cache_max_age_seconds is not None and self.cache_max_age_seconds <= 0:
+        if self.cache_max_age_seconds is not None and (
+            not isfinite(self.cache_max_age_seconds) or self.cache_max_age_seconds <= 0
+        ):
             raise ValueError("storage.cache_max_age must be positive.")
+        if self.safety_min_free_bytes < 0 or not 0 <= self.safety_min_free_percent < 100:
+            raise ValueError("Storage safety must be non-negative with percent below 100.")
+        if not isfinite(self.terminal_grace_seconds) or self.terminal_grace_seconds < 0:
+            raise ValueError("Storage terminal grace period cannot be negative.")
 
     @property
     def bundle_root(self) -> str:
@@ -80,6 +97,11 @@ class ClusterStoragePolicy:
             "dataset_root": self.dataset_root,
             "cache_max_size": self.cache_max_bytes,
             "cache_max_age": self.cache_max_age_seconds,
+            "safety": {
+                "min_free": self.safety_min_free_bytes,
+                "min_free_percent": self.safety_min_free_percent,
+            },
+            "terminal_jobs": {"grace_period": self.terminal_grace_seconds},
         }
 
     def for_project(self, project_id: str, *, workspace: str) -> ClusterStoragePolicy:

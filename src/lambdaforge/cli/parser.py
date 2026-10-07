@@ -158,6 +158,20 @@ def build_parser() -> argparse.ArgumentParser:
     _cluster_selector(clean)
     clean.add_argument("--json", action="store_true")
 
+    storage = commands.add_parser("storage", help="Inspect and reconcile owned storage.")
+    storage_commands = storage.add_subparsers(dest="storage_command", required=True)
+    for operation in ("status", "reconcile"):
+        storage_operation = storage_commands.add_parser(operation)
+        storage_operation.add_argument("--on", default="local")
+        _cluster_selector(storage_operation)
+        storage_operation.add_argument("--json", action="store_true")
+        if operation == "reconcile":
+            storage_operation.add_argument(
+                "--apply",
+                action="store_true",
+                help="Update the diagnostic ledger; never delete data.",
+            )
+
     clusters = commands.add_parser("clusters", help="Manage execution targets.")
     clusters.add_argument("--catalog", type=Path)
     cluster_commands = clusters.add_subparsers(dest="cluster_command", required=True)
@@ -326,6 +340,36 @@ def build_parser() -> argparse.ArgumentParser:
     datasets = commands.add_parser("datasets", help="Inspect immutable dataset versions.")
     datasets.add_argument("--clusters", type=Path)
     dataset_commands = datasets.add_subparsers(dest="dataset_command", required=True)
+    preflight = dataset_commands.add_parser(
+        "preflight", help="Check before expensive reconstruction."
+    )
+    preflight.add_argument("dataset")
+    preflight.add_argument("--on", default="local")
+    preflight.add_argument("--intent", choices=("publish", "reuse", "rebuild"), default="publish")
+    preflight.add_argument("--json", action="store_true")
+    compare = dataset_commands.add_parser(
+        "compare", help="Compare two sealed, co-located datasets."
+    )
+    compare.add_argument("left", type=Path)
+    compare.add_argument("right", type=Path)
+    compare.add_argument("--on", default="local")
+    compare.add_argument("--verifier", help="Explicit trusted project module:function.")
+    compare.add_argument("--policy", type=Path, help="Variable-specific verification policy JSON.")
+    compare.add_argument(
+        "--contracts",
+        type=Path,
+        help="Project contracts keyed by exact content ID for historical data.",
+    )
+    compare.add_argument("--output", type=Path, help="Save the comparison report locally.")
+    compare.add_argument("--json", action="store_true")
+    publish = dataset_commands.add_parser(
+        "publish-candidate", help="Publish saved bytes, not computation."
+    )
+    publish.add_argument("root", type=Path)
+    publish.add_argument("--version", help="Explicit new logical version for different content.")
+    publish.add_argument("--on", default="local")
+    publish.add_argument("--apply", action="store_true")
+    publish.add_argument("--json", action="store_true")
     listing = dataset_commands.add_parser("list")
     listing.add_argument("--on")
     listing.add_argument("--all", action="store_true")

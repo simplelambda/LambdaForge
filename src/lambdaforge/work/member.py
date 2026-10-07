@@ -308,6 +308,15 @@ def request_pruning(root: Path, shard_id: str, command: Mapping[str, Any]) -> di
 
 
 def run_member(root: Path) -> None:
+    """Apply the native storage admission boundary inside scheduler-owned allocations."""
+    from lambdaforge.controlplane.StorageAdmission import StorageAdmission
+
+    resources = ResourceRequest.from_mapping(allocation_manifest(root)["resources"])
+    with StorageAdmission.worker_lease(resources.storage_bytes):
+        _run_member(root)
+
+
+def _run_member(root: Path) -> None:
     """Hold one real provider allocation across waves; never restart an unknown owner."""
     allocation = allocation_manifest(root)
     if os.environ.get("LAMBDAFORGE_JOB_ID") != allocation["job_id"]:
@@ -348,6 +357,7 @@ def run_member(root: Path) -> None:
             while not stopping.is_set():
                 now = time.time()
                 slots, granted, free = capacity, len(tokens), None
+                storage_available = None
                 reason = "admissible"
                 try:
                     if resources.gpu_count:
@@ -380,6 +390,23 @@ def run_member(root: Path) -> None:
                         slots, reason = 0, "baseline-wave-active"
                     if (root / "shutdown.json").exists():
                         slots, reason = 0, "member-draining"
+                    if raw_storage := os.environ.get("LAMBDAFORGE_STORAGE_POLICY"):
+                        from lambdaforge.controlplane.StorageAdmission import StorageAdmission
+
+                        storage_policy = json.loads(raw_storage)
+                        observation = StorageAdmission.filesystem(
+                            Path(storage_policy["run_root"]), storage_policy
+                        )
+                        volumes = StorageAdmission.observe(
+                            storage_policy, owner_job_id=allocation["job_id"]
+                        )
+                        volume = volumes[observation["device"]]
+                        storage_available = volume["admissible_bytes"]
+                        if (
+                            volume["ownership_unresolved"]
+                            or storage_available < resources.storage_bytes
+                        ):
+                            slots, reason = 0, "storage-admission"
                 except (RuntimeError, ValueError, OSError):
                     slots, granted, free, reason = 0, 0, None, "admission-probe-unavailable"
                 with mutex:
@@ -395,6 +422,7 @@ def run_member(root: Path) -> None:
                         "slots": slots,
                         "admissible_gpus": granted,
                         "free_memory_bytes": free,
+                        "admissible_storage_bytes": storage_available,
                         "acknowledged_leases": leases,
                         "reason": reason,
                     },

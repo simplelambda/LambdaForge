@@ -111,6 +111,7 @@ class CoordinatedDispatcher:
                 equivalence,
                 requires_gpu=bool(resources.gpu_count),
                 gpu_memory_bytes=resources.gpu_memory_bytes,
+                storage_bytes=resources.storage_bytes,
                 priority_class=(
                     "confirmation"
                     if value.get("hpo_phase") == "confirmation"
@@ -465,3 +466,7 @@ class CoordinatedDispatcher:
             # WorkRunner may invoke this boundary again for confirmation or another native
             # evidence phase. The parent Fleet service owns allocation lifetime, not a batch.
         return tuple(results)
+
+    def spent_attempts(self) -> int:
+        """Authoritative cumulative physical leases, including active and failed members."""
+        return int(self.coordinator.snapshot()["attempts_reserved"])

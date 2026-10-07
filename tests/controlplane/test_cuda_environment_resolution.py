@@ -69,7 +69,10 @@ class InstallationTransport(Transport):
         self.commands: list[tuple[str, ...]] = []
         self.files: set[str] = set()
 
-    def run(self, command: Sequence[str], *, cwd: str | Path | None = None) -> CommandResult:
+    def run(
+        self, command: Sequence[str], *, cwd: str | Path | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
         del cwd
         values = tuple(command)
         self.commands.append(values)

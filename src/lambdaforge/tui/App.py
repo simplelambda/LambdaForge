@@ -146,6 +146,16 @@ class ClusterEditor(ModalScreen[bool]):
         "cluster-dataset-root": "Optional durable root for managed dataset placements.",
         "cluster-cache-size": "Optional cache retention ceiling, for example 500GiB.",
         "cluster-cache-age": "Optional cache retention age, for example 30d.",
+        "cluster-lease-root": "Host-wide cooperative lease root shared by all project profiles.",
+        "cluster-storage-free": (
+            "Absolute free-space floor kept after all storage commitments, e.g. 20GiB."
+        ),
+        "cluster-storage-percent": (
+            "Free-space safety percentage; the larger absolute/percentage floor wins."
+        ),
+        "cluster-storage-grace": (
+            "Successful Execution checkpoint retention, e.g. 2d. Failed recovery remains protected."
+        ),
         "cluster-connect-timeout": "SSH transport connection deadline.",
         "cluster-auth-timeout": "SSH authentication deadline.",
         "cluster-banner-timeout": "SSH server-banner deadline.",
@@ -415,6 +425,12 @@ class ClusterEditor(ModalScreen[bool]):
                                 "cache_max_age",
                                 "Optional seconds or 30d",
                             ),
+                            (
+                                "Host lease root",
+                                "cluster-lease-root",
+                                "lease_root",
+                                "Derived host-wide root when empty",
+                            ),
                         ):
                             yield Label(label, classes="field-label")
                             stored = storage.get(key)
@@ -427,6 +443,33 @@ class ClusterEditor(ModalScreen[bool]):
                                 placeholder=placeholder,
                                 id=identifier,
                             )
+                        safety = self._nested(storage, "safety")
+                        terminal = self._nested(storage, "terminal_jobs")
+                        for label, identifier, stored in (
+                            (
+                                "Minimum free storage",
+                                "cluster-storage-free",
+                                safety.get("min_free", "0B"),
+                            ),
+                            (
+                                "Minimum free percentage",
+                                "cluster-storage-percent",
+                                safety.get("min_free_percent", 5),
+                            ),
+                            (
+                                "Terminal checkpoint grace",
+                                "cluster-storage-grace",
+                                terminal.get("grace_period", "2d"),
+                            ),
+                        ):
+                            yield Label(label, classes="field-label")
+                            if identifier == "cluster-storage-free" and isinstance(stored, int):
+                                stored = f"{stored}B"
+                            elif identifier == "cluster-storage-grace" and isinstance(
+                                stored, (int, float)
+                            ):
+                                stored = f"{stored}s"
+                            yield Input(value=str(stored), id=identifier)
                         for label, identifier, key, default, placeholder in (
                             (
                                 "Connect timeout",
@@ -593,6 +636,7 @@ class ClusterEditor(ModalScreen[bool]):
             "dataset_root": self._input("cluster-dataset-root"),
             "cache_max_size": self._input("cluster-cache-size"),
             "cache_max_age": self._input("cluster-cache-age"),
+            "lease_root": self._input("cluster-lease-root"),
         }
         gpu_access: dict[str, Any] = {"mode": gpu_mode}
         if gpu_mode == "command":
@@ -601,9 +645,7 @@ class ClusterEditor(ModalScreen[bool]):
                     "command_prefix": list(shlex.split(self._input("cluster-gpu-prefix"))),
                     "claim_command": list(shlex.split(self._input("cluster-gpu-claim"))),
                     "release_command": list(shlex.split(self._input("cluster-gpu-release"))),
-                    "visibility_command": list(
-                        shlex.split(self._input("cluster-gpu-visibility"))
-                    ),
+                    "visibility_command": list(shlex.split(self._input("cluster-gpu-visibility"))),
                 }
             )
         descriptor = self._advanced()
@@ -635,7 +677,16 @@ class ClusterEditor(ModalScreen[bool]):
                     "command_timeout": self._optional(self._input("cluster-command-timeout")),
                 },
                 "workspace": self._input("cluster-workspace"),
-                "storage": {key: value for key, value in storage_fields.items() if value},
+                "storage": {
+                    **{key: value for key, value in storage_fields.items() if value},
+                    "safety": {
+                        "min_free": self._input("cluster-storage-free") or "0B",
+                        "min_free_percent": self._input("cluster-storage-percent") or 5,
+                    },
+                    "terminal_jobs": {
+                        "grace_period": self._input("cluster-storage-grace") or "2d",
+                    },
+                },
                 "python": {
                     "strategy": str(self.query_one("#cluster-python-strategy", Select).value),
                     "executable": self._input("cluster-python-executable"),
@@ -1147,9 +1198,7 @@ class LambdaForgeApp(App[None]):
             latest, started = next(reversed(self._background_tasks.values()))
             elapsed = max(time.monotonic() - started, 0.0)
             prefix = (
-                f"{len(self._background_tasks)} tasks · "
-                if len(self._background_tasks) > 1
-                else ""
+                f"{len(self._background_tasks)} tasks · " if len(self._background_tasks) > 1 else ""
             )
             status.update(f"{prefix}{latest} · active {elapsed:.0f}s")
         else:

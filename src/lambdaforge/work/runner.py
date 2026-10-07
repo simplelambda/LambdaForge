@@ -9,6 +9,7 @@ import math
 import multiprocessing
 import os
 import random
+import re
 import shutil
 import statistics
 import subprocess
@@ -87,6 +88,7 @@ from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 from lambdaforge.reproducibility.ScientificIdentity import ScientificIdentity
 from lambdaforge.reproducibility.SeedProvider import ProjectSeedStream
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
+from lambdaforge.runtime.SharedGPUAdmission import shared_gpu_launch
 from lambdaforge.work.atomic import atomic_write_text
 from lambdaforge.work.cache import WorkCache
 from lambdaforge.work.checkpoints import CheckpointCollection
@@ -109,7 +111,12 @@ from lambdaforge.work.models import (
     atomic_json,
 )
 from lambdaforge.work.paths import WorkPathContext
-from lambdaforge.work.recovery import latest_outcomes, read_owned_json, validate_execution
+from lambdaforge.work.recovery import (
+    fixed_inventory,
+    latest_outcomes,
+    read_owned_json,
+    validate_execution,
+)
 from lambdaforge.work.retention import compact_attempt
 from lambdaforge.work.runtime import WorkRuntime
 from lambdaforge.work.study import StudyTelemetry, study_run_key
@@ -329,13 +336,17 @@ class WorkRunner:
             if (
                 len(config.levels) != 1
                 or len(config.levels[0].runs) != 1
-                or config.levels[0].runs[0].search_policy is None
+                or not config.levels[0].runs[0].study_expected
             ):
-                raise ValueError("HPO recovery requires one adaptive Study, not a composed Work.")
+                raise ValueError("Study recovery requires one Study, not a composed Work.")
             if rerun or restart:
                 raise ValueError("Study recovery cannot be combined with --rerun or --restart.")
             execution_dir = Path(resume_execution).expanduser().absolute()
             manifest = validate_execution(execution_dir)
+            if config.levels[0].runs[0].search_policy is None:
+                _validate_fixed_recovery(
+                    config.levels[0].runs[0], plan.source, execution_dir, manifest
+                )
             origin_code = manifest.get("code_identity")
             if not isinstance(origin_code, Mapping) or self._study_identity(
                 config, code_identity=origin_code
@@ -345,7 +356,7 @@ class WorkRunner:
                 )
             previous_identity = manifest.get("scientific_fingerprint")
             current_revision = execution_dir / "current-code.json"
-            if current_revision.exists():
+            if current_revision.exists() or current_revision.is_symlink():
                 previous_identity = read_owned_json(current_revision).get(
                     "scientific_fingerprint", previous_identity
                 )
@@ -359,7 +370,9 @@ class WorkRunner:
             raise ValueError("Recovery options require an existing Study execution.")
         if dry_run:
             return plan
-        with CrossProcessFileLock(
+        from lambdaforge.controlplane.StorageAdmission import StorageAdmission
+
+        with StorageAdmission.worker_lease(config.resources.storage_bytes), CrossProcessFileLock(
             execution_dir / ".controller.lock",
             shared=False,
             timeout_seconds=0.1,
@@ -610,6 +623,16 @@ class WorkRunner:
             if any(not result.ok for result in level_results):
                 break
         status = "succeeded" if outcomes and all(result.ok for result in outcomes) else "failed"
+        for level in config.levels:
+            for definition in level.runs:
+                design = definition.study_design
+                if (
+                    design is not None
+                    and design.kind in {"repeated", "sweep"}
+                    and design.replication == "fixed"
+                ):
+                    if sum(run.name == definition.name for run in outcomes) < definition.run_count:
+                        status = "failed"  # Required pending evidence is not successful completion.
         execution_result = WorkExecutionResult(
             config.name,
             plan.execution_id,
@@ -1169,6 +1192,54 @@ def _execute_group(
     return tuple(outcomes)
 
 
+def _validate_fixed_recovery(
+    definition: RunDefinition,
+    source: Path,
+    execution_dir: Path,
+    manifest: Mapping[str, Any],
+) -> None:
+    """Validate per-cell identities before dry-run returns or recovery writes its audit."""
+    inventory = fixed_inventory(execution_dir, manifest=manifest)
+    variants = {trial: variant for trial, variant, _seed in WorkRunner._expanded(definition)}
+    for requirement in inventory["requirements"]:
+        trial, seed = int(requirement["candidate"]), requirement.get("seed")
+        if trial not in variants:
+            raise ValueError("Persisted sweep block contains an unknown candidate.")
+        variant = variants[trial]
+        prior = inventory["latest"].get((trial, seed))
+        if prior is None:
+            continue
+        _parameters, inputs, identity_parameters = _resolve_inputs(
+            {**definition.parameters, **variant}, source.parent
+        )
+        identity = ScientificIdentity.from_payload(
+            {
+                "identity_version": 1,
+                "work_class": definition.work_class,
+                "code": manifest["code_identity"],
+                "parameters": identity_parameters,
+                "inputs": [value.identity_dict() for value in inputs.values()],
+                "seed": seed,
+                "trial_parameters": dict(variant),
+            }
+        ).digest
+        if prior["run_id"] != f"run-{identity.removeprefix('sha256:')[:20]}":
+            raise ValueError(
+                "Persisted fixed Run identity is incompatible with its original design."
+            )
+        if "parameters" in prior and prior["parameters"] != identity_parameters:
+            raise ValueError(
+                "Persisted fixed Run parameters/inputs differ from its original design."
+            )
+        checkpoints = execution_dir / "runs" / prior["run_id"] / "checkpoints"
+        if checkpoints.is_symlink() or checkpoints.resolve() != checkpoints:
+            raise ValueError("Recovery checkpoint is outside the owned execution.")
+        if checkpoints.exists() and (
+            not checkpoints.is_dir() or any(item.is_symlink() for item in checkpoints.rglob("*"))
+        ):
+            raise ValueError("Recovery requires regular, owned application checkpoints.")
+
+
 def _execute_fixed_evidence_group(
     specifications: Sequence[Mapping[str, Any]],
     *,
@@ -1253,10 +1324,34 @@ def _execute_fixed_evidence_group(
             alpha=float((design.get("replication_policy") or {}).get("family_alpha", 0.05)),
         )
     telemetry = StudyTelemetry.from_environment()
+    recovering = bool(specifications[0].get("study_recovery"))
+    recovery = fixed_inventory(Path(specifications[0]["execution_dir"])) if recovering else None
     prepared = [dict(value) for value in specifications]
+    templates = {int(value["trial_index"]): dict(value) for value in prepared}
+    if recovery is not None:
+        known = {(int(value["trial_index"]), value.get("seed")) for value in prepared}
+        for requirement in recovery["requirements"]:
+            key = (int(requirement["candidate"]), requirement.get("seed"))
+            if key in known:
+                continue
+            if key[0] not in templates:
+                raise ValueError("Recovered sweep block contains an unknown candidate.")
+            prepared.append(
+                {
+                    **templates[key[0]],
+                    "seed": key[1],
+                    "seed_metadata": requirement.get("seed_metadata"),
+                    "hpo_phase": "sweep",
+                }
+            )
+            known.add(key)
     requirement_by_identity = {
         (int(value.get("candidate", 0)), value.get("seed")): value
-        for value in design.get("evidence", {}).get("requirements", ())
+        for value in (
+            recovery["requirements"]
+            if recovery is not None
+            else design.get("evidence", {}).get("requirements", ())
+        )
         if isinstance(value, Mapping)
     }
     for value in prepared:
@@ -1276,15 +1371,89 @@ def _execute_fixed_evidence_group(
             design=design,
         )
         telemetry.schedule(prepared)
-    parallelism = _adaptive_parallelism(resources, policy)
+    parallelism = _adaptive_parallelism(resources, policy, evidence_runs=len(prepared))
     started = time.monotonic()
     terminal_results: list[WorkResult] = []
+    reused: list[WorkResult] = []
+    elapsed_before = float(recovery["elapsed_seconds"]) if recovery else 0.0
+    if recovery is not None:
+        origin = read_owned_json(Path(specifications[0]["execution_dir"]) / "execution.json")
+        for value in tuple(prepared):
+            _params, inputs, identity_parameters = _resolve_inputs(
+                value["parameters"], Path(value["source"]).parent
+            )
+            fingerprint = ScientificIdentity.from_payload(
+                {
+                    "identity_version": 1,
+                    "work_class": definition["work_class"],
+                    "code": origin["code_identity"],
+                    "parameters": identity_parameters,
+                    "inputs": [item.identity_dict() for item in inputs.values()],
+                    "seed": value.get("seed"),
+                    "trial_parameters": dict(value.get("trial_parameters", {})),
+                }
+            ).digest
+            original_id = f"run-{fingerprint.removeprefix('sha256:')[:20]}"
+            prior = recovery["latest"].get((int(value["trial_index"]), value.get("seed")))
+            if prior and prior["run_id"] != original_id:
+                raise ValueError(
+                    "Persisted fixed Run scientific identity differs from its original design."
+                )
+            if prior and "parameters" in prior and prior["parameters"] != identity_parameters:
+                raise ValueError(
+                    "Persisted fixed Run parameters/inputs differ from its original design."
+                )
+            value["recovery_run_id"] = original_id
+            if prior and prior["status"] != "interrupted":
+                previous_result = _work_result_from_mapping(prior)
+                reused.append(previous_result)
+                terminal_results.append(previous_result)
+            if prior and prior["status"] == "succeeded":
+                result = _work_result_from_mapping(prior)
+                prepared.remove(value)
+                if telemetry is not None:
+                    telemetry.run_finished(value, result)
+            else:
+                value["recovery_checkpoint_root"] = str(
+                    Path(value["execution_dir"]) / "runs" / original_id / "checkpoints"
+                )
+                value["failure_retry"] = policy.failure_retries
+        if execution.max_runs is not None:
+            prepared = prepared[: max(0, execution.max_runs - int(recovery["spent_runs"]))]
+        if execution.max_time_seconds is not None and elapsed_before >= execution.max_time_seconds:
+            prepared = []
     sequential_finish_reason: str | None = None
     sequential_path = (
         Path(str(specifications[0]["execution_dir"])) / "hpo-control" / "sweep-sequential.json"
     )
     block_progress_path = sequential_path.with_name("sweep-blocks.json")
-    templates = {int(value["trial_index"]): dict(value) for value in prepared}
+    budget_path = sequential_path.with_name("fixed-recovery-state.json")
+    segment_started = datetime.now(timezone.utc).isoformat()
+
+    def spent_attempts() -> int:
+        local = sum(
+            1
+            for _ in Path(specifications[0]["execution_dir"]).glob("runs/run-*/attempts/attempt-*")
+        )
+        # Fleet Attempts live on their members, not below the coordinator Execution.
+        # Its persisted leases are the physical cost authority (including active/failure
+        # history). Do not add mirrored results again or reset this counter on refill.
+        remote_cost = getattr(dispatcher, "spent_attempts", None)
+        return max(local, int(remote_cost())) if callable(remote_cost) else local
+
+    def persist_budget() -> None:
+        atomic_json(
+            budget_path,
+            {
+                "state_version": 1,
+                "execution_id": str(specifications[0]["execution_id"]),
+                "prior_elapsed_seconds": elapsed_before,
+                "segment_started_at_utc": segment_started,
+                "elapsed_seconds": elapsed_before + time.monotonic() - started,
+            },
+        )
+
+    persist_budget()
     committed_lookahead: int | None = None
 
     def block_ordinal(value: Mapping[str, Any]) -> int | None:
@@ -1376,14 +1545,21 @@ def _execute_fixed_evidence_group(
     ) -> Sequence[dict[str, Any]]:
         nonlocal committed_lookahead, sequential_finish_reason
         terminal_results.append(result)
+        terminal_results[:] = {result.run_id: result for result in terminal_results}.values()
+        persist_budget()
         if (
             execution.max_time_seconds is None
-            or time.monotonic() - started < execution.max_time_seconds
+            or elapsed_before + time.monotonic() - started < execution.max_time_seconds
         ):
             retained = [dict(value) for value in queued]
         else:
             retained = []
             sequential_finish_reason = "TIME_BUDGET"
+        if execution.max_runs is not None:
+            # Active siblings can still be publishing their start metadata. Counting owned
+            # Attempt directories suffices for physical cost; do not validate a half-written
+            # live record as if this were a terminal recovery inspection.
+            retained = retained[: max(0, execution.max_runs - spent_attempts())]
         for value in queued:
             if not retained and telemetry is not None:
                 telemetry.queued_action_cancelled(
@@ -1442,7 +1618,7 @@ def _execute_fixed_evidence_group(
                 if (ordinal := block_ordinal(value)) is not None
             } | observed_ordinals
             next_ordinal = max(scheduled, default=-1) + 1
-            projected = len(terminal_results) + len(pending) + candidate_count
+            projected = spent_attempts() + candidate_count
             if execution.max_runs is not None and projected > execution.max_runs:
                 return ()
             committed_lookahead = next_ordinal
@@ -1473,7 +1649,7 @@ def _execute_fixed_evidence_group(
             return ()
         if (
             execution.max_runs is not None
-            and len(terminal_results) + candidate_count > execution.max_runs
+            and spent_attempts() + candidate_count > execution.max_runs
         ):
             sequential_finish_reason = "RUN_BUDGET"
             return ()
@@ -1505,16 +1681,17 @@ def _execute_fixed_evidence_group(
         objective_metric=metric,
         objective_mode=mode,
         objective=objective,
-        historical_results=(),
+        historical_results=tuple(reused),
         parallelism=parallelism,
         telemetry=telemetry,
         on_result=retain_required_queue,
     )
+    persist_budget()
     if telemetry is not None:
         trials = tuple(sorted({int(value["trial_index"]) for value in specifications}))
         time_exhausted = (
             execution.max_time_seconds is not None
-            and time.monotonic() - started >= execution.max_time_seconds
+            and elapsed_before + time.monotonic() - started >= execution.max_time_seconds
         )
         telemetry.candidate_states(
             active=trials,
@@ -1525,7 +1702,11 @@ def _execute_fixed_evidence_group(
                 or ("TIME_BUDGET" if time_exhausted else "FIXED_DESIGN_COMPLETE")
             ),
         )
-    return outcomes
+    return (
+        tuple({result.run_id: result for result in (*reused, *outcomes)}.values())
+        if recovering
+        else outcomes
+    )
 
 
 def _bounded_objective_range(objective: Mapping[str, Any]) -> tuple[float, float] | None:
@@ -1671,6 +1852,11 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         }
     ).digest
     run_id = f"run-{identity.removeprefix('sha256:')[:20]}"
+    if specification.get("study_recovery") and specification.get("recovery_run_id"):
+        preserved_id = str(specification["recovery_run_id"])
+        if not re.fullmatch(r"run-[0-9a-f]{20}", preserved_id):
+            raise ValueError("Unsafe recovered logical Run identity.")
+        run_id = preserved_id
     run_root = execution_dir / "runs" / run_id
     checkpoint_root = run_root / "checkpoints"
     recovery_checkpoint = specification.get("recovery_checkpoint_root")
@@ -1687,13 +1873,36 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
             raise RuntimeError(f"Unsafe checkpoint root: {checkpoint_root}")
         shutil.rmtree(checkpoint_root)
     attempts = run_root / "attempts"
-    attempt_number = 1 + len(tuple(attempts.glob("attempt-*"))) if attempts.is_dir() else 1
+    attempt_number = 1 + max(
+        (
+            int(path.name.removeprefix("attempt-"))
+            for path in attempts.glob("attempt-*")
+            if path.name.removeprefix("attempt-").isdigit()
+        ),
+        default=0,
+    )
     attempt_id = f"attempt-{attempt_number:04d}"
     run_dir = attempts / attempt_id
     run_dir.mkdir(parents=True, exist_ok=False)
     temp_dir = run_dir / "tmp"
     temp_dir.mkdir()
     checkpoints = CheckpointCollection(checkpoint_root)
+    # Publish the scientific request before user code starts. A killed first Attempt has
+    # no result yet, but recovery must still identify its exact logical evidence cell.
+    atomic_json(
+        run_dir / "request.json",
+        {
+            "execution_id": str(specification["execution_id"]),
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "attempt_number": attempt_number,
+            "run_dir": str(run_dir),
+            "parameters": identity_parameters,
+            "seed": seed,
+            "trial": {"index": trial_index},
+            "seed_metadata": specification.get("seed_metadata"),
+        },
+    )
     resource_heartbeat_path = run_dir / "resource-heartbeat.json"
     atomic_json(
         resource_heartbeat_path,
@@ -5417,18 +5626,65 @@ def _controller_failure_result(
         default=str,
     ).encode("utf-8")
     identity = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    recorded_parameters = dict(specification.get("parameters", {}))
+    recorded_inputs: tuple[WorkInput, ...] = ()
+    raw_design = definition.get("study_design")
+    fixed = isinstance(raw_design, Mapping) and raw_design.get("type") in {"repeated", "sweep"}
+    if fixed:
+        # Fixed recovery has no adaptive controller to reconcile synthetic identities.
+        # Even a worker lost before returning must retain the normal scientific Run ID.
+        source = Path(specification["source"])
+        _parameters, inputs, recorded_parameters = _resolve_inputs(
+            specification["parameters"], source.parent
+        )
+        identity = ScientificIdentity.from_payload(
+            {
+                "identity_version": 1,
+                "work_class": definition["work_class"],
+                "code": _code_identity(WorkRunner._project_root(source.parent)),
+                "parameters": recorded_parameters,
+                "inputs": [value.identity_dict() for value in inputs.values()],
+                "seed": specification.get("seed"),
+                "trial_parameters": dict(specification.get("trial_parameters", {})),
+            }
+        ).digest
+        recorded_inputs = tuple(inputs.values())
     run_id = f"run-{identity.removeprefix('sha256:')[:20]}"
+    if fixed and specification.get("study_recovery") and specification.get("recovery_run_id"):
+        run_id = str(specification["recovery_run_id"])
+        if not re.fullmatch(r"run-[0-9a-f]{20}", run_id):
+            raise ValueError("Unsafe recovered logical Run identity.")
     run_root = Path(specification["execution_dir"]) / "runs" / run_id
     attempts = run_root / "attempts"
     attempt_number = 1 + len(tuple(attempts.glob("attempt-*"))) if attempts.is_dir() else 1
     attempt_id = f"attempt-{attempt_number:04d}"
     run_dir = attempts / attempt_id
-    run_dir.mkdir(parents=True, exist_ok=False)
+    reuse_attempt = False
+    if fixed and specification.get("hpo_checkpoint_manifest_path"):
+        location = Path(str(specification["hpo_checkpoint_manifest_path"]))
+        if location.exists():
+            record = read_owned_json(location)
+            owned = Path(str(record.get("run_dir", "")))
+            if (
+                record.get("run_id") != run_id
+                or not owned.is_relative_to(attempts)
+                or owned.resolve() != owned
+                or not owned.is_dir()
+                or not re.fullmatch(r"attempt-\d{4,}", owned.name)
+            ):
+                raise ValueError("Lost worker ownership does not match its fixed Run.")
+            if (owned / "result.json").exists():
+                return _work_result_from_mapping(read_owned_json(owned / "result.json"))
+            run_dir, attempt_id = owned, owned.name
+            attempt_number = int(attempt_id.removeprefix("attempt-"))
+            reuse_attempt = True
+    run_dir.mkdir(parents=True, exist_ok=reuse_attempt)
     message = f"{type(error).__name__}: {error}"
-    (run_dir / "work.log").write_text(
-        f"LambdaForge worker process failed before returning a complete WorkResult.\n{message}\n",
-        encoding="utf-8",
-    )
+    with (run_dir / "work.log").open("a", encoding="utf-8") as log:
+        log.write(
+            "LambdaForge worker process failed before returning a complete WorkResult.\n"
+            f"{message}\n"
+        )
     now = datetime.now(timezone.utc).isoformat()
     failure = {
         "type": type(error).__name__,
@@ -5452,12 +5708,16 @@ def _controller_failure_result(
         finished_at_utc=now,
         duration_seconds=0.0,
         seed=(int(specification["seed"]) if specification.get("seed") is not None else None),
-        trial={
-            "index": int(specification["trial_index"]),
-            "parameters": dict(specification.get("trial_parameters", {})),
-        },
-        parameters=dict(specification.get("parameters", {})),
-        inputs=(),
+        trial=(
+            {
+                "index": int(specification["trial_index"]),
+                "parameters": dict(specification.get("trial_parameters", {})),
+            }
+            if not fixed or definition.get("has_variants", False)
+            else None
+        ),
+        parameters=recorded_parameters,
+        inputs=recorded_inputs,
         requested_resources=resources,
         failure=failure,
         job_id=os.environ.get("LAMBDAFORGE_JOB_ID"),
@@ -6037,6 +6297,7 @@ def _execute_gpu_admitted_runs(
             visible_gpus=visible_gpus,
             run_limits=run_limits,
             hardware_labels=hardware_labels,
+            external_activity=_gpu_compute_activity(visible_gpus),
         )
         admission_slots = granted_slots if visibility_probe_available else set()
         # HPO planning used to refill only after a terminal Run event.  A narrow initial
@@ -6262,7 +6523,6 @@ def _execute_gpu_admitted_runs(
                 continue
             action = by_candidate[selected_decision.candidate_key]
             value = next(item for item in queued if item is action.specification)
-            queued.remove(value)
             value = _apply_host_resource_lease(
                 value,
                 resources,
@@ -6275,23 +6535,22 @@ def _execute_gpu_admitted_runs(
             value["resource_controller_pid"] = os.getpid()
             value["resource_admission_mode"] = selected_decision.admission_mode
             value["resource_experiment_signature"] = selected_decision.exploration_signature
-            pool = ProcessPoolExecutor(
-                max_workers=1,
-                mp_context=multiprocessing.get_context("spawn"),
-                initializer=_initialize_gpu_worker,
-                initargs=(
-                    visible_gpus[slot],
-                    str(value.get("hpo_worker_identity_path", "")),
-                    os.getpid(),
-                ),
+            started_run = _launch_gpu_run(
+                value,
+                token=visible_gpus[slot],
+                slot=slot,
+                resources=resources,
+                action=action,
+                device=devices[slot],
+                model=resource_model,
             )
+            if started_run is None:
+                # Another Study is checking/starting on this physical GPU, or its fresh
+                # headroom no longer fits. Preserve the exact queued identity for the next poll.
+                continue
+            future, pool = started_run
+            queued.remove(next(item for item in queued if item is action.specification))
             executors.append(pool)
-            try:
-                future = pool.submit(_execute_run, value)
-            except BaseException:
-                pool.shutdown(wait=True, cancel_futures=True)
-                executors.remove(pool)
-                raise
             pending[future] = (value, slot, pool)
             selected_device = devices[slot]
             prediction = action.prediction_for(selected_device)
@@ -6465,6 +6724,59 @@ def _resource_action_is_device_infeasible(
     return bool(devices) and all(
         action.prediction_for(device).known_lower_bound_bytes > device.total_bytes
         for device in devices
+    )
+
+
+def _launch_gpu_run(
+    value: dict[str, Any],
+    *,
+    token: str,
+    slot: int,
+    resources: ResourceRequest,
+    action: CandidateResourceAction,
+    device: GPUResourceState,
+    model: ResourceDemandModel,
+) -> tuple[Any, ProcessPoolExecutor] | None:
+    """Start one fresh worker, coordinating shared-host admission across Studies."""
+    raw_root = os.environ.get("LAMBDAFORGE_GPU_ADMISSION_ROOT")
+
+    def launch() -> tuple[Any, ProcessPoolExecutor] | None:
+        if raw_root:
+            try:
+                free, total = _gpu_memory_inventory(resources.gpu_count)[slot]
+            except RuntimeError:
+                return None  # Observation failure is not permission to start a Run.
+            fresh = replace(
+                device,
+                free_bytes=free,
+                total_bytes=total,
+                external_bytes=max(
+                    0, total - free - sum(item.current_bytes for item in device.active)
+                ),
+            )
+            admitted, _blocked = GPUPlacementPlanner(model).place(
+                (action,), (fresh,), max_launches=1, now=time.monotonic()
+            )
+            if not admitted:
+                return None
+        pool = ProcessPoolExecutor(
+            max_workers=1,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_initialize_gpu_worker,
+            initargs=(token, str(value.get("hpo_worker_identity_path", "")), os.getpid()),
+        )
+        try:
+            return pool.submit(_execute_run, value), pool
+        except BaseException:
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+
+    return (
+        shared_gpu_launch(
+            Path(raw_root), token, launch, stagger_seconds=_GPU_LAUNCH_STAGGER_SECONDS
+        )
+        if raw_root
+        else launch()
     )
 
 
@@ -6718,6 +7030,7 @@ def _resource_device_states(
     visible_gpus: Sequence[str],
     run_limits: Sequence[int],
     hardware_labels: Sequence[str],
+    external_activity: Mapping[str, bool] | None = None,
 ) -> tuple[GPUResourceState, ...]:
     """Reconcile physical free VRAM with controller-owned future commitments."""
     values: list[GPUResourceState] = []
@@ -6746,9 +7059,39 @@ def _resource_device_states(
                 external_bytes=max(0, external),
                 active=commitments,
                 run_cap=int(run_limits[index]),
+                external_busy=(external_activity or {}).get(visible_gpus[index]),
             )
         )
     return tuple(values)
+
+
+def _gpu_compute_activity(visible_gpus: Sequence[str]) -> dict[str, bool]:
+    """Observe compute occupancy without importing CUDA or expanding the permitted subset."""
+    try:
+        inventory = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        processes = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    uuid_by_token: dict[str, str] = {}
+    for line in inventory.stdout.splitlines():
+        parts = [value.strip() for value in line.split(",")]
+        if len(parts) == 2:
+            uuid_by_token[parts[0]] = parts[1]
+            uuid_by_token[parts[1]] = parts[1]
+    busy = {line.split(",")[0].strip() for line in processes.stdout.splitlines() if "," in line}
+    return {token: uuid_by_token[token] in busy for token in visible_gpus if token in uuid_by_token}
 
 
 def _read_live_resource_snapshot(specification: Mapping[str, Any]) -> dict[str, Any]:
@@ -8125,10 +8468,19 @@ def _confirmation_backfill_room(
     )
 
 
-def _adaptive_parallelism(resources: ResourceRequest, policy: AdaptiveSearchPolicy) -> int:
-    run_budget = policy.max_runs or (
-        (policy.candidate_budget or policy.proposal_pool_size) * max(1, policy.min_seeds)
-        + policy.confirmation_top_k * len(policy.confirmation_seeds)
+def _adaptive_parallelism(
+    resources: ResourceRequest,
+    policy: AdaptiveSearchPolicy,
+    *,
+    evidence_runs: int | None = None,
+) -> int:
+    run_budget = (
+        policy.max_runs
+        or evidence_runs
+        or (
+            (policy.candidate_budget or policy.proposal_pool_size) * max(1, policy.min_seeds)
+            + policy.confirmation_top_k * len(policy.confirmation_seeds)
+        )
     )
     host_ceiling = max(1, min(resources.cpu_cores, run_budget))
     derived = (

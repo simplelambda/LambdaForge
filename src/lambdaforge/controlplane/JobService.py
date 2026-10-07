@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
@@ -1728,6 +1729,8 @@ exec "$fallback" "$@"
         script = r"""
 import json,sys
 from pathlib import Path
+seed_source=sys.argv.pop()
+exec(sys.argv.pop())
 work,known,result,controller=map(Path,sys.argv[1:])
 def read(p):
  if not p.is_file() or p.is_symlink(): return {}
@@ -1741,17 +1744,28 @@ else:
   value=read(controller).get("initialization",{})
   if value.get("control_state_path"): paths=[Path(value["control_state_path"]).parent.parent]
  if not paths:
-  paths=list((work/".lambdaforge"/"runs").glob("*/execution-*/hpo-control/state.json"))[:65]
-  paths=[p.parent.parent for p in paths]
-if paths and any(not (p/"hpo-control"/"state.json").is_file() for p in paths):
- raise SystemExit("Persisted Study recovery state is missing; refusing a silent restart")
+  root=work/".lambdaforge"/"runs"
+  if work.name=="runs" and work.parent.name==".lambdaforge": root=work
+  paths=[p.parent for p in list(root.glob("*/execution-*/execution.json"))[:65]]
 if len(paths)>1: raise SystemExit("Ambiguous persisted Study execution; refusing guessed recovery")
 out={"resumable":False}
 if paths:
  p=paths[0]
  if not p.is_absolute() or p.resolve()!=p or not p.is_relative_to(work):
   raise SystemExit("Recovery state is outside the recorded owner Job workspace")
- manifest=read(p/"execution.json"); state=read(p/"hpo-control"/"state.json")
+ manifest=read(p/"execution.json")
+ designs=manifest.get("study_designs",[])
+ if len(designs)==1 and designs[0].get("type") in {"sweep","repeated"}:
+  stream=None
+  if designs[0].get("replication")=="auto-blocks":
+   # Inspection may use an older system Python, not the managed scientific runtime.
+   exec(seed_source.replace(", slots=True", ""))
+   stream=ProjectSeedStream
+  out=fixed_recovery_preview(p,seed_stream=stream)
+  json.dump(out,sys.stdout); sys.exit(0)
+ if not (p/"hpo-control"/"state.json").is_file():
+  raise SystemExit("Persisted adaptive Study recovery state is missing; refusing a silent restart")
+ state=read(p/"hpo-control"/"state.json")
  if manifest.get("execution_id")!=p.name or state.get("execution_id")!=p.name:
   raise SystemExit("Recovery execution identity mismatch")
  out={"resumable":True,"execution_dir":str(p),"execution_id":p.name,
@@ -1770,6 +1784,12 @@ json.dump(out,sys.stdout)
                 str(previous.metadata.get("recovery_execution_dir") or "."),
                 str(PurePosixPath(previous.work_dir).parent / "result.json"),
                 str(PurePosixPath(previous.work_dir).parent / "study" / "controller.json"),
+                (Path(__file__).resolve().parents[1] / "work" / "recovery.py").read_text(
+                    encoding="utf-8"
+                ),
+                (
+                    Path(__file__).resolve().parents[1] / "reproducibility" / "SeedProvider.py"
+                ).read_text(encoding="utf-8"),
             ),
             timeout=30.0,
         )
@@ -1781,7 +1801,11 @@ json.dump(out,sys.stdout)
                 "job_id": job_id,
                 "cluster": previous.cluster,
                 "owner_job_id": owner_id,
-                "will_preserve": "valid evidence, assigned seeds, HPO decisions and spent budgets",
+                "will_preserve": (
+                    "valid evidence, assigned seeds, original fixed design and spent budgets"
+                    if plan.get("strategy") in {"sweep", "repeated"}
+                    else "valid evidence, assigned seeds, HPO decisions and spent budgets"
+                ),
                 "will_retry": "failed and interrupted Runs; checkpoints when available",
                 "code_change_policy": "explicit compatibility acknowledgement required",
             }
@@ -1892,6 +1916,21 @@ json.dump(out,sys.stdout)
                 }
             run_arguments = tuple(cleaned)
             if dry_run:
+                if preview.get("resumable"):
+                    # Recovery inspection is metadata-only: do not build a bundle, reserve
+                    # a new local Job or touch scheduler/environment state just to show it.
+                    return JobHandle(
+                        previous.job_id,
+                        previous.cluster,
+                        JobState.PLANNED,
+                        preview={
+                            "operation": "study-recovery",
+                            "source_config": str(source_config),
+                            "run_arguments": list(run_arguments),
+                            "will_submit_new_job": True,
+                        },
+                        recovery_plan=preview,
+                    )
                 from lambdaforge.controlplane.ControlPlane import ControlPlane
 
                 handle, _ = ControlPlane(self.catalog, jobs=self).submit(
@@ -1902,9 +1941,35 @@ json.dump(out,sys.stdout)
                     run_arguments=run_arguments,
                     group_id=previous.group_id,
                 )
-                return handle
+                return replace(handle, recovery_plan=preview or None)
             from lambdaforge.controlplane.SubmissionService import SubmissionService
 
+            if recovery_metadata:
+                from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
+
+                token = hashlib.sha256(
+                    f"{previous.cluster}\0{recovery_metadata['recovery_execution_dir']}".encode()
+                ).hexdigest()
+                with CrossProcessFileLock(
+                    self.store.root / "recovery-locks" / f"{token}.lock",
+                    shared=False,
+                    timeout_seconds=30.0,
+                    poll_interval_seconds=0.05,
+                ):
+                    self.refuse_active_execution(
+                        str(recovery_metadata["recovery_work_identity"]),
+                        previous.cluster,
+                        name=str(previous.metadata.get("name", job_id)),
+                    )
+                    return SubmissionService(self.catalog, self).enqueue(
+                        str(source_config),
+                        cluster=previous.cluster,
+                        resources=request,
+                        run_arguments=run_arguments,
+                        group_id=previous.group_id,
+                        retry_of=previous.job_id,
+                        metadata=recovery_metadata,
+                    )
             return SubmissionService(self.catalog, self).enqueue(
                 str(source_config),
                 cluster=previous.cluster,

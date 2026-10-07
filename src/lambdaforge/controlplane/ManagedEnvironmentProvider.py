@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
+from lambdaforge.controlplane.CacheBuildLease import CacheBuildLease
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.CommandResult import CommandResult
 from lambdaforge.controlplane.EnvironmentProvider import EnvironmentProvider
@@ -48,23 +48,14 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         created = transport.run(("mkdir", "-p", str(cache_root)))
         if created.returncode:
             raise RuntimeError(f"Could not create managed cache root: {created.stderr.strip()}")
-        acquired = self._acquire(transport, marker, completion)
-        if not acquired:
+        self._acquire(transport, marker, completion, python=profile.python)
+        with CacheBuildLease.maintain(transport, marker, python=profile.python):
             return self._prepare(
                 profile,
                 transport,
                 bundle,
                 remote_bundle_dir=remote_bundle_dir,
             )
-        try:
-            return self._prepare(
-                profile,
-                transport,
-                bundle,
-                remote_bundle_dir=remote_bundle_dir,
-            )
-        finally:
-            transport.run(("rmdir", str(marker)))
 
     def _prepare(
         self,
@@ -105,6 +96,16 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
             if verified.returncode == 0:
                 self._activate(profile, transport, str(python))
                 return PreparedEnvironment(bundle.environment_id, str(python), True)
+            # This exact immutable prefix may still serve another Job or recovery.
+            # Never rename/remove it as an installation side effect. GC, with its
+            # authoritative live/recovery references, is the only eviction authority.
+            error_type = NativeEnvironmentError if native is not None else RuntimeError
+            raise error_type(
+                f"Cached managed environment {bundle.environment_id} failed verification: "
+                f"{verified.stderr.strip() or verified.stdout.strip()}. "
+                "The prefix was preserved because other Jobs may reference it. "
+                "Inspect the environment and preview `lf clean` before removing an unused cache."
+            )
         legacy_environment = (
             PurePosixPath(profile.workspace)
             / ".lambdaforge"
@@ -304,11 +305,6 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
             self._cleanup(transport, temporary)
             raise RuntimeError(f"Could not mark managed environment ready: {marked.stderr.strip()}")
         # Only complete verified environments receive their content-addressed final name.
-        if cached.returncode == 0:
-            stale = environment_root / f".{bundle.environment_id}.stale-{uuid4().hex}"
-            moved = transport.run(("mv", str(environment), str(stale)))
-            if moved.returncode == 0:
-                self._cleanup(transport, stale)
         published = transport.run(
             (
                 profile.python,
@@ -656,7 +652,10 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
             (
                 python,
                 "-c",
-                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2])",
+                "from pathlib import Path; import sys,os; "
+                "Path(sys.argv[1]).write_text(sys.argv[2]); "
+                "p=Path(sys.argv[2].strip()).parent.parent/'.lambdaforge-environment.json'; "
+                "(os.utime(p,None),os.utime(p.parent,None)) if p.is_file() else None",
                 str(pointer),
                 f"{python}\n",
             )
@@ -681,15 +680,20 @@ class ManagedEnvironmentProvider(EnvironmentProvider):
         lock: PurePosixPath,
         completion: PurePosixPath,
         *,
-        timeout: float = 30.0,
+        timeout: float = 3600.0,
+        python: str = "python3",
     ) -> bool:
-        """Serialize identical environment creation with a bounded remote mkdir lock."""
-        deadline = time.monotonic() + timeout
-        while True:
-            if transport.run(("mkdir", str(lock))).returncode == 0:
-                return True
-            if transport.run(("test", "-f", str(completion))).returncode == 0:
-                return False
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"Timed out waiting for managed environment lock {lock}.")
-            time.sleep(0.2)
+        """Wait through native/pip provisioning, not just a short connection timeout.
+
+        Individual installation phases can each take 900 seconds. Contention is ordinary
+        preparation, not a failed submission; a missing completion still fails closed after
+        the bounded provisioning window, without stealing or deleting another builder's lock.
+        """
+        # Reuse must also own the marker: seeing a completion receipt alone cannot
+        # prevent GC from evicting the prefix during verification/activation.
+        del completion
+        try:
+            CacheBuildLease.acquire(transport, lock, python=python, timeout=timeout)
+        except TimeoutError as error:
+            raise RuntimeError(f"Timed out waiting for managed environment lock {lock}.") from error
+        return True

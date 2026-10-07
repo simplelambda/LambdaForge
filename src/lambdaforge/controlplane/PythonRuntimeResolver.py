@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -13,6 +12,7 @@ from uuid import uuid4
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
+from lambdaforge.controlplane.CacheBuildLease import CacheBuildLease
 from lambdaforge.controlplane.MicromambaArtifactStore import MicromambaArtifactStore
 from lambdaforge.controlplane.python_runtime import (
     NoCompatiblePythonRuntimeError,
@@ -38,7 +38,7 @@ class PythonRuntimeResolver:
         self,
         artifacts: MicromambaArtifactStore | None = None,
         *,
-        lock_timeout: float = 30.0,
+        lock_timeout: float = 3600.0,
         tls: TlsTrustResolver | None = None,
     ) -> None:
         self.artifacts = artifacts or MicromambaArtifactStore()
@@ -221,17 +221,35 @@ class PythonRuntimeResolver:
     ) -> PythonRuntime:
         assert profile.storage is not None
         provider, executable, provider_version = manager
+        # The configured future interpreter may not exist yet. Lease bootstrap needs
+        # only host stdlib, not a Python compatible with the scientific project.
+        lease_python = next(
+            (
+                candidate
+                for candidate in self._existing_candidates(profile.runtime_policy)
+                if self._probe(profile, transport, candidate, trust=trust) is not None
+            ),
+            None,
+        )
+        if lease_python is None:
+            raise RuntimeError(
+                "Managed Python provisioning needs a host Python for GC-safe build ownership. "
+                "Configure an existing bootstrap interpreter; "
+                "it need not satisfy Work requirements."
+            )
         cache_root = PurePosixPath(profile.storage.cache_root)
         runtime_root = PurePosixPath(self._runtime_root(profile))
         lock = cache_root / f".python-runtime-{request_id}.lock"
-        acquired = self._acquire(transport, lock, runtime_root / request_id / self.MARKER)
+        created_cache = transport.run(("mkdir", "-p", str(cache_root)))
+        if created_cache.returncode:
+            raise RuntimeError(f"Could not create runtime cache: {created_cache.stderr.strip()}")
+        acquired = self._acquire(
+            transport, lock, runtime_root / request_id / self.MARKER, python=lease_python
+        )
         if not acquired:
-            cached = self._request_cache(profile, transport, request_id)
-            if cached is not None:
-                return cached
             raise RuntimeError(f"Timed out waiting for managed Python runtime lock {lock}.")
         temporary = runtime_root / f".{request_id}.tmp-{uuid4().hex}"
-        try:
+        with CacheBuildLease.maintain(transport, lock, python=lease_python):
             cached = self._request_cache(profile, transport, request_id)
             if (
                 cached is not None
@@ -383,8 +401,6 @@ class PythonRuntimeResolver:
                 runtime = self._with_action(existing, existing, "reuse", trust=trust)
             self._publish_request(profile, transport, request_id, runtime)
             return runtime
-        finally:
-            transport.run(("rmdir", str(lock)))
 
     def _install_manager(
         self, profile: ClusterProfile, transport: Transport, platform_tag: str
@@ -641,18 +657,16 @@ class PythonRuntimeResolver:
             raise RuntimeError(f"Could not publish runtime state: {published.stderr.strip()}")
 
     def _acquire(
-        self, transport: Transport, lock: PurePosixPath, completion: PurePosixPath
+        self, transport: Transport, lock: PurePosixPath, completion: PurePosixPath,
+        *, python: str = "python3",
     ) -> bool:
-        deadline = time.monotonic() + self.lock_timeout
-        while True:
-            result = transport.run(("mkdir", str(lock)))
-            if result.returncode == 0:
-                return True
-            if transport.run(("test", "-f", str(completion))).returncode == 0:
-                return False
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(0.2)
+        # Even a complete receipt needs a GC-safe verification/activation lease.
+        del completion
+        try:
+            CacheBuildLease.acquire(transport, lock, python=python, timeout=self.lock_timeout)
+        except TimeoutError:
+            return False
+        return True
 
     @staticmethod
     def _cleanup(transport: Transport, path: PurePosixPath) -> None:

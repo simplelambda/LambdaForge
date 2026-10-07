@@ -219,6 +219,9 @@ services are `self.outputs`, `self.metrics`, `self.checkpoints`, `self.cache`, `
 - `self.log("message", level="info")` emits an immediately visible timestamped log line.
 - `self.checkpoints.file(...)` atomically builds/reuses a validated file;
   `save_json/load_json/exists` manages small sequential state shared by compatible Attempts.
+  `pin(name, reason=...)` protects recovery bytes; `unpin(name)` removes that pin.
+  `outputs.from_checkpoint(...)` seals a durable artifact; dataset publication accepts
+  `source_checkpoint` without an intermediate Attempt tree.
 - `self.cache.put(key, content)` and `get(key, default=None)` are the ordinary cache API for bytes,
   text and strict JSON. `file/fetch(...)` handles large or library-produced files;
   `cache.path` is only the advanced raw-layout escape hatch.
@@ -1083,13 +1086,18 @@ lf clean                     # preview only
 lf clean --apply
 ```
 
-To continue a failed, cancelled or timed-out adaptive Study, open it in the console and choose
+To recover a failed, cancelled or timed-out Study (adaptive, repeated seeds or fixed sweep), open
+it in the console and choose
 **Resume Study…**, or run `lf retry STUDY` from the original project. It submits a new Job on the
-same cluster with current project code, reconnects to the exact persisted HPO execution and keeps
+same cluster with current project code, reconnects to the exact persisted Execution and keeps
 completed/pruned evidence, candidate identities, seed assignments and decisions. Failed and
 interrupted Runs create new Attempts: compatible checkpoints enable `self.resuming`; without a
 checkpoint that Run starts again. Valid completed Runs and performance-pruned Runs are not repeated.
 Already spent Run/time budgets stay spent; retry does not grant more budget.
+For repeated/fixed designs, `lf retry STUDY --dry-run --json` lists Runs to reuse, retry and run
+for the first time. Nine successful seeds plus one failed seed reuse nine Runs and create only
+one new Attempt of the failed Run. Fixed recovery uses owned design/Attempt records, not adaptive
+controller state. Checkpoints are application state: epoch-level continuation requires Work support.
 
 After fixing consumer code, use `lf retry STUDY --accept-code-change` **only** if previous metrics
 and checkpoint formats remain scientifically valid. The console offers the same explicit
@@ -1097,7 +1105,8 @@ compatibility checkbox. Configuration, inputs, seed streams and objective must s
 different scientific protocol requires a new Study. The original manifest remains immutable and
 `recovery-history.jsonl` records actual code revisions. Keep the original Job workspace: cleanup
 protects it while a recovered Study references its evidence. Missing/corrupt recovery state fails
-visibly rather than silently restarting an existing Study. This recovery targets one adaptive Study,
+visibly rather than silently restarting an existing Study. Adaptive recovery still requires its
+HPO controller state. This recovery targets one Study,
 not a composed multi-Work execution, and does not move state between clusters.
 
 The Research Console is the human interface for live Work, Studies, Clusters, Datasets and Results.
@@ -1156,8 +1165,17 @@ Normal execution reuses a verified successful scientific definition. `retry` cre
 of the same Run, checkpoints make it resumable, and `--rerun` deliberately creates a new Execution.
 Cleanup is preview-first. `lf clean` includes reconstructible cache and hash-verified redundant or
 partial managed artifacts from terminal Attempts, but never published datasets, results,
-checkpoints, active work or an unpublished successful output. Superseded managed environments are removed automatically after a verified
-replacement becomes active, except environments referenced by live Jobs. This preserves immutable
+required/pinned recovery checkpoints, active work or an unpublished successful output. Successful
+Executions may release unpinned checkpoints after configurable grace or verified explicit publication.
+Cluster **Clear storage…** previews/confirms native cleanup with background feedback;
+**Clear output** only clears terminal text. `resources.storage` is a future Job commitment admitted
+against physical free space, other leases and safety; a GPU-ready Job may wait for disk. Read the
+[storage guide](docs/STORAGE.md) for exact guarantees and current boundaries.
+`lf storage status --on CLUSTER` inspects usage; `lf storage reconcile --on CLUSTER` reports drift,
+with `--apply` updating diagnostic measurements only. Managed publication copies reserve additional
+space on their destination volume and preserve source evidence if that volume lacks safety margin.
+Superseded managed environments are removed automatically after a verified
+replacement becomes active, except environments referenced by live/recovered Jobs. This preserves immutable
 reuse without accumulating one multi-gigabyte prefix per historical dependency identity.
 
 For clusters, datasets, search, result metadata, cleanup ownership and the complete CLI, read
@@ -1451,6 +1469,11 @@ unreachable conflicting placement is never removed automatically. LambdaForge do
 relay a large remote dataset through the controller: remote-to-remote placement uses the site's
 durable transfer facility, followed by `reconcile` after the exact manifest-backed directory is in
 place.
+
+Before expensive reconstruction, use `lf datasets preflight` and `self.outputs.dataset_preflight`.
+[Dataset reconstruction](docs/DATASET_RECONSTRUCTION.md) covers explicit scientific declarations,
+project-owned comparison, unchanged exact checksums and publication-only recovery. Console Datasets
+discovers all configured cluster locations; divergent content remains visible as a conflict.
 
 Work names are display labels, not identities. The same authored Work may run locally and on one or
 more clusters at the same time; tables and destructive actions use the exact `work_id`, so equal

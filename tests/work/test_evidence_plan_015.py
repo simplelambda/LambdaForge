@@ -119,6 +119,57 @@ def test_fixed_and_legacy_exhaustive_use_the_common_resource_dispatcher(
     assert captured == [(80, False, 2), (4, False, 3)]
 
 
+@pytest.mark.parametrize(
+    ("execution", "expected"),
+    [({}, 6), ({"runs_per_gpu": 1}, 2), ({"max_parallel": 3}, 3)],
+)
+def test_single_trial_repeated_seeds_use_evidence_budget_for_parallelism(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execution: dict[str, Any], expected: int
+) -> None:
+    definition = (
+        WorkConfig.from_mapping(
+            {
+                "name": "repeated",
+                "run": "tests.work_cases.AdaptiveScoreWork",
+                "seeds": list(range(6)),
+                "resources": {"cpu": 8, "gpu": 2},
+                "execution": execution,
+            },
+            source=tmp_path / "repeated.yaml",
+        )
+        .levels[0]
+        .runs[0]
+    )
+    assert definition.study_design is not None
+    specifications = [
+        {
+            "definition": {
+                "name": definition.name,
+                "resources": definition.resources.to_dict(),
+                "execution_policy": definition.execution_policy.to_dict(),
+                "study_design": definition.study_design.to_dict(),
+            },
+            "trial_index": trial,
+            "seed": seed,
+            "execution_dir": tmp_path,
+            "execution_id": "execution-test",
+        }
+        for trial, _variant, seed in WorkRunner._expanded(definition)
+    ]
+    captured: list[int] = []
+
+    def dispatch(values: Any, **kwargs: Any) -> tuple[Any, ...]:
+        assert len(values) == 6
+        assert kwargs["policy"].early_stopping is False
+        captured.append(kwargs["parallelism"])
+        return ()
+
+    monkeypatch.delenv("LAMBDAFORGE_STUDY_PATH", raising=False)
+    monkeypatch.setattr(runner, "_execute_adaptive_dispatch", dispatch)
+    runner._execute_fixed_evidence_group(specifications)
+    assert captured == [expected]
+
+
 def test_structured_and_legacy_adaptive_yaml_normalize_identically(tmp_path: Path) -> None:
     shared = {
         "name": "adaptive",

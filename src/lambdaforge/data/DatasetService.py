@@ -34,6 +34,7 @@ from lambdaforge.data.errors import (
     AmbiguousDatasetVersionError,
     DatasetRegistryCorruptionError,
     DatasetResolutionError,
+    InvalidDatasetPublicationError,
     MissingDatasetPlacementError,
     MissingManagedEnvironmentError,
     OfflineClusterError,
@@ -59,6 +60,7 @@ class DatasetService:
         self.factory = factory or ControlPlaneFactory()
         self.max_parallel = max(1, int(max_parallel))
         self.discovery_warnings: tuple[str, ...] = ()
+        self.discovery_failures: tuple[str, ...] = ()
 
     def list(
         self, *, cluster: str | None = None, all_clusters: bool = False
@@ -80,16 +82,15 @@ class DatasetService:
                 try:
                     discovered = future.result()
                     remote.extend(discovered)
-                    for record in discovered:
-                        self.registry.register(record)
                 except Exception as error:
                     if not all_clusters:
                         raise
                     warnings.append(f"{futures[future]}: {error.__class__.__name__}: {error}")
-        self.discovery_warnings = tuple(sorted(warnings))
-        by_identity: dict[str, DatasetRecord] = {}
+        self.discovery_failures = tuple(sorted(warnings))
+        self.discovery_warnings = self.discovery_failures
+        by_identity: dict[tuple[str, str], DatasetRecord] = {}
         for record in (*records, *remote):
-            key = record.dataset_id
+            key = (record.key, record.dataset_id)
             previous = by_identity.get(key)
             if previous is None:
                 by_identity[key] = record
@@ -115,6 +116,16 @@ class DatasetService:
                 previous.lineage_graph or record.lineage_graph,
             )
         values = tuple(sorted(by_identity.values(), key=lambda value: (value.name, value.version)))
+        identities: dict[str, set[str]] = {}
+        for record in values:
+            identities.setdefault(record.key, set()).add(record.dataset_id)
+        warnings.extend(
+            f"Immutable identity conflict for {key}: {', '.join(sorted(ids))}. "
+            "No registry was changed; inspect/reconcile each --on target."
+            for key, ids in sorted(identities.items())
+            if len(ids) > 1
+        )
+        self.discovery_warnings = tuple(sorted(warnings))
         if cluster is not None:
             values = tuple(
                 value
@@ -122,6 +133,110 @@ class DatasetService:
                 if any(item.cluster == cluster for item in value.placements)
             )
         return values
+
+    def publication_preflight(
+        self,
+        selector: str,
+        *,
+        cluster: str = "local",
+        intent: str = "publish",
+    ) -> dict[str, Any]:
+        """Inspect all configured indexes without mutating them or computing members."""
+        name, separator, version = selector.partition("@")
+        if not separator or not name or not version:
+            raise ValueError("Publication preflight requires NAME@VERSION.")
+        self.clusters.get(cluster)
+        from lambdaforge.data.DatasetPublisher import DatasetPublisher
+
+        DatasetPublisher._publication_label(name, field="name")
+        DatasetPublisher._publication_label(version, field="version")
+        if intent not in {"publish", "reuse", "rebuild"}:
+            raise ValueError("Dataset intent must be publish, reuse or rebuild.")
+        records = [record for record in self.list(all_clusters=True) if record.key == selector]
+        identities = sorted({record.dataset_id for record in records})
+        unresolved = bool(self.discovery_failures) or len(identities) > 1
+        allowed = not unresolved and (not records if intent == "publish" else len(identities) == 1)
+        return {
+            "dataset": selector,
+            "cluster": cluster,
+            "intent": intent,
+            "allowed": allowed,
+            "content_ids": identities,
+            "locations": [
+                placement.to_dict() | {"content_id": record.dataset_id}
+                for record in records
+                for placement in record.placements
+            ],
+            "warnings": list(self.discovery_warnings),
+            "reason": "Registry discovery is incomplete or conflicting."
+            if unresolved
+            else (
+                "Version exists; reuse exact bytes, rebuild for comparison, "
+                "or choose a new version."
+            )
+            if not allowed and intent == "publish"
+            else "An unambiguous published reference is required."
+            if not allowed
+            else "Preflight passed; final exact identity checks still apply.",
+            "next": f"lf datasets materialize {selector} --on {cluster}" if records else None,
+            "state_changed": False,
+        }
+
+    def publish_candidate(
+        self,
+        root: str | Path,
+        *,
+        cluster: str = "local",
+        version: str | None = None,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Publish saved bytes only; remote paths are interpreted on their owning host."""
+        profile = self.clusters.get(cluster)
+        assert profile.storage is not None
+        publication_root = profile.storage.dataset_root
+        if not publication_root and cluster == "local":
+            publication_root = str(self.registry.path.parent / "datasets" / "published")
+        if not publication_root:
+            raise InvalidDatasetPublicationError(
+                "Configure storage.dataset_root before publication."
+            )
+        options = json.dumps(
+            {
+                "publication_root": publication_root,
+                "version": version,
+                "apply": apply,
+                "cluster": cluster,
+                "registry": str(self.registry.path)
+                if cluster == "local"
+                else str(PurePosixPath(profile.storage.state_root) / "datasets.json"),
+            }
+        )
+        return self._operation(cluster, "publish-candidate", str(root), options)
+
+    def compare_reconstruction(
+        self,
+        left: str | Path,
+        right: str | Path,
+        *,
+        cluster: str = "local",
+        verifier: str | None = None,
+        policy: Mapping[str, Any] | None = None,
+        scientific_contracts: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Compare two co-located roots without downloading assets or changing indexes."""
+        return self._operation(
+            cluster,
+            "compare",
+            str(left),
+            str(right),
+            json.dumps(
+                {
+                    "verifier": verifier,
+                    "policy": dict(policy or {}),
+                    "scientific_contracts": dict(scientific_contracts or {}),
+                }
+            ),
+        )
 
     def show(self, selector: str, *, cluster: str | None = None) -> DatasetRecord:
         """Resolve a local or reconciled remote logical dataset version."""
@@ -1310,6 +1425,8 @@ class DatasetService:
         self, cluster: str, operation: str, root: str, *arguments: str
     ) -> dict[str, Any]:
         if cluster == "local":
+            if operation in {"compare", "publish-candidate"}:
+                return DatasetOperations.reconstruction_operation(operation, root, arguments)
             if operation == "inspect":
                 return DatasetOperations.inspect(root)
             if operation == "summary":

@@ -42,6 +42,7 @@ class JobHandle:
     state: JobState
     scheduler_id: str | None = None
     preview: dict[str, Any] | None = None
+    recovery_plan: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a concise CLI/API payload."""
@@ -51,6 +52,7 @@ class JobHandle:
             "state": self.state.value,
             "scheduler_id": self.scheduler_id,
             **({"scheduler_preview": self.preview} if self.preview is not None else {}),
+            **({"recovery_plan": self.recovery_plan} if self.recovery_plan is not None else {}),
         }
 
 

@@ -111,6 +111,13 @@ class DatasetRegistry:
                         f"Existing content: {existing.dataset_id}. "
                         f"New content: {record.dataset_id}."
                     )
+                if existing.metadata.get("lambdaforge_science") != record.metadata.get(
+                    "lambdaforge_science"
+                ):
+                    raise InvalidDatasetPublicationError(
+                        f"Dataset {record.key} has a different scientific declaration. "
+                        "Do not relabel an immutable version; choose a new version."
+                    )
                 by_cluster = {item.cluster: item for item in existing.placements}
                 by_cluster.update({item.cluster: item for item in record.placements})
                 record = DatasetRecord(
@@ -144,9 +151,23 @@ class DatasetRegistry:
         root: str | Path | None = None,
         producer: Mapping[str, object] | None = None,
     ) -> DatasetRecord:
+        return self.register(
+            self.artifact_record(manifest, cluster=cluster, root=root, producer=producer)
+        )
+
+    @classmethod
+    def artifact_record(
+        cls,
+        manifest: str | Path,
+        *,
+        cluster: str = "local",
+        root: str | Path | None = None,
+        producer: Mapping[str, object] | None = None,
+    ) -> DatasetRecord:
+        """Describe verified publication/candidate metadata without registering it."""
         artifact = DatasetArtifact.read_json(manifest)
         physical_root = Path(root or Path(manifest).parent).resolve()
-        size, files = self._size(physical_root)
+        size, files = cls._size(physical_root)
         placement = DatasetPlacement(
             cluster, str(physical_root), artifact.created_at_utc, size, files, True
         )
@@ -175,7 +196,7 @@ class DatasetRegistry:
             {name: value.to_dict() for name, value in artifact.global_assets.items()},
             artifact.lineage,
         )
-        return self.register(record)
+        return record
 
     def remove(self, selector: str, *, cluster: str | None = None) -> DatasetRecord | None:
         """Remove registration/placement only and never touch dataset bytes."""

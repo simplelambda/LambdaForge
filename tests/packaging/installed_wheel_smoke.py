@@ -28,6 +28,10 @@ def main() -> None:
         "share/lambdaforge/examples/sequence.yaml",
         "share/lambdaforge/docs/MANUAL.md",
         "share/lambdaforge/docs/MANUAL.es.md",
+        "share/lambdaforge/docs/STORAGE.md",
+        "share/lambdaforge/docs/STORAGE.es.md",
+        "share/lambdaforge/docs/DATASET_RECONSTRUCTION.md",
+        "share/lambdaforge/docs/DATASET_RECONSTRUCTION.es.md",
     ):
         matches = tuple(
             item

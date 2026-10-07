@@ -288,6 +288,22 @@ def test_hard_filters_never_infer_permission(changed: dict[str, Any], reason: st
     assert reason in excluded["A"]
 
 
+@pytest.mark.parametrize("available", [None, 99, 100])
+def test_placement_requires_real_storage_fit(available: int | None) -> None:
+    requested = run(1, storage_bytes=100)
+    assert GlobalRun.from_mapping(requested.to_dict()) == requested
+    assert requested.key == run(1, storage_bytes=200).key  # Operational, not scientific identity.
+    selected, excluded = GlobalPlacementBroker().place(
+        requested,
+        [offer("A", 1, admissible_storage_bytes=available)],
+        {"A": FleetMember("A")},
+        now=10,
+    )
+    assert (selected is not None) is (available == 100)
+    if selected is None:
+        assert "storage-fit-unknown-or-insufficient" in excluded["A"]
+
+
 def test_caps_command_slurm_and_checkpoint_locality() -> None:
     broker = GlobalPlacementBroker()
     requested = run(1, checkpoint_locations=("B",))

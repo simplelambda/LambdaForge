@@ -43,6 +43,7 @@ class DatasetArtifact(JsonResult):
         global_assets: Mapping[str, DatasetAsset | Mapping[str, Any]] | None = None,
         producer: Mapping[str, Any] | None = None,
         lineage: Mapping[str, Any] | None = None,
+        scientific_identity: Mapping[str, Any] | None = None,
     ) -> None:
         self._validate_id(dataset_id, "Dataset ID")
         if content_id is not None and content_id != dataset_id:
@@ -84,8 +85,46 @@ class DatasetArtifact(JsonResult):
         self.producer = FrozenJsonMapping(producer or {})
         self.lineage = FrozenJsonMapping(lineage or {})
         self.created_at_utc = str(created_at_utc)
-        self.metadata = FrozenJsonMapping(metadata or {})
+        metadata_value = dict(metadata or {})
+        if scientific_identity is not None:
+            declaration = json.loads(json.dumps(dict(scientific_identity), allow_nan=False))
+            required = {"sources", "selection", "labels", "configuration", "algorithm"}
+            if not required.issubset(declaration):
+                raise ValueError(f"Scientific identity requires {sorted(required)}.")
+            if "lambdaforge_science" in metadata_value:
+                raise ValueError(
+                    "Use scientific_identity, not reserved lambdaforge_science metadata."
+                )
+            metadata_value["lambdaforge_science"] = declaration
+        if "lambdaforge_science" in metadata_value:
+            self.scientific_contract_id(metadata_value["lambdaforge_science"])
+        self.metadata = FrozenJsonMapping(metadata_value)
         self._freeze_mapping(self.to_dict())
+
+    @property
+    def scientific_identity(self) -> Mapping[str, Any] | None:
+        """Explicit project contract; never inferred from arbitrary asset formats."""
+        value = self.metadata.get("lambdaforge_science")
+        return value if isinstance(value, Mapping) else None
+
+    @property
+    def scientific_id(self) -> str | None:
+        declaration = self.scientific_identity
+        return self.scientific_contract_id(declaration) if declaration is not None else None
+
+    @classmethod
+    def scientific_contract_id(cls, declaration: Mapping[str, Any]) -> str:
+        """Validate explicit science without modifying historical manifests."""
+        if not isinstance(declaration, Mapping) or not {
+            "sources",
+            "selection",
+            "labels",
+            "configuration",
+            "algorithm",
+        }.issubset(declaration):
+            raise ValueError("Invalid dataset scientific declaration.")
+        normalized = json.loads(json.dumps(dict(declaration), allow_nan=False))
+        return cls._digest({"scientific_identity_version": 1, "contract": normalized})
 
     @property
     def member_count(self) -> int:
@@ -105,6 +144,7 @@ class DatasetArtifact(JsonResult):
         global_assets: Mapping[str, DatasetAsset | Mapping[str, Any]] | None = None,
         metadata: Mapping[str, Any] | None = None,
         lineage: Mapping[str, Any] | None = None,
+        scientific_identity: Mapping[str, Any] | None = None,
     ) -> DatasetArtifact:
         summary = index.summary()
         globals_value = {
@@ -147,6 +187,7 @@ class DatasetArtifact(JsonResult):
             lineage=lineage,
             created_at_utc=datetime.now(timezone.utc).isoformat(),
             metadata=metadata,
+            scientific_identity=scientific_identity,
         )
 
     @classmethod
@@ -157,7 +198,7 @@ class DatasetArtifact(JsonResult):
         artifact_version = int(value.get("dataset_artifact_version", 1))
         if artifact_version not in {1, 2}:
             raise ValueError(f"Unsupported DatasetArtifact version {artifact_version}.")
-        return cls(
+        result = cls(
             dataset_artifact_version=artifact_version,
             dataset_id=str(value.get("content_id", value["dataset_id"])),
             content_id=str(value["content_id"]) if value.get("content_id") else None,
@@ -178,6 +219,11 @@ class DatasetArtifact(JsonResult):
             created_at_utc=str(value["created_at_utc"]),
             metadata=value.get("metadata", {}),
         )
+        if value.get("scientific_id") != result.scientific_id:
+            raise ValueError("Dataset scientific declaration identity differs from its manifest.")
+        if value.get("scientific_identity") != result.scientific_identity:
+            raise ValueError("Dataset scientific declaration differs from its manifest metadata.")
+        return result
 
     def to_dict(self) -> dict[str, Any]:
         common = {
@@ -210,6 +256,8 @@ class DatasetArtifact(JsonResult):
             },
             "producer": copy.deepcopy(self.producer),
             "lineage": copy.deepcopy(self.lineage),
+            "scientific_id": self.scientific_id,
+            "scientific_identity": copy.deepcopy(self.scientific_identity),
         }
 
     @staticmethod

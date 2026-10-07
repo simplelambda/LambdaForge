@@ -11,11 +11,50 @@ metadata empaquetada.
 
 ### Corregido
 
+- Inventario de datasets descubre todas las ubicaciones en la consola sin modificar registros ni
+  ocultar identidades divergentes. Preflight, contratos científicos, verificadores del proyecto y
+  publicación de candidatos conservados mantienen checksums exactos. Publicación fallida conserva
+  artifacts/checkpoints y candidatos; equivalencia no sustituye versiones. Guía ES/EN y WISDOM.
+
+- Builds de runtime Python comparten con entornos la adquisición atómica de propiedad frente a GC;
+  heartbeat/liberación acotados no sustituyen propietarios inciertos ni ocultan fallos de preparación.
+  Prefijos completos inválidos se conservan, no se eliminan bajo Jobs que podrían referenciarlos.
+  Un controlador obsoleto muerto no permite eliminar temporales usados todavía por hijos pip/Conda.
+
+- Studies coordinados fijos/pareados cuentan Attempts físicos persistidos por el coordinador, no
+  solo archivos locales. El marker de entorno se adquiere atómicamente con GC, también al reutilizar.
+  Pruning conserva referencias recuperadas/unknown y prefijos incompletos; ausencia de un PID local
+  no permite recuperar reservas de otro host.
+
+- Recuperación nativa/en consola para Studies de seeds repetidas y sweeps fijos sin exigir estado
+  adaptativo: conserva Runs correctas, reintenta solo las incompletas como nuevos Attempts y mantiene
+  evidencia, fallos y presupuestos gastados. Dry-run explica el plan sin descargar artefactos.
+  Restaurar un checkpoint no implica continuar una época sin soporte explícito del Work.
+
+- El paralelismo de Studies con seeds repetidas usa sus Runs obligatorias, no un presupuesto de
+  un candidato. Jobs directos compartidos no reservan exclusivamente todas sus GPUs: locks breves,
+  comprobación actualizada y separación de arranques entre Studies, preferencia por GPUs sin
+  cómputo y conservación del best-fit. La espera por entorno cubre la instalación y la limpieza
+  opcional se pospone con leases activos. Se mantienen límites CPU/RAM y concesiones/exclusividad GPU.
+
 - Analysis de sweeps condicionales usa el espacio del StudyDesign persistido, también en lecturas
   vivas de entornos worker antiguos e inmutables. Evidencia insuficiente por rama no provoca una
   media vacía; los diagnósticos remotos acotados conservan la excepción final.
 
 ### Añadido
+
+- `lf storage status/reconcile`: consulta de cambios sin mutación y actualización explícita del
+  inventario diagnóstico. Copias de publicación/snapshots reservan bytes adicionales en el volumen
+  destino, intentan GC seguro del mismo volumen si falta espacio y conservan evidencia original.
+
+- Compromisos por filesystem, margen absoluto/porcentual configurable, inodes, presión y admission
+  en cola con GC seguro limitado. Workers de scheduler comparten la autoridad; Fleet exige fit
+  conocido y SLURM permite mapping de scratch del sitio sin fingir una reserva.
+- Quotas/LRU de caches reconstruibles, razones/protecciones por entrada y borrado recuperable tras
+  crash. Gracia de checkpoints, pin/unpin y publicación independiente checkpoint→output/dataset
+  evitan árboles redundantes: CoW donde exista, copia segura en otro caso. **Clear storage…** confirma
+  GC nativo con feedback en segundo plano; editor de storage y resúmenes de presión. Guías EN/ES
+  detallan garantías y pendientes de reservas de provisioning/separación de dependencias y código.
 
 - Más estilos HTML en Parameters/Explore y Runs: puntos individuales, líneas escalonadas/áreas,
   violines, comparaciones horizontales, histogramas y distribuciones acumuladas; ejes que identifican

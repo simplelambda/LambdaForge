@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Static
 
 from lambdaforge.tui.screens.Base import DataScreen, EntitySelected
 
@@ -14,9 +14,20 @@ class DatasetScreen(DataScreen):
 
     TITLE = "Datasets · versions, members, placements and lineage"
 
+    def _loaded(self, value: Any) -> None:
+        super()._loaded(value)
+        warnings = {warning for item in value for warning in item.get("discovery_warnings", ())}
+        conflicts = any(item.get("inventory_conflict") for item in value)
+        if warnings or conflicts:
+            self.query_one("#screen-status", Static).update(
+                "Identity conflicts detected · inspect the selected dataset details."
+                if conflicts
+                else "Partial inventory · remote discovery warnings in dataset details."
+            )
+
     def populate(self, table: DataTable[Any], value: Any) -> None:
         table.clear(columns=True)
-        table.add_columns("Dataset", "Members", "Size", "Locations", "Parents")
+        table.add_columns("Dataset", "Members", "Size", "Locations", "Identity")
         for item in value:
             placements = item.get("placements", [])
             table.add_row(
@@ -24,8 +35,9 @@ class DatasetScreen(DataScreen):
                 str(item.get("sample_count", 0)),
                 self._bytes(self._dataset_size(item)),
                 ", ".join(str(entry.get("cluster")) for entry in placements) or "none",
-                str(len(item.get("lineage", ()))),
-                key=f"{item.get('name')}@{item.get('version')}",
+                ("CONFLICT · " if item.get("inventory_conflict") else "")
+                + str(item.get("dataset_id", ""))[-12:],
+                key=f"{item.get('name')}@{item.get('version')}:{item.get('dataset_id')}",
             )
 
     def detail(self, row: int) -> str:
@@ -47,7 +59,18 @@ class DatasetScreen(DataScreen):
             f"{len(lineage)} lineage inputs\n"
             f"Locations    {locations or 'not materialized'}\n"
             f"Content ID   {item.get('content_id', item.get('dataset_id', 'unavailable'))}\n"
-            "Enter/right opens bounded members, statistics, integrity and lineage views."
+            + (
+                "CONFLICT: the same version has different content across indexes. "
+                "No identity was chosen; inspect lf datasets reconcile NAME@VERSION --on CLUSTER.\n"
+                if item.get("inventory_conflict")
+                else ""
+            )
+            + (
+                "Discovery incomplete: " + "; ".join(item.get("discovery_warnings", ())) + "\n"
+                if item.get("discovery_warnings")
+                else ""
+            )
+            + "Enter/right opens bounded members, statistics, integrity and lineage views."
         )
 
     def open_row(self, row: int) -> None:

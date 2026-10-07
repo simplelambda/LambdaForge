@@ -72,6 +72,15 @@ class WorkCache:
 
     def __init__(self, root: Path, *, hold_gc_lease: bool = False) -> None:
         self._root = root.resolve()
+        self._gc_lease: CrossProcessFileLock | None = None
+        if hold_gc_lease:
+            self._gc_lease = CrossProcessFileLock(
+                self._root.parent / f".{self._root.name}.lease",
+                shared=True,
+                timeout_seconds=300.0,
+                poll_interval_seconds=0.05,
+            )
+            self._gc_lease.acquire()
         self._root.mkdir(parents=True, exist_ok=True)
         self._store = ManagedFileStore(
             self._root,
@@ -83,15 +92,6 @@ class WorkCache:
         self._dependency_collectors: ContextVar[tuple[list[ManagedFile], ...]] = ContextVar(
             f"lambdaforge_work_cache_dependencies_{id(self)}", default=()
         )
-        self._gc_lease: CrossProcessFileLock | None = None
-        if hold_gc_lease:
-            self._gc_lease = CrossProcessFileLock(
-                self._root.parent.parent / ".gc.lock",
-                shared=True,
-                timeout_seconds=300.0,
-                poll_interval_seconds=0.05,
-            )
-            self._gc_lease.acquire()
 
     def file(
         self,

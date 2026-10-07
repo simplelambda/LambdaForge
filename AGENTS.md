@@ -34,9 +34,11 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Work operations | `lf show/logs/cancel/retry/delete SELECTOR`; study Run: `show/logs WORK --run KEY` |
 | Low-level jobs | `lf jobs list/show/logs/cancel/retry/delete`; `lf jobs clear [--apply]` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
+| Dataset reconstruction/publication | `lf datasets preflight/compare/publish-candidate`; `docs/DATASET_RECONSTRUCTION.md` |
 | Results | `lf results list/show/compare/analyze/report/replay`; portable Study: `lf export SELECTOR --output DIR` |
 | Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Cluster profiles | Research Console; `lf clusters add/set/unset/...` for automation |
+| Inspect/reconcile storage | `lf storage status/reconcile [--on CLUSTER]`; reconcile `--apply` updates only the ledger |
 | Preview safe storage cleanup | `lf clean [--on CLUSTER]`; add `--apply` after review |
 | Scaffold | `lf init DIRECTORY` |
 
@@ -46,7 +48,10 @@ tracebacks. Local and remote run both return after durable asynchronous preparat
 
 ## Writing Work
 
-Adaptive Study recovery is `lf retry STUDY` or **Resume Study…** in its console workspace. It
+Study recovery (adaptive, repeated seeds or fixed sweep) is `lf retry STUDY` or **Resume Study…**
+in its console workspace. `--dry-run --json` exposes reuse/retry/pending evidence without launching.
+Fixed designs restore owned execution/design/Attempt records, never require or fabricate adaptive
+`hpo-control/state.json`; adaptive recovery still requires that state. It
 reconnects a freshly prepared Job to the exact original owned Execution on the same cluster;
 valid completed/pruned evidence, HPO decisions, seeds and spent budgets remain intact. Failed and
 interrupted Runs create new Attempts from compatible checkpoints or start fresh when absent.
@@ -56,7 +61,8 @@ not a waiver of configuration/input/seed/objective identity checks. Preserve imm
 referenced owner Jobs from cleanup and use the existing cross-process lock. Never silently start
 over if persisted recovery state is missing/corrupt, automatically retry consumer exceptions,
 repeat valid confirmation seeds, or remove physical failed Attempt cost/history. Recovery currently
-requires one adaptive Study per Execution; it does not migrate state between clusters.
+requires one Study per Execution; it does not migrate state between clusters. Recovery restores a
+Study, not necessarily an epoch: checkpoint continuation requires explicit Work support.
 
 ```python
 from pathlib import Path
@@ -651,6 +657,21 @@ checkpoints; rerun means a deliberate new Execution. Published datasets are dura
 objects. Results/checkpoints are scientific state. Bundle/environment/cache bytes are
 reconstructible. Deletion and cleanup must be exact-root, symlink-safe, idempotent and preview-first.
 
+Storage admission shares per-filesystem owned leases: physical free minus active/new commitments
+must preserve the larger absolute/percentage safety floor and available inodes. Reservation is not
+usage. Never pool volumes or infer foreign owner death from a local PID. Automatic/manual GC shares
+`StorageService/StorageOperations`. Environment/runtime marker acquisition is atomic with GC,
+including reuse verification. Never replace an invalid complete prefix underneath referenced Jobs.
+Publication-copy leases target the destination volume and GC only owned cache roots, never external
+publication folders. `lf storage reconcile` measures explicit diagnostic drift; `--apply` only writes
+the ledger, never scientific state. It is not a per-write ledger. Protect recovery references and
+independent live Work-cache leases.
+**Clear storage…** confirms native cleanup; **Clear output** only clears text. Successful unpinned
+checkpoints have configurable grace; failed/interrupted recovery remains protected. Named
+`checkpoints.pin/unpin`, `outputs.from_checkpoint` and dataset `source_checkpoint` declare independent
+publication/retention; never mutable hardlinks. Read `docs/STORAGE.md` for exact scope and unfinished
+provisioning/code-layer guarantees rather than claiming those are implemented.
+
 Project-scoped dataset roots affect new publications only. Preserve a verified legacy absolute
 placement already recorded for the current project. Content-hash subdirectories are immutable
 identity, never random paths: changed bytes require a new logical version. Publication must check
@@ -661,6 +682,17 @@ registered directory is proven absent; unreachable or existing bytes remain a ha
 Dataset creation occurs only from `self.outputs.dataset(...)`; it streams members into the existing
 DatasetArtifact v2/index/registry format. There is no dataset-build execution protocol. Preserve v1
 manifest reads and immutable name/version conflict checks.
+
+Dataset producers call `outputs.dataset_preflight(...)` before expensive work; `datasets preflight`
+inspects all indexes without mutation. `intent="rebuild"` seals a pinned unregistered candidate.
+`scientific_identity` explicitly declares sources/selection/labels/configuration/algorithm; never
+infer operational exclusions. `DatasetComparison.compare`/`datasets compare` verifies all bytes
+before trusted project verification with variable-specific policy; identifiers/targets/partitions/
+source contracts stay exact. Equivalence keeps both content IDs, never replaces a version.
+Publication failures protect artifacts/checkpoints and sealed candidates; `datasets publish-candidate`
+previews/applies bytes-only recovery without rerunning science or changing failed history. Inventory
+is read-only, merges (name, version, content ID), discovers all configured Console locations and
+shows conflicts without ambiguous mutations. See `docs/DATASET_RECONSTRUCTION.md` (Spanish sibling).
 
 ## Control-plane invariants
 
@@ -706,7 +738,13 @@ whole-Study cancellation or launch from stale memory data.
 
 Cluster `gpu_access.mode` is `auto|scheduler|exclusive|shared|command`. Auto selects scheduler for
 SLURM and exclusive cooperative leases for direct hosts. Shared admits external occupancy only when
-the operator explicitly accepts that risk. Command requires an argv `command_prefix` for a site
+the operator explicitly accepts that risk. Shared Jobs register non-exclusive access, permit other
+shared Studies and block new exclusive grants; Run admission uses per-physical-token host locks,
+fresh VRAM rechecks and cross-Study start staggering. Prefer observed compute-idle permitted GPUs;
+preserve best fit when all are busy/unknown. Never bypass CPU/RAM Job ceilings to exploit spare
+VRAM. Fixed/repeated Study parallelism counts required Runs, not just distinct candidates.
+Environment build contention waits through provisioning; optional cleanup defers under cache
+leases without weakening reference protection. Command requires an argv `command_prefix` for a site
 claim wrapper; never encode it as shell. Prefer a self-contained `gpu exec`-style wrapper. Optional
 `claim_command` and `release_command` are an atomic pair; only `{gpu_count}` expands, the direct
 supervisor releases on every terminal path, and persistent claims are invalid with SLURM. In

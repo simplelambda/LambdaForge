@@ -3503,10 +3503,38 @@ class StudyRetryConfirmation(ModalScreen[bool | None]):
         with Vertical(classes="modal-card wide-modal"):
             yield Label("Resume Study", classes="modal-title")
             with VerticalScroll():
-                yield Static(confirmation_text(self.preview), markup=False)
+                rows = self.preview.get("runs", [])
+                if "reuse_runs" in self.preview:
+                    yield Static(
+                        f"Reuse {self.preview['reuse_runs']} successful Runs · "
+                        f"Retry {self.preview['retry_runs']} unfinished Runs · "
+                        f"Pending {self.preview['pending_runs']} not-yet-started Runs",
+                        id="retry-plan-summary",
+                        markup=False,
+                    )
+                yield Static(
+                    confirmation_text(
+                        {key: value for key, value in self.preview.items() if key != "runs"}
+                    ),
+                    markup=False,
+                )
+                if rows:
+                    yield Static(
+                        "\n".join(
+                            f"Trial {row['trial']} · seed {row['seed']} → {row['action']}"
+                            for row in rows[:50]
+                        )
+                        + (
+                            f"\n… {len(rows) - 50} more; full plan: lf retry STUDY --dry-run --json"
+                            if len(rows) > 50
+                            else ""
+                        ),
+                        markup=False,
+                    )
                 yield Static(
                     "Completed and pruned Runs will not be repeated. Failed/interrupted Runs use "
-                    "their checkpoints when available, otherwise start again. Spent budgets remain spent. "
+                    "compatible application checkpoints when available, otherwise start again. "
+                    "Epoch-level continuation requires support in the Work itself. Spent budgets remain spent. "
                     "If the code fix changes the meaning of earlier metrics or checkpoint structure, "
                     "cancel this dialog and start a new Study."
                 )
@@ -3634,6 +3662,13 @@ class ClusterWorkspace(ResearchWorkspace):
                     classes="cluster-action",
                     flat=True,
                 )
+                yield Button(
+                    "Clear storage…",
+                    id="cluster-storage-clear",
+                    classes="cluster-action",
+                    variant="warning",
+                    flat=True,
+                )
             with TabbedContent(initial="cluster-overview", id="cluster-detail-tabs"):
                 with TabPane("Overview", id="cluster-overview"):
                     with Grid(classes="cluster-overview-grid"):
@@ -3699,7 +3734,7 @@ class ClusterWorkspace(ResearchWorkspace):
                 compact=True,
                 id="cluster-operation-size",
             )
-            yield Button("Clear", id="cluster-operation-clear", flat=True, compact=True)
+            yield Button("Clear output", id="cluster-operation-clear", flat=True, compact=True)
         yield OperationResizeHandle("#cluster-operation-log")
         yield RichLog(id="cluster-operation-log", wrap=True, auto_scroll=True, highlight=True)
 
@@ -3803,6 +3838,12 @@ class ClusterWorkspace(ResearchWorkspace):
                 ),
                 accepts_progress=True,
             )
+        elif selected == "cluster-storage-clear":
+            self._run_operation(
+                "Storage cleanup preview",
+                lambda: self.services.clean_storage(self.cluster_name),
+                self._confirm_storage_clear,
+            )
         elif selected == "cluster-bootstrap-apply":
             self.app.push_screen(
                 ExactConfirmation(
@@ -3852,6 +3893,32 @@ class ClusterWorkspace(ResearchWorkspace):
     def _edited(self, saved: bool | None) -> None:
         if saved:
             self.notify("Cluster updated. Reopen it to use the refreshed service catalog.")
+
+    def _confirm_storage_clear(self, preview: Mapping[str, Any]) -> None:
+        self.app.push_screen(
+            ExactConfirmation(
+                f"Clear safe storage on {self.cluster_name}",
+                {
+                    "cluster": self.cluster_name,
+                    "reclaimable_bytes": preview.get("reclaimable_bytes", 0),
+                    "categories": preview.get("categories", {}),
+                    "protected_entries": len(preview.get("protected_items", ())),
+                    "will_preserve": [
+                        "active and ownership-unresolved Jobs",
+                        "published datasets, scientific results and unpublished artifacts",
+                        "recovery checkpoints and referenced environments",
+                    ],
+                    "effect": "Rechecks current ownership before removing reconstructible or verified redundant bytes. Does not delete Job history.",
+                },
+            ),
+            self._apply_storage_clear,
+        )
+
+    def _apply_storage_clear(self, confirmed: bool | None) -> None:
+        if confirmed:
+            self._run_operation(
+                "Clear storage", lambda: self.services.clean_storage(self.cluster_name, apply=True)
+            )
 
     def _apply_bootstrap(self, confirmed: bool | None) -> None:
         if confirmed:
@@ -4280,11 +4347,18 @@ class DatasetWorkspace(ResearchWorkspace):
         yield Static(f"{name} · immutable DatasetVersion", classes="workspace-header")
         with Horizontal(id="dataset-toolbar", classes="workspace-actions"):
             yield Static(
-                "Ready · destructive actions require an exact preview and confirmation.",
+                "Identity conflict · inspect/reconcile each cluster before dataset operations."
+                if self.dataset.get("inventory_conflict")
+                else "Ready · destructive actions require an exact preview and confirmation.",
                 id="dataset-operation-status",
                 classes="status-line",
             )
-            yield Button("Delete DatasetVersion…", id="dataset-delete", variant="error")
+            yield Button(
+                "Delete DatasetVersion…",
+                id="dataset-delete",
+                variant="error",
+                disabled=bool(self.dataset.get("inventory_conflict")),
+            )
         with TabbedContent(initial="dataset-summary", id="dataset-tabs"):
             with TabPane("Summary", id="dataset-summary"):
                 with Grid(classes="dataset-summary-grid"):
@@ -4406,6 +4480,12 @@ class DatasetWorkspace(ResearchWorkspace):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         target: str | None = None
         action: Any = None
+        if self.dataset.get("inventory_conflict"):
+            self.query_one("#dataset-operation-status", Static).update(
+                "Different content identities exist. Inspect lf datasets reconcile "
+                f"{self.selector} --on CLUSTER; no identity was selected automatically."
+            )
+            return
         if event.button.id == "dataset-show-stats":
             target = "#dataset-stat-content"
             action = partial(self.services.dataset_stats, self.selector)
@@ -4425,10 +4505,23 @@ class DatasetWorkspace(ResearchWorkspace):
     def on_mount(self) -> None:
         self.query_one("#dataset-member-table", DataTable).display = False
         self._apply_logical_summary(self.dataset, exact=False)
-        self._load_logical_summary()
+        if self.dataset.get("inventory_conflict"):
+            self.query_one("#dataset-split-note", Static).update(
+                "Cached counts for this exact identity. Resolve the registry conflict "
+                "before reading member or integrity evidence through a logical selector."
+            )
+        else:
+            self._load_logical_summary()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         if event.tabbed_content.id == "dataset-tabs" and event.pane.id == "dataset-members":
+            if self.dataset.get("inventory_conflict"):
+                self.query_one("#dataset-members-loading").display = False
+                self.query_one("#dataset-member-content", Static).update(
+                    "Member reads are blocked by conflicting content identities. "
+                    "Inspect/reconcile the selected cluster explicitly."
+                )
+                return
             self._load_members(partial(self.services.dataset_members, self.selector))
 
     def _load_logical_summary(self) -> None:

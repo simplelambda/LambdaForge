@@ -53,6 +53,16 @@ def retention_plan(result: WorkResult) -> dict[str, Any]:
     run_dir = result.run_dir.resolve()
     artifacts_root = owned_path(run_dir, "artifacts")
     if not result.ok:
+        if (
+            (run_dir / "dataset-publication-pending.json").exists()
+            or ((result.failure or {}).get("type") == "InvalidDatasetPublicationError")
+            or (run_dir.parent.parent / "checkpoints" / "dataset-publication-failure.json").exists()
+        ):
+            return {
+                "paths": (),
+                "reclaimable_bytes": 0,
+                "reason": "publication-failure-recoverable",
+            }
         failed_paths: tuple[str, ...] = ("artifacts",) if artifacts_root.exists() else ()
         return {
             "paths": failed_paths,
@@ -93,6 +103,14 @@ def retention_plan(result: WorkResult) -> dict[str, Any]:
 def compact_incomplete_attempt(attempt_dir: Path) -> dict[str, Any]:
     """Remove an unfinalized artifact tree from a terminal interrupted Attempt."""
     directory = attempt_dir.resolve()
+    if (directory / "dataset-publication-pending.json").exists():
+        return {
+            "retention_version": 1,
+            "status": "interrupted",
+            "removed": [],
+            "reclaimed_bytes": 0,
+            "preserved": ["publication recovery evidence", "artifacts", "checkpoints"],
+        }
     artifacts = owned_path(directory, "artifacts")
     reclaimed = _size(artifacts) if artifacts.exists() else 0
     if artifacts.exists():

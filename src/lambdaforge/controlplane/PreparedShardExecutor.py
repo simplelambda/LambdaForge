@@ -391,12 +391,27 @@ class PreparedShardExecutor:
             inputs_ready=True,
             local_admission_verified=True,
             acknowledged_leases=tuple(acknowledged),
+            admissible_storage_bytes=self._storage_offer(),
             diagnostics={
                 "authority": "prepared-shard-provider",
                 "gpu_support": False,
                 "gpu_pending": "owned-allocation-offer" if self.resources.gpu_count else None,
             },
         )
+
+    def _storage_offer(self) -> int | None:
+        """Local legacy CPU offers use the same root/lease authority, never a deep scan."""
+        if self.profile.transport != "local":
+            return None
+        from lambdaforge.controlplane.StorageAdmission import StorageAdmission
+
+        assert self.profile.storage is not None
+        descriptor = self.profile.storage.to_dict()
+        try:
+            device = StorageAdmission.filesystem(Path(descriptor["run_root"]), descriptor)["device"]
+            return int(StorageAdmission.observe(descriptor)[device]["admissible_bytes"])
+        except (OSError, ValueError):
+            return None
 
     @property
     def allocation_job_id(self) -> str:
@@ -639,6 +654,7 @@ class PreparedShardExecutor:
             inputs_ready=bool(valid),
             local_admission_verified=bool(valid),
             acknowledged_leases=tuple(value.get("acknowledged_leases", ())) if valid else (),
+            admissible_storage_bytes=value.get("admissible_storage_bytes") if valid else None,
             diagnostics={
                 "authority": "owned-provider-allocation",
                 "job_id": self.allocation_job_id,

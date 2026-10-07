@@ -129,6 +129,16 @@ class ResourceDashboard(Vertical):
             "[bright_cyan]━ cluster total[/]  ·  "
             "[bright_magenta]━ my LambdaForge jobs[/]  ·  fixed five-minute window"
         )
+        volumes = self._mapping(observed.get("storage"))
+        if volumes:
+            self._summary += "\nStorage · " + "  |  ".join(
+                f"{', '.join(volume.get('roots', ())) or 'volume'}: "
+                f"{self._bytes(volume.get('free_bytes'))} free · "
+                f"{volume.get('pressure', 'unknown').replace('_', ' ').lower()}"
+                for value in volumes.values()
+                if isinstance(value, Mapping)
+                for volume in (value,)
+            )
         if self.is_mounted:
             self.query_one(".resource-summary", Static).update(self._summary)
             self._render_plots()

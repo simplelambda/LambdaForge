@@ -26,6 +26,7 @@ _NAMES = (
     "DataIdentityProvider",
     "DataIdentityProviderRegistry",
     "DatasetArtifact",
+    "DatasetComparison",
     "DatasetDeletionPlan",
     "DatasetIdIdentityProvider",
     "DatasetIdentity",
@@ -56,6 +57,10 @@ LazyExports.install(
         "DatasetAsset": ("lambdaforge.data.index", "DatasetAsset"),
         "DatasetIndex": ("lambdaforge.data.index", "DatasetIndex"),
         "DatasetMember": ("lambdaforge.data.index", "DatasetMember"),
+        "DatasetComparisonContext": (
+            "lambdaforge.data.DatasetComparison",
+            "DatasetComparisonContext",
+        ),
         "DatasetPlacementResolution": (
             "lambdaforge.data.DatasetResolution",
             "DatasetPlacementResolution",
@@ -77,6 +82,7 @@ __all__ = [
     "DatasetAsset",
     "DatasetIndex",
     "DatasetMember",
+    "DatasetComparisonContext",
     "DatasetPlacementResolution",
     "DatasetPlacementState",
     "AmbiguousDatasetVersionError",

@@ -51,6 +51,7 @@ class GlobalRun:
     priority_class: str = "required"
     proposal: Mapping[str, Any] = field(default_factory=dict)
     checkpoint_locations: tuple[str, ...] = ()
+    storage_bytes: int = 0
 
     def __post_init__(self) -> None:
         if any(
@@ -70,6 +71,12 @@ class GlobalRun:
             raise ValueError("Global Run memory requirement cannot be negative.")
         if not isinstance(self.requires_gpu, bool):
             raise TypeError("Global Run requires_gpu must be a boolean.")
+        if (
+            isinstance(self.storage_bytes, bool)
+            or not isinstance(self.storage_bytes, int)
+            or self.storage_bytes < 0
+        ):
+            raise ValueError("Global Run storage requirement must be nonnegative bytes.")
         if self.priority_class not in {
             "required",
             "decision",
@@ -138,6 +145,7 @@ class GlobalRun:
             "parameters": dict(self.parameters),
             "equivalence": self.equivalence.to_dict(),
             "gpu_memory_bytes": self.gpu_memory_bytes,
+            "storage_bytes": self.storage_bytes,
             "requires_gpu": self.requires_gpu,
             "priority_class": self.priority_class,
             "proposal": dict(self.proposal),
@@ -159,6 +167,7 @@ class GlobalRun:
             priority_class=value.get("priority_class", "required"),
             proposal=value.get("proposal", {}),
             checkpoint_locations=tuple(value.get("checkpoint_locations", ())),
+            storage_bytes=value.get("storage_bytes", 0),
         )
         if value.get("run_key", run.key) != run.key:
             raise ValueError("Global Run identity does not match its definition.")
@@ -190,6 +199,7 @@ class ClusterOffer:
     expected_run_seconds: float | None = None
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
     acknowledged_leases: tuple[str, ...] = ()
+    admissible_storage_bytes: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("slots", "admissible_gpus"):
@@ -209,6 +219,12 @@ class ClusterOffer:
             isinstance(self.free_memory_bytes, bool) or not isinstance(self.free_memory_bytes, int)
         ):
             raise TypeError("Cluster offer free memory must be an integer byte count or null.")
+        if self.admissible_storage_bytes is not None and (
+            isinstance(self.admissible_storage_bytes, bool)
+            or not isinstance(self.admissible_storage_bytes, int)
+            or self.admissible_storage_bytes < 0
+        ):
+            raise ValueError("Cluster offer storage must be nonnegative bytes or unknown.")
         if self.equivalence is not None and not isinstance(self.equivalence, ExecutionEquivalence):
             raise TypeError("Offer equivalence must be a verified ExecutionEquivalence or null.")
         for name in ("free_memory_bytes", "startup_seconds", "expected_run_seconds"):
@@ -286,6 +302,11 @@ class GlobalPlacementBroker:
                 reasons.append("memory-fit-unknown-or-insufficient")
         if run.checkpoint_locations and offer.cluster not in run.checkpoint_locations:
             reasons.append("checkpoint-transfer-required")
+        if run.storage_bytes and (
+            offer.admissible_storage_bytes is None
+            or offer.admissible_storage_bytes < run.storage_bytes
+        ):
+            reasons.append("storage-fit-unknown-or-insufficient")
         return tuple(reasons)
 
     def place(

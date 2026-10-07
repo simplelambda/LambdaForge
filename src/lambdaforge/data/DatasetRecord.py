@@ -71,6 +71,14 @@ class DatasetRecord:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        from lambdaforge.data.DatasetArtifact import DatasetArtifact
+
+        declaration = self.metadata.get("lambdaforge_science")
+        scientific_id = (
+            DatasetArtifact.scientific_contract_id(declaration)
+            if isinstance(declaration, Mapping)
+            else None
+        )
         return {
             "dataset_record_version": 2,
             "name": self.name,
@@ -84,6 +92,8 @@ class DatasetRecord:
             "lineage": list(self.lineage),
             "metadata": copy.deepcopy(self.metadata),
             "content_id": self.dataset_id,
+            "scientific_id": scientific_id,
+            "scientific_identity": copy.deepcopy(declaration),
             "build_id": self.build_id,
             "index": copy.deepcopy(self.index),
             "partitions": copy.deepcopy(self.partitions),

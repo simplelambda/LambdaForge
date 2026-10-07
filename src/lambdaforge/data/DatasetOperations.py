@@ -73,11 +73,12 @@ class DatasetOperations:
         artifact = DatasetArtifact.read_json(manifest) if manifest.is_file() else None
         index_summary: dict[str, Any] = {}
         if artifact is not None and artifact.index.get("path"):
-            index_path = (path / str(artifact.index["path"])).resolve(strict=False)
+            lexical = path / str(artifact.index["path"])
+            index_path = lexical.resolve(strict=False)
             if (
                 index_path.is_relative_to(path)
                 and index_path.is_file()
-                and not index_path.is_symlink()
+                and not any(item.is_symlink() for item in (lexical, *lexical.parents))
             ):
                 index_summary = DatasetIndex(index_path).summary()
         files = tuple(item for item in path.rglob("*") if item.is_file() and not item.is_symlink())
@@ -122,6 +123,9 @@ class DatasetOperations:
 
     @classmethod
     def verify(cls, root: str | Path, expected_id: str) -> dict[str, Any]:
+        from lambdaforge.work.snapshot import validate_path
+
+        validate_path(Path(root).expanduser().absolute())
         path = Path(root).resolve()
         if path.is_symlink() or not path.exists():
             return {"valid": False, "errors": ["Registered root is absent or a symlink."]}
@@ -133,10 +137,11 @@ class DatasetOperations:
         if artifact.dataset_id != expected_id:
             errors.append("Dataset identity does not match the registry.")
         if artifact.index.get("path"):
-            index_path = (path / str(artifact.index["path"])).resolve(strict=False)
+            lexical_index = path / str(artifact.index["path"])
+            index_path = lexical_index.resolve(strict=False)
             if (
                 not index_path.is_relative_to(path)
-                or index_path.is_symlink()
+                or any(item.is_symlink() for item in (lexical_index, *lexical_index.parents))
                 or not index_path.is_file()
             ):
                 errors.append("Dataset member index is missing or unsafe.")
@@ -158,10 +163,11 @@ class DatasetOperations:
                 if index.identity(global_identity) != artifact.content_id:
                     errors.append("Dataset logical content identity differs from the manifest.")
         for expected in artifact.artifacts:
-            candidate = (path / expected.path).resolve(strict=False)
+            lexical = path / expected.path
+            candidate = lexical.resolve(strict=False)
             if (
                 not candidate.is_relative_to(path)
-                or candidate.is_symlink()
+                or any(item.is_symlink() for item in (lexical, *lexical.parents))
                 or not candidate.exists()
             ):
                 errors.append(f"Missing or unsafe artifact: {expected.path}")
@@ -172,10 +178,11 @@ class DatasetOperations:
         for name, asset in artifact.global_assets.items():
             if "://" in asset.path:
                 continue
-            candidate = (path / asset.path).resolve(strict=False)
+            lexical = path / asset.path
+            candidate = lexical.resolve(strict=False)
             if (
                 not candidate.is_relative_to(path)
-                or candidate.is_symlink()
+                or any(item.is_symlink() for item in (lexical, *lexical.parents))
                 or not candidate.exists()
             ):
                 errors.append(f"Missing or unsafe global asset: {name}")
@@ -223,12 +230,17 @@ class DatasetOperations:
 
     @staticmethod
     def _index(root: str | Path) -> DatasetIndex:
+        from lambdaforge.work.snapshot import validate_path
+
+        validate_path(Path(root).expanduser().absolute() / "dataset-artifact.json")
         path = Path(root).resolve()
         manifest = DatasetArtifact.read_json(path / "dataset-artifact.json")
         relative = manifest.index.get("path")
         if not relative:
             raise ValueError("DatasetArtifact v1 has no logical DatasetIndex.")
-        index = (path / str(relative)).resolve(strict=False)
+        lexical = path / str(relative)
+        validate_path(lexical)
+        index = lexical.resolve(strict=False)
         if not index.is_relative_to(path) or index.is_symlink() or not index.is_file():
             raise ValueError("DatasetIndex is missing or unsafe.")
         return DatasetIndex(index)
@@ -269,6 +281,49 @@ class DatasetOperations:
         return next(iter(suffixes)) if len(suffixes) == 1 else "mixed" if suffixes else "unknown"
 
     @classmethod
+    def reconstruction_operation(
+        cls,
+        operation: str,
+        root: str,
+        arguments: Sequence[str],
+    ) -> dict[str, Any]:
+        """Common local/remote reconstruction CLI boundary; explicit trusted code only."""
+        if operation == "publish-candidate":
+            from lambdaforge.data.DatasetPublisher import DatasetPublisher
+            from lambdaforge.data.DatasetRegistry import DatasetRegistry
+
+            options = json.loads(arguments[0])
+            return DatasetPublisher(DatasetRegistry(options["registry"])).publish_candidate(
+                root,
+                publication_root=options["publication_root"],
+                cluster=options["cluster"],
+                version=options.get("version"),
+                apply=options["apply"],
+            )
+        from importlib import import_module
+
+        from lambdaforge.data.DatasetComparison import DatasetComparison
+
+        options = json.loads(arguments[1])
+        verifier = None
+        identifier = options.get("verifier")
+        if identifier:
+            module, separator, name = identifier.partition(":")
+            if not separator or not module or not name or name.startswith("_"):
+                raise ValueError("Verifier must be an explicit trusted module:function.")
+            verifier = getattr(import_module(module), name)
+            if not callable(verifier):
+                raise TypeError("Dataset verifier must be callable.")
+        return DatasetComparison.compare(
+            root,
+            arguments[0],
+            verifier=verifier,
+            verifier_id=identifier,
+            policy=options.get("policy"),
+            scientific_contracts=options.get("scientific_contracts"),
+        )
+
+    @classmethod
     def main(cls, argv: Sequence[str] | None = None) -> int:
         values = tuple(argv if argv is not None else sys.argv[1:])
         if len(values) < 2:
@@ -276,7 +331,9 @@ class DatasetOperations:
                 "Usage: DatasetOperations summary|stats|verify|delete|members|member ROOT [ARGS]"
             )
         operation, root, *rest = values
-        if operation == "inspect":
+        if operation in {"compare", "publish-candidate"}:
+            payload = cls.reconstruction_operation(operation, root, rest)
+        elif operation == "inspect":
             payload = cls.inspect(root)
         elif operation == "summary":
             payload = cls.summary(root)

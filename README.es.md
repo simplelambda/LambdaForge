@@ -974,13 +974,18 @@ lf export ESTUDIO --output ./exportaciones
 lf clean                    # vista previa de limpieza segura
 ```
 
-Para continuar un Study adaptativo fallido, cancelado o con timeout, ábrelo en la consola y pulsa
+Para recuperar un Study fallido, cancelado o con timeout (adaptativo, seeds repetidas o sweep fijo),
+ábrelo en la consola y pulsa
 **Resume Study…**, o ejecuta `lf retry STUDY` desde el proyecto original. Se prepara un nuevo Job
-en el mismo clúster con el código actual y se reconecta a la Execution HPO exacta: conserva resultados
+en el mismo clúster con el código actual y se reconecta a la Execution exacta: conserva resultados
 válidos, podas, candidatos, seeds asignadas y decisiones. Las Runs fallidas o interrumpidas crean
 otro Attempt: un checkpoint compatible activa `self.resuming`; sin checkpoint esa Run empieza de
 nuevo. Las Runs completadas y las podadas por rendimiento no se repiten. Los presupuestos de tiempo
 y Runs ya gastados siguen gastados: retry no concede presupuesto extra.
+Para diseños repetidos/fijos, `lf retry STUDY --dry-run --json` lista Runs reutilizadas,
+reintentadas y pendientes de primer envío. Con nueve seeds correctas y una fallida se reutilizan
+nueve Runs y solo se crea otro Attempt de la fallida. No requieren estado de controlador adaptativo:
+se usan registros propios de diseño y Attempts. Continuar desde una época exige soporte en el Work.
 
 Si has corregido el código consumidor, usa `lf retry STUDY --accept-code-change` **solo** cuando
 las métricas anteriores y los formatos de checkpoints sigan siendo científicamente válidos. La
@@ -989,7 +994,8 @@ seeds y objetivo deben seguir coincidiendo; cambiar el protocolo científico req
 El manifest original no se sobrescribe y `recovery-history.jsonl` registra las revisiones reales.
 Conserva el workspace del Job original: la limpieza lo protege mientras una recuperación lo
 referencie. Un estado HPO ausente/corrupto falla visiblemente en lugar de reiniciar silenciosamente
-el estudio. Esta recuperación cubre un único Study adaptativo, no composiciones de varios Works,
+el estudio; los adaptativos siguen requiriendo ese estado HPO. Esta recuperación cubre un único
+Study, no composiciones de varios Works,
 y no traslada el estado entre clústeres.
 
 La Consola es la interfaz humana para Work, Studies, Clusters, Datasets y Results. Overview separa
@@ -1074,10 +1080,19 @@ como cancelados, limpiando con seguridad huérfanos dejados por versiones anteri
 
 `lf clean` también presenta cache reconstruible y artefactos gestionados parciales o duplicados de
 Attempts terminales que pueden eliminarse con prueba exacta. Nunca incluye un Job activo, un output
-correcto no publicado, resultados, métricas, checkpoints ni datasets.
+correcto no publicado, resultados, métricas, checkpoints requeridos/pinned de recuperación ni
+datasets. Una Execution correcta puede liberar checkpoints no fijados tras la gracia configurable
+o una publicación explícita verificada. En el clúster **Clear storage…** presenta/confirma limpieza
+nativa con feedback en segundo plano; **Clear output** solo limpia texto. `resources.storage` es
+un compromiso futuro del Job, admitido contra espacio físico libre, otras reservas y margen.
+Puede haber GPUs libres y un Job esperando disco. La
+[guía de almacenamiento](docs/STORAGE.es.md) detalla garantías y límites actuales.
+`lf storage status --on CLUSTER` consulta uso; `lf storage reconcile --on CLUSTER` informa cambios,
+y `--apply` solo actualiza medidas diagnósticas. Las copias de publicación gestionadas reservan
+espacio adicional en el volumen destino y conservan la evidencia original si falta margen.
 
 Los entornos gestionados obsoletos se eliminan automáticamente tras activar un reemplazo verificado,
-salvo los referenciados por Jobs vivos. Así se conserva la inmutabilidad sin acumular un prefijo de
+salvo los referenciados por Jobs vivos/recuperados. Así se conserva la inmutabilidad sin acumular un prefijo de
 varios GB por cada identidad histórica.
 
 La creación de datasets se realiza con `self.outputs.dataset(...)`; `lf datasets` inspecciona,
@@ -1344,6 +1359,11 @@ nunca se elimina automáticamente. LambdaForge no retransmite silenciosamente un
 grande a través del controlador: la colocación entre dos remotos usa el servicio durable de
 transferencia del centro y después `reconcile`, cuando ya existe allí el directorio exacto con su
 manifiesto.
+
+Antes de reconstruir datasets usa `lf datasets preflight` y `self.outputs.dataset_preflight`.
+[Reconstrucción de datasets](docs/DATASET_RECONSTRUCTION.es.md) explica identidad científica
+explícita, verificación del proyecto, checksums exactos y recuperación de publicación sin recalcular.
+Datasets en la consola descubre todas las ubicaciones configuradas y señala contenido divergente.
 
 El nombre de un Work es una etiqueta, no su identidad. El mismo YAML puede ejecutarse a la vez en
 local y en uno o más clústeres; las tablas y acciones destructivas usan el `work_id` exacto, por lo

@@ -282,6 +282,8 @@ class OutputCollection:
             )
 
     def _publish(self, source: Path, pending: _PendingOutput) -> Path:
+        from lambdaforge.work.snapshot import copy_file, copy_tree
+
         destination = self._publication_path(pending.publish_to)
         if destination == source:
             return destination
@@ -295,13 +297,13 @@ class OutputCollection:
         if source.is_file():
             if pending.overwrite:
                 return atomic_build_file(
-                    destination, lambda temporary: shutil.copy2(source, temporary)
+                    destination, lambda temporary: copy_file(source, temporary)
                 )
             staging = destination.with_name(
                 f".{destination.name}.{os.getpid()}.{uuid4().hex}.lambdaforge-tmp"
             )
             try:
-                shutil.copy2(source, staging)
+                copy_file(source, staging)
                 with staging.open("rb") as handle:
                     os.fsync(handle.fileno())
                 try:
@@ -320,7 +322,7 @@ class OutputCollection:
             f".{destination.name}.{os.getpid()}.{uuid4().hex}.lambdaforge-backup"
         )
         try:
-            shutil.copytree(source, staging)
+            copy_tree(source, staging)
             if destination.exists():
                 if not pending.overwrite:
                     raise FileExistsError(
@@ -383,9 +385,27 @@ class OutputCollection:
         output: str = "dataset",
         metadata: Mapping[str, Any] | None = None,
         target_schema: Mapping[str, Any] | None = None,
+        source_checkpoint: str | None = None,
+        release_checkpoints: Iterable[str] = (),
+        scientific_identity: Mapping[str, Any] | None = None,
+        intent: str = "publish",
     ) -> Mapping[str, Any]:
         """Stream, verify and atomically publish one independent DatasetVersion."""
         output_name = self._new_name(output)
+        release_names = list(release_checkpoints)
+        for checkpoint in release_names:
+            selected = owned_path(self._runtime.checkpoints._root, checkpoint, must_exist=True)
+            if selected == self._runtime.checkpoints._root:
+                raise ValueError("Release named checkpoints, not the collection root.")
+        source_root = (
+            self._runtime.checkpoints.path(source_checkpoint, create_parent=False)
+            if source_checkpoint is not None
+            else self._runtime.run_dir
+        )
+        if source_checkpoint is not None:
+            owned_path(self._runtime.checkpoints._root, source_root, must_exist=True)
+            if source_root == self._runtime.checkpoints._root or not source_root.is_dir():
+                raise ValueError("Dataset source_checkpoint must name an owned directory.")
         cluster = os.environ.get("LAMBDAFORGE_CLUSTER", "local")
         configured_root = os.environ.get("LAMBDAFORGE_DATASET_ROOT")
         if cluster != "local" and configured_root is None:
@@ -399,26 +419,139 @@ class OutputCollection:
             os.environ.get("LAMBDAFORGE_DATASET_REGISTRY")
             or DatasetRegistry.project_path(self._runtime.source_dir)
         )
-        record = DatasetPublisher(registry).publish_members(
-            name,
-            version,
-            members,
-            source_root=self._runtime.run_dir,
-            publication_root=publication_root,
-            build_provenance={
-                "work_class": self._runtime.config.work_class,
-                "scientific_fingerprint": self._runtime.scientific_fingerprint,
-                "execution_id": self._runtime.execution_id,
-                "run_id": self._runtime.run_id,
-                "attempt_id": self._runtime.attempt_id,
-            },
-            cluster=cluster,
-            metadata=metadata,
-            target_schema=target_schema,
+        recovery_root = self._runtime.checkpoints.path(f"dataset-publications/{output_name}")
+        if intent == "rebuild":
+            DatasetPublisher(registry).preflight(name, version, intent="rebuild")
+            publication_root = recovery_root
+        from lambdaforge.work.models import atomic_json
+
+        pending = self._runtime.run_dir / "dataset-publication-pending.json"
+        atomic_json(
+            pending,
+            {"dataset": f"{name}@{version}", "intent": intent, "recovery_root": str(recovery_root)},
         )
+        try:
+            record = DatasetPublisher(registry).publish_members(
+                name,
+                version,
+                members,
+                source_root=source_root,
+                publication_root=publication_root,
+                build_provenance={
+                    "work_class": self._runtime.config.work_class,
+                    "scientific_fingerprint": self._runtime.scientific_fingerprint,
+                    "execution_id": self._runtime.execution_id,
+                    "run_id": self._runtime.run_id,
+                    "attempt_id": self._runtime.attempt_id,
+                },
+                cluster=cluster,
+                metadata=metadata,
+                target_schema=target_schema,
+                scientific_identity=scientific_identity,
+                intent=intent,
+                recovery_root=recovery_root if intent == "publish" else None,
+            )
+        except Exception:
+            self._runtime.checkpoints.save_json(
+                "dataset-publication-failure.json",
+                {
+                    "dataset": f"{name}@{version}",
+                    "recovery_root": str(recovery_root),
+                    "preserve_artifacts": True,
+                },
+            )
+            raise
+        pending.unlink(missing_ok=True)
         payload = record.to_dict()
+        if intent == "rebuild":
+            payload["publication_status"] = "reconstructed-unregistered"
+            self._runtime.checkpoints.pin(
+                f"dataset-publications/{output_name}",
+                reason="dataset reproducibility comparison",
+            )
+            self._values[output_name] = payload
+            return payload
         self._datasets[output_name] = payload
+        if release_names:
+            self._runtime.checkpoints._publication_committed(
+                release_names,
+                {
+                    "kind": "dataset",
+                    "dataset_id": record.dataset_id,
+                    "placements": [placement.to_dict() for placement in record.placements],
+                },
+            )
         return payload
+
+    def dataset_preflight(
+        self,
+        *,
+        name: str,
+        version: str,
+        intent: str = "publish",
+    ) -> Mapping[str, Any]:
+        """Check the publication target before any expensive scientific calculation.
+
+        Call as the first operation in a producing Work. It does not enumerate
+        members or execute computation and cannot waive the final identity check.
+        """
+        registry = DatasetRegistry(
+            os.environ.get("LAMBDAFORGE_DATASET_REGISTRY")
+            or DatasetRegistry.project_path(self._runtime.source_dir)
+        )
+        return DatasetPublisher(registry).preflight(name, version, intent=intent)
+
+    def from_checkpoint(
+        self,
+        name: str,
+        checkpoint: str,
+        *,
+        role: str = "model",
+        release: bool = False,
+    ) -> Path:
+        """Seal a checkpoint into an independent durable artifact, without scratch trees."""
+        from lambdaforge.work.snapshot import copy_file, copy_tree
+
+        source = owned_path(self._runtime.checkpoints._root, checkpoint, must_exist=True)
+        if source == self._runtime.checkpoints._root:
+            raise ValueError("Publish a named checkpoint, not the collection root.")
+        selected = self._new_name(name)
+        destination = owned_path(
+            self._runtime.run_dir, Path("artifacts") / self._safe_name(selected)
+        )
+        if source.is_file():
+            destination /= source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        identity = fingerprint(source)
+        if source.is_dir():
+            copy_tree(source, destination)
+        else:
+            copy_file(source, destination)
+        if fingerprint(source) != identity or fingerprint(destination) != identity:
+            raise ValueError(
+                "Checkpoint changed during publication; refusing an unsealed snapshot."
+            )
+        digest, size = identity
+        self._artifacts[selected] = WorkArtifact(
+            selected,
+            destination.relative_to(self._runtime.run_dir).as_posix(),
+            role,
+            digest,
+            size,
+            None,
+            {"checkpoint_source": checkpoint},
+        )
+        if release:
+            self._runtime.checkpoints._publication_committed(
+                [checkpoint],
+                {
+                    "kind": "artifact",
+                    "path": str(destination),
+                    "sha256": digest,
+                    "size_bytes": size,
+                },
+            )
+        return destination
 
     @property
     def values(self) -> Mapping[str, Any]:

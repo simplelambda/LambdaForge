@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from lambdaforge.ProjectContext import ProjectContext
+if TYPE_CHECKING:
+    from lambdaforge.ProjectContext import ProjectContext
 
 
 @dataclass(frozen=True, slots=True)

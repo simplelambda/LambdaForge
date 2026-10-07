@@ -30,8 +30,10 @@ runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada 
 | Operar Work | `lf show/logs/cancel/retry/delete SELECTOR`; Run: `show/logs WORK --run CLAVE` |
 | Jobs de bajo nivel | `lf jobs list/show/logs/cancel/retry/delete/clear`; `lf doctor --on CLUSTER` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
+| Reconstruir/publicar datasets | `lf datasets preflight/compare/publish-candidate`; `docs/DATASET_RECONSTRUCTION.es.md` |
 | Resultados | `lf results list/show/compare/analyze/report/replay`; Study portable: `lf export SELECTOR --output DIR` |
 | Perfiles de clúster | Consola; `lf clusters add/set/unset/...` para automatización |
+| Consultar/reconciliar almacenamiento | `lf storage status/reconcile [--on CLUSTER]`; reconcile `--apply` solo actualiza inventario |
 | Limpiar almacenamiento seguro | `lf clean`; aplicar con `--apply` |
 
 Usa `--json` para automatización y `--debug` solo para traceback interno. Los envíos locales y
@@ -50,7 +52,10 @@ objective/analysis raíz ignorados. Preflight distingue presupuesto del Study de
 solicitudes imposibles; los grants del scheduler/launcher siguen siendo autoridad del runtime.
 Guía: docs/CONDITIONAL_STUDIES.es.md.
 
-Un Study adaptativo se recupera con `lf retry STUDY` o **Resume Study…** en su ventana. Se prepara
+Un Study adaptativo, de seeds repetidas o sweep fijo se recupera con `lf retry STUDY` o
+**Resume Study…** en su ventana. `--dry-run --json` explica Runs reutilizadas, reintentadas y
+pendientes sin lanzar. Diseños fijos usan registros propios de Execution/diseño/Attempts, nunca
+requieren ni inventan `hpo-control/state.json`; los adaptativos sí lo requieren. Se prepara
 otro Job conectado a la Execution original exacta del mismo clúster: conserva evidencia completa/
 podada, decisiones HPO, seeds y presupuestos gastados. Runs fallidas/interrumpidas crean Attempts
 desde checkpoints compatibles o empiezan de nuevo si no existen. `--accept-code-change` reconoce
@@ -59,7 +64,8 @@ entradas, seeds u objetivo. Mantén inmutable `execution.json`, registra revisio
 `recovery-history.jsonl`/`current-code.json`, protege Jobs referenciados de limpieza y usa el bloqueo
 entre procesos existente. Nunca reinicies silenciosamente un estado ausente/corrupto, reintentes
 automáticamente excepciones consumidoras, repitas seeds de confirmación válidas ni borres coste/
-historial de Attempts fallidos. Cubre un único Study adaptativo por Execution y no migra entre clústeres.
+historial de Attempts fallidos. Cubre un único Study por Execution y no migra entre clústeres.
+Recuperar el Study no garantiza continuar una época: el Work debe implementar restauración de checkpoints.
 
 La firma y el docstring de `run()` son la verdad de parámetros. Los únicos marcadores especiales
 son `{file: ...}`, `{dataset: NOMBRE@VERSION}` y `{from: PASO.SALIDA}`. Las vistas inmutables son
@@ -336,7 +342,14 @@ variante; excluye clúster, rutas, IDs operacionales y tiempo. Retry crea otro A
 checkpoint compatible; rerun crea otra Execution.
 
 `gpu_access.mode` es `auto|scheduler|exclusive|shared|command`: auto elige scheduler en SLURM y
-leases exclusivos en hosts directos; shared admite ocupación externa solo por decisión explícita;
+leases exclusivos en hosts directos; shared admite ocupación externa solo por decisión explícita.
+Jobs shared registran acceso no exclusivo: permiten otros Studies shared y bloquean nuevos grants
+exclusive. La admisión de Runs usa locks del host por token físico, nueva comprobación de VRAM y
+arranques separados entre Studies. Prefiere GPUs permitidas sin cómputo observado; conserva best-fit
+si todas están ocupadas/desconocidas. No omitas límites CPU/RAM para aprovechar VRAM libre.
+El paralelismo fijo/repetido cuenta Runs obligatorias, no solo candidatos distintos. La contención
+del build espera durante el aprovisionamiento; limpieza opcional se pospone con leases de caché
+sin debilitar la protección por referencias.
 command exige `command_prefix` argv del centro, nunca shell; prefiere wrappers autocontenidos como
 `gpu exec`. `claim_command`/`release_command` son una pareja atómica, solo expanden `{gpu_count}` y
 no son válidos con SLURM. En command/scheduler, `CUDA_VISIBLE_DEVICES` heredado son grants opacos:
@@ -602,10 +615,36 @@ Reutiliza `lambdaforge.nn.distances.Distance`, aplica la tabla de capacidades y 
 antes de una matriz O(N²). KMeans y Ward son euclídeos. Escalado, imputación, PCA, parámetros,
 thresholds e interpretación de estabilidad son ciencia explícita del proyecto.
 
+El productor llama a `outputs.dataset_preflight(...)` antes del cálculo; `datasets preflight` lee
+todos los índices sin modificarlos. `intent="rebuild"` sella un candidato fijado y no registrado.
+`scientific_identity` declara fuentes/selección/labels/configuración/algoritmo; no infieras exclusiones
+operativas. `DatasetComparison.compare`/`datasets compare` verifica bytes antes del verificador
+confiado con política explícita por variable; IDs/targets/particiones/fuentes siguen exactos.
+Equivalencia conserva content IDs distintos, no sustituye versión. Publicación fallida protege
+artifacts/checkpoints y candidato; `datasets publish-candidate` recupera solo publicación con
+preview/apply, sin recalcular ni reescribir historial. Inventario read-only fusiona solo
+(nombre, versión, content ID), descubre todas las ubicaciones y señala conflictos sin acciones
+ambiguas. Contrato y WISDOM: `docs/DATASET_RECONSTRUCTION.es.md`.
+
 Los datasets publicados son objetos durables independientes. Los resultados y checkpoints son
 estado científico; bundles, entornos compartidos y caché son reconstruibles. Todo borrado debe ser
 exacto, seguro frente a symlinks, idempotente y con vista previa. Nunca contactes un clúster real ni
 modifiques datos científicos reales al probar el repositorio.
+
+Admission comparte leases por filesystem: espacio físico libre menos compromisos actuales/nuevos
+conserva el mayor margen absoluto/porcentual e inodes disponibles. Reserva no es uso. No sumes
+volúmenes ni deduzcas muerte de un propietario remoto por PID local. GC automático/manual comparte
+`StorageService/StorageOperations`; los markers de entorno/runtime se adquieren atómicamente con GC,
+también al verificar reuse. No reemplaces prefijos completos inválidos bajo Jobs que los referencien.
+Las copias de publicación reservan en el volumen destino y GC solo limpia raíces de caché propias,
+nunca carpetas externas. `lf storage status/reconcile` consulta/mide; reconcile `--apply` solo actualiza
+el inventario diagnóstico, no estado científico ni contabilidad de cada escritura. Protege
+referencias de recuperación y leases independientes de caches Work.
+**Clear storage…** confirma limpieza nativa; **Clear output** solo limpia texto. Checkpoints correctos
+sin pin tienen gracia configurable; recuperación fallida/interrumpida se conserva.
+`checkpoints.pin/unpin`, `outputs.from_checkpoint` y dataset `source_checkpoint` declaran publicación/
+retención independientes, nunca hardlinks mutables. `docs/STORAGE.es.md` detalla alcance y garantías
+pendientes de provisioning/capas de código; no las afirmes implementadas.
 
 Las raíces de dataset con scope de proyecto solo afectan a publicaciones nuevas. Conserva una
 colocación absoluta heredada ya registrada para el proyecto si verifica exactamente. Las

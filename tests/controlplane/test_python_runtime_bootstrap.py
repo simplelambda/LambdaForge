@@ -55,6 +55,17 @@ class RuntimeResolutionTransport(Transport):
         del cwd, timeout
         values = tuple(command)
         self.commands.append(values)
+        if "lambdaforge-environment-build-lease" in " ".join(values):
+            target = values[-2]
+            if target in self.directories:
+                return CommandResult(75)
+            self.directories.add(target)
+            self.files[f"{target}/owner.json"] = values[-1]
+            return CommandResult(0)
+        if "lambdaforge-cache-build-release" in " ".join(values):
+            self.files.pop(values[-2], None)
+            self.directories.discard(str(Path(values[-2]).parent))
+            return CommandResult(0)
         if values[:2] == ("uname", "-s"):
             return CommandResult(0, "Linux\n")
         if values[:2] == ("uname", "-m"):
@@ -234,6 +245,26 @@ def test_auto_selects_a_compatible_existing_alternative() -> None:
     assert runtime.executable == "python3.12"
     assert runtime.version == "3.12.11"
     assert not runtime.managed
+
+
+def test_runtime_lease_can_bootstrap_when_configured_python_is_not_installed() -> None:
+    from dataclasses import replace
+
+    from lambdaforge.controlplane.python_runtime import PythonRuntimePolicy
+
+    profile = replace(
+        managed_profile(strategy="auto"),
+        python="/not-installed/python",
+        python_runtime=PythonRuntimePolicy(strategy="auto", executable="/not-installed/python"),
+    )
+    transport = RuntimeResolutionTransport({"python3": "3.9.21"}, manager="conda")
+    runtime = PythonRuntimeResolver().resolve(profile, transport)
+    assert runtime.managed
+    lease_commands = [
+        command for command in transport.commands
+        if "lambdaforge-environment-build-lease" in " ".join(command)
+    ]
+    assert lease_commands and lease_commands[0][0] == "python3"
 
 
 def test_auto_uses_a_compatible_configured_python_without_managed_install() -> None:

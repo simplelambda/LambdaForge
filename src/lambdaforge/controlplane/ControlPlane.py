@@ -352,6 +352,7 @@ class ControlPlane:
                     "LAMBDAFORGE_DATASET_REGISTRY="
                     f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
                     f"LAMBDAFORGE_CACHE_ROOT={storage.cache_root}",
+                    "LAMBDAFORGE_STORAGE_POLICY=" + json.dumps(storage.to_dict()),
                     f"LAMBDAFORGE_CLUSTER={cluster}",
                     f"LAMBDAFORGE_GPU_ACCESS_MODE={gpu_mode}",
                     f"LAMBDAFORGE_REQUESTED_GPUS={request.gpu_count}",

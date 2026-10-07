@@ -257,7 +257,14 @@ class DiagnosticClassifier:
                 operation=context.operation,
             )
         if isinstance(error, InvalidDatasetPublicationError):
-            if "different immutable identity" in lowered:
+            if any(
+                marker in lowered
+                for marker in (
+                    "different immutable identity",
+                    "already published",
+                    "different scientific declaration",
+                )
+            ):
                 return diagnostic(
                     ErrorCategory.OPERATION_REFUSED,
                     "LambdaForge refused to overwrite an immutable dataset version.",
@@ -267,8 +274,14 @@ class DiagnosticClassifier:
                         "changing its bytes would make earlier results ambiguous."
                     ),
                     impact=("The existing version and registry record were left unchanged.",),
-                    fixes=("Publish changed scientific content under a new dataset version.",),
-                    commands=(("Inspect existing versions", "lf datasets list"),),
+                    fixes=(
+                        "Reuse/materialize exact published bytes, compare a reconstruction, "
+                        "or publish changed content under an explicit new dataset version.",
+                        "A scientific validation PASS does not establish byte equality. "
+                        "Use publish-candidate to publish a preserved reconstruction "
+                        "without recalculation.",
+                    ),
+                    commands=(("Inspect existing versions", "lf datasets list --all"),),
                     context={"cluster": context.cluster},
                     operation=context.operation,
                 )

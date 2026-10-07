@@ -139,7 +139,25 @@ class ConsoleServices:
         return self.resources.get(name).to_dict()
 
     def dataset_rows(self) -> list[dict[str, Any]]:
-        return [record.to_dict() for record in self.datasets.list()]
+        records = self.datasets.list(all_clusters=True)
+        if not records and self.datasets.discovery_failures:
+            from lambdaforge.data.errors import DatasetResolutionError
+
+            raise DatasetResolutionError(
+                "Dataset discovery is incomplete; absence cannot be established. "
+                + "; ".join(self.datasets.discovery_failures)
+            )
+        identities: dict[str, set[str]] = {}
+        for record in records:
+            identities.setdefault(record.key, set()).add(record.dataset_id)
+        return [
+            record.to_dict()
+            | {
+                "inventory_conflict": len(identities[record.key]) > 1,
+                "discovery_warnings": list(self.datasets.discovery_warnings),
+            }
+            for record in records
+        ]
 
     def result_rows(self) -> list[dict[str, Any]]:
         return [
@@ -316,6 +334,10 @@ class ConsoleServices:
     def doctor(self, name: str) -> dict[str, Any]:
         """Run the same read-only diagnostic service used by the CLI."""
         return Doctor(self.catalog).check(name).to_dict()
+
+    def clean_storage(self, name: str, *, apply: bool = False) -> dict[str, Any]:
+        """Use exactly the same safe preview/apply authority as native lf clean."""
+        return self.storage.gc(name, apply=apply).to_dict()
 
     def bootstrap(
         self,

@@ -132,13 +132,19 @@ Choose storage by lifecycle, not convenience:
 |---|---|---:|---:|---:|
 | small derivable bytes/text/JSON | `cache.put/get` | normally reused | yes | no |
 | derivable downloaded/computed file | `cache.file/fetch` | normally reused | yes | no |
-| sequential state required to resume a Run | `checkpoints.file/save_json` | yes | no | resume evidence |
+| sequential state required to resume a Run | `checkpoints.file/save_json` | yes | only when no longer required, under retention policy | resume evidence |
 | final scientific file/tree | `outputs.file/directory` | belongs to Attempt | only a verified published duplicate | yes |
 | disposable intermediate | `temp_dir` | no | automatic | no |
 
 `cache.path`, `checkpoints.path` and direct `run_dir` writes remain explicit interoperability
 escapes. They are not the ordinary pattern because their caller owns validation, atomicity and
 registration.
+
+Checkpoints are recovery state, not permanent model outputs. `checkpoints.pin(name, reason=...)`
+protects owned named state; `unpin(name)` only changes metadata. Publish models with
+`outputs.from_checkpoint(name, checkpoint, release=True)` or datasets from `source_checkpoint`.
+Release requires independent verified publication and successful Execution finalization.
+See [Storage admission and safe cleanup](STORAGE.md) for examples and retention.
 
 ### 4.2 ManagedFile and cache
 
@@ -421,6 +427,19 @@ computes path-independent content identity, writes DatasetArtifact v2 in staging
 atomically renames it, then registers placement. An existing name/version with different content
 is refused. DatasetArtifact v1 manifests remain readable because persisted research data outlives
 the authoring API.
+
+### 6.1 Reuse, reconstruction and publication recovery
+
+Use `lf datasets preflight NAME@VERSION --intent publish|reuse|rebuild --on CLUSTER` before costly
+computation. Producing Works call `outputs.dataset_preflight(...)` first: arbitrary Python output
+names cannot be inferred before `run()`. `outputs.dataset(..., intent="rebuild",
+scientific_identity=...)` seals a pinned unregistered candidate; exact checksums stay unchanged.
+`lf datasets compare ROOT_A ROOT_B --on CLUSTER --verifier project.module:function
+--policy policy.json --output report.json` verifies all bytes before project scientific comparison.
+`lf datasets publish-candidate ROOT --version NEW --on CLUSTER` previews bytes-only recovery;
+`--apply` publishes without repeating calculation. The Console discovers all configured locations
+and marks conflicting identities. [Dataset reconstruction](DATASET_RECONSTRUCTION.md) documents
+the complete public contracts, safety, retention and required WISDOM changes.
 
 ## 7. Sequence, parallelism, seeds and search
 
@@ -1400,7 +1419,7 @@ checkpoint tree. `--rerun` creates a deliberately distinct Execution even for th
 Remote control-plane submission also refuses an active same-fingerprint/same-target duplicate unless
 `--allow-duplicate` is explicit.
 
-### Recover an interrupted adaptive Study
+### Recover an interrupted Study
 
 `lf retry STUDY` and the Study workspace's **Resume Study…** button use the same recovery service.
 The selector identifies a failed/cancelled/timed-out attempt on the original cluster. The service
@@ -1409,7 +1428,17 @@ the runner to the original owned Execution directory. It never copies weights or
 merely to retry: only compact console indexes and decision references move to the new Job. Original
 logs, scalar files, checkpoints and evidence remain referenced in place.
 
-The runner restores proposed candidates/public Trial numbers, deterministic generator expansion,
+Adaptive, repeated-seed and fixed-sweep Studies share this operation. For fixed designs, recovery
+reads the immutable design and owned per-Run Attempt records, reconciles the latest outcome and
+reuses successful Runs. It never fabricates an adaptive controller or requires its state file.
+`lf retry STUDY --dry-run --json` exposes `recovery_plan` with `reuse_runs`, `retry_runs`,
+`pending_runs`, per-cell seed/Trial/actions and physical spent budgets. A failed seed gets a new
+Attempt of the same logical Run, not a fresh experiment. Runs not yet started remain required.
+Recovery is distinct from training continuation: compatible checkpoints are made available, but
+epoch-level continuation requires the Work's own restore logic. If absent, only that unfinished
+Run restarts. Incompatible scientific inputs/designs and unsafe checkpoints are refused.
+
+For adaptive Studies, the runner restores proposed candidates/public Trial numbers, deterministic generator expansion,
 seed identities, pending actions, initial-design obligations, convergence and confirmation state.
 Completed and performance-pruned outcomes remain evidence. Failed Runs and interrupted pending
 actions are requeued once as new Attempts, using a compatible checkpoint when one exists and
@@ -1428,7 +1457,9 @@ The original `execution.json` stays immutable; `current-code.json`, per-Run prov
 A cross-process controller lock prevents concurrent writers. Recovery dependencies protect original
 Job workspaces from GC and individual deletion while referenced; deleting the entire terminal Work
 history previews and removes the chain together. Missing/corrupt state or foreign/symlinked paths
-fail closed. Recovery currently supports one adaptive Study per Execution on the same cluster;
+fail closed. Adaptive Studies still require compatible `hpo-control/state.json`. Fixed Studies
+require complete owned design/Attempt evidence instead. Recovery supports one Study per Execution
+on the same cluster;
 ordinary preparation failures with no Study state can still retry submission normally. Automatic Run
 retries remain bounded infrastructure recovery; consumer exceptions are retried only by this
 deliberate user action, never in an endless automatic loop.
@@ -1543,13 +1574,30 @@ GPU admission is configured once per cluster:
 | `auto` | `scheduler` for SLURM; `exclusive` for a direct process host |
 | `scheduler` | the batch scheduler owns allocation and isolation |
 | `exclusive` | direct Jobs wait for a LambdaForge lease and avoid observed external compute use |
-| `shared` | direct Jobs coordinate with each other but may enter an externally occupied GPU |
+| `shared` | direct Jobs may share GPUs; each Study coordinates fresh check/start admission across projects |
 | `command` | no direct lease; prepend an explicit site claim/launcher argv |
 
 ```bash
 lf clusters set free-host gpu_access.mode shared
 lf clusters set citius-gpu gpu_access '{mode: command, command_prefix: [gpu, exec]}'
 ```
+
+On a shared direct host, Studies do not exclusively reserve their entire GPU subset for the
+Job's lifetime. New Runs prefer a permitted device without observed compute processes (including
+those belonging to other Studies/users); otherwise the existing resource-aware best-fit policy
+applies. Per-device host locks serialize the fresh VRAM check and launch, and stagger starts across
+Studies. These are short admission guards, not extra VRAM reservations. External applications do
+not participate in these locks, so this is not hardware isolation or an OOM guarantee. Site grants
+and exclusive Job leases remain authoritative; no device outside the permitted subset is added.
+
+Repeated-seed Studies also use the common resource dispatcher: one candidate with ten seeds has
+ten independent required Runs, not a parallelism ceiling of one. `execution.max_parallel` and
+`runs_per_gpu`, live memory/ARI safety and the Job's aggregate CPU/RAM allocation still bound
+concurrency. Concurrent Jobs need enough **host resources**, not just spare VRAM. For example,
+46 reserved cores on a 48-core host leave only two for other Jobs; a second request for 32 cores
+correctly queues. Change future YAML allocations deliberately rather than oversubscribing the
+host. Identical managed-environment builds wait through provisioning and reuse the verified
+completion; optional obsolete-environment cleanup defers while the cache is leased by active Jobs.
 
 The command form is an argv sequence and never invokes a shell. Use it when a center requires a
 wrapper around every GPU command. At CITIUS, `gpu exec` is the preferred self-contained gpuctl
@@ -1791,6 +1839,14 @@ terminal-Attempt compaction used automatically at completion. It retains active 
 unpublished successful artifacts and lightweight evidence, rejects unsafe roots/symlinks and is
 idempotent. This also lets upgraded installations reclaim safe bulk left by older Jobs.
 
+Cluster **Clear storage…** uses the same preview/apply authority, confirms categories and shows
+background feedback. **Clear output** is not disk cleanup. The [storage guide](STORAGE.md) documents
+physical-volume reservations, safety pressure, quotas/LRU, checkpoint grace/pins/publication proofs,
+Fleet/SLURM fit and current boundaries. Normal probes read only filesystem/lease metadata.
+`lf storage status --on CLUSTER` explicitly inventories usage. `lf storage reconcile --on CLUSTER`
+reports drift; `--apply` atomically updates the diagnostic ledger, never deletes scientific bytes.
+Managed publication snapshots reserve on their actual destination volume, not the Run volume.
+
 Inside the Research Console, `d` confirms deletion of the selected terminal Work or numbered Attempt;
 `D` confirms deletion of every terminal history entry. Active Jobs are never removed. Deletion runs
 outside the terminal event loop, removes the exact provider workspace plus local Job events and
@@ -1798,12 +1854,14 @@ submission record, and preserves published datasets, caches, environments and un
 `lf jobs clear` provides the non-interactive preview and `lf jobs clear --apply` performs the same
 whole-history operation, reporting failures without discarding the affected local record.
 
-A narrower automatic retention pass runs at terminal completion. It deletes only partial managed
+A narrower automatic retention pass runs at terminal completion. It deletes partial managed
 artifacts from failed/interrupted Attempts and verified internal duplicates of successful
 `publish_to` outputs. It preserves every lightweight fact needed by the Research Console, `lf logs`, results
 and reproduction; `retention.json` records reclaimed bytes. Superseded immutable managed
 environments are also pruned after a verified replacement is activated, except the active prefix
-and prefixes referenced by live Jobs. Bootstrap and normal automatic preparation share this rule;
+and prefixes referenced by live/recovered Jobs. Successful unpinned checkpoints are eligible only
+under the documented grace/publication policy; failed/interrupted recovery state remains.
+Bootstrap and normal automatic preparation share this rule;
 Attempt environment provenance remains after reconstructible environment bytes are collected.
 
 ## 12. CLI reference
@@ -1824,6 +1882,7 @@ Attempt environment provenance remains after reconstructible environment bytes a
 | `datasets ...` | inspect/verify/place/delete published dataset versions |
 | `results list/show/compare/analyze/report` | query, analyze and export Work Execution evidence |
 | `clean` | preview/apply safe cache and terminal-artifact compaction |
+| `storage status/reconcile` | explicit usage/drift inspection; reconcile `--apply` updates diagnostic ledger only |
 
 `lf help`, `lf --help`, `lf help clusters add` and conventional nested `--help` all exit zero.
 All command failures go through stable diagnostic categories/exit codes; add `--json` for tooling
