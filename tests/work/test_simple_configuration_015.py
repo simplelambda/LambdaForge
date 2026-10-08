@@ -117,19 +117,19 @@ def test_auto_sweep_uses_shared_blocks_and_anytime_valid_decision(tmp_path: Path
     }
 
     analyzer = PairedSweepSequentialAnalyzer(mode="max", bounds=(0.0, 1.0))
-    collecting = analyzer.evaluate({1: {1: 0.0}, 2: {1: 1.0}})
+    collecting = analyzer.evaluate({1: {1: 0.0}, 2: {1: 1.0}}, seed_order=[1])
     assert not collecting.stop
     values = {1: {}, 2: {}}
     decision = collecting
     for seed in range(1, 200):
         values[1][seed] = 0.0
         values[2][seed] = 1.0
-        decision = analyzer.evaluate(values)
+        decision = analyzer.evaluate(values, seed_order=range(1, seed + 1))
         if decision.stop:
             break
     assert decision.stop
     assert decision.conclusion == "PREFERRED"
-    assert decision.policy_version == "paired-pm-eb-cs-v1"
+    assert decision.policy_version == "paired-pm-eb-cs-v2"
 
 
 def test_sequential_alpha_is_rejected_for_a_fixed_sweep(tmp_path: Path) -> None:

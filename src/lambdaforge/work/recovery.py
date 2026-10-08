@@ -65,6 +65,82 @@ def validate_execution(path: Path, *, seed_stream: Any = None) -> dict[str, Any]
     return manifest
 
 
+def fixed_requirements(
+    design: Mapping[str, Any], blocks: Mapping[str, Any] | None = None, *, seed_stream: Any = None
+) -> list[dict[str, Any]]:
+    """Project authored and durably created blocks without rewriting scientific design."""
+    requirements = design.get("evidence", {}).get("requirements")
+    if not isinstance(requirements, list) or not requirements:
+        raise ValueError("Persisted fixed evidence requirements are missing or corrupt.")
+    requirements = [dict(value) for value in requirements]
+    # Paired sweeps may have committed additional shared-seed blocks. Restore the exact
+    # persisted stream coordinates, never replace them with freshly selected seeds.
+    if design.get("replication") == "auto-blocks":
+        if seed_stream is None:
+            from lambdaforge.reproducibility.SeedProvider import ProjectSeedStream
+
+            seed_stream = ProjectSeedStream
+        stream = seed_stream.from_mapping(design.get("seed_source") or {})
+        from lambdaforge.work.sweep_blocks import sweep_block_inventory
+
+        if blocks is None:
+            raise ValueError("Persisted sweep block inventory is missing.")
+        ordinals, _committed = sweep_block_inventory(blocks)
+        candidates = sorted({int(value["candidate"]) for value in requirements})
+        initial = {value.get("seed") for value in requirements}
+        resolved_seeds = design.get("seed_source", {}).get("resolved", ())
+        if not isinstance(resolved_seeds, list | tuple):
+            raise ValueError("Initial sweep seed acquisition coordinates are missing or corrupt.")
+        for requirement in requirements:
+            matching = [
+                dict(value)
+                for value in resolved_seeds
+                if isinstance(value, Mapping) and value.get("value") == requirement.get("seed")
+            ]
+            if len(matching) != 1 or (
+                requirement.get("seed_metadata") is not None
+                and requirement["seed_metadata"] != matching[0]
+            ):
+                raise ValueError(
+                    "Initial sweep seed order is missing or conflicts with its design."
+                )
+            # This is a read projection of the authored resolved coordinate, not a rewrite.
+            requirement["seed_metadata"] = matching[0]
+        for ordinal in ordinals:
+            identity = stream.at(ordinal)
+            if identity.value in initial:
+                continue
+            requirements.extend(
+                {
+                    "candidate": trial,
+                    "seed": identity.value,
+                    "seed_metadata": identity.to_dict(),
+                    "key": f"candidate-{trial}:seed-{identity.value}:search:fidelity-none",
+                    "phase": "search",
+                    "required": True,
+                    "kind": "SHARED_SEED",
+                    "fidelity": None,
+                }
+                for trial in candidates
+            )
+    required = {(int(value["candidate"]), value.get("seed")) for value in requirements}
+    if len(required) != len(requirements):
+        raise ValueError("Persisted fixed evidence identities are duplicated.")
+    if design.get("replication") == "auto-blocks":
+        for requirement in requirements:
+            metadata = requirement.get("seed_metadata")
+            seed_ordinal = metadata.get("ordinal") if isinstance(metadata, Mapping) else None
+            if (
+                not isinstance(seed_ordinal, int)
+                or isinstance(seed_ordinal, bool)
+                or seed_ordinal < 0
+                or metadata != stream.at(seed_ordinal).to_dict()
+                or requirement.get("seed") != stream.at(seed_ordinal).value
+            ):
+                raise ValueError("Persisted sweep seed acquisition metadata is missing or corrupt.")
+    return requirements
+
+
 def fixed_inventory(
     path: Path, *, manifest: Mapping[str, Any] | None = None, seed_stream: Any = None
 ) -> dict[str, Any]:
@@ -82,34 +158,17 @@ def fixed_inventory(
     levels = resolved.get("levels", [])
     if len(levels) != 1 or len(levels[0]) != 1 or levels[0][0].get("design") != design:
         raise ValueError("Persisted Study design and resolved configuration disagree.")
-    requirements = design.get("evidence", {}).get("requirements")
-    if not isinstance(requirements, list) or not requirements:
-        raise ValueError("Persisted fixed evidence requirements are missing or corrupt.")
-    requirements = [dict(value) for value in requirements]
-    # Paired sweeps may have committed additional shared-seed blocks. Restore the exact
-    # persisted stream coordinates, never replace them with freshly selected seeds.
-    if design.get("replication") == "auto-blocks":
-        if seed_stream is None:
-            from lambdaforge.reproducibility.SeedProvider import ProjectSeedStream
-
-            seed_stream = ProjectSeedStream
-        stream = seed_stream.from_mapping(design.get("seed_source") or {})
-        blocks = read_owned_json(path / "hpo-control" / "sweep-blocks.json")
-        if blocks.get("block_progress_version") != 1:
-            raise ValueError("Persisted sweep block inventory is incompatible.")
-        candidates = sorted({int(value["candidate"]) for value in requirements})
-        initial = {value.get("seed") for value in requirements}
-        for block in blocks.get("blocks", []):
-            identity = stream.at(block["ordinal"])
-            if identity.value in initial:
-                continue
-            requirements.extend(
-                {"candidate": trial, "seed": identity.value, "seed_metadata": identity.to_dict()}
-                for trial in candidates
-            )
+    blocks = (
+        read_owned_json(path / "hpo-control" / "sweep-blocks.json")
+        if design.get("replication") == "auto-blocks"
+        else None
+    )
+    requirements = fixed_requirements(design, blocks, seed_stream=seed_stream)
     required = {(int(value["candidate"]), value.get("seed")) for value in requirements}
-    if len(required) != len(requirements):
-        raise ValueError("Persisted fixed evidence identities are duplicated.")
+    requirement_metadata = {
+        (int(value["candidate"]), value.get("seed")): value.get("seed_metadata")
+        for value in requirements
+    }
     attempts: list[dict[str, Any]] = []
     latest: dict[tuple[int, int | None], dict[str, Any]] = {}
     start = datetime.fromisoformat(str(manifest["created_at_utc"]))
@@ -165,6 +224,9 @@ def fixed_inventory(
                 key = (int(trial["index"]), result.get("seed"))
                 if key not in required:
                     raise ValueError("Recovery Run is not part of the persisted evidence design.")
+                if design.get("replication") == "auto-blocks":
+                    if result.get("seed_metadata") != requirement_metadata[key]:
+                        raise ValueError("Recovery Run conflicts with its sweep seed ordinal.")
                 previous = latest.get(key)
                 if previous and previous["run_id"] != result["run_id"]:
                     raise ValueError("Multiple Run identities claim the same fixed evidence cell.")
@@ -257,6 +319,7 @@ def fixed_inventory(
         "latest": latest,
         "spent_runs": len(attempts),
         "elapsed_seconds": elapsed,
+        "sweep_blocks": blocks if design.get("replication") == "auto-blocks" else None,
     }
 
 

@@ -5,12 +5,12 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from lambdaforge.hpo.ScientificConclusions import ScientificRelation
 
-_POLICY_VERSION = "paired-pm-eb-cs-v1"
+_POLICY_VERSION = "paired-pm-eb-cs-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,10 +31,13 @@ class SweepSequentialDecision:
     alpha: float = 0.05
     primary_comparisons: int = 0
     policy_version: str = _POLICY_VERSION
+    evidence_seeds: tuple[int, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "policy_version": self.policy_version,
+            "evidence_order": "committed-acquisition-prefix-v1",
+            "evidence_seeds": list(self.evidence_seeds),
             "stop": self.stop,
             "conclusion": self.conclusion,
             "complete_shared_seed_blocks": self.blocks,
@@ -109,17 +112,43 @@ class PairedSweepSequentialAnalyzer:
         self.reference = reference
 
     def evaluate(
-        self, values: Mapping[int, Mapping[int, float]]
+        self, values: Mapping[int, Mapping[int, float]], *, seed_order: Sequence[int] | None = None
+    ) -> SweepSequentialDecision:
+        """Inspect a complete prefix in the *persisted* acquisition order.
+
+        ``seed_order`` is the authored sequence or the committed project-stream ordinal
+        sequence, not worker completion order. A missing cell seals the inference prefix:
+        later complete speculative blocks cannot skip it. No order is inferred from dicts
+        or numeric seed values. This query has no mutable inference state.
+        """
+        if seed_order is None:
+            raise ValueError(
+                "Sequential sweep inference requires persisted seed acquisition order."
+            )
+        order = tuple(seed_order)
+        if any(isinstance(seed, bool) or not isinstance(seed, int) for seed in order):
+            raise ValueError("Sweep acquisition order must contain integer seeds.")
+        if len(set(order)) != len(order):
+            raise ValueError("Sweep acquisition order contains duplicate seeds.")
+        known = set(order)
+        if any(set(observed) - known for observed in values.values()):
+            raise ValueError("Sweep observations contain seeds outside the committed order.")
+        seeds: list[int] = []
+        for seed in order:
+            if not values or not all(seed in observed for observed in values.values()):
+                break
+            seeds.append(seed)
+        decision = self._evaluate_prefix(values, tuple(seeds))
+        return replace(decision, evidence_seeds=tuple(seeds))
+
+    def _evaluate_prefix(
+        self, values: Mapping[int, Mapping[int, float]], seeds: tuple[int, ...]
     ) -> SweepSequentialDecision:
         candidates = tuple(sorted(values))
         if not candidates:
             return self._decision(False, "COLLECTING", 0, None, None, "No evidence.", {})
         if self.reference is not None and self.reference not in candidates:
             raise ValueError("The authored sweep reference does not identify a candidate.")
-        shared = set(values[candidates[0]])
-        for candidate in candidates[1:]:
-            shared.intersection_update(values[candidate])
-        seeds = tuple(sorted(shared))
         self._validate_observations(values, candidates, seeds)
         means = {
             candidate: statistics.fmean(values[candidate][seed] for seed in seeds)
@@ -155,9 +184,7 @@ class PairedSweepSequentialAnalyzer:
         relations: list[ScientificRelation] = []
         radii: list[float] = []
         for left, right in primary_pairs:
-            differences = [
-                sign * (values[left][seed] - values[right][seed]) for seed in seeds
-            ]
+            differences = [sign * (values[left][seed] - values[right][seed]) for seed in seeds]
             lower, upper = self._pm_eb_interval(differences, pair_alpha)
             estimate = statistics.fmean(differences)
             relation = self._relation(lower, upper)
@@ -198,8 +225,7 @@ class PairedSweepSequentialAnalyzer:
                         *(
                             value.left
                             for value in relations
-                            if value.relation
-                            in {"MATERIALLY_BETTER", "PRACTICALLY_EQUIVALENT"}
+                            if value.relation in {"MATERIALLY_BETTER", "PRACTICALLY_EQUIVALENT"}
                         ),
                     }
                 )
@@ -267,10 +293,7 @@ class PairedSweepSequentialAnalyzer:
             if left != right
         )
         inferior_resolved = all(
-            any(
-                directed.get((candidate, superior)) == "MATERIALLY_WORSE"
-                for superior in top
-            )
+            any(directed.get((candidate, superior)) == "MATERIALLY_WORSE" for superior in top)
             for candidate in inferior
         )
         if top_resolved and inferior_resolved and len(top) + len(inferior) == len(candidates):
@@ -376,9 +399,7 @@ class PairedSweepSequentialAnalyzer:
             return "PRACTICALLY_EQUIVALENT"
         return "UNRESOLVED"
 
-    def _pm_eb_interval(
-        self, differences: Sequence[float], alpha: float
-    ) -> tuple[float, float]:
+    def _pm_eb_interval(self, differences: Sequence[float], alpha: float) -> tuple[float, float]:
         """Return the PM-EB confidence sequence using the authored objective span."""
         if not differences:
             return (-math.inf, math.inf)
@@ -398,7 +419,8 @@ class PairedSweepSequentialAnalyzer:
             lam = min(
                 0.5,
                 math.sqrt(
-                    2.0 * math.log(2.0 / alpha)
+                    2.0
+                    * math.log(2.0 / alpha)
                     / max(1e-15, running_variance * index * math.log(index + 1.0))
                 ),
             )

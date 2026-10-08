@@ -6,6 +6,10 @@ This is a continuation ledger, **not a declaration that the requested reform is 
 Baseline: `d2f526d`, LambdaForge 0.17.0. No WISDOM files, productive cluster Jobs or persisted
 scientific records are modified by this reform.
 
+Follow-up at `c8f2d2e`: [scientific correctness audit](SCIENTIFIC_AUDIT.md) closes ordered paired
+evidence, persisted lookahead recovery and conclusion/stability inconsistencies. It does not close
+the larger lifecycle, learned host allocation, product dependency or distributed Fleet scope below.
+
 ## Audit findings
 
 - `work/runner.py` combines execution, controller orchestration, retry classification, termination,

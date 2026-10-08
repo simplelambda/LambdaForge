@@ -34,6 +34,8 @@ def main() -> None:
         "share/lambdaforge/docs/DATASET_RECONSTRUCTION.es.md",
         "share/lambdaforge/docs/ARCHITECTURAL_REFORM.md",
         "share/lambdaforge/docs/ARCHITECTURAL_REFORM.es.md",
+        "share/lambdaforge/docs/SCIENTIFIC_AUDIT.md",
+        "share/lambdaforge/docs/SCIENTIFIC_AUDIT.es.md",
         "share/lambdaforge/docs/PRODUCTS.md",
         "share/lambdaforge/docs/PRODUCTS.es.md",
     ):
@@ -75,6 +77,15 @@ def main() -> None:
 
     assert callable(DatasetEquivalenceCertificate.build)
     assert callable(ResultStore.import_export)
+    from lambdaforge.hpo.SequentialSweep import PairedSweepSequentialAnalyzer
+    from lambdaforge.work.sweep_blocks import sweep_block_inventory
+
+    decision = PairedSweepSequentialAnalyzer(mode="max", bounds=(0, 1)).evaluate(
+        {1: {54: 0.5}, 2: {54: 0.6}}, seed_order=[54]
+    )
+    assert decision.policy_version == "paired-pm-eb-cs-v2"
+    assert decision.evidence_seeds == (54,)
+    assert callable(sweep_block_inventory)
     print(lambdaforge.__version__)
 
 

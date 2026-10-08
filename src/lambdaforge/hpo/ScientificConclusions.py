@@ -58,6 +58,27 @@ _RESOLVED_CONCLUSIONS = frozenset(
 )
 
 
+def formal_sequential_state(record: Mapping[str, Any] | None) -> str | None:
+    """Read a formal decision; stopping for operational incompleteness is not resolution."""
+    if record is None:
+        return None
+    formal = record.get("formal_sequential_evidence")
+    if isinstance(formal, Mapping):
+        return (
+            "RESOLVED"
+            if formal.get("state") == "RESOLVED" and record.get("stop") is True
+            else "UNRESOLVED"
+        )
+    # Version-one historical records have no separate state. Preserve only explicit
+    # supported scientific stops, never INCOMPLETE/budget/failure as formal approval.
+    return (
+        "RESOLVED"
+        if record.get("stop") is True
+        and record.get("conclusion") in _RESOLVED_CONCLUSIONS | {"SINGLE_CELL_COMPLETE"}
+        else "UNRESOLVED"
+    )
+
+
 def scientific_status(scientific: Mapping[str, Any]) -> str:
     """Summarize material parameter and interaction questions consistently.
 
@@ -93,9 +114,13 @@ def scientific_status(scientific: Mapping[str, Any]) -> str:
         # Modern records explicitly state whether the pending interpretation is worth another
         # action.  Legacy parameter records remain conservative; legacy interactions are ignored
         # unless their own probability mass says they could be material.
-        pending = unresolved and materiality > 0.0 and (
-            remaining > resolution
-            or (not remaining_known and (not interaction or materiality > 0.0))
+        pending = (
+            unresolved
+            and materiality > 0.0
+            and (
+                remaining > resolution
+                or (not remaining_known and (not interaction or materiality > 0.0))
+            )
         )
         if pending:
             material_pending += 1
@@ -208,8 +233,19 @@ class ScientificQuestionState:
     remaining_information_value: float | None = None
 
     @property
+    def descriptively_resolved(self) -> bool:
+        return self.conclusion.kind != "UNRESOLVED"
+
+    @property
+    def formally_resolved(self) -> bool:
+        return self.sequential_state == "RESOLVED"
+
+    @property
     def resolved(self) -> bool:
-        return self.conclusion.kind != "UNRESOLVED" and self.sequential_state != "UNRESOLVED"
+        """Compatibility: applicable descriptive resolution, never formal approval."""
+        return self.descriptively_resolved and (
+            self.sequential_state is None or self.formally_resolved
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +256,8 @@ class ScientificQuestionState:
             "coverage_quality": self.coverage_quality,
             "remaining_information_value": self.remaining_information_value,
             "resolved": self.resolved,
+            "descriptively_resolved": self.descriptively_resolved,
+            "formally_resolved": self.formally_resolved,
         }
 
 
@@ -240,4 +278,5 @@ __all__ = [
     "ScientificQuestionState",
     "ScientificRelation",
     "scientific_status",
+    "formal_sequential_state",
 ]

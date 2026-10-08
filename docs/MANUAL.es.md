@@ -432,7 +432,7 @@ persisten motivos como `CONVERGED_BALANCED`, `CANDIDATE_BUDGET`, `RUN_BUDGET`, `
 
 Un sweep auto empieza todas sus celdas en `replicate[0]`. Sus diferencias pareadas usan la secuencia
 de confianza empirical-Bernstein plug-in predecible, simultánea, uniforme en el tiempo y adaptativa
-a varianza `paired-pm-eb-cs-v1`, manteniendo validez con parada opcional. La multiplicidad cubre solo
+a varianza `paired-pm-eb-cs-v2`, manteniendo validez con parada opcional. La multiplicidad cubre solo
 la familia primaria authored: tratamientos frente a `reference`, o relaciones pairwise necesarias
 para identificar un top set práctico. El controlador puede comprometer exactamente un bloque
 completo siguiente como lookahead y ordena sus celdas por duración previa; no usa ese bloque para
@@ -442,6 +442,14 @@ y estado/cobertura secuencial formal. Se exige objetivo acotado y la equivalenci
 `practical_margin`. El alpha de familia predeterminado es `0.05`; el ajuste avanzado
 `sweep.sequential_alpha` debe estar en `(0,1)` y es inválido con `replicates` fijo. En sweep no
 existe pruning HPO ni carrera por celda.
+
+Runtime v2 consume el prefijo persistido de adquisición (`seed_metadata.ordinal` en streams,
+orden declarado en seeds explícitas), nunca el orden numérico. Un bloque posterior completo no
+salta uno anterior incompleto. Recovery restaura el compromiso anticipado existente y el preview
+no lo modifica. Manifests/decisiones v1 históricos siguen consultables e inmutables. Hipótesis
+predictiva, soporte/estabilidad descriptivos y resolución formal son distintos: falta de soporte
+no hereda estabilidad del modelo y parar por bloque incompleto no es conclusión formal.
+Consulta la [auditoría de corrección y aceptación pendiente](SCIENTIFIC_AUDIT.es.md).
 
 Los Studies largos conservan su inicialización científica inmutable en
 `study/controller.json` → `initialization`: objetivo completo, margen práctico, espacio declarado

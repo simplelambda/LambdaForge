@@ -484,7 +484,7 @@ status.
 
 An auto-replicated sweep starts every cell at `replicate[0]`. Its primary paired differences use a
 simultaneous, time-uniform predictable plug-in empirical-Bernstein confidence sequence
-(`paired-pm-eb-cs-v1`), whose width adapts to observed variance while retaining optional-stopping
+(`paired-pm-eb-cs-v2`), whose width adapts to observed variance while retaining optional-stopping
 validity. Multiplicity covers only the authored primary family: treatment versus `reference`, or
 the pairwise relations needed to identify a practical top set. The controller may commit exactly
 one next complete block as lookahead and orders its cells by prior duration; that block cannot alter
@@ -494,6 +494,14 @@ state/coverage are persisted separately. A bounded objective is required; equiva
 requires an authored `practical_margin`. The default family alpha is `0.05`; the advanced
 `sweep.sequential_alpha` override must be in `(0,1)` and is invalid with fixed `replicates`. Sweep
 HPO pruning and per-cell seed racing stay disabled.
+
+Runtime v2 consumes the persisted acquisition prefix (`seed_metadata.ordinal` for streams,
+authored order for explicit seeds), never numeric seed order. Complete later blocks cannot skip
+an incomplete earlier block. Recovery restores the existing one-block commitment; previews do not
+alter it. Historical v1 manifests/decisions remain inspectable and unchanged. Predictive hypotheses,
+descriptive support/stability and formal resolution are separate: missing response support must not
+inherit a model's stability, and stopping on an incomplete block is not a formal conclusion.
+See the [correctness audit and remaining acceptance boundaries](SCIENTIFIC_AUDIT.md).
 
 Long Studies retain their immutable scientific initialization in `study/controller.json` →
 `initialization`. This includes the complete objective, practical margin, authored parameter space

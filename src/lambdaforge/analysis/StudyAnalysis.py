@@ -26,7 +26,7 @@ from lambdaforge.analysis.MetricCatalog import resolve_semantics
 from lambdaforge.analysis.ResearchAnalysis import ResearchAnalysis
 from lambdaforge.hpo.ObjectiveUtility import ObjectiveUtility
 from lambdaforge.hpo.ResourceReplay import ResourceSchedulerReplay
-from lambdaforge.hpo.ScientificConclusions import scientific_status
+from lambdaforge.hpo.ScientificConclusions import formal_sequential_state, scientific_status
 from lambdaforge.hpo.ScientificDesign import ScientificQuestionAnalyzer
 from lambdaforge.work.atomic import atomic_write_json
 
@@ -631,9 +631,7 @@ class StudyAnalysis:
             kind = "UNRESOLVED"
             exact_trials = []
             modal_token = "UNRESOLVED"
-            modal_probability = (
-                1.0 - modal_probability if modal_probability <= 0.5 else modal_probability
-            )
+            modal_probability = float(distribution.get("UNRESOLVED", 0.0)) if resamples else 0.0
         conclusion = {
             "kind": kind,
             "trials": exact_trials,
@@ -643,6 +641,7 @@ class StudyAnalysis:
         }
         return {
             "analysis_version": 1,
+            "conclusion_semantics_version": 3,
             "design": "fixed-shared-seed-sweep",
             "reference": dict(reference_rule) if isinstance(reference_rule, Mapping) else None,
             "reference_trial": reference_trial,
@@ -662,11 +661,7 @@ class StudyAnalysis:
             "primary_unit": "paired seed difference",
             "practical_margin": practical_margin,
             "formal_sequential_evidence": dict(sequential) if sequential is not None else None,
-            "sequential_decision": (
-                "RESOLVED"
-                if sequential is not None and sequential.get("stop") is True
-                else "UNRESOLVED"
-            ),
+            "sequential_decision": formal_sequential_state(sequential),
             "sequential_coverage_level": (
                 (
                     (sequential.get("formal_sequential_evidence") or {}).get(

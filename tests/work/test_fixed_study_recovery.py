@@ -325,6 +325,138 @@ def test_paired_sweep_recovery_restores_committed_shared_blocks(
     assert fixed_inventory(first.execution_dir)["spent_runs"] <= 8
 
 
+def test_recovery_does_not_open_a_second_speculative_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real persisted Runs; interrupt after one cell of each of two blocks."""
+    runner = importlib.import_module("lambdaforge.work.runner")
+    config = WorkConfig.from_mapping(
+        {
+            "name": "fixed",
+            "run": "tests.work_cases.FixedRecoveryWork",
+            "with": {"failures": 0},
+            "sweep": {"space": {"choice": [0, 1]}},
+            "resources": {"cpu": 1},
+            "execution": {"max_runs": 6, "failure_retries": 0},
+            "objective": {"metric": "score", "mode": "max", "range": [0, 1]},
+        },
+        source=tmp_path / "lookahead.yaml",
+    )
+
+    def interrupted_dispatch(values: Any, **kwargs: Any) -> tuple[Any, ...]:
+        first = runner._execute_run(values[0])
+        lookahead = list(kwargs["on_result"](first, (), values[1:]))
+        assert {value["seed_metadata"]["ordinal"] for value in lookahead} == {1}
+        second = runner._execute_run(lookahead[0])
+        kwargs["on_result"](second, lookahead[1:], values[1:])
+        return (first, second)
+
+    monkeypatch.setattr(runner, "_execute_adaptive_dispatch", interrupted_dispatch)
+    first = WorkRunner().run(config)
+    inventory = fixed_inventory(first.execution_dir)
+    assert inventory["sweep_blocks"]["lookahead"]["committed_ordinal"] == 1
+    original = (first.execution_dir / "execution.json").read_bytes()
+    inspected = False
+
+    def recovery_dispatch(values: Any, **kwargs: Any) -> tuple[Any, ...]:
+        nonlocal inspected
+        assert {value["seed_metadata"]["ordinal"] for value in values} == {0, 1}
+        prior = next(value for value in values if value["seed_metadata"]["ordinal"] == 0)
+        pending = [value for value in values if value is not prior]
+        result = runner._execute_run(prior)
+        # Block one is already committed. Recovering block zero must not create block two.
+        assert not kwargs["on_result"](result, (), pending)
+        inspected = True
+        outcomes = [result]
+        queue = pending
+        while queue:
+            value = queue.pop(0)
+            terminal = runner._execute_run(value)
+            outcomes.append(terminal)
+            queue = list(kwargs["on_result"](terminal, queue, ()))
+        return tuple(outcomes)
+
+    monkeypatch.setattr(runner, "_execute_adaptive_dispatch", recovery_dispatch)
+    second = WorkRunner().run(config, resume_execution=first.execution_dir)
+    assert inspected
+    assert (first.execution_dir / "execution.json").read_bytes() == original
+    assert {run.run_dir for run in first.runs} <= {run.run_dir for run in second.runs}
+    assert fixed_inventory(first.execution_dir)["spent_runs"] == 6
+
+
+def test_completed_initial_block_cannot_hide_incomplete_committed_lookahead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("lambdaforge.work.runner")
+    config = WorkConfig.from_mapping(
+        {
+            "name": "fixed",
+            "run": "tests.work_cases.FixedRecoveryWork",
+            "with": {"failures": 0},
+            "sweep": {"space": {"choice": [0, 1]}},
+            "resources": {"cpu": 1},
+            "execution": {"max_runs": 4},
+            "objective": {"metric": "score", "mode": "max", "range": [0, 1]},
+        },
+        source=tmp_path / "incomplete-lookahead.yaml",
+    )
+
+    def partial_dispatch(values: Any, **kwargs: Any) -> tuple[Any, ...]:
+        first = runner._execute_run(values[0])
+        lookahead = list(kwargs["on_result"](first, (), values[1:]))
+        second = runner._execute_run(values[1])
+        kwargs["on_result"](second, lookahead, ())
+        speculative = runner._execute_run(lookahead[0])
+        kwargs["on_result"](speculative, lookahead[1:], ())
+        return (first, second, speculative)
+
+    monkeypatch.setattr(runner, "_execute_adaptive_dispatch", partial_dispatch)
+    result = WorkRunner().run(config)
+    assert all(run.ok for run in result.runs)
+    assert result.status == "failed"
+    assert result.summary["evidence"]["required_runs"] == 4
+    assert result.summary["evidence"]["required_missing"] == 1
+    preview = fixed_recovery_preview(result.execution_dir)
+    assert (preview["reuse_runs"], preview["pending_runs"]) == (3, 1)
+
+
+@pytest.mark.parametrize("damage", ["missing_metadata", "wrong_ordinal", "discontinuous_blocks"])
+def test_paired_recovery_rejects_corrupt_coordinates_without_writing(
+    tmp_path: Path, inline_dispatch: None, damage: str
+) -> None:
+    config = WorkConfig.from_mapping(
+        {
+            "name": "fixed",
+            "run": "tests.work_cases.FixedRecoveryWork",
+            "with": {"failures": 0},
+            "sweep": {"space": {"choice": [0, 1]}},
+            "resources": {"cpu": 1},
+            "execution": {"max_runs": 4, "failure_retries": 0},
+            "objective": {"metric": "score", "mode": "max", "range": [0, 1]},
+        },
+        source=tmp_path / "order.yaml",
+    )
+    result = WorkRunner().run(config)
+    if damage == "discontinuous_blocks":
+        path = result.execution_dir / "hpo-control" / "sweep-blocks.json"
+        record = json.loads(path.read_text())
+        record["blocks"][-1]["ordinal"] = 3
+    else:
+        path = result.runs[0].run_dir / "result.json"
+        record = json.loads(path.read_text())
+        if damage == "missing_metadata":
+            record.pop("seed_metadata")
+        else:
+            record["seed_metadata"]["ordinal"] = 3
+    atomic_json(path, record)
+    before = {item: item.read_bytes() for item in result.execution_dir.rglob("*") if item.is_file()}
+    with pytest.raises(ValueError, match="ordinal|metadata|discontinuous"):
+        fixed_recovery_preview(result.execution_dir)
+    assert {
+        item: item.read_bytes() for item in result.execution_dir.rglob("*") if item.is_file()
+    } == before
+
+
 def test_lost_worker_keeps_its_real_run_and_attempt_identity(
     tmp_path: Path, inline_dispatch: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

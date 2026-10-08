@@ -490,7 +490,7 @@ racha legacy requiere override explícito y FINISH persiste el motivo exacto. Ca
 contiene únicamente sus valores candidato/seed y una definición compacta; nunca copies el pool
 completo en cada una, porque un Study grande válido debe usar memoria lineal.
 Un sweep sin réplicas explícitas abre bloques completos compartidos y usa la secuencia de confianza
-empirical-Bernstein plug-in predecible y adaptativa a varianza `paired-pm-eb-cs-v1` sobre diferencias
+empirical-Bernstein plug-in predecible y adaptativa a varianza `paired-pm-eb-cs-v2` sobre diferencias
 pareadas acotadas. Controla una familia primaria authored (tratamientos frente a
 `sweep.reference`, o la familia pairwise necesaria para el top set), expresa preferencias,
 `PRACTICAL_TOP_SET` y relaciones frente a referencia, y permite un solo bloque completo de
@@ -500,6 +500,13 @@ familia predeterminado es `0.05`; solo el sweep automático permite el ajuste av
 `sweep.sequential_alpha`, rechazado con réplicas fijas. Persiste por
 separado líder puntual, conclusión/estabilidad descriptiva exacta y evidencia secuencial formal;
 `UNRESOLVED` nunca equivale a convergencia.
+Pasa explícitamente el orden persistido de adquisición, nunca orden numérico de seeds o llegada de
+workers. Inferencia formal solo consume un prefijo comprometido completo y continuo. Recovery
+restaura el único compromiso anticipado de `sweep-blocks.json`; coordenadas ausentes/contradictorias
+fallan antes de escribir. Separa estabilidad predictiva si falta soporte descriptivo; estabilidad
+no resuelta es su propia masa de realizaciones, no el complemento de otra hipótesis. Ausencia de
+estado secuencial no es aprobación formal. Decisiones/manifests históricos v1 no se reescriben.
+Auditoría actual y aceptación pendiente: `docs/SCIENTIFIC_AUDIT.es.md` y su versión inglesa.
 Los Studies terminales reconcilian toda identidad en cola y exponen `status`, `design_status`,
 `scientific_status` y `finish_reason`. Un diseño fijo puede estar completo y científicamente no
 resuelto; agotar tiempo/Runs con deuda obligatoria implica incompleto. Distingue candidatos

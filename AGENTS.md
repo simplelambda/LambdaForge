@@ -550,7 +550,7 @@ reason. Per-Run specifications contain only
 their candidate/seed values and a compact definition; never embed or copy the complete pool into
 each specification, because valid large Studies must have linear planner memory.
 An omitted sweep replicate count means sequential complete shared-seed blocks. Primary stopping
-uses the variance-adaptive `paired-pm-eb-cs-v1` predictable plug-in empirical-Bernstein confidence
+uses the variance-adaptive `paired-pm-eb-cs-v2` predictable plug-in empirical-Bernstein confidence
 sequence over paired bounded differences. It controls one authored primary family (treatments
 against `sweep.reference`, otherwise the practical top-set pairwise family), supports
 `PREFERRED`/`PRACTICAL_TOP_SET`/reference relations, and keeps a one-complete-block lookahead to
@@ -560,6 +560,13 @@ authored margin. The family alpha defaults to `0.05`; only automatic sweeps may 
 advanced `sweep.sequential_alpha`, which fixed replicates reject. Persist point-estimate leader,
 exact descriptive conclusion/stability and formal
 sequential evidence as three different quantities; `UNRESOLVED` never means converged.
+Pass persisted acquisition order explicitly, never numeric seed sorting or worker arrival order.
+Only a complete contiguous committed prefix may enter formal inference. Restore the sole lookahead
+commitment from `sweep-blocks.json` on recovery; reject conflicting/missing coordinates before writes.
+Keep predictive stability separate when observed support blocks a descriptive conclusion; unresolved
+stability is its own realization mass, never the complement of another hypothesis. Missing sequential
+state is not formal approval. Historical v1 decisions/manifests remain unchanged. The current audit
+and unfinished acceptance boundaries are in `docs/SCIENTIFIC_AUDIT.md` (Spanish sibling).
 Terminal Studies reconcile every queued identity and expose execution `status`, `design_status`,
 `scientific_status` and `finish_reason`. Fixed designs may be complete while scientifically
 unresolved; time/Run exhaustion with required debt is incomplete. Keep observed and

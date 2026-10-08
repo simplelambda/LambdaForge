@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -165,6 +166,59 @@ def test_missing_state_is_not_silently_restarted(
     (execution / "hpo-control" / "state.json").unlink()
     with pytest.raises(ValueError, match="missing"):
         jobs.retry_preview(previous.job_id)
+
+
+def test_automatic_sweep_preview_works_without_an_installed_remote_runtime(
+    recovery_jobs: tuple[JobService, JobRecord, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, previous, _execution = recovery_jobs
+    config = WorkConfig.from_mapping(
+        {
+            "name": "recovery",
+            "run": "tests.work_cases.FixedRecoveryWork",
+            "with": {"failures": 0},
+            "sweep": {"space": {"choice": [0, 1]}},
+            "resources": {"cpu": 1},
+            "execution": {"max_runs": 4},
+            "objective": {"metric": "score", "mode": "max", "range": [0, 1]},
+        },
+        source=Path(str(previous.config_path)),
+    )
+
+    def dispatch(values: Any, **kwargs: Any) -> tuple[Any, ...]:
+        queue = list(values)
+        results = []
+        while queue:
+            result = _execute_run(queue.pop(0))
+            results.append(result)
+            queue = list(kwargs["on_result"](result, queue, ()))
+        return tuple(results)
+
+    result = WorkRunner(
+        dispatcher=dispatch,
+        execution_root=Path(previous.work_dir) / ".lambdaforge" / "runs" / "recovery",
+    ).run(config)
+    atomic_json(Path(previous.work_dir).parent / "result.json", result.to_dict())
+
+    class IsolatedTransport:
+        def run(self, command: Any, **kwargs: Any) -> Any:
+            # No site packages, PYTHONPATH, installed LambdaForge or real SSH provider.
+            return subprocess.run(
+                [sys.executable, "-I", "-S", *command[1:]],
+                capture_output=True,
+                text=True,
+                timeout=kwargs["timeout"],
+                check=False,
+            )
+
+    monkeypatch.setattr(jobs.factory, "transport", lambda profile: IsolatedTransport())
+    before = {path: path.read_bytes() for path in result.execution_dir.rglob("*") if path.is_file()}
+    preview = jobs.retry_preview(previous.job_id)
+    assert preview["reuse_runs"] == 4
+    assert preview["retry_runs"] == preview["pending_runs"] == 0
+    assert before == {
+        path: path.read_bytes() for path in result.execution_dir.rglob("*") if path.is_file()
+    }
 
 
 def test_preview_fails_closed_for_foreign_execution(

@@ -1714,6 +1714,8 @@ exec "$fallback" "$@"
 
     def retry_preview(self, job_id: str) -> dict[str, Any]:
         """Read a bounded recovery plan on its execution host; never copy scientific bytes."""
+        from lambdaforge.work.sweep_blocks import sweep_block_inventory
+
         previous = self.get(job_id)
         if previous.state not in {JobState.FAILED, JobState.CANCELLED, JobState.TIMEOUT}:
             raise ValueError("Retry requires a failed, cancelled or timed-out Job.")
@@ -1784,9 +1786,13 @@ json.dump(out,sys.stdout)
                 str(previous.metadata.get("recovery_execution_dir") or "."),
                 str(PurePosixPath(previous.work_dir).parent / "result.json"),
                 str(PurePosixPath(previous.work_dir).parent / "study" / "controller.json"),
-                (Path(__file__).resolve().parents[1] / "work" / "recovery.py").read_text(
-                    encoding="utf-8"
-                ),
+                (Path(__file__).resolve().parents[1] / "work" / "recovery.py")
+                .read_text(encoding="utf-8")
+                .replace(
+                    "        from lambdaforge.work.sweep_blocks import sweep_block_inventory\n", ""
+                )
+                + "\n"
+                + inspect.getsource(sweep_block_inventory),
                 (
                     Path(__file__).resolve().parents[1] / "reproducibility" / "SeedProvider.py"
                 ).read_text(encoding="utf-8"),

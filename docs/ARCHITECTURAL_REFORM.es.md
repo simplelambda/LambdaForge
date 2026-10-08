@@ -6,6 +6,10 @@ Este documento permite continuar el trabajo; **no declara terminada la reforma s
 Base: `d2f526d`, LambdaForge 0.17.0. La reforma no modifica WISDOM, trabajos de clusters productivos
 ni registros científicos persistidos.
 
+Continuación sobre `c8f2d2e`: la [auditoría científica](SCIENTIFIC_AUDIT.es.md) corrige orden de
+evidencia pareada, recovery del compromiso anticipado y coherencia conclusión/estabilidad. No cierra
+los pendientes de lifecycle, asignación host aprendida, dependencias de productos o Fleet distribuido.
+
 ## Hallazgos
 
 - `work/runner.py` reúne ejecución, coordinación, clasificación de reintentos, terminación,

@@ -115,6 +115,7 @@ from lambdaforge.work.models import (
 from lambdaforge.work.paths import WorkPathContext
 from lambdaforge.work.recovery import (
     fixed_inventory,
+    fixed_requirements,
     latest_outcomes,
     read_owned_json,
     validate_execution,
@@ -655,7 +656,7 @@ class WorkRunner:
                     }
             if any(not result.ok for result in logical_level_results):
                 break
-        summary = self._summary(config, outcomes)
+        summary = self._summary(config, outcomes, execution_dir=execution_dir)
         status = StudyState.from_execution(
             summary, [result.to_dict() for result in outcomes], status="completed"
         ).final_status
@@ -757,7 +758,9 @@ class WorkRunner:
             atomic_json(Path(configured).expanduser().resolve(), result.to_dict())
 
     @staticmethod
-    def _summary(config: WorkConfig, outcomes: Sequence[WorkResult]) -> Mapping[str, Any]:
+    def _summary(
+        config: WorkConfig, outcomes: Sequence[WorkResult], *, execution_dir: Path | None = None
+    ) -> Mapping[str, Any]:
         # Final scientific evidence uses latest physical outcomes of each native evidence cell.
         # Earlier failures/prunes remain in result envelopes, never survivor-only scientific data.
         outcomes = latest_outcomes(outcomes)
@@ -782,6 +785,17 @@ class WorkRunner:
         if study_designs:
             _, design = study_designs[0]
             summary["study_design"] = design.to_dict()
+
+            def completion_design(design: Any) -> dict[str, Any]:
+                projected = design.to_dict()
+                if design.replication == "auto-blocks" and execution_dir is not None:
+                    blocks = read_owned_json(execution_dir / "hpo-control" / "sweep-blocks.json")
+                    projected["evidence"] = {
+                        **projected["evidence"],
+                        "requirements": fixed_requirements(projected, blocks),
+                    }
+                return cast(dict[str, Any], projected)
+
             evidence_by_work = {
                 name: execution_evidence(
                     [
@@ -798,7 +812,7 @@ class WorkRunner:
                         for result in outcomes
                         if result.name == name
                     ],
-                    design.to_dict(),
+                    completion_design(design),
                 )
                 for name, design in study_designs
             }
@@ -1506,6 +1520,10 @@ def _execute_fixed_evidence_group(
 
     persist_budget()
     committed_lookahead: int | None = None
+    if automatic_blocks and recovery is not None:
+        from lambdaforge.work.sweep_blocks import sweep_block_inventory
+
+        _ordinals, committed_lookahead = sweep_block_inventory(recovery["sweep_blocks"])
 
     def block_ordinal(value: Mapping[str, Any]) -> int | None:
         metadata = value.get("seed_metadata")
@@ -1561,11 +1579,14 @@ def _execute_fixed_evidence_group(
                         ordinal, {"completed": 0, "failed": 0, "active": 0, "queued": 0}
                     )
                     state[label] += 1
-        complete = [
+        complete = {
             ordinal
             for ordinal, state in states.items()
             if state["completed"] == candidate_count and state["failed"] == 0
-        ]
+        }
+        complete_prefix = 0
+        while complete_prefix in complete:
+            complete_prefix += 1
         atomic_json(
             block_progress_path,
             {
@@ -1584,7 +1605,7 @@ def _execute_fixed_evidence_group(
                     "committed_ordinal": committed_lookahead,
                 },
                 "inference_uses_blocks": (
-                    {"first": min(complete), "last": max(complete)} if complete else None
+                    {"first": 0, "last": complete_prefix - 1} if complete_prefix else None
                 ),
             },
         )
@@ -1630,8 +1651,16 @@ def _execute_fixed_evidence_group(
             public_trial = int((observed.trial or {"index": 0})["index"])
             metadata = observed.seed_metadata
             ordinal = metadata.get("ordinal") if isinstance(metadata, Mapping) else None
-            if not isinstance(ordinal, int) or isinstance(ordinal, bool):
-                continue
+            if (
+                not isinstance(ordinal, int)
+                or isinstance(ordinal, bool)
+                or ordinal < 0
+                or metadata != replicate_stream.at(ordinal).to_dict()
+                or observed.seed != replicate_stream.at(ordinal).value
+            ):
+                raise ValueError(
+                    "Sweep evidence has missing or conflicting seed acquisition metadata."
+                )
             observed_ordinals.add(ordinal)
             objective_value = _result_objective(observed, metric)
             if (
@@ -1648,7 +1677,7 @@ def _execute_fixed_evidence_group(
             atomic_json(
                 sequential_path,
                 {
-                    "policy_version": "paired-pm-eb-cs-v1",
+                    "policy_version": "paired-pm-eb-cs-v2",
                     "stop": True,
                     "conclusion": "INCOMPLETE",
                     "reason": "A shared-seed cell remained failed after configured recovery.",
@@ -1693,7 +1722,14 @@ def _execute_fixed_evidence_group(
         # No cell remains active: a previously speculative block is now complete and may enter
         # the formal decision. Only now can another block become eligible.
         committed_lookahead = None
-        decision = sequential_analyzer.evaluate(by_candidate)
+        persist_block_progress((), ())
+        ordered_ordinals = sorted(observed_ordinals)
+        if ordered_ordinals != list(range(len(ordered_ordinals))):
+            raise ValueError("Sweep evidence acquisition ordinals are discontinuous.")
+        decision = sequential_analyzer.evaluate(
+            by_candidate,
+            seed_order=[replicate_stream.at(ordinal).value for ordinal in ordered_ordinals],
+        )
         atomic_json(sequential_path, decision.to_dict())
         if decision.stop:
             sequential_finish_reason = decision.conclusion
@@ -1725,6 +1761,8 @@ def _execute_fixed_evidence_group(
         persist_block_progress(next_block, ())
         return next_block
 
+    if automatic_blocks:
+        persist_block_progress(prepared, ())
     outcomes = (dispatcher or _execute_adaptive_dispatch)(
         prepared,
         resources=resources,

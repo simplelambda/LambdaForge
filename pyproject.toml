@@ -130,6 +130,8 @@ lambdaforge = [
     "docs/DATASET_RECONSTRUCTION.es.md",
     "docs/ARCHITECTURAL_REFORM.md",
     "docs/ARCHITECTURAL_REFORM.es.md",
+    "docs/SCIENTIFIC_AUDIT.md",
+    "docs/SCIENTIFIC_AUDIT.es.md",
     "docs/PRODUCTS.md",
     "docs/PRODUCTS.es.md",
 ]

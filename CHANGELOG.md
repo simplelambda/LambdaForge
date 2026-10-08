@@ -12,6 +12,17 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Paired automatic sweep inference now uses explicit persisted acquisition order and only complete
+  contiguous blocks (`paired-pm-eb-cs-v2`), preserving old evidence. Recovery restores the existing
+  lookahead commitment rather than opening an additional speculative block. Conflicting seed
+  coordinates or block inventories fail closed. Scientific conclusions no longer borrow another
+  hypothesis's stability; predictive support and formal resolution stay separate, and incomplete
+  execution stops are not formal scientific decisions. Added regression/integration/calibration
+  checks and an English/Spanish audit with explicit remaining engineering scope.
+  Native completion and recovery share committed block obligations, so a successful initial block
+  cannot hide unfinished lookahead cells. Remote retry inspection remains self-contained on a
+  system Python without an installed worker runtime.
+
 - First architectural lifecycle foundation: shared operational failure classification, distinct
   activity/evidence/health Study projections, preserved failed Attempts across retry, cumulative
   physical display counters and late-observation protection. Generic CUDA kernel errors no longer

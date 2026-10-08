@@ -681,7 +681,7 @@ class ScientificQuestionAnalyzer:
             ),
         )
         result = {
-            "scientific_question_version": 3,
+            "scientific_question_version": 4,
             "status": "available" if rows else "insufficient",
             "objective": dict(objective),
             "practical_margin": margin,
@@ -1061,17 +1061,10 @@ class ScientificQuestionAnalyzer:
                 dominant = "WEAK_PREFERENCE"
                 best_probability = best_count / max(1, total)
                 confidence = practical_equivalent * best_probability
-                transformed = {
-                    token: probability
-                    for token, probability in token_distribution.items()
-                    if token != "PRACTICALLY_EQUIVALENT"
-                }
-                for label, count in sorted(best_distribution.items()):
-                    token = f"WEAK_PREFERENCE:{label}"
-                    transformed[token] = transformed.get(token, 0.0) + (
-                        practical_equivalent * count / max(1, total)
-                    )
-                token_distribution = transformed
+                # A weak numerical leader does not change the event sampled above:
+                # the whole response was inside the authored practical margin. Preserve
+                # that exact equivalence mass rather than multiplying it by a separate
+                # winner frequency and attributing that product to another statement.
         direct_labels = {_label(value) for value in observed.values()}
         censored_values = {
             _label(values[name]): values[name]
@@ -1142,16 +1135,19 @@ class ScientificQuestionAnalyzer:
                 "UNRESOLVED",
                 (),
                 "UNRESOLVED",
-                predictive_exact.descriptive_stability,
+                0.0,
             )
-            result["predictive_conclusion"] = predictive_exact.to_dict()
+            result["unresolved_reason"] = "missing-terminal-response-support"
+        result["predictive_conclusion"] = predictive_exact.to_dict()
+        result["predictive_stability"] = predictive_exact.descriptive_stability
+        result["conclusion_semantics_version"] = 3
         result["modal_hypothesis"] = (
             {
                 "token": max(token_distribution, key=lambda value: token_distribution[value]),
                 "probability": max(token_distribution.values()),
             }
             if token_distribution
-            else {"token": "UNRESOLVED", "probability": 1.0}
+            else {"token": "UNRESOLVED", "probability": 0.0}
         )
         result["exact_conclusion"] = exact.to_dict()
         result["conclusion_kind"] = exact.kind
@@ -1169,19 +1165,14 @@ class ScientificQuestionAnalyzer:
         practical_margin: float | None,
     ) -> ExactScientificConclusion:
         if not distribution:
-            return ExactScientificConclusion("UNRESOLVED", (), "UNRESOLVED", 1.0)
+            return ExactScientificConclusion("UNRESOLVED", (), "UNRESOLVED", 0.0)
         token = max(distribution, key=lambda value: distribution[value])
         probability = float(distribution[token])
         kind, separator, encoded = token.partition(":")
         if kind == "WEAK_PREFERENCE":
-            if practical_margin is not None:
-                return ExactScientificConclusion(
-                    "PRACTICALLY_EQUIVALENT",
-                    tuple(levels),
-                    "PRACTICALLY_EQUIVALENT",
-                    probability,
-                )
-            return ExactScientificConclusion("UNRESOLVED", (), "UNRESOLVED", probability)
+            return ExactScientificConclusion(
+                "UNRESOLVED", (), "UNRESOLVED", float(distribution.get("UNRESOLVED", 0.0))
+            )
         # A categorical argmax always exists. It is a resolved preference only when the same
         # exact winner is supported by a majority of plausible evidence realizations.
         if kind in {"PREFERRED", "PREFERRED_REGION", "WEAK_PREFERENCE"} and probability <= 0.5:
@@ -1189,14 +1180,14 @@ class ScientificQuestionAnalyzer:
                 "UNRESOLVED",
                 (),
                 "UNRESOLVED",
-                1.0 - probability,
+                float(distribution.get("UNRESOLVED", 0.0)),
             )
         if kind == "PRACTICALLY_EQUIVALENT" and practical_margin is None:
             return ExactScientificConclusion(
                 "UNRESOLVED",
                 (),
                 "UNRESOLVED",
-                1.0 - probability,
+                float(distribution.get("UNRESOLVED", 0.0)),
             )
         labels = encoded.split("|") if separator and encoded else []
         by_label = {_label(value): value for value in levels}
@@ -1233,6 +1224,8 @@ class ScientificQuestionAnalyzer:
         stable_confidence = (
             float(confidence) if confidence is not None else float(probabilities[dominant])
         )
+        if not response and missing:
+            stable_confidence = 0.0
         exact_distribution = dict(conclusion_distribution or probabilities)
         modal_token = max(exact_distribution, key=lambda value: exact_distribution[value])
         modal_probability = float(exact_distribution[modal_token])
@@ -1240,7 +1233,8 @@ class ScientificQuestionAnalyzer:
         shared = cls._shared_seed_count({trial: outcomes.get(trial, {}) for trial in active_trials})
         del pruned
         return {
-            "question_version": 2,
+            "question_version": 3,
+            "conclusion_semantics_version": 3,
             "question": f"What can we conclude about {name} in the studied space?",
             "parameter": name,
             "kind": "numeric" if numeric else "categorical",

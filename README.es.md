@@ -8,6 +8,10 @@ remota, recursos, reintentos, métricas, artefactos, datasets, procedencia, resu
 
 ## Índice
 
+La [auditoría de corrección científica](docs/SCIENTIFIC_AUDIT.es.md) documenta inferencia pareada
+en orden de adquisición, recovery de bloques anticipados comprometidos y separación de conclusiones
+predictivas/descriptivas/formales, con compatibilidad y fronteras de ingeniería pendientes.
+
 1. [Instalación](#instalación)
 2. [Primer Work](#primer-work)
 3. [Servicios y operación](#servicios-y-operación)

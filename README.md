@@ -8,6 +8,10 @@ SSH, or through SLURM. It records inputs, code, parameters, resources, metrics, 
 datasets, attempts, logs and environment provenance without putting infrastructure in scientific
 code.
 
+The [scientific correctness audit](docs/SCIENTIFIC_AUDIT.md) documents acquisition-ordered paired
+sweep inference, recovery of committed lookahead blocks and separate predictive/descriptive/formal
+conclusions, including compatibility and explicit unfinished engineering boundaries.
+
 ## Contents
 
 1. [Install](#install)

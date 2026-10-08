@@ -11,6 +11,16 @@ metadata empaquetada.
 
 ### Corregido
 
+- Inferencia pareada automática en orden persistido de adquisición y solo bloques continuos
+  completos (`paired-pm-eb-cs-v2`), conservando evidencia histórica. Recovery restaura el compromiso
+  anticipado existente y no abre otro bloque especulativo. Coordenadas/inventarios contradictorios
+  fallan de forma segura. Conclusiones no heredan estabilidad de otra hipótesis; soporte predictivo
+  y resolución formal quedan separados y una ejecución incompleta no implica conclusión formal.
+  Nuevas regresiones, integración, calibración y auditoría bilingüe con alcance pendiente explícito.
+  Finalización y recovery comparten obligaciones de bloques comprometidos: completar el inicial
+  no oculta celdas anticipadas pendientes. Preview remoto sigue autocontenido incluso sin runtime
+  instalado en el Python del sistema.
+
 - Primera base de reforma: clasificación operativa compartida, actividad/evidencia/salud separadas,
   historial físico conservado durante retry, contadores acumulados y protección frente a respuestas
   antiguas. Errores CUDA genéricos ya no parecen OOM recuperables; retry en espera no ocupa un slot

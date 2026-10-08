@@ -144,6 +144,11 @@ def test_incomplete_discrete_support_keeps_full_domain_conclusion_unresolved() -
     assert question["observed_values"] == [32, 256]
     assert question["conclusion_kind"] == "UNRESOLVED"
     assert question["exact_conclusion"]["kind"] == "UNRESOLVED"
+    assert question["confidence"] == question["descriptive_stability"] == 0.0
+    assert question["predictive_stability"] == question["predictive_conclusion"][
+        "descriptive_stability"
+    ]
+    assert question["unresolved_reason"] == "missing-terminal-response-support"
     assert question["predictive_conclusion"]["kind"] in {
         "PREFERRED",
         "PREFERRED_REGION",
