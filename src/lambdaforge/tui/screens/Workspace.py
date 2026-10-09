@@ -4235,6 +4235,7 @@ class WorkWorkspace(ResearchWorkspace):
         with Horizontal(classes="workspace-actions"):
             yield Button("Cancel", id="work-cancel", variant="warning")
             yield Button("Retry latest Attempt", id="work-retry")
+            yield Button("Export Work…", id="work-export", variant="success")
             yield Button("Delete", id="work-delete", variant="error")
         if isinstance(self.work.get("study"), Mapping):
             yield Button("Open Study", id="work-open-study", variant="primary")
@@ -4260,10 +4261,10 @@ class WorkWorkspace(ResearchWorkspace):
                 yield Static(
                     json.dumps(self.work.get("resources", {}), indent=2), classes="workspace-panel"
                 )
-            with TabPane("Outputs", id="work-outputs"):
-                yield Static(
-                    "Managed output evidence is available in the terminal result envelope."
-                )
+            with TabPane("Results", id="work-outputs"):
+                from lambdaforge.tui.widgets.WorkEvidence import WorkEvidence
+
+                yield WorkEvidence(self.work, self.services)
 
     def on_mount(self) -> None:
         table = self.query_one("#attempt-table", DataTable)
@@ -4359,6 +4360,14 @@ class WorkWorkspace(ResearchWorkspace):
                 "Delete preview",
                 lambda: self.services.delete_work(self._selector, apply=False),
                 self._confirm_delete,
+            )
+        elif event.button.id == "work-export":
+            self.app.push_screen(ExportDirectoryPicker(Path.cwd()), self._export_work)
+
+    def _export_work(self, destination: Path | None) -> None:
+        if destination is not None:
+            self._operation(
+                "Export Work", lambda: self.services.export_work(self._selector, destination)
             )
 
     def _apply_cancel(self, confirmed: bool | None) -> None:
@@ -5241,15 +5250,27 @@ class ResultWorkspace(ResearchWorkspace):
         super().__init__(f"Results / {result.get('name', 'Execution')}")
 
     def compose_workspace(self) -> ComposeResult:
+        ordinary = not self.result.get(
+            "study_expected",
+            bool(
+                self.result.get("summary", {}).get("study_design")
+                or self.result.get("summary", {}).get("objective")
+            ),
+        )
         yield Static(
             f"{self.result.get('name')} · {str(self.result.get('status', 'unknown')).upper()}",
             classes="workspace-header",
         )
         with Horizontal(classes="workspace-actions"):
-            yield Button("Analyze / refresh", id="result-analyze", variant="primary")
-            yield Button("Export HTML report", id="result-report")
-            yield Button("Export experiment…", id="result-export", variant="success")
+            yield Button("Analyze", id="result-analyze", variant="primary", disabled=ordinary)
+            yield Button("HTML report", id="result-report")
+            yield Button("Export…", id="result-export", variant="success")
             yield Button("Delete", id="result-delete", variant="error")
+        if ordinary:
+            from lambdaforge.tui.widgets.WorkEvidence import WorkEvidence
+
+            yield WorkEvidence(self.result, self.services)
+            return
         with TabbedContent(initial="result-summary"):
             with TabPane("Summary", id="result-summary"):
                 yield Static(
@@ -5280,6 +5301,8 @@ class ResultWorkspace(ResearchWorkspace):
                 )
 
     def on_mount(self) -> None:
+        if not self.query("#result-analysis-content"):
+            return
         selector = self.result.get("execution_id")
         if not selector:
             return

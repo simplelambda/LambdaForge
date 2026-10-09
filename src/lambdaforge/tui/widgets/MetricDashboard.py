@@ -46,6 +46,7 @@ class MetricDashboard(Vertical):
         selected_step: int | None,
         best_step: int | None,
         display_names: Mapping[str, Any] | None = None,
+        axis_label: str = "epoch",
     ) -> None:
         """Replace the current page while retaining truthful selected/best markers."""
         signature = tuple(names)
@@ -72,7 +73,14 @@ class MetricDashboard(Vertical):
             points = self._points(curves.get(name))
             display_name = metric_display_name(name, display_names)
             self.query_one(f".metric-plot-title-{index}", Label).update(display_name)
-            slot_signature = (name, tuple(points), selected_step, best_step, display_name)
+            slot_signature = (
+                name,
+                tuple(points),
+                selected_step,
+                best_step,
+                display_name,
+                axis_label,
+            )
             if same_page and slot_signature == self._slot_signatures[index]:
                 continue
             viewport = plot.user_viewport() if same_page else None
@@ -101,7 +109,7 @@ class MetricDashboard(Vertical):
                             InspectionPoint(
                                 float(step),
                                 value,
-                                f"epoch={step}",
+                                f"{axis_label}={step}",
                                 f"{display_name}={value:.6g}",
                                 display_name,
                             )
@@ -110,7 +118,7 @@ class MetricDashboard(Vertical):
                     )
                     self._mark(plot, points, best_step, "bright_green", "best")
                     self._mark(plot, points, selected_step, "bright_red", "selected")
-                    plot.set_xlabel("epoch")
+                    plot.set_xlabel(axis_label)
                     plot.set_ylabel("value")
                     plot.show_legend()
             self._slot_signatures[index] = slot_signature

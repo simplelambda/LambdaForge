@@ -10,13 +10,13 @@ import hashlib
 import os
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from lambdaforge.products.decision import build_study_decision
-from lambdaforge.products.models import ProductContract, _text
+from lambdaforge.products.models import ProductArtifact, ProductContract, StudyProduct, _text
 from lambdaforge.products.registry import ProductRegistry, _encoded
 from lambdaforge.products.selection import SelectionPolicy, select_models
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
@@ -32,18 +32,60 @@ class ProductPublication:
     kind: str
     contract: str
     selection: SelectionPolicy | None = None
+    outputs: tuple[str, ...] = ()
+    scientific_meaning: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, name: str, value: Any) -> ProductPublication:
         _text(name, field="publication name")
         if (
             not isinstance(value, Mapping)
-            or set(value) - {"kind", "contract", "select"}
+            or set(value) - {"kind", "contract", "select", "outputs", "scientific_meaning"}
             or not {"kind", "contract"}.issubset(value)
-            or value["kind"] not in {"StudyDecision", "ModelSet"}
+            or value["kind"]
+            not in {
+                "StudyDecision",
+                "ModelSet",
+                "ScientificReport",
+                "AnalysisResult",
+                "ModelArtifact",
+                "Selection",
+            }
         ):
-            raise ValueError("products entries require kind=StudyDecision|ModelSet and contract.")
+            raise ValueError(
+                "products entries require a supported native product kind and contract."
+            )
         ProductContract(value["contract"], ("declaration",))
+        if value["kind"] not in {"StudyDecision", "ModelSet"}:
+            outputs, meaning = value.get("outputs"), value.get("scientific_meaning")
+            if (
+                "select" in value
+                or not isinstance(outputs, list)
+                or not outputs
+                or len(outputs) > 128
+                or any(not isinstance(item, str) or not item for item in outputs)
+                or len(set(outputs)) != len(outputs)
+                or not isinstance(meaning, Mapping)
+                or not meaning
+            ):
+                raise ValueError(
+                    "Work products require explicit unique outputs and scientific_meaning; "
+                    "select is not allowed."
+                )
+            contract = ProductContract(value["contract"], tuple(meaning))
+            meaning = contract.validate(meaning)
+            return cls(
+                name,
+                value["kind"],
+                value["contract"],
+                outputs=tuple(outputs),
+                scientific_meaning=meaning,
+            )
+        if "outputs" in value or "scientific_meaning" in value:
+            raise ValueError(
+                "StudyDecision/ModelSet derive meaning from native evidence, "
+                "not Work output declarations."
+            )
         if value["kind"] == "ModelSet":
             if "select" not in value:
                 raise ValueError("ModelSet publication requires an explicit select policy.")
@@ -58,6 +100,9 @@ class ProductPublication:
         value: dict[str, Any] = {"kind": self.kind, "contract": self.contract}
         if self.selection is not None:
             value["select"] = self.selection.to_dict()
+        if self.outputs:
+            value["outputs"] = list(self.outputs)
+            value["scientific_meaning"] = dict(self.scientific_meaning)
         return value
 
 
@@ -211,7 +256,9 @@ def _publish(
                 plan = {"applied": apply, "reused": True}
             else:
                 files: dict[str, Path] = {}
-                if declaration.selection is not None:
+                if declaration.outputs:
+                    product, files = _work_product(declaration, source, root)
+                elif declaration.selection is not None:
                     selected = select_models(
                         source,
                         root,
@@ -285,6 +332,85 @@ def _publish(
             os.fsync(stream.fileno())
         atomic_json(state_path, result)
     return result
+
+
+def _work_product(
+    declaration: ProductPublication,
+    source: Mapping[str, Any],
+    root: Path,
+) -> tuple[StudyProduct, dict[str, Path]]:
+    """Promote explicitly selected native outputs; no implicit scientific interpretation."""
+    from lambdaforge.work.managed import fingerprint
+    from lambdaforge.work.result_projection import attempt_path, owned
+
+    latest: dict[str, Mapping[str, Any]] = {}
+    for run in source.get("runs", ()):
+        previous = latest.get(run["run_id"])
+        if previous is None or run["attempt_number"] > previous["attempt_number"]:
+            latest[run["run_id"]] = run
+    if len(latest) != 1:
+        raise ValueError(
+            "Work output promotion requires one logical Run; "
+            "use explicit Study model selection for multiple Runs."
+        )
+    run = next(iter(latest.values()))
+    if run.get("status") != "succeeded":
+        raise ValueError(
+            "Work products require a successful latest Attempt; partial evidence is not promoted."
+        )
+    directory = attempt_path(root, run)
+    values, artifacts, files = {}, [], {}
+    registered = {item["name"]: item for item in run.get("artifacts", ())}
+    for name in declaration.outputs:
+        if name in run.get("outputs", {}):
+            values[name] = run["outputs"][name]
+            continue
+        if name not in registered:
+            raise ValueError(f"Declared product output {name!r} was not registered by the Work.")
+        artifact = registered[name]
+        path = owned(directory, artifact["path"])
+        if not path.is_file():
+            raise ValueError(
+                f"Work product output {name!r} must be a retained regular file. "
+                "Register directory members explicitly."
+            )
+        before = path.stat()
+        if fingerprint(path) != (artifact["sha256"], artifact["size_bytes"]):
+            raise ValueError(f"Work product output checksum differs: {name}.")
+        target = f"artifacts/{name}/{path.name}"
+        checksum = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                checksum.update(chunk)
+        after = path.stat()
+        if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise ValueError(f"Work product output changed during byte promotion: {name}.")
+        artifacts.append(
+            ProductArtifact(
+                name, target, checksum.hexdigest(), path.stat().st_size, artifact["role"]
+            )
+        )
+        files[name] = path
+    product = StudyProduct(
+        declaration.name,
+        declaration.kind,
+        ProductContract(declaration.contract, tuple(declaration.scientific_meaning)),
+        {"outputs": values, "source_run": run["run_id"], "source_attempt": run["attempt_id"]},
+        declaration.scientific_meaning,
+        {
+            "execution_id": source["execution_id"],
+            "config_fingerprint": source["scientific_fingerprint"],
+            "evidence_fingerprint": "sha256:" + hashlib.sha256(_encoded(source)).hexdigest(),
+            "source_status": source["status"],
+        },
+        tuple(artifacts),
+    )
+    return product, files
 
 
 def finalize_native_products(

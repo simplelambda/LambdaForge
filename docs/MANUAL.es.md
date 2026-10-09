@@ -1,4 +1,8 @@
-# Manual de LambdaForge 0.17
+# Manual de LambdaForge 0.18
+
+Resultados e informes de Work, dependencias históricas exactas y materialización comprimida explícita:
+[Guía de resultados](WORK_RESULTS.es.md). Reutilizan runner, ResultStore, registro de productos e
+import/export de Studies; no añaden entrenamiento ni inferencia estadística implícita a Works ordinarios.
 
 [English](MANUAL.md) · Español
 

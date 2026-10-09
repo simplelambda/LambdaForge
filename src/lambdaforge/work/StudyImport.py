@@ -341,6 +341,14 @@ class StudyImport:
                             "will_execute": False,
                         }
                         atomic_json(stage / "result.json", result)
+                        from lambdaforge.work.result_projection import compact_index
+
+                        atomic_json(
+                            stage / "result-index.json",
+                            compact_index(
+                                result, _mapping(stage / "portable/execution/configuration.json")
+                            ),
+                        )
                         atomic_json(stage / "import.json", receipt)
                         from lambdaforge.work.ImportedStudy import import_index, write_import_views
 

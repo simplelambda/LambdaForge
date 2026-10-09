@@ -654,7 +654,7 @@ else if(visible==='study-trials')updateRanking();}};
         '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
         'content="width=device-width,initial-scale=1">'
         '<meta http-equiv="Content-Security-Policy" content="frame-src \'none\'">'
-        '<title>LambdaForge Study Analysis</title><style>'
+        "<title>LambdaForge Study Analysis</title><style>"
         + style
         + '</style></head><body><div class="shell"><header><div><h1>Study Analysis dashboard</h1>'
         "<p>Explore persisted evidence; every association remains descriptive or predictive.</p></div>"
@@ -783,6 +783,8 @@ def write_metric_html(
     preferred_names: Sequence[str] = (),
     selected_step: int | None = None,
     best_step: int | None = None,
+    step_label: str = "Epoch",
+    series_groups: Mapping[str, str] | None = None,
 ) -> Path:
     """Write a self-contained interactive metric dashboard for one Run."""
     try:
@@ -823,7 +825,7 @@ def write_metric_html(
             {
                 "name": name,
                 "label": label,
-                "group": _metric_group(name),
+                "group": (series_groups or {}).get(name, _metric_group(name)),
                 "color": palette[len(series) % len(palette)],
                 "x": [step for step, _value in points],
                 "y": values,
@@ -849,6 +851,9 @@ def write_metric_html(
         if value["name"] not in defaults and value["group"] == "Validation"
     )
     defaults.extend(value["name"] for value in series if value["name"] not in defaults)
+    if series_groups and defaults:
+        first_group = series_groups[defaults[0]]
+        defaults = [name for name in defaults if series_groups.get(name) == first_group]
     defaults = defaults[:4]
     default_set = set(defaults)
 
@@ -868,7 +873,7 @@ def write_metric_html(
                 **common,
                 y=value["y"],
                 hovertemplate=(
-                    f"epoch=%{{x}}<br>{html.escape(value['label'])}=%{{y:.6g}}<extra></extra>"
+                    f"{html.escape(step_label)}=%{{x}}<br>{html.escape(value['label'])}=%{{y:.6g}}<extra></extra>"
                 ),
             )
         )
@@ -878,13 +883,15 @@ def write_metric_html(
                 y=value["normalized"],
                 customdata=value["y"],
                 hovertemplate=(
-                    "epoch=%{x}<br>relative position=%{y:.3f}"
+                    f"{html.escape(step_label)}=%{{x}}<br>relative position=%{{y:.3f}}"
                     "<br>original=%{customdata:.6g}<extra></extra>"
                 ),
             )
         )
 
-    reference_shapes, reference_annotations = _metric_step_references(best_step, selected_step)
+    reference_shapes, reference_annotations = _metric_step_references(
+        best_step, selected_step, step_label=step_label
+    )
     common_layout = {
         "template": "plotly_dark",
         "paper_bgcolor": "rgba(0,0,0,0)",
@@ -902,14 +909,16 @@ def write_metric_html(
     }
     raw_figure.update_layout(
         **curve_layout,
-        title="Observed learning curves",
-        xaxis_title="Epoch",
+        title="Observed learning curves"
+        if step_label == "Epoch"
+        else "Persisted metric observations",
+        xaxis_title=step_label,
         yaxis_title="Observed value",
     )
     normalized_figure.update_layout(
         **curve_layout,
         title="Relative trajectory comparison",
-        xaxis_title="Epoch",
+        xaxis_title=step_label,
         yaxis_title="Position within each metric's observed range",
         yaxis={"range": [-0.05, 1.05]},
     )
@@ -934,7 +943,7 @@ def write_metric_html(
         yaxis_title="",
     )
 
-    correlations = _metric_correlations(series)
+    correlations = _metric_correlations(series, groups=series_groups)
     initial_correlation = [
         [correlations.get(left["name"], {}).get(right["name"]) for right in selected_series]
         for left in selected_series
@@ -955,7 +964,7 @@ def write_metric_html(
     )
     correlation.update_layout(
         **common_layout,
-        title="Same-epoch Pearson correlation",
+        title=f"Same-{step_label.lower()} Pearson correlation",
         xaxis_title="Metric",
         yaxis_title="Metric",
     )
@@ -977,18 +986,18 @@ def write_metric_html(
                     "colorscale": "Viridis",
                     "size": 9,
                     "showscale": True,
-                    "colorbar": {"title": "Epoch"},
+                    "colorbar": {"title": step_label},
                 },
                 hovertemplate=(
                     f"{html.escape(left['label'])}=%{{x:.6g}}"
                     f"<br>{html.escape(right['label'])}=%{{y:.6g}}"
-                    "<br>epoch=%{customdata}<extra></extra>"
+                    f"<br>{html.escape(step_label)}=%{{customdata}}<extra></extra>"
                 ),
             )
         )
     relationship.update_layout(
         **common_layout,
-        title="Metric relationship over shared epochs",
+        title=f"Metric relationship over shared {step_label.lower()}s",
         xaxis_title=selected_series[0]["label"] if selected_series else "Metric X",
         yaxis_title=selected_series[1]["label"] if len(selected_series) >= 2 else "Metric Y",
     )
@@ -996,7 +1005,7 @@ def write_metric_html(
     custom_figure.update_layout(
         **common_layout,
         title="Create or select a saved chart",
-        xaxis_title="Epoch",
+        xaxis_title=step_label,
     )
 
     plot_config = {
@@ -1051,6 +1060,7 @@ def write_metric_html(
         figures,
         best_step=best_step,
         selected_step=selected_step,
+        step_label=step_label,
     )
 
 
@@ -1093,13 +1103,13 @@ def _metric_group(name: str) -> str:
 
 
 def _metric_step_references(
-    best_step: int | None, selected_step: int | None
+    best_step: int | None, selected_step: int | None, *, step_label: str = "Epoch"
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     shapes: list[dict[str, Any]] = []
     annotations: list[dict[str, Any]] = []
     for step, label, color in (
-        (best_step, "Best epoch", "#56d364"),
-        (selected_step, "Selected epoch", "#ff7b72"),
+        (best_step, f"Best {step_label.lower()}", "#56d364"),
+        (selected_step, f"Selected {step_label.lower()}", "#ff7b72"),
     ):
         if step is None or any(value.get("x0") == step for value in shapes):
             continue
@@ -1130,7 +1140,9 @@ def _metric_step_references(
     return shapes, annotations
 
 
-def _metric_correlations(series: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, float | None]]:
+def _metric_correlations(
+    series: Sequence[Mapping[str, Any]], *, groups: Mapping[str, str] | None = None
+) -> dict[str, dict[str, float | None]]:
     by_name = {
         str(value["name"]): {
             str(step): float(observed)
@@ -1142,6 +1154,9 @@ def _metric_correlations(series: Sequence[Mapping[str, Any]]) -> dict[str, dict[
     for left, left_values in by_name.items():
         result[left] = {}
         for right, right_values in by_name.items():
+            if groups is not None and groups.get(left) != groups.get(right):
+                result[left][right] = None
+                continue
             shared = sorted(set(left_values) & set(right_values))
             if len(shared) < 2:
                 result[left][right] = None
@@ -1167,8 +1182,9 @@ def _write_metric_dashboard(
     *,
     best_step: int | None,
     selected_step: int | None,
+    step_label: str = "Epoch",
 ) -> Path:
-    groups = ("Validation", "Training", "Resources & timing", "Other")
+    groups = tuple(dict.fromkeys(str(value["group"]) for value in series))
     controls: list[str] = []
     default_set = set(defaults)
     for group in groups:
@@ -1210,8 +1226,8 @@ def _write_metric_dashboard(
     context = " · ".join(
         value
         for value in (
-            f"Best epoch {best_step}" if best_step is not None else "",
-            f"Selected epoch {selected_step}" if selected_step is not None else "",
+            f"Best {step_label.lower()} {best_step}" if best_step is not None else "",
+            f"Selected {step_label.lower()} {selected_step}" if selected_step is not None else "",
         )
         if value
     )
@@ -1221,6 +1237,8 @@ def _write_metric_dashboard(
             "series": list(series),
             "defaults": list(defaults),
             "correlations": correlations,
+            "step_label": step_label,
+            "groups": list(groups),
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -1304,6 +1322,7 @@ top:auto;max-height:420px}.cards{grid-template-columns:1fr}.chart-builder{grid-t
     script = """
 (()=>{
 const payload=JSON.parse(document.getElementById('lf-metric-data').textContent);
+const stepLabel=payload.step_label||'Epoch';
 const byName=Object.fromEntries(payload.series.map(item=>[item.name,item]));
 const order=payload.series.map(item=>item.name);
 const boxes=[...document.querySelectorAll('.metric-option input')];
@@ -1329,7 +1348,7 @@ window.lfPlotConfig={responsive:true,displaylogo:false,scrollZoom:true,
 const layouts={snapshot:layoutOf('view-snapshot'),correlation:layoutOf('view-correlation'),
  relationship:layoutOf('view-relationship')};
 
-const defaultGroups=['Validation','Training','Resources & timing','Other'];
+const defaultGroups=payload.groups||['Validation','Training','Resources & timing','Other'];
 const groupContainer=document.getElementById('metric-groups');
 const safeGroups=()=>[...document.querySelectorAll('.metric-group')];
 function ensureGroup(name){let group=safeGroups().find(value=>value.dataset.group===name);if(group)return group;
@@ -1377,21 +1396,21 @@ function customLayout(title,x='',y=''){return {template:'plotly_dark',paper_bgco
  font:{family:'Inter, ui-sans-serif, system-ui',color:'#c9d1d9'},height:Math.max(280,document.getElementById('view-custom').clientHeight-145),
  margin:{l:72,r:28,t:52,b:62},title,xaxis:{title:{text:x},autorange:true},yaxis:{title:{text:y},autorange:true}}}
 function renderCustomChart(spec){const chart=plotNode('custom-chart');if(!chart)return;const items=(spec?.metrics||[]).map(name=>byName[name]).filter(Boolean);
- let traces=[],xLabel='Epoch',yLabel='Observed value';if(spec?.kind==='latest'){traces=[{type:'bar',orientation:'h',x:items.map(item=>item.stats.latest),
+ let traces=[],xLabel=stepLabel,yLabel='Observed value';if(spec?.kind==='latest'){traces=[{type:'bar',orientation:'h',x:items.map(item=>item.stats.latest),
   y:items.map(item=>item.label),marker:{color:items.map(item=>item.color)},hovertemplate:'%{y}<br>latest=%{x:.6g}<extra></extra>'}];xLabel='Latest value';yLabel='';}
  else if(spec?.kind==='relationship'&&items.length>=2){const left=items[0],right=items[1],lx=Object.fromEntries(left.x.map((step,index)=>[String(step),left.y[index]])),
   ry=Object.fromEntries(right.x.map((step,index)=>[String(step),right.y[index]])),steps=Object.keys(lx).filter(step=>step in ry).sort((a,b)=>Number(a)-Number(b));
   traces=[{type:'scatter',mode:'markers+lines',x:steps.map(step=>lx[step]),y:steps.map(step=>ry[step]),customdata:steps,
-  marker:{color:steps.map(Number),colorscale:'Viridis',size:9,showscale:true,colorbar:{title:'Epoch'}},hovertemplate:'%{x:.6g} / %{y:.6g}<br>epoch=%{customdata}<extra></extra>'}];xLabel=left.label;yLabel=right.label;}
+  marker:{color:steps.map(Number),colorscale:'Viridis',size:9,showscale:true,colorbar:{title:stepLabel}},hovertemplate:'%{x:.6g} / %{y:.6g}<br>'+stepLabel+'=%{customdata}<extra></extra>'}];xLabel=left.label;yLabel=right.label;}
  else if(['histogram','ecdf','box','violin'].includes(spec?.kind)){
   traces=items.map(item=>{const values=[...item.y].sort((a,b)=>a-b),common={name:item.label,marker:{color:item.color}};
    if(spec.kind==='histogram')return {...common,type:'histogram',x:values,opacity:.6};
    if(spec.kind==='ecdf')return {...common,type:'scatter',mode:'lines',x:values,y:values.map((_,i)=>(i+1)/values.length),line:{color:item.color,shape:'hv'}};
    return {...common,type:spec.kind,y:values,...(spec.kind==='violin'?{points:'all',box:{visible:true}}:{boxpoints:'all'})};});
-  xLabel=['box','violin'].includes(spec.kind)?'Metric':'Observed value';yLabel=spec.kind==='ecdf'?'Cumulative fraction':spec.kind==='histogram'?'Epoch count':'Observed value';}
+  xLabel=['box','violin'].includes(spec.kind)?'Metric':'Observed value';yLabel=spec.kind==='ecdf'?'Cumulative fraction':spec.kind==='histogram'?'Observation count':'Observed value';}
  else{const normalized=spec?.kind==='normalized';traces=items.map(item=>({type:'scatter',mode:spec?.kind==='scatter'?'markers':'lines+markers',x:item.x,y:normalized?item.normalized:item.y,
   name:item.label,line:{color:item.color,width:2.5,shape:spec?.kind==='step'?'hv':'linear'},marker:{color:item.color,size:5},
-  ...(spec?.kind==='area'?{fill:'tozeroy',fillcolor:item.color+'22'}:{}),hovertemplate:'epoch=%{x}<br>value=%{y:.6g}<extra></extra>'}));
+  ...(spec?.kind==='area'?{fill:'tozeroy',fillcolor:item.color+'22'}:{}),hovertemplate:stepLabel+'=%{x}<br>value=%{y:.6g}<extra></extra>'}));
   yLabel=normalized?'Position within observed range':'Observed value'}
  Plotly.react(chart,traces,customLayout(spec?.name||'Saved chart',xLabel,yLabel),window.lfPlotConfig)}
 function showCustomChart(id){const charts=Array.isArray(preferences.customCharts)?preferences.customCharts:[],spec=charts.find(item=>item.id===id)||charts[0];
@@ -1410,13 +1429,13 @@ function updateRelationship(){
  const lx=Object.fromEntries(left.x.map((step,index)=>[String(step),left.y[index]]));
  const ry=Object.fromEntries(right.x.map((step,index)=>[String(step),right.y[index]]));
  const steps=Object.keys(lx).filter(step=>step in ry).sort((a,b)=>Number(a)-Number(b));
- const layout={...layouts.relationship,title:'Metric relationship over shared epochs',
+ const layout={...layouts.relationship,title:'Metric relationship over shared '+stepLabel.toLowerCase()+'s',
   xaxis:{...(layouts.relationship.xaxis||{}),title:{text:left.label},autorange:true},
   yaxis:{...(layouts.relationship.yaxis||{}),title:{text:right.label},autorange:true}};
  Plotly.react(target,[{type:'scatter',mode:'markers+lines',x:steps.map(step=>lx[step]),
   y:steps.map(step=>ry[step]),customdata:steps,marker:{color:steps.map(Number),colorscale:'Viridis',
-  size:9,showscale:true,colorbar:{title:'Epoch'}},hovertemplate:left.label+'=%{x:.6g}<br>'+right.label+
-  '=%{y:.6g}<br>epoch=%{customdata}<extra></extra>'}],layout,window.lfPlotConfig);
+  size:9,showscale:true,colorbar:{title:stepLabel}},hovertemplate:left.label+'=%{x:.6g}<br>'+right.label+
+  '=%{y:.6g}<br>'+stepLabel+'=%{customdata}<extra></extra>'}],layout,window.lfPlotConfig);
  save({relationshipX:left.name,relationshipY:right.name});
 }
 function update(){
@@ -1509,7 +1528,7 @@ if(preferences.tab&&document.getElementById(preferences.tab))activate(preference
         'changing the scientific result.</p></div><div class="context">'
         + html.escape(context or "Interactive offline report")
         + '</div></header><div class="cards"><div class="card"><small>Available metrics</small>'
-        f'<strong>{len(series)}</strong></div><div class="card"><small>Observed epochs</small>'
+        f'<strong>{len(series)}</strong></div><div class="card"><small>Observed {html.escape(step_label.lower())}s</small>'
         f'<strong>{html.escape(epoch_summary)}</strong></div><div class="card">'
         "<small>Selected metrics</small>"
         f'<strong id="selected-count">{len(defaults)}</strong></div></div>'
@@ -1558,7 +1577,7 @@ if(preferences.tab&&document.getElementById(preferences.tab))activate(preference
         '</select></label><label><input id="correlation-reverse" type="checkbox"> Reverse</label>'
         '</div><div class="plot-wrap">'
         + figures["correlation"]
-        + '</div><p class="note">Pearson correlation uses only epochs shared by each pair. '
+        + f'</div><p class="note">Pearson correlation uses only {html.escape(step_label.lower())}s shared by each pair in the same evidence group. '
         "Association is "
         "descriptive and does not imply causality.</p></section>"
         '<section class="view resizable" id="view-relationship" hidden><div class="view-tools">'
@@ -1566,12 +1585,12 @@ if(preferences.tab&&document.getElementById(preferences.tab))activate(preference
         '<label>Y metric <select id="relationship-y" class="relationship-select"></select></label>'
         '</div><div class="plot-wrap">'
         + figures["relationship"]
-        + '</div><p class="note">Each point is one shared epoch; colour shows training order. '
+        + f'</div><p class="note">Each point is one shared {html.escape(step_label.lower())}; colour shows observation order. '
         "This is a descriptive relationship, not an independent-sample test or a causal effect."
         "</p></section>"
         '<section class="view" id="view-summary" hidden><div class="table-wrap">'
         '<table id="metric-summary">'
-        "<thead><tr><th>Metric</th><th>Latest epoch</th><th>Latest</th><th>Change</th>"
+        f"<thead><tr><th>Metric</th><th>Latest {html.escape(step_label.lower())}</th><th>Latest</th><th>Change</th>"
         "<th>Minimum</th>"
         '<th>Maximum</th><th>Points</th></tr></thead><tbody></tbody></table><p id="summary-empty" '
         'class="empty" hidden>Select at least one metric.</p></div></section>'
@@ -1581,7 +1600,7 @@ if(preferences.tab&&document.getElementById(preferences.tab))activate(preference
         '<option value="normalized">Normalized trends</option><option value="latest">Latest values</option>'
         '<option value="scatter">Points</option><option value="step">Step lines</option><option value="area">Area</option>'
         '<option value="histogram">Histogram</option><option value="ecdf">Cumulative distribution</option>'
-        '<option value="box">Epoch distributions</option><option value="violin">Violin distributions</option>'
+        '<option value="box">Observation distributions</option><option value="violin">Violin distributions</option>'
         '<option value="relationship">X/Y relationship</option></select></label>'
         '<span class="muted">Uses the currently selected metrics</span>'
         '<button id="save-custom-chart">Save chart</button></div>'

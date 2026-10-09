@@ -24,6 +24,7 @@ class ExecutionBundle:
     environment_policy: Mapping[str, Any] | None = None
     shared_inputs: tuple[Mapping[str, Any], ...] = ()
     product_inputs: tuple[Mapping[str, Any], ...] = ()
+    result_inputs: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if self.environment_policy is not None:
@@ -39,6 +40,9 @@ class ExecutionBundle:
         )
         object.__setattr__(
             self, "product_inputs", tuple(FrozenJsonMapping(value) for value in self.product_inputs)
+        )
+        object.__setattr__(
+            self, "result_inputs", tuple(FrozenJsonMapping(value) for value in self.result_inputs)
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -57,6 +61,11 @@ class ExecutionBundle:
             **(
                 {"product_inputs": [dict(value) for value in self.product_inputs]}
                 if self.product_inputs
+                else {}
+            ),
+            **(
+                {"result_inputs": [dict(value) for value in self.result_inputs]}
+                if self.result_inputs
                 else {}
             ),
         }

@@ -507,6 +507,7 @@ class WorkRunner:
             execution_dir / "execution.json",
             {
                 "execution_manifest_version": 1,
+                "job_id": os.environ.get("LAMBDAFORGE_JOB_ID"),
                 "name": config.name,
                 "execution_id": plan.execution_id,
                 "scientific_fingerprint": plan.scientific_fingerprint,
@@ -727,6 +728,12 @@ class WorkRunner:
                 ),
             )
         self._publish_job_result(execution_result)
+        from lambdaforge.work.result_projection import compact_index
+
+        atomic_json(
+            execution_dir / "result-index.json",
+            compact_index(execution_result.to_dict(), config.raw),
+        )
         self._compact_outcomes(outcomes)
         return execution_result
 
@@ -1083,6 +1090,10 @@ class WorkRunner:
     @staticmethod
     def _resolve_references(value: Any, outputs: Mapping[str, Mapping[str, Any]]) -> Any:
         if isinstance(value, Mapping):
+            if set(value) in ({"product"}, {"result"}, {"dataset"}, {"file"}):
+                # A typed input owns its nested schema. Product provenance's ``from`` is
+                # not a composed step-output reference and must reach its native resolver.
+                return dict(value)
             if set(value) == {"from"}:
                 producer, _, output = str(value["from"]).partition(".")
                 selected = outputs[producer]
@@ -9821,6 +9832,18 @@ def _resolve_inputs(
 
     def resolve(item: Any, name: str) -> tuple[Any, Any]:
         if isinstance(item, Mapping):
+            if set(item) == {"result"}:
+                from lambdaforge.work.ResultInput import resolve_result_input, result_identity
+
+                historical, manifest = resolve_result_input(item["result"], source_dir)
+                inputs[name] = WorkInput(
+                    name,
+                    "result",
+                    historical.execution_id,
+                    manifest,
+                    content_id=historical.evidence_id,
+                )
+                return historical, result_identity(historical)
             if set(item) == {"product"}:
                 from lambdaforge.products.dependency import product_identity, resolve_product_input
 
@@ -9886,6 +9909,11 @@ def _resolve_inputs(
 def _identity_values(value: Any, source_dir: Path) -> Any:
     """Resolve typed input identity while retaining output references as logical values."""
     if isinstance(value, Mapping):
+        if set(value) == {"result"}:
+            from lambdaforge.work.ResultInput import resolve_result_input, result_identity
+
+            historical, _manifest = resolve_result_input(value["result"], source_dir)
+            return result_identity(historical)
         if set(value) == {"product"}:
             from lambdaforge.products.dependency import product_identity, resolve_product_input
 

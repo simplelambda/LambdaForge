@@ -52,6 +52,19 @@ def retention_plan(result: WorkResult) -> dict[str, Any]:
     """Return exact currently safe-to-remove Attempt paths without mutation."""
     run_dir = result.run_dir.resolve()
     artifacts_root = owned_path(run_dir, "artifacts")
+    publication = run_dir.parent.parent.parent.parent / "products.json"
+    if publication.exists() or publication.is_symlink():
+        if publication.resolve() != publication:
+            raise ValueError("Product retention witness cannot be symbolic.")
+        state = json.loads(publication.read_text(encoding="utf-8"))
+        if state.get("product_publication_version") != 1:
+            raise ValueError("Product retention witness is corrupt; refusing compaction.")
+        if state.get("status") in {"pending", "failed"}:
+            return {
+                "paths": (),
+                "reclaimable_bytes": 0,
+                "reason": "product-publication-recoverable",
+            }
     if not result.ok:
         if (
             (run_dir / "dataset-publication-pending.json").exists()

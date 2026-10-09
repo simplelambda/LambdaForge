@@ -102,6 +102,8 @@ class ProductWorkspace(ResearchWorkspace):
         with Horizontal(classes="workspace-actions"):
             yield Button("Verify bytes", id="product-verify", flat=True)
             yield Button("Export product…", id="product-export", flat=True)
+            yield Button("Materialize…", id="product-materialize", flat=True)
+            yield Button("Choose reusable input…", id="product-reference", flat=True)
             yield Button("Previous audit page", id="product-previous", flat=True)
             yield Button("Next audit page", id="product-next", flat=True)
         yield Static(
@@ -159,6 +161,18 @@ class ProductWorkspace(ResearchWorkspace):
             )
         elif selected == "product-export":
             self.app.push_screen(ExportDirectoryPicker(), self._export)
+        elif selected == "product-materialize":
+            from lambdaforge.tui.widgets.DependencyPicker import MaterializationDialog
+
+            self.app.push_screen(
+                MaterializationDialog(
+                    self.services, str(self.product["content_id"]), kind="product"
+                )
+            )
+        elif selected == "product-reference":
+            from lambdaforge.tui.widgets.DependencyPicker import DependencyPicker
+
+            self.app.push_screen(DependencyPicker(self.services))
         elif selected in {"product-next", "product-previous"}:
             self.audit_offset = max(
                 0, self.audit_offset + (20 if selected == "product-next" else -20)

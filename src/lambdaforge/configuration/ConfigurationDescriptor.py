@@ -25,12 +25,14 @@ class ConfigurationDescriptor:
     unit: str = "runs"
 
     @classmethod
-    def from_path(cls, path: str | Path) -> ConfigurationDescriptor:
+    def from_path(
+        cls, path: str | Path, *, input_bindings: Mapping[str, Any] | None = None
+    ) -> ConfigurationDescriptor:
         """Validate a Work document and derive metadata without executing it."""
         from lambdaforge.work.runner import WorkRunner
 
         source = Path(path).expanduser().resolve()
-        config = WorkConfig.from_yaml(source)
+        config = WorkConfig.from_yaml(source, input_bindings=input_bindings)
         plan = WorkRunner().plan(config)
         return cls(
             source,

@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lambdaforge-work-results-example"
+version = "1.0.0"
+requires-python = ">=3.10"
+dependencies = ["lambdaforge>=0.18.0"]
+
+[tool.setuptools]
+packages = ["work_results_example"]

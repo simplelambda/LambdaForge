@@ -101,6 +101,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--rerun", action="store_true")
     run.add_argument("--restart", action="store_true")
     run.add_argument("--resume-execution", type=Path, help=argparse.SUPPRESS)
+    run.add_argument("--input-pins", type=Path, help=argparse.SUPPRESS)
+    run.add_argument(
+        "--input-ref",
+        action="append",
+        default=[],
+        metavar="PARAMETER=JSON",
+        help="Bind a historical result/product input without editing YAML.",
+    )
     run.add_argument("--resume-study-path", type=Path, help=argparse.SUPPRESS)
     run.add_argument(
         "--accept-code-change",
@@ -470,6 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
         "consumers",
         "finalize",
         "status",
+        "materialize",
     ):
         product_operation = product_commands.add_parser(operation)
         product_operation.add_argument("--root", type=Path)
@@ -484,6 +493,7 @@ def build_parser() -> argparse.ArgumentParser:
             "decide",
             "finalize",
             "status",
+            "materialize",
         }:
             product_operation.add_argument("selector")
         if operation in {"list", "provenance", "consumers"}:
@@ -505,6 +515,10 @@ def build_parser() -> argparse.ArgumentParser:
         if operation == "import":
             product_operation.add_argument("source", type=Path)
             product_operation.add_argument("--apply", action="store_true")
+        if operation == "materialize":
+            product_operation.add_argument("--on", required=True)
+            product_operation.add_argument("--clusters", type=Path)
+            product_operation.add_argument("--apply", action="store_true")
         if operation in {"select", "decide"}:
             product_operation.add_argument("--name", required=True)
             product_operation.add_argument("--contract", required=True)
@@ -519,13 +533,49 @@ def build_parser() -> argparse.ArgumentParser:
 
     results = commands.add_parser("results", help="Inspect persisted Work results.")
     result_commands = results.add_subparsers(dest="result_command", required=True)
+    result_reference = result_commands.add_parser(
+        "reference", help="Resolve and pin a historical input without reading artifact bytes."
+    )
+    result_reference.add_argument("selector")
+    result_reference.add_argument("--product")
+    result_reference.add_argument(
+        "--artifact", help="Exact registered member of the selected product."
+    )
+    result_reference.add_argument("--run")
+    result_reference.add_argument("--attempt", type=int)
+    result_reference.add_argument("--root", type=Path)
+    result_reference.add_argument("--json", action="store_true")
+    result_materialize = result_commands.add_parser(
+        "materialize", help="Place verified historical evidence on a cluster; preview first."
+    )
+    result_materialize.add_argument("selector")
+    result_materialize.add_argument("--on", required=True)
+    result_materialize.add_argument("--clusters", type=Path)
+    result_materialize.add_argument("--root", type=Path)
+    result_materialize.add_argument("--apply", action="store_true")
+    result_materialize.add_argument("--json", action="store_true")
     result_list = result_commands.add_parser("list")
+    result_preview = result_commands.add_parser(
+        "preview-output",
+        help="Verify and preview one retained small UTF-8 output (64 KiB maximum).",
+    )
+    result_preview.add_argument("selector")
+    result_preview.add_argument("name")
+    result_preview.add_argument("--run", dest="run_id")
+    result_preview.add_argument("--attempt", type=int)
+    result_preview.add_argument("--root", type=Path)
+    result_preview.add_argument("--json", action="store_true")
     result_list.add_argument("--root", type=Path)
     result_list.add_argument("--json", action="store_true")
     result_show = result_commands.add_parser("show")
     result_show.add_argument("selector")
     result_show.add_argument("--root", type=Path)
     result_show.add_argument("--json", action="store_true")
+    result_show.add_argument(
+        "--view", choices=("overview", "attempt", "metrics", "logs", "outputs", "provenance")
+    )
+    result_show.add_argument("--run", dest="run_id")
+    result_show.add_argument("--attempt", type=int)
     result_compare = result_commands.add_parser("compare")
     result_compare.add_argument("selectors", nargs="+")
     result_compare.add_argument("--metric")

@@ -10,7 +10,20 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-09
+
+First-class Work results, exact historical dependencies and independent scientific products,
+using the existing execution, result, publication and portable evidence infrastructure.
+
 ### Added
+
+- First-class ordinary Work evidence panels and offline reports, using exact Run/Attempt records,
+  bounded lazy metrics/logs, structured outputs/checkpoints, project HTML isolation and provenance.
+  Native portable export/import includes Work reports without converting Works into Studies.
+- Pinned historical ResultInput and human published-product source references, ambiguity diagnostics,
+  compact result catalogs, Console input selection and launch-time typed bindings without YAML edits.
+- Explicit ordinary Work product promotion and publication-only recovery; compressed preview/apply
+  dependency materialization through native verifiers, exact destination reuse and Console controls.
 
 - Explicit Dataset conflict management: choose a byte-verified project reference with `datasets adopt`,
   retire/delete one target copy by exact content ID despite other registry identities, and Console
@@ -24,6 +37,11 @@ metadata rather than invented release numbers.
   publication; register both indexes and reuse exact destinations. Conflicts remain errors.
 
 ### Fixed
+
+- Local Job export locates project-owned Execution records through recorded configuration and exact
+  Job attestation, instead of assuming all execution evidence is below the staged Job workspace.
+- Ordinary Work HTML reports enforce the native Study sandbox policy, including blocking external
+  iframe navigation while preserving self-contained scripts and the shared metrics dashboard.
 
 - Study export/analysis handles structured finite parameter choices (lists and mappings,
   including conditional learned-scalar bounds). Coverage and effect grouping use canonical

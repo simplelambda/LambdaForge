@@ -42,6 +42,7 @@ class SubmissionService:
         allow_duplicate: bool = False,
         metadata: Mapping[str, Any] | None = None,
         fleet: str | None = None,
+        input_bindings: Mapping[str, Any] | None = None,
     ) -> JobHandle:
         """Persist and launch preparation without blocking on the selected execution target."""
         source = Path(config).expanduser().resolve()
@@ -52,6 +53,12 @@ class SubmissionService:
         if not source.is_file():
             raise FileNotFoundError(f"Configuration does not exist: {source}")
         profile = self.catalog.get(cluster)
+        if input_bindings:
+            from lambdaforge.work.dependency_bindings import pin_bindings
+
+            input_bindings = pin_bindings(input_bindings, source)
+            if fleet is not None:
+                raise ValueError("Declare Fleet dependency inputs in the authored Study YAML.")
         fleet_preview = None
         selected_fleet = None
         if fleet is not None:
@@ -77,7 +84,11 @@ class SubmissionService:
             )
         # Parse and identify first so authoring errors and duplicate scientific work remain
         # immediate; expensive remote preparation still happens in the detached controller.
-        descriptor = ConfigurationDescriptor.from_path(source)
+        descriptor = (
+            ConfigurationDescriptor.from_path(source, input_bindings=input_bindings)
+            if input_bindings
+            else ConfigurationDescriptor.from_path(source)
+        )
         if not allow_duplicate:
             self.jobs.refuse_active_execution(
                 descriptor.scientific_identity,
@@ -100,6 +111,7 @@ class SubmissionService:
                 "submission_phase": "queued-locally",
                 "submission_mode": "asynchronous",
                 "run_arguments": list(run_arguments),
+                **({"input_bindings": dict(input_bindings)} if input_bindings else {}),
                 **dict(metadata or {}),
                 **(
                     {"fleet": fleet, "execution_target": "fleet:" + fleet}
@@ -124,6 +136,7 @@ class SubmissionService:
             "config": str(source),
             "resources": request_resources.to_dict(),
             "run_arguments": list(run_arguments),
+            **({"input_bindings": dict(input_bindings)} if input_bindings else {}),
             "group_id": group_id,
             "allow_duplicate": allow_duplicate,
             "job_store": str(self.jobs.store.root),

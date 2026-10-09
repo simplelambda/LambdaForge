@@ -1,5 +1,8 @@
 # Durable scientific products: implemented foundation
 
+Ordinary Work output promotion, exact historical source references, ResultInput versus ProductInput,
+Console selection and compressed explicit materialization are described in [Work results](WORK_RESULTS.md).
+
 [Español](PRODUCTS.es.md)
 
 This is the working **product model/catalog/transport and explicit Work-input layer**, not the

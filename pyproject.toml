@@ -134,6 +134,18 @@ lambdaforge = [
     "docs/SCIENTIFIC_AUDIT.es.md",
     "docs/PRODUCTS.md",
     "docs/PRODUCTS.es.md",
+    "docs/WORK_RESULTS.md",
+    "docs/WORK_RESULTS.es.md",
+]
+"share/lambdaforge/examples/work_results" = [
+    "examples/work_results/README.md",
+    "examples/work_results/pyproject.toml",
+    "examples/work_results/train.yaml",
+    "examples/work_results/visualize.yaml",
+    "examples/work_results/demo.py",
+]
+"share/lambdaforge/examples/work_results/work_results_example" = [
+    "examples/work_results/work_results_example/__init__.py",
 ]
 
 [tool.pytest.ini_options]

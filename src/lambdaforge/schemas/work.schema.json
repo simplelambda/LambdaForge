@@ -54,6 +54,31 @@
     ]}}
   ],
   "$defs": {
+    "productInput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["product"],
+      "properties": {"product": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "maxLength": 256},
+          "contract": {"type": "string", "minLength": 1},
+          "expect": {"type": "object"},
+          "artifact": {"type": "string", "minLength": 1, "maxLength": 256},
+          "from": {
+            "type": "object", "additionalProperties": false,
+            "required": ["execution", "output"],
+            "properties": {
+              "execution": {"type": "string", "minLength": 1},
+              "output": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "oneOf": [
+          {"required": ["name", "contract"], "not": {"required": ["from"]}},
+          {"required": ["from"], "not": {"required": ["name"]}}
+        ]
+      }}
+    },
     "productPublications": {
       "type": "object", "minProperties": 1, "maxProperties": 128,
       "propertyNames": {"type": "string", "minLength": 1, "maxLength": 256},
@@ -65,8 +90,30 @@
          "required": ["kind", "contract", "select"],
          "properties": {"kind": {"const": "ModelSet"},
                         "contract": {"$ref": "#/$defs/productContract"},
-                        "select": {"$ref": "#/$defs/modelSelection"}}}
+                        "select": {"$ref": "#/$defs/modelSelection"}}},
+        {"type": "object", "additionalProperties": false,
+         "required": ["kind", "contract", "scientific_meaning", "outputs"],
+         "properties": {
+           "kind": {"enum": ["ScientificReport", "AnalysisResult", "ModelArtifact", "Selection"]},
+           "contract": {"$ref": "#/$defs/productContract"},
+           "scientific_meaning": {"type": "object", "minProperties": 1},
+           "outputs": {"type": "array", "minItems": 1, "uniqueItems": true,
+                       "items": {"type": "string", "minLength": 1}}
+         }}
       ]}
+    },
+    "resultInput": {
+      "type": "object", "additionalProperties": false, "required": ["result"],
+      "properties": {"result": {
+        "type": "object", "additionalProperties": false, "required": ["execution"],
+        "properties": {
+          "execution": {"type": "string", "minLength": 1, "maxLength": 256},
+          "run": {"type": "string", "pattern": "^run-[A-Za-z0-9_-]+$"},
+          "attempt": {"type": "integer", "minimum": 1},
+          "evidence_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        },
+        "dependentRequired": {"attempt": ["run"]}
+      }}
     },
     "productContract": {"type": "string", "maxLength": 256,
                         "pattern": "^[a-z][a-z0-9_-]*(/[a-z][a-z0-9_-]*)*:v[1-9][0-9]*$"},

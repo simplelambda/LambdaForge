@@ -794,6 +794,124 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             curve_points=curve_points,
         )
 
+    def work_result_view(self, job_id: str, **options: Any) -> dict[str, Any]:
+        """Query only one ordinary Work/Attempt on its execution host, using byte pages.
+
+        The reader travels with the controller and never imports historical consumer code.
+        Provider ownership and exact Run paths are checked before any evidence is read.
+        """
+        import base64
+
+        from lambdaforge.work import result_projection
+
+        record = self.get(job_id, refresh=False)
+        profile, transport, _scheduler = self._provider(record)
+        allowed = [record.work_dir]
+        if profile.transport == "local":
+            from lambdaforge.work.runner import WorkRunner
+
+            source = Path(str(record.metadata.get("source_config_path") or record.config_path))
+            allowed.append(str(WorkRunner._project_root(source.parent) / ".lambdaforge/runs"))
+        recovery = record.metadata.get("recovery_execution_dir")
+        if isinstance(recovery, str):
+            if self._owned_study_path(record, recovery) is None:
+                raise ValueError("Unowned Work recovery result.")
+            allowed.append(recovery)
+        script = (
+            Path(result_projection.__file__).read_text(encoding="utf-8")
+            + """
+import sys
+owner = Path(sys.argv[1])
+request = json.loads(sys.argv[2])
+path = owned(owner, "result.json")
+allowed = request.pop("allowed")
+job_id = request.pop("job_id")
+status = request.pop("job_state")
+operational = request.pop("operational")
+if path.exists():
+    result = read_mapping(path, aggregate=True)
+    root = Path(result["execution_dir"])
+else:
+    roots = [Path(p) if Path(p).name == 'runs' else Path(p) / '.lambdaforge/runs'
+             for p in allowed]
+    root, result = live_result(roots, job_id, status=status)
+if root.resolve() != root or not any(root.is_relative_to(Path(p)) for p in allowed):
+    raise ValueError("Work Execution is outside the recorded provider ownership.")
+offset = request.pop("offset")
+preview_name = request.pop("artifact_preview", None)
+value = projection(root, result, **request)
+if preview_name is not None:
+    value = preview_artifact(value, preview_name)
+value["operational"] = operational
+progress_path = owned(owner, "progress.json")
+if request.get("view", "overview") == "overview" and progress_path.exists():
+    value["operational"]["progress"] = read_mapping(progress_path)
+print(json.dumps(page(value, offset), separators=(",", ":")))
+"""
+        )
+        python = sys.executable if profile.transport == "local" else profile.python
+        for index in range(1, len(record.command) - 1):
+            if record.command[index : index + 2] == ("-m", "lambdaforge"):
+                python = record.command[index - 1]
+                break
+        for _generation in range(3):
+            chunks: list[bytes] = []
+            offset, fingerprint = 0, ""
+            while True:
+                request = {
+                    **options,
+                    "allowed": allowed,
+                    "offset": offset,
+                    "job_id": job_id,
+                    "job_state": record.state.value,
+                    "operational": {
+                        "cluster": record.cluster,
+                        "job_id": record.job_id,
+                        "state": record.state.value,
+                        "created_at_utc": record.created_at_utc,
+                    },
+                }
+                response = transport.run(
+                    (
+                        *ControlPlaneFactory.reader_command(profile, preferred=python),
+                        "-c",
+                        script,
+                        str(PurePosixPath(record.work_dir).parent),
+                        json.dumps(request),
+                    ),
+                    timeout=30,
+                )
+                if response.returncode:
+                    raise RuntimeError(f"Could not read Work result: {response.stderr[-1500:]}")
+                if len(response.stdout.encode()) > 1024 * 1024:
+                    raise ValueError("Work result page exceeds the wire safety bound.")
+                envelope = json.loads(response.stdout)
+                current = envelope.get("fingerprint")
+                if offset and fingerprint != current:
+                    break
+                fingerprint = current
+                chunk = base64.b64decode(envelope["data"], validate=True)
+                if (
+                    len(chunk) > 512 * 1024
+                    or envelope.get("offset") != offset
+                    or type(envelope.get("next_offset")) is not int
+                    or envelope["next_offset"] != offset + len(chunk)
+                    or type(envelope.get("eof")) is not bool
+                ):
+                    raise ValueError("Invalid Work result page cursor.")
+                chunks.append(chunk)
+                if envelope["eof"]:
+                    raw = b"".join(chunks)
+                    if hashlib.sha256(raw).hexdigest() != fingerprint:
+                        raise ValueError("Work result pages differ from their exact generation.")
+                    value = json.loads(raw)
+                    value["cluster"] = record.cluster
+                    return cast(dict[str, Any], value)
+                if not chunk:
+                    raise ValueError("Work result pagination made no progress.")
+                offset = envelope["next_offset"]
+        raise RuntimeError("Work result changed while paging; retry the read.")
+
     @classmethod
     def _study_run_dashboard(
         cls,

@@ -29,7 +29,22 @@ def run_product_command(arguments: Any) -> int:
     registry = ProductRegistry(arguments.root)
     operation = arguments.product_command
     payload: Any
-    if operation == "list":
+    if operation == "materialize":
+        from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
+        from lambdaforge.controlplane.DependencyMaterialization import DependencyMaterialization
+
+        payload = DependencyMaterialization(ClusterCatalog.load(arguments.clusters)).materialize(
+            arguments.selector,
+            cluster=arguments.on,
+            apply=arguments.apply,
+            source_root=arguments.root,
+        )
+        human = (
+            f"{'Materialized' if payload['applied'] else 'Would materialize'} exact product "
+            f"{payload['identity']} on {payload['cluster']} at {payload['destination']}. "
+            "No producer computation is launched."
+        )
+    elif operation == "list":
         products = registry.list(offset=arguments.offset, limit=arguments.limit)
         payload = {
             "items": [product.to_dict() for product in products],

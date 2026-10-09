@@ -60,18 +60,99 @@ class ConsoleServices:
     def cluster_names(self) -> tuple[str, ...]:
         return self.catalog.names()
 
+    def dependency_choices(self, *, offset: int = 0) -> list[dict[str, Any]]:
+        """Metadata-only local/imported catalog and independent published product choices."""
+        if type(offset) is not int or offset < 0:
+            raise ValueError("Invalid dependency catalog page.")
+        rows = [
+            {
+                "kind": "imported result" if row.get("imported") else "result",
+                "label": row["display_name"],
+                "state": row["status"],
+                "identity": row["execution_id"],
+            }
+            for row in self.results.catalog()
+        ]
+        products = []
+        for row in self.product_rows(offset=offset):
+            products.append(
+                {
+                    "kind": "product",
+                    "label": row["name"],
+                    "state": row["contract"]["identifier"],
+                    "identity": row["content_id"],
+                    "contract": row["contract"]["identifier"],
+                }
+            )
+        return rows[offset : offset + 100] + products
+
+    def dependency_details(self, choice: Mapping[str, Any]) -> dict[str, Any]:
+        """Selected source metadata only, never artifact bytes or all Run curves."""
+        if choice["kind"] == "product":
+            return self.product_detail(str(choice["identity"]))
+        return self.results.view(str(choice["identity"]), view="overview")
+
+    def dependency_reference(
+        self,
+        choice: Mapping[str, Any],
+        *,
+        run: str | None = None,
+        attempt: int | None = None,
+        artifact: str | None = None,
+    ) -> dict[str, Any]:
+        if choice["kind"] == "product":
+            from lambdaforge.products.dependency import ProductRequirement, resolve_product_input
+
+            requirement = ProductRequirement(
+                str(choice["identity"]), str(choice["contract"]), artifact=artifact
+            )
+            resolved, _ = resolve_product_input(requirement.to_dict(), Path.cwd())
+            return {"product": {**requirement.to_dict(), "name": resolved.content_id}}
+        return self.results.reference(str(choice["identity"]), run=run, attempt=attempt)
+
+    def materialize_dependency(
+        self,
+        selector: str,
+        cluster: str,
+        *,
+        kind: str,
+        apply: bool = False,
+        expected_evidence_id: str | None = None,
+    ) -> dict[str, Any]:
+        from lambdaforge.controlplane.DependencyMaterialization import DependencyMaterialization
+
+        return DependencyMaterialization(self.catalog, self.factory).materialize(
+            selector,
+            cluster=cluster,
+            kind=kind,
+            apply=apply,
+            expected_evidence_id=expected_evidence_id,
+        )
+
     def fleet_targets(self) -> tuple[str, ...]:
         """Operational targets, separate from real cluster profile names."""
         return tuple("fleet:" + name for name in self.catalog.fleet_names())
 
-    def validate_work(self, config: Path) -> dict[str, Any]:
+    def validate_work(
+        self, config: Path, *, input_bindings: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        if input_bindings:
+            parsed = WorkConfig.from_yaml(config, input_bindings=input_bindings)
+            errors = parsed.validation_errors(check_inputs=True)
+            return {"valid": not errors, "errors": list(errors), "name": parsed.name}
         return WorkConfig.validate_file(config).to_dict()
 
-    def explain_work(self, config: Path) -> dict[str, Any]:
-        return WorkConfig.from_yaml(config).explanation()
+    def explain_work(
+        self, config: Path, *, input_bindings: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return WorkConfig.from_yaml(config, input_bindings=input_bindings).explanation()
 
-    def submit_work(self, config: Path, cluster: str) -> dict[str, Any]:
+    def submit_work(
+        self, config: Path, cluster: str, *, input_bindings: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
         if cluster.startswith("fleet:"):
+            if input_bindings:
+                raise ValueError("Declare Fleet dependency inputs in the authored Study YAML.")
             fleet = self.catalog.fleet(cluster.removeprefix("fleet:"))
             return (
                 SubmissionService(self.catalog, self.jobs)
@@ -83,7 +164,11 @@ class ConsoleServices:
                 )
                 .to_dict()
             )
-        return SubmissionService(self.catalog, self.jobs).enqueue(config, cluster=cluster).to_dict()
+        return (
+            SubmissionService(self.catalog, self.jobs)
+            .enqueue(config, cluster=cluster, input_bindings=input_bindings)
+            .to_dict()
+        )
 
     def recent_work_configs(self, *, limit: int = 12) -> tuple[dict[str, str], ...]:
         """Return recent valid local YAML paths from MRU state and existing Job history."""
@@ -133,7 +218,9 @@ class ConsoleServices:
         items = value.setdefault("work", {}).setdefault("items", [])
         existing = {item.get("work_id") for item in items}
         items.extend(
-            row for row in ImportedStudy.rows(self.results.root) if row["work_id"] not in existing
+            row
+            for row in ImportedStudy.rows(self.results.root, include_works=True)
+            if row["work_id"] not in existing
         )
 
     def _imported(self, selector: str) -> Any:
@@ -183,7 +270,7 @@ class ConsoleServices:
     def result_rows(self) -> list[dict[str, Any]]:
         return [
             {key: value for key, value in record.items() if key != "_manifest_path"}
-            for record in self.results.list()
+            for record in self.results.catalog()
         ]
 
     def product_rows(self, *, offset: int = 0) -> list[dict[str, Any]]:
@@ -232,6 +319,46 @@ class ConsoleServices:
 
     def report(self, selector: str, output: Path) -> Path:
         return self.results.report(selector, output)
+
+    def work_result_view(self, work: Mapping[str, Any], **options: Any) -> dict[str, Any]:
+        """Shared Console route for native/provider/imported evidence, selected on demand."""
+        job = work.get("primary_job_id")
+        if job and not work.get("imported"):
+            return self.jobs.work_result_view(str(job), **options)
+        return self.results.view(str(work["execution_id"]), **options)
+
+    def work_report(self, work: Mapping[str, Any], output: Path) -> Path:
+        """Explicit provider/local report collection, never a bulk artifact export."""
+        from lambdaforge.analysis.WorkReport import write_work_html
+
+        overview = self.work_result_view(work)
+        attempts, sections = [], []
+        for row in overview["attempts"]:
+            options = {"run_id": row["run_id"], "attempt": row["attempt_number"]}
+            attempts.append(self.work_result_view(work, view="attempt", **options))
+            sections.extend(self.work_result_view(work, view="html", **options).get("sections", ()))
+        return write_work_html(overview, attempts, output, sections=sections)
+
+    def work_output_preview(
+        self, work: Mapping[str, Any], name: str, **options: Any
+    ) -> dict[str, Any]:
+        """An explicit 64 KiB text preview; never download arbitrary model/HTML bytes."""
+        job = work.get("primary_job_id")
+        if job and not work.get("imported"):
+            return self.jobs.work_result_view(
+                str(job), view="outputs", artifact_preview=name, **options
+            )
+        return self.results.output_preview(str(work["execution_id"]), name, **options)
+
+    def historical_result(self, execution_id: str) -> dict[str, Any]:
+        """Navigate an exact known result using compact catalog metadata, never a name alias."""
+        matches = [row for row in self.results.catalog() if row["execution_id"] == execution_id]
+        if len(matches) != 1:
+            raise ValueError(
+                "Exact historical Execution is not available in this catalog; "
+                "explicitly export/import its evidence before opening it here."
+            )
+        return {key: value for key, value in matches[0].items() if key != "_manifest_path"}
 
     def export_result(self, selector: str, destination: Path) -> dict[str, Any]:
         """Export one local persisted Execution through the shared package format."""

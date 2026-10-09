@@ -9,7 +9,20 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+## [0.18.0] - 2026-10-09
+
+Resultados de Work de primera clase, dependencias históricas exactas y productos científicos
+independientes, reutilizando ejecución, resultados, publicación y evidencia portable existentes.
+
 ### Añadido
+
+- Visores e informes offline de evidencia de Works ordinarios: Run/Attempt exactos, métricas/logs
+  acotados y diferidos, outputs/checkpoints, HTML aislado y procedencia. Import/export nativo de Work
+  sin convertirlo artificialmente en Study.
+- ResultInput histórico fijado y referencias humanas a productos publicados, diagnóstico de nombres
+  ambiguos, índices compactos y selección tipada al lanzar desde consola sin editar el YAML.
+- Promoción explícita de outputs de Work y recuperación exclusiva de publicación; materialización
+  comprimida preview/apply con verificadores nativos, reutilización exacta y controles en consola.
 
 - Gestión explícita de conflictos Dataset: `datasets adopt` elige referencia verificada byte a byte,
   retirar/borrar una copia por content ID exacto pese a otras identidades y Manage copies en consola
@@ -23,6 +36,11 @@ metadata empaquetada.
   ambos índices y reutiliza destinos exactos. Los conflictos siguen siendo errores.
 
 ### Corregido
+
+- Export de Jobs locales localiza el Execution del proyecto mediante configuración registrada y
+  atestación exacta del Job, sin asumir que toda la evidencia está bajo su workspace preparado.
+- Informes HTML de Work aplican el aislamiento nativo de Study, bloqueando también la navegación
+  externa del iframe y conservando scripts autocontenidos y el dashboard compartido de métricas.
 
 - Export/análisis de Studies admite valores finitos estructurados (listas y mappings, incluidos
   límites condicionales de escalares aprendidos). Cobertura y efectos agrupan mediante claves JSON

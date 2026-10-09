@@ -252,7 +252,12 @@ class CommandLineInterface:
 
     @staticmethod
     def _run(arguments: Any) -> int:
+        from lambdaforge.work.dependency_bindings import parse_bindings
+
+        bindings = parse_bindings(getattr(arguments, "input_ref", []))
         if getattr(arguments, "on_fleet", None):
+            if bindings:
+                raise ValueError("Declare Fleet dependency inputs in the authored Study YAML.")
             from lambdaforge.controlplane.FleetStudyService import fleet_preflight
             from lambdaforge.execution.ResourceRequest import ResourceRequest
 
@@ -301,7 +306,11 @@ class CommandLineInterface:
         if supervised or (arguments.on == "local" and arguments.dry_run):
             from lambdaforge.work.runner import WorkRunner
 
-            config = WorkConfig.from_yaml(arguments.config)
+            config = WorkConfig.from_yaml(
+                arguments.config,
+                input_pins=getattr(arguments, "input_pins", None),
+                input_bindings=bindings,
+            )
             target_capacity: Mapping[str, Any] | None = None
             if arguments.dry_run and not supervised:
                 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
@@ -355,10 +364,13 @@ class CommandLineInterface:
                 dry_run=arguments.dry_run,
                 run_arguments=run_arguments,
                 allow_duplicate=arguments.allow_duplicate,
+                input_bindings=bindings,
             )
             payload = {"job": handle.to_dict(), "bundle": bundle.to_dict()}
             if arguments.dry_run:
-                payload["preflight"] = WorkConfig.from_yaml(arguments.config).preflight()
+                payload["preflight"] = WorkConfig.from_yaml(
+                    arguments.config, input_bindings=bindings
+                ).preflight()
                 payload["target_capacity"] = plane.jobs.store.get(handle.job_id).metadata.get(
                     "target_capacity"
                 )
@@ -368,6 +380,7 @@ class CommandLineInterface:
                 cluster=arguments.on,
                 run_arguments=run_arguments,
                 allow_duplicate=arguments.allow_duplicate,
+                input_bindings=bindings,
             )
             payload = handle.to_dict()
         print(
@@ -378,7 +391,7 @@ class CommandLineInterface:
         if arguments.dry_run and not arguments.json:
             print(
                 CommandLineInterface._explanation(
-                    WorkConfig.from_yaml(arguments.config).explanation()
+                    WorkConfig.from_yaml(arguments.config, input_bindings=bindings).explanation()
                 )
             )
             print(CommandLineInterface._capacity_summary(payload.get("target_capacity")))
@@ -628,6 +641,63 @@ class CommandLineInterface:
         from lambdaforge.work.ResultStore import ResultStore
 
         store = ResultStore(arguments.root)
+        if arguments.result_command == "materialize":
+            from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
+            from lambdaforge.controlplane.DependencyMaterialization import DependencyMaterialization
+
+            print(
+                json.dumps(
+                    DependencyMaterialization(ClusterCatalog.load(arguments.clusters)).materialize(
+                        arguments.selector,
+                        cluster=arguments.on,
+                        kind="result",
+                        apply=arguments.apply,
+                        source_root=arguments.root,
+                    ),
+                    indent=2,
+                )
+            )
+            return 0
+        if arguments.result_command == "preview-output":
+            value = store.output_preview(
+                arguments.selector,
+                arguments.name,
+                run_id=arguments.run_id,
+                attempt=arguments.attempt,
+            )
+            print(
+                json.dumps(value, indent=2)
+                if arguments.json
+                else (str(value["notice"]) + "\n" + str(value.get("content") or ""))
+            )
+            return 0
+        if arguments.result_command == "reference":
+            print(
+                json.dumps(
+                    store.reference(
+                        arguments.selector,
+                        product=arguments.product,
+                        artifact=arguments.artifact,
+                        run=arguments.run,
+                        attempt=arguments.attempt,
+                    ),
+                    indent=2,
+                )
+            )
+            return 0
+        if arguments.result_command == "show" and arguments.view:
+            print(
+                json.dumps(
+                    store.view(
+                        arguments.selector,
+                        view=arguments.view,
+                        run_id=arguments.run_id,
+                        attempt=arguments.attempt,
+                    ),
+                    indent=2,
+                )
+            )
+            return 0
         if arguments.result_command == "replay":
             payload = store.resource_replay(arguments.selector, policy=arguments.policy)
             if arguments.json:

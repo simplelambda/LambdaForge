@@ -1,6 +1,6 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.17.1. Spanish is
+This is the low-token source of truth for agents using or modifying LambdaForge 0.18.0. Spanish is
 in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
 then inspect the public signature or implementation being changed. Current tests and code override
 assumptions.
@@ -50,6 +50,16 @@ tracebacks. Local and remote run both return after durable asynchronous preparat
 `--wait-for-submit` is explicit; `--dry-run` is direct and read-only. Never parse prose or secrets.
 
 ## Writing Work
+
+Ordinary Work evidence uses ResultStore.view/work_report and the same portable import/export, not a
+fake Study. ResultInput is exact read-only Execution evidence; ProductInput is independently sealed
+contracted content. Historical names must reject ambiguity. Launch input bindings are explicit typed
+inputs, pinned before enqueue and never authored YAML edits. Ordinary product declarations promote
+explicit outputs only after science is durable; failed publication protects required artifacts for
+publication-only retry. See docs/WORK_RESULTS.md. Metadata-only listings must never open artifact bytes.
+Product inputs may pin an exact registered `artifact` member; it remains within the same sealed
+contract/content identity and adds the member choice to consumer identity. Never turn it into a path
+selector or choose another member implicitly.
 
 Lifecycle foundations: `diagnostics/failure.py` owns operational failure classification, using
 existing ErrorCategory/RetryDisposition. Retry eligibility never bypasses ARI/headroom/budgets;
@@ -127,8 +137,10 @@ resources:
 ```
 
 Python signatures and docstrings own parameter truth. Use only the typed markers `{file: ...}`,
-`{dataset: NAME@VERSION}`, `{from: STEP.OUTPUT}` and
-`{product: {name: NAME, contract: CONTRACT, expect: {...}}}` (`expect` is optional). Plain strings are never guessed as paths.
+`{dataset: NAME@VERSION}`, `{from: STEP.OUTPUT}`,
+`{result: {execution: EXECUTION, run: RUN, attempt: ATTEMPT}}` (`run`/`attempt` are optional), and
+`{product: {name: NAME, contract: CONTRACT, expect: {...}}}` (`expect` is optional; an exact
+published `from: {execution: EXECUTION, output: OUTPUT}` may replace `name`). Plain strings are never guessed as paths.
 Every project class must be importable from its installed consumer package.
 
 Work properties are available only during execution:

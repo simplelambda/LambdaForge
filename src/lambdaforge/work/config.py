@@ -221,7 +221,13 @@ class WorkConfig:
         object.__setattr__(self, "raw", immutable_mapping(self.raw))
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> WorkConfig:
+    def from_yaml(
+        cls,
+        path: str | Path,
+        *,
+        input_pins: Path | None = None,
+        input_bindings: Mapping[str, Any] | None = None,
+    ) -> WorkConfig:
         """Parse and validate one current Work YAML document."""
         source = Path(path).expanduser().resolve()
         text = source.read_text(encoding="utf-8")
@@ -231,6 +237,17 @@ class WorkConfig:
             raise WorkYamlError(_yaml_error_message(source, text, error)) from error
         if not isinstance(value, Mapping):
             raise TypeError("LambdaForge YAML must contain one mapping.")
+        if input_bindings:
+            from lambdaforge.work.dependency_bindings import bind_document, pin_bindings
+
+            value = bind_document(value, pin_bindings(input_bindings, source))
+        if input_pins is not None:
+            from lambdaforge.work.result_projection import read_mapping
+
+            frozen = read_mapping(input_pins.absolute())
+            if set(frozen) != {"authored", "pinned"} or frozen["authored"] != value:
+                raise ValueError("Authored configuration changed after dependency resolution.")
+            value = frozen["pinned"]
         return cls.from_mapping(value, source=source)
 
     @classmethod
@@ -346,8 +363,12 @@ class WorkConfig:
 
             declarations = publication_declarations(data["products"])
             definition = levels[0].runs[0]
-            if not definition.study_expected:
-                raise ValueError("products publication requires a Study with search/sweep/seeds.")
+            if not definition.study_expected and any(
+                item.kind == "StudyDecision" for item in declarations
+            ):
+                raise ValueError(
+                    "StudyDecision publication requires a Study with search/sweep/seeds."
+                )
             if (
                 any(item.kind == "StudyDecision" for item in declarations)
                 and definition.objective is None
@@ -402,6 +423,24 @@ class WorkConfig:
                 except Exception as error:
                     errors.append(str(error))
                 for parameter, marker in _markers(definition.parameters):
+                    if "result" in marker:
+                        try:
+                            from lambdaforge.work.ResultInput import (
+                                ResultRequirement,
+                                resolve_result_input,
+                            )
+
+                            ResultRequirement.from_mapping(marker["result"])
+                            if check_inputs:
+                                resolve_result_input(
+                                    marker["result"],
+                                    self.source.parent if self.source else Path.cwd(),
+                                )
+                        except Exception as error:
+                            errors.append(
+                                f"Parameter {parameter!r} historical result "
+                                f"cannot be resolved: {error}"
+                            )
                     if "product" in marker:
                         try:
                             from lambdaforge.products.dependency import (
@@ -409,7 +448,10 @@ class WorkConfig:
                                 resolve_product_input,
                             )
 
-                            ProductRequirement.from_mapping(marker["product"])
+                            ProductRequirement.from_mapping(
+                                marker["product"],
+                                source_dir=self.source.parent if self.source else Path.cwd(),
+                            )
                             if check_inputs:
                                 resolve_product_input(
                                     marker["product"],
@@ -1520,7 +1562,7 @@ def _is_marker(value: Any) -> bool:
     return (
         isinstance(value, Mapping)
         and len(value) == 1
-        and next(iter(value), None) in {"file", "dataset", "from", "product"}
+        and next(iter(value), None) in {"file", "dataset", "from", "product", "result"}
     )
 
 

@@ -1,5 +1,8 @@
 # Productos científicos durables: base implementada
 
+Promoción desde Works ordinarios, referencias históricas exactas, ResultInput frente a ProductInput,
+selección en consola y materialización comprimida explícita: [Resultados de Work](WORK_RESULTS.es.md).
+
 [English](PRODUCTS.md)
 
 Esta es la capa funcional de **modelo/registro/transporte e inputs Work explícitos**, no el sistema

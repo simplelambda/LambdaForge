@@ -63,13 +63,16 @@ def import_index(
         "state": manifest["status"],
         "cluster": "imported · local snapshot",
         "study_expected": expected,
+        "attempts": len(result.get("runs", ())),
         "imported": True,
         "study_selector": "import:" + str(manifest["execution_id"]),
         "study": {
             "detail_level": "overview",
             "counts": counts,
             "objective": summary.get("objective") or {},
-        },
+        }
+        if expected
+        else None,
     }
 
 
@@ -77,8 +80,14 @@ def write_import_views(
     stage: Path, result: Mapping[str, Any], *, package: Path | None = None
 ) -> None:
     """Derive hierarchical read models once while the verified import is unpublished."""
+    from lambdaforge.work.result_projection import is_study
     from lambdaforge.work.ResultStore import _portable_name
     from lambdaforge.work.StudyImport import _mapping
+
+    configuration = _mapping((package or stage / "portable") / "execution/configuration.json")
+    if not is_study(configuration):
+        (stage / "import-view").mkdir(parents=True, exist_ok=True)
+        return
 
     source = (package or stage / "portable") / "study"
     target = stage / "import-view"
@@ -227,7 +236,7 @@ class ImportedStudy:
         self.selector = selector
 
     @staticmethod
-    def rows(root: Path) -> list[dict[str, Any]]:
+    def rows(root: Path, *, include_works: bool = False) -> list[dict[str, Any]]:
         from lambdaforge.work.StudyImport import _mapping
 
         rows = []
@@ -244,7 +253,7 @@ class ImportedStudy:
                 or value.get("imported") is not True
             ):
                 raise ValueError("Imported Study index contains an invalid observer identity.")
-            if value.get("study_expected"):
+            if value.get("study_expected") or include_works:
                 rows.append(value)  # Ordinary imported Works remain in Results, not fake Studies.
         return rows
 

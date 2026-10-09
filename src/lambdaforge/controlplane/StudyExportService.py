@@ -89,10 +89,21 @@ class StudyExportService:
         cluster_profile = self.catalog.get(record.cluster)
         assert cluster_profile.storage is not None
         product_root = cluster_profile.storage.product_root
+        local_result_arguments: tuple[str, ...] = ()
         if cluster_profile.transport == "local":
             from lambdaforge.products.registry import ProductRegistry
+            from lambdaforge.work.runner import WorkRunner
 
             product_root = str(ProductRegistry().root)
+            local_config_source = record.metadata.get("source_config_path") or record.config_path
+            if isinstance(local_config_source, str):
+                local_result_arguments = (
+                    "--local-result-root",
+                    str(
+                        WorkRunner._project_root(Path(local_config_source).parent)
+                        / ".lambdaforge/runs"
+                    ),
+                )
         transport = self.factory.transport(cluster_profile)
         remote_archive = str(
             PurePosixPath(record.work_dir).parent / f".lambdaforge-export-{uuid4().hex}.zip"
@@ -121,6 +132,7 @@ class StudyExportService:
                         record.job_id,
                         export_profile,
                         *recovery_arguments,
+                        *local_result_arguments,
                         "--product-root",
                         product_root,
                     ),
@@ -528,10 +540,18 @@ import hashlib,json,os,re,sys,zipfile
 from pathlib import Path
 
 product_root=None
+local_result_root=None
 if "--product-root" in sys.argv:
  index=sys.argv.index("--product-root")
  if index+2!=len(sys.argv): raise SystemExit("invalid product-root export arguments")
  product_root=Path(sys.argv[index+1]); del sys.argv[index:]
+if "--local-result-root" in sys.argv:
+ index=sys.argv.index("--local-result-root")
+ if index+2!=len(sys.argv): raise SystemExit("invalid local-result-root export arguments")
+ local_result_root=Path(sys.argv[index+1]); del sys.argv[index:]
+ if (not local_result_root.is_absolute() or local_result_root.resolve()!=local_result_root
+     or local_result_root.name!="runs" or local_result_root.parent.name!=".lambdaforge"):
+  raise SystemExit("invalid owned local result root")
 authored_job=Path(sys.argv[1]); job=authored_job.resolve(); output=Path(sys.argv[2])
 expected="" if sys.argv[3]=="-" else sys.argv[3]; job_id=sys.argv[4]; profile=sys.argv[5]
 if profile not in {"default","full"}: raise SystemExit("invalid export profile")
@@ -569,6 +589,23 @@ executions=[] if not runs.is_dir() else [
  candidate for candidate in sorted(runs.glob("*/execution-*"))
  if candidate.is_dir() and not candidate.is_symlink()
 ]
+if local_result_root is not None and local_result_root.is_dir():
+ # A local command uses its authored project, not a copied remote workspace. Only
+ # exact Job-attested records (or the owned Job's durable result pointer) are eligible.
+ pointer=job/"result.json"; pointed=None; pointed_id=None
+ if pointer.exists():
+  check(pointer)
+  value=json.loads(pointer.read_text(encoding="utf-8"))
+  pointed=Path(value["execution_dir"]); pointed_id=value["execution_id"]
+  if pointed.resolve()!=pointed or not pointed.is_relative_to(local_result_root):
+   raise SystemExit("local Job result points outside its recorded project")
+ for candidate in sorted(local_result_root.glob("*/execution-*")):
+  metadata=candidate/"execution.json"
+  check(metadata)
+  origin=json.loads(metadata.read_text(encoding="utf-8"))
+  if (origin.get("job_id")==job_id or
+      (candidate==pointed and origin.get("execution_id")==pointed_id)):
+   if candidate not in executions: executions.append(candidate)
 if len(sys.argv)>6:
  recovered=Path(sys.argv[6]); owner_work=Path(sys.argv[7])
  if (not recovered.is_absolute() or recovered.resolve()!=recovered

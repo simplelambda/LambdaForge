@@ -31,7 +31,7 @@ proyecto:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.17.1
+python -m pip install lambdaforge==0.18.0
 python -m pip install -e .
 python -m pip check
 ```
@@ -312,7 +312,7 @@ produce un error claro. La ruta y la versión consultada se registran una sola v
 ## Clustering
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.17.1"
+python -m pip install "lambdaforge[clustering]==0.18.0"
 ```
 
 ```python
@@ -1121,7 +1121,7 @@ y atómico. También puede calcularse o actualizarse expresamente:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.17.1"
+python -m pip install "lambdaforge[analysis-report]==0.18.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json
@@ -1251,6 +1251,12 @@ exigencia; dos GPU capaces de admitir cinco Runs cada una pueden ejecutar diez, 
 sin capacidad esperan y se vuelven a evaluar de forma escalonada sin tumbar el estudio.
 
 ## Consola de investigación
+
+Los Works ordinarios también tienen resultados de primera clase: selección exacta de Run/Attempt,
+métricas, outputs/checkpoints, HTML del proyecto, logs, recursos y procedencia. Genera informes offline,
+importa/exporta evidencia y selecciona entradas históricas ResultInput/ProductInput sin editar el YAML.
+Consulta [Resultados de Work y dependencias](docs/WORK_RESULTS.es.md) y el
+[ejemplo ejecutable Study → visualización](examples/work_results/README.md).
 
 `lf` sin argumentos abre en un TTY la Consola de investigación basada en Textual 8.2. La instalación
 base incluye `textual-plot`, un widget nativo de Textual: el historial de recursos y las curvas de

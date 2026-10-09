@@ -1,4 +1,8 @@
-# LambdaForge 0.17 manual
+# LambdaForge 0.18 manual
+
+[Work results guide](WORK_RESULTS.md) covers ordinary Work evidence,
+reports, exact historical dependencies and explicit compressed materialization. These reuse the runner,
+result store, product registry and portable import/export without inventing Study inference.
 
 ## Contents
 

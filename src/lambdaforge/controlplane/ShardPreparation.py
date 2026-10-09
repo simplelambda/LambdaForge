@@ -22,6 +22,8 @@ def _files(value: Any) -> dict[str, None]:
     if isinstance(value, Mapping):
         if set(value) == {"file"}:
             output[str(value["file"])] = None
+        elif set(value) in ({"product"}, {"result"}):
+            return output
         else:
             for child in value.values():
                 output.update(_files(child))
@@ -29,6 +31,30 @@ def _files(value: Any) -> dict[str, None]:
         for child in value:
             output.update(_files(child))
     return output
+
+
+def _dependencies(value: Any, source_dir: Path) -> list[dict[str, Any]]:
+    """Pin native historical metadata, without loading model/output bytes."""
+    from lambdaforge.controlplane.ExecutionBundleBuilder import ExecutionBundleBuilder
+
+    if isinstance(value, Mapping):
+        if set(value) in ({"product"}, {"result"}):
+            pinned = ExecutionBundleBuilder._pin_products(value, source_dir, [], [])
+            return [{"kind": "historical-input", "configured": dict(value), "pinned": pinned}]
+        return [entry for child in value.values() for entry in _dependencies(child, source_dir)]
+    if isinstance(value, list | tuple):
+        return [entry for child in value for entry in _dependencies(child, source_dir)]
+    return []
+
+
+def _input_identity(files: list[dict[str, Any]], dependencies: list[dict[str, Any]]) -> str:
+    values: dict[str, Any] = {"file_inputs": files}
+    if dependencies:
+        # Preserve the historical file-only stratum for existing Fleet Studies.
+        values["historical_inputs"] = sorted(
+            {json.dumps(row["pinned"], sort_keys=True) for row in dependencies}
+        )
+    return ScientificIdentity.from_payload(values).digest
 
 
 def prepared_equivalence(source: Path, prepared: PreparedWork) -> ExecutionEquivalence:
@@ -60,7 +86,7 @@ def prepared_equivalence(source: Path, prepared: PreparedWork) -> ExecutionEquiv
     equivalence = ExecutionEquivalence(
         ScientificIdentity.from_payload(manifest["code_identity"]).digest,
         str(prepared.bundle.environment_id or "unattested"),
-        ScientificIdentity.from_payload({"file_inputs": identity}).digest,
+        _input_identity(identity, _dependencies(definition.parameters, source.parent)),
         ScientificIdentity.from_payload(
             {
                 "native_runtime": LambdaForgeVersion.CURRENT,
@@ -109,6 +135,7 @@ def prepared_input_bindings(
     ):
         raise ValueError("Native invocations differ from the prepared Work class.")
     original = config.levels[0].runs[0].parameters
+    dependencies = _dependencies(original, source.parent)
 
     # Dataset placement must be attested by its registry/content identity, not only by having
     # the same authored NAME@VERSION. That distributed placement integration is still gated.
@@ -126,7 +153,11 @@ def prepared_input_bindings(
 
     def pair(left: Any, right: Any) -> None:
         if isinstance(left, Mapping):
-            if set(left) == {"file"}:
+            if set(left) in ({"product"}, {"result"}):
+                expected = _dependencies(left, source.parent)[0]["pinned"]
+                if right != expected:
+                    raise ValueError("Bundle changed an exact historical dependency.")
+            elif set(left) == {"file"}:
                 if not isinstance(right, Mapping) or set(right) != {"file"}:
                     raise ValueError("Bundle lost a declared file input.")
                 old, new = str(left["file"]), str(right["file"])
@@ -167,15 +198,30 @@ def prepared_input_bindings(
         {key: item[key] for key in ("configured", "sha256", "size_bytes", "algorithm")}
         for item in sorted(bindings, key=lambda item: item["configured"])
     ]
-    if ScientificIdentity.from_payload({"file_inputs": identity}).digest != equivalence.inputs:
+    if _input_identity(identity, dependencies) != equivalence.inputs:
         raise ValueError("Prepared input content differs from the coordinator stratum.")
-    return bindings
+    return bindings + dependencies
 
 
 def relocate_file_inputs(value: Any, bindings: list[dict[str, Any]]) -> Any:
     """Revalidate exact bytes before replacing typed file locations in native parameters."""
     locations: dict[str, str] = {}
+    dependencies: dict[str, dict[str, Any]] = {}
     for item in bindings:
+        if item.get("kind") == "historical-input":
+            if set(item) != {"kind", "configured", "pinned"}:
+                raise ValueError("Invalid historical input binding fields.")
+            original, pinned = item["configured"], item["pinned"]
+            if not isinstance(original, Mapping) or set(original) not in ({"product"}, {"result"}):
+                raise ValueError("Historical bindings require typed product/result inputs.")
+            verified = _dependencies(pinned, Path.cwd())[0]["pinned"]
+            if verified != pinned or set(original) != set(pinned):
+                raise ValueError("Historical input content differs from its exact binding.")
+            key = json.dumps(original, sort_keys=True)
+            if key in dependencies and dependencies[key] != pinned:
+                raise ValueError("Conflicting historical input bindings.")
+            dependencies[key] = pinned
+            continue
         if set(item) != {"configured", "destination", "sha256", "size_bytes", "algorithm"}:
             raise ValueError("Invalid prepared input binding fields.")
         configured, destination = item["configured"], item["destination"]
@@ -195,6 +241,11 @@ def relocate_file_inputs(value: Any, bindings: list[dict[str, Any]]) -> Any:
         if isinstance(item, Mapping):
             if set(item) == {"file"}:
                 return {"file": locations[str(item["file"])]}
+            if set(item) in ({"product"}, {"result"}):
+                key = json.dumps(dict(item), sort_keys=True)
+                if key not in dependencies:
+                    raise ValueError("Prepared invocation contains an unbound historical input.")
+                return dependencies[key]
             return {key: replace(child) for key, child in item.items()}
         if isinstance(item, list | tuple):
             return [replace(child) for child in item]

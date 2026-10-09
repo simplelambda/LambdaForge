@@ -83,6 +83,7 @@ class ControlPlane:
         allow_duplicate: bool = False,
         progress: Callable[[str], None] | None = None,
         entrypoint_builder: Callable[[PreparedWork], Sequence[str]] | None = None,
+        input_bindings: Mapping[str, Any] | None = None,
     ) -> tuple[JobHandle, ExecutionBundle]:
         """Build/cache a bundle, stage it and submit the normal remote run command."""
         notify = progress or (lambda _phase: None)
@@ -100,7 +101,11 @@ class ControlPlane:
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
         storage = profile.storage
-        descriptor = ConfigurationDescriptor.from_path(config_path)
+        descriptor = (
+            ConfigurationDescriptor.from_path(config_path, input_bindings=input_bindings)
+            if input_bindings
+            else ConfigurationDescriptor.from_path(config_path)
+        )
         request = resources or ConfigurationResourceResolver.resolve(config_path)
         gpu_mode = profile.gpu_access.effective_mode(profile.scheduler)
         resolution_profile = profile
@@ -127,6 +132,14 @@ class ControlPlane:
                 except (KeyError, FileNotFoundError):
                     pass  # Internal prepared callers may reserve only their provider identity.
                 else:
+                    if (
+                        input_bindings
+                        and reserved.metadata.get("scientific_identity")
+                        != descriptor.scientific_identity
+                    ):
+                        raise ValueError(
+                            "Selected input/configuration changed since submission preview."
+                        )
                     execution_target = str(reserved.metadata.get("execution_target", cluster))
             self.jobs.refuse_active_execution(
                 descriptor.scientific_identity,
@@ -224,6 +237,7 @@ class ControlPlane:
         bundle = self.bundles.build(
             config_path,
             effective_profile,
+            input_bindings=input_bindings,
             dependency_policy=(
                 {
                     "python_runtime": runtime.to_dict(),
@@ -247,11 +261,26 @@ class ControlPlane:
         work_dir: str | Path
         if cluster == "local":
             work_dir = Path(config_path).resolve().parent
+            pinned_arguments = tuple(run_arguments)
+            local_prefix = profile.command_prefix
+            if bundle.product_inputs or bundle.result_inputs:
+                pinned_arguments = (
+                    *pinned_arguments,
+                    "--input-pins",
+                    str(bundle.directory / "input-pins.json"),
+                )
+            if bundle.result_inputs:
+                result_project = project or Path(config_path).resolve().parent
+                local_prefix = (
+                    *local_prefix,
+                    "env",
+                    f"LAMBDAFORGE_RESULT_INPUT_ROOT={result_project / '.lambdaforge/runs'}",
+                )
             command = self._command(
-                profile.command_prefix,
+                local_prefix,
                 profile.python,
                 str(Path(config_path).resolve()),
-                run_arguments,
+                pinned_arguments,
             )
             config = str(Path(config_path).resolve())
             execution_prefix = profile.command_prefix
@@ -272,6 +301,8 @@ class ControlPlane:
                 if cached.returncode != 0:
                     transport.put(bundle.directory, remote_dir)
             if dry_run:
+                if bundle.result_inputs:
+                    self._verify_result_inputs(transport, effective_profile, bundle.result_inputs)
                 remote_python = (
                     str(
                         PurePosixPath(storage.environment_root)
@@ -299,6 +330,13 @@ class ControlPlane:
                         "Prepared interpreter belongs to another environment identity."
                     )
                 remote_python = prepared.python
+                if bundle.result_inputs:
+                    notify("inputs")
+                    self._verify_result_inputs(
+                        transport,
+                        replace(effective_profile, python=remote_python),
+                        bundle.result_inputs,
+                    )
                 if runtime is not None:
                     self.runtime_resolver.activate(profile, transport, runtime)
                 if prepared.environment_id not in {None, "existing"}:
@@ -356,6 +394,8 @@ class ControlPlane:
                     f"{PurePosixPath(storage.state_root) / 'datasets.json'}",
                     f"LAMBDAFORGE_CACHE_ROOT={storage.cache_root}",
                     f"LAMBDAFORGE_PRODUCT_ROOT={storage.product_root}",
+                    "LAMBDAFORGE_RESULT_INPUT_ROOT="
+                    f"{PurePosixPath(storage.state_root) / 'results'}",
                     "LAMBDAFORGE_STORAGE_POLICY=" + json.dumps(storage.to_dict()),
                     f"LAMBDAFORGE_CLUSTER={cluster}",
                     f"LAMBDAFORGE_GPU_ACCESS_MODE={gpu_mode}",
@@ -463,7 +503,7 @@ class ControlPlane:
                 },
                 job_id=reserved_job_id,
                 group_id=group_id,
-                job_type=self._configuration_type(config_path),
+                job_type=descriptor.job_type,
             )
         except Exception as submission_error:
             release = profile.gpu_access.release() if external_claimed else ()
@@ -615,6 +655,46 @@ except Exception as error:
                 )
 
     @staticmethod
+    def _verify_result_inputs(
+        transport: Transport,
+        profile: ClusterProfile,
+        inputs: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Preview availability of frozen evidence on the destination without downloading assets."""
+        assert profile.storage is not None
+        script = """
+import json, os, pathlib, sys
+from lambdaforge.work.ResultInput import resolve_result_input
+os.environ['LAMBDAFORGE_RESULT_INPUT_ROOT'] = sys.argv[1]
+value, _ = resolve_result_input(json.loads(sys.argv[2]), pathlib.Path.cwd())
+print(json.dumps(value.requirement.to_dict()))
+"""
+        prefix = ControlPlaneFactory.reader_command(profile, preferred=profile.python)
+        for expected in inputs:
+            response = transport.run(
+                (
+                    *prefix,
+                    "-c",
+                    script,
+                    str(PurePosixPath(profile.storage.state_root) / "results"),
+                    json.dumps(dict(expected)),
+                ),
+                timeout=30,
+            )
+            if response.returncode:
+                raise ValueError(
+                    f"Historical Execution {expected['execution']} "
+                    f"is not materialized on {profile.name}: "
+                    f"{response.stderr[-500:]}. Export/import the verified package into "
+                    f"{PurePosixPath(profile.storage.state_root) / 'results'}; "
+                    "dependency bytes are never transferred by preview."
+                )
+            if len(response.stdout.encode()) > 8192 or json.loads(response.stdout) != dict(
+                expected
+            ):
+                raise ValueError("Remote historical evidence differs from its pinned identity.")
+
+    @staticmethod
     def _verify_product_inputs(
         transport: Transport,
         profile: ClusterProfile,
@@ -675,6 +755,12 @@ except Exception as error:
             if len(result.stdout.encode("utf-8")) > 512 * 1024 + 1:
                 raise ValueError("Remote product metadata exceeds its bounded contract.")
             product = StudyProduct.from_dict(json.loads(result.stdout))
+            if (
+                expected.get("artifact") is not None
+                and len([item for item in product.artifacts if item.name == expected["artifact"]])
+                != 1
+            ):
+                raise ValueError("Remote product does not contain the exact selected artifact.")
             if (
                 product.content_id != expected["name"]
                 or product.contract.identifier != expected["contract"]

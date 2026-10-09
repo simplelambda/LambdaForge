@@ -9,6 +9,8 @@ from textual.widgets import Button, Label, Select, Static
 
 
 class DatasetManagement(ModalScreen[tuple[str, str] | None]):
+    """Choose an exact dataset placement and preview its native management operation."""
+
     DEFAULT_CSS = """
     DatasetManagement { align: center middle; }
     DatasetManagement > Vertical { width: 76; max-width: 95%; height: 90%; max-height: 32;

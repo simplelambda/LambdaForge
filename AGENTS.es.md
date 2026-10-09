@@ -1,6 +1,6 @@
 # Guía de LambdaForge para agentes
 
-Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.17.1. Consulta solo la
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.18.0. Consulta solo la
 sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
 
 ## Arquitectura no negociable
@@ -52,6 +52,16 @@ remotos devuelven control tras crear el registro durable de preparación salvo q
 `--wait-for-submit`; `--dry-run` es directo y sin efectos.
 
 ## Contrato Work
+
+La evidencia de Work usa ResultStore.view/work_report y el import/export nativo, nunca un Study
+artificial. ResultInput fija evidencia de un Execution; ProductInput consume contenido sellado con
+contrato independiente. Los nombres ambiguos se rechazan. Las entradas elegidas al lanzar se fijan
+antes de encolar y no editan el YAML. La promoción ordinaria enumera outputs explícitos tras persistir
+la ciencia; sus fallos conservan bytes para reintentar solo publicación. Véase docs/WORK_RESULTS.es.md.
+Los listados de metadata nunca deben abrir bytes de artefactos.
+Una entrada de producto puede fijar un miembro `artifact` registrado exacto: mantiene contrato y
+contenido sellados y añade esa elección a la identidad del consumidor. Nunca convertirla en selector
+de rutas ni sustituir el miembro implícitamente.
 
 Base de lifecycle: `diagnostics/failure.py` clasifica fallos con ErrorCategory/RetryDisposition
 existentes. Elegibilidad de retry no evita ARI/headroom/presupuestos; EOFError/ValueError del
@@ -111,8 +121,10 @@ historial de Attempts fallidos. Cubre un único Study por Execution y no migra e
 Recuperar el Study no garantiza continuar una época: el Work debe implementar restauración de checkpoints.
 
 La firma y el docstring de `run()` son la verdad de parámetros. Los únicos marcadores especiales
-son `{file: ...}`, `{dataset: NOMBRE@VERSION}`, `{from: PASO.SALIDA}` y
-`{product: {name: NOMBRE, contract: CONTRATO, expect: {...}}}` (`expect` opcional). Las vistas inmutables son
+son `{file: ...}`, `{dataset: NOMBRE@VERSION}`, `{from: PASO.SALIDA}`,
+`{result: {execution: EXECUTION, run: RUN, attempt: ATTEMPT}}` (`run`/`attempt` opcionales) y
+`{product: {name: NOMBRE, contract: CONTRATO, expect: {...}}}` (`expect` opcional;
+`from: {execution: EXECUTION, output: SALIDA}` puede sustituir `name` para una publicación exacta). Las vistas inmutables son
 `name`, `config`, `inputs`, `resources`, `seed`, `trial`, `source_dir` y `resuming`. Los servicios
 gestionados son `outputs.file/directory/value/dataset`, `metrics.log/log_many`,
 `checkpoints.file/exists/save_json/load_json`, `cache.put/get/file/fetch/rate_limit`, `tools.require/run`,

@@ -2,7 +2,7 @@
 
 [Español](RESEARCH_ANALYSIS.es.md) · [Manual](MANUAL.md#16-study-analysis)
 
-Current application release: **0.17.1**. Analysis v8 and saved-view v1 remain compatible; the
+Current application release: **0.18.0**. Analysis v8 and saved-view v1 remain compatible; the
 implementation reports below retain their historical release context.
 
 ## Contents

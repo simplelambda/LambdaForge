@@ -825,6 +825,8 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
         self.services = services
         self._busy = False
         loader = getattr(services, "recent_work_configs", None)
+        self._input_bindings: dict[str, Any] = {}
+        self._bindings_path: str | None = None
         try:
             values = loader(limit=12) if callable(loader) else ()
         except Exception:
@@ -881,6 +883,14 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
                         value="local" if "local" in clusters else clusters[0],
                         id="launch-cluster",
                     )
+                with Horizontal(classes="workspace-actions"):
+                    yield Input(
+                        placeholder="Input parameter name, e.g. model", id="launch-input-name"
+                    )
+                    yield Button("Choose historical input…", id="launch-dependency")
+                yield Static(
+                    "No launch-time input selection.", id="launch-dependency-status", markup=False
+                )
                 yield Static(
                     "Choose a YAML to continue.", id="launch-status", classes="status-line"
                 )
@@ -899,6 +909,20 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
         self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "launch-dependency":
+            from lambdaforge.tui.widgets.DependencyPicker import DependencyPicker
+
+            name = self.query_one("#launch-input-name", Input).value.strip()
+            if not name.isidentifier():
+                self.query_one("#launch-dependency-status", Static).update(
+                    "Enter a valid Work parameter name first."
+                )
+                return
+            self.app.push_screen(
+                DependencyPicker(self.services),
+                lambda value: self._dependency_selected(name, value),
+            )
+            return
         if event.button.id == "launch-cancel":
             self.dismiss(None)
             return
@@ -928,6 +952,11 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "launch-config" or self._busy:
             return
+        if self._input_bindings and event.value.strip() != self._bindings_path:
+            self._input_bindings.clear()
+            self.query_one("#launch-dependency-status", Static).update(
+                "YAML changed · choose historical inputs again if needed."
+            )
         selected = bool(event.value.strip())
         self.query_one("#launch-submit", Button).disabled = not selected
         self.query_one("#launch-status", Static).update(
@@ -945,6 +974,10 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
         self._select_path(path, "YAML selected")
 
     def _select_path(self, path: Path, source: str) -> None:
+        self._input_bindings.clear()
+        self.query_one("#launch-dependency-status", Static).update(
+            "No launch-time input selection."
+        )
         self.query_one("#launch-config", Input).value = str(path)
         self.query_one("#launch-submit", Button).disabled = False
         self.query_one("#launch-status", Static).update(
@@ -955,10 +988,12 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
         if self._busy:
             return
         self._set_busy(True, "Validating the Work signature and resolving its execution plan…")
+        bindings = dict(self._input_bindings)
+        options = {"input_bindings": bindings} if bindings else {}
 
         def run() -> None:
             try:
-                validation = self.services.validate_work(path)
+                validation = self.services.validate_work(path, **options)
                 if not validation.get("valid"):
                     errors = validation.get("errors")
                     detail = (
@@ -967,7 +1002,7 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
                         else "Work configuration is invalid."
                     )
                     raise ValueError(detail)
-                explanation = self.services.explain_work(path)
+                explanation = self.services.explain_work(path, **options)
             except Exception as error:
                 self.app.call_from_thread(self._preview_failed, error, "validation")
                 return
@@ -1055,7 +1090,10 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
 
         def run() -> None:
             try:
-                result = self.services.submit_work(path, cluster)
+                options = (
+                    {"input_bindings": dict(self._input_bindings)} if self._input_bindings else {}
+                )
+                result = self.services.submit_work(path, cluster, **options)
             except Exception as error:
                 self.app.call_from_thread(self._preview_failed, error, "submission")
                 return
@@ -1067,10 +1105,23 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
         self._busy = busy
         self.query_one("#launch-status", Static).update(message)
         self.query_one("#launch-browse", Button).disabled = busy
+        self.query_one("#launch-dependency", Button).disabled = busy
+        self.query_one("#launch-input-name", Input).disabled = busy
         self.query_one("#launch-cluster", Select).disabled = busy
         self.query_one("#launch-config", Input).disabled = busy
         self.query_one("#launch-submit", Button).disabled = busy or not bool(
             self.query_one("#launch-config", Input).value.strip()
+        )
+
+    def _dependency_selected(self, name: str, value: dict[str, Any] | None) -> None:
+        if value is None:
+            return
+        self._input_bindings[name] = value
+        self._bindings_path = self.query_one("#launch-config", Input).value.strip()
+        self.query_one("#launch-dependency-status", Static).update(
+            "Exact selected inputs: "
+            + ", ".join(self._input_bindings)
+            + " · authored YAML is unchanged"
         )
 
     @staticmethod
@@ -1242,7 +1293,11 @@ class LambdaForgeApp(App[None]):
         if message.kind == "study":
             self.push_screen(StudyWorkspace(message.value, self.services))
         elif message.kind == "work":
-            self.push_screen(WorkWorkspace(message.value, self.services))
+            self.push_screen(
+                ResultWorkspace(message.value, self.services)
+                if message.value.get("imported")
+                else WorkWorkspace(message.value, self.services)
+            )
         elif message.kind == "cluster":
             self.push_screen(ClusterWorkspace(str(message.value), self.services))
         elif message.kind == "dataset":

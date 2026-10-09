@@ -1,0 +1,14 @@
+name: toy-model-visualization
+run: work_results_example.VisualizeModel
+with:
+  model:
+    product:
+      from: {execution: toy-model-study, output: toy-selected-models}
+      artifact: model-1
+resources: {cpu: 1, memory: 128MiB}
+products:
+  toy-visualization-report:
+    kind: ScientificReport
+    contract: example/visualization:v1
+    scientific_meaning: {protocol: stored-toy-model-view-v1}
+    outputs: [model-view, summary]

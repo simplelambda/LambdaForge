@@ -1,0 +1,13 @@
+name: toy-model-study
+run: work_results_example.TrainModel
+seeds: [4, 7]
+sweep:
+  space:
+    width: {values: [2, 4]}
+objective: {metric: score, mode: max}
+resources: {cpu: 1, memory: 128MiB}
+products:
+  toy-selected-models:
+    kind: ModelSet
+    contract: example/models:v1
+    select: {artifact: model, rank_by: score, mode: max, top_k: 1}

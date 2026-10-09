@@ -1,5 +1,7 @@
 """Construct control-plane providers from one cluster profile."""
 
+import sys
+from pathlib import PurePosixPath
 from threading import Lock
 from typing import cast
 
@@ -25,6 +27,33 @@ class ControlPlaneFactory:
         self.credentials = credentials or CredentialService()
         self._transports: dict[str, tuple[dict[str, object], Transport]] = {}
         self._transport_lock = Lock()
+
+    @staticmethod
+    def reader_command(profile: ClusterProfile, *, preferred: str | None = None) -> tuple[str, ...]:
+        """Read-only interpreter selection, without site GPU claims or activation side effects."""
+        if profile.transport == "local":
+            return (preferred or sys.executable,)
+        assert profile.storage is not None
+        choose = """
+preferred=$1; fallback=$2; pointer=$3; shift 3
+if [ "$preferred" != '-' ] && command -v "$preferred" >/dev/null 2>&1; then
+ exec "$preferred" "$@"
+fi
+if [ -r "$pointer" ]; then
+ IFS= read -r active < "$pointer"
+ if [ -x "$active" ]; then exec "$active" "$@"; fi
+fi
+exec "$fallback" "$@"
+"""
+        return (
+            "sh",
+            "-c",
+            choose,
+            "lambdaforge-evidence-reader",
+            preferred or "-",
+            profile.python,
+            str(PurePosixPath(profile.storage.state_root) / "active-environment"),
+        )
 
     def transport(self, profile: ClusterProfile) -> Transport:
         """Build the configured transport."""

@@ -39,12 +39,114 @@ class ResultStore:
             configured or ProjectContext.discover().root / ".lambdaforge" / "runs"
         ).resolve()
 
-    def list(self) -> tuple[dict[str, Any], ...]:
+    def catalog(self) -> tuple[dict[str, Any], ...]:
+        """Read compact cells for root lists; old evidence is projected without rewriting it."""
+        from lambdaforge.work.result_projection import compact_index, read_mapping
+
+        if not self.root.is_dir() or self.root.is_symlink():
+            return ()
+        values = []
+        for path in sorted(self.root.glob("*/execution-*/result.json")):
+            if path.resolve() != path:
+                raise ValueError("Work result ownership cannot contain symbolic paths.")
+            if not path.is_file():
+                continue
+            index = path.parent / "result-index.json"
+            if index.exists():
+                value = read_mapping(index)
+                if (
+                    value.get("result_index_version") != 1
+                    or value.get("execution_id") != path.parent.name
+                ):
+                    raise ValueError("Corrupt compact Work result index.")
+            else:
+                result = read_mapping(path, aggregate=True)
+                directory = self._evidence_dir(path)
+                configuration = directory / "configuration.json"
+                value = compact_index(
+                    result, read_mapping(configuration) if configuration.exists() else {}
+                )
+                if not configuration.exists():
+                    summary = result.get("summary") or {}
+                    value["study_expected"] = bool(
+                        summary.get("study_design") or summary.get("objective")
+                    )
+            value["_manifest_path"] = str(path)
+            value["imported"] = (path.parent / "import.json").exists()
+            values.append(value)
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for value in values:
+            groups.setdefault(str(value["name"]), []).append(value)
+        for group in groups.values():
+            ordered = sorted(
+                group, key=lambda row: (str(row.get("started_at_utc") or ""), row["execution_id"])
+            )
+            for number, value in enumerate(ordered, 1):
+                value["display_name"] = (
+                    f"{value['name']} #{number}" if len(group) > 1 else value["name"]
+                )
+        return tuple(values)
+
+    def reference(
+        self,
+        selector: str,
+        *,
+        product: str | None = None,
+        run: str | None = None,
+        attempt: int | None = None,
+        artifact: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview an exact dependency without loading artifact bytes or writing state."""
+        if product is not None:
+            from lambdaforge.products.dependency import historical_product_requirement
+
+            selected = self.select(selector)
+            requirement = historical_product_requirement(
+                {"from": {"execution": selected["execution_id"], "output": product}}
+                | ({"artifact": artifact} if artifact is not None else {}),
+                source_dir=self.root.parent.parent,
+                results_root=self.root,
+            )
+            if artifact is not None:
+                from lambdaforge.products.dependency import resolve_product_input
+
+                resolve_product_input(requirement.to_dict(), self.root.parent.parent)
+            return {"product": requirement.to_dict()}
+        if artifact is not None:
+            raise ValueError("Artifact selection requires a published --product.")
+        from lambdaforge.work.ResultInput import resolve_result_input
+
+        result, _manifest = resolve_result_input(
+            {
+                key: value
+                for key, value in {"execution": selector, "run": run, "attempt": attempt}.items()
+                if value is not None
+            },
+            self.root.parent.parent,
+            results_root=self.root,
+        )
+        return {"result": result.requirement.to_dict()}
+
+    def list(self, *, _selector: str | None = None) -> tuple[dict[str, Any], ...]:
         """Return valid current Execution envelopes without guessing partial state."""
         records: list[dict[str, Any]] = []
         if not self.root.is_dir() or self.root.is_symlink():
             return ()
-        for path in sorted(self.root.glob("*/execution-*/result.json")):
+        paths = (
+            [
+                Path(value["_manifest_path"])
+                for value in self.catalog()
+                if _selector
+                in {
+                    value.get("name"),
+                    value.get("execution_id"),
+                    value.get("scientific_fingerprint"),
+                }
+            ]
+            if _selector is not None
+            else sorted(self.root.glob("*/execution-*/result.json"))
+        )
+        for path in paths:
             if path.is_symlink() or not path.is_file():
                 continue
             try:
@@ -86,7 +188,7 @@ class ResultStore:
         """Resolve exact name/Execution/fingerprint and refuse ambiguous names."""
         matches = tuple(
             value
-            for value in self.list()
+            for value in self.list(_selector=selector)
             if selector
             in {
                 value.get("name"),
@@ -100,9 +202,14 @@ class ResultStore:
                 return {**receipt, "already_deleted": True}
             raise KeyError(f"Unknown local Work Execution {selector!r}.")
         if len(matches) != 1:
+            choices = "; ".join(
+                f"{item['execution_id']} · {item.get('status', 'unknown')}"
+                + (" · imported" if item.get("imported") else "")
+                for item in matches[:20]
+            )
             raise ValueError(
                 f"Work selector {selector!r} identifies {len(matches)} local Executions; "
-                "use an Execution ID."
+                f"select an exact Execution ID: {choices}."
             )
         return dict(matches[0])
 
@@ -634,10 +741,69 @@ class ResultStore:
 
         selected = self.select(selector)
         execution_dir = self._evidence_dir(Path(str(selected["_manifest_path"])).resolve())
+        from lambdaforge.work.result_projection import is_study, read_mapping
+
+        configuration = execution_dir / "configuration.json"
+        if (configuration.exists() or configuration.is_symlink()) and not is_study(
+            read_mapping(configuration)
+        ):
+            return self.work_report(selector, output)
         return write_html(
             self.analysis(selector, recompute=recompute),
             output,
             sections=read_html_sections(selected.get("runs", ()), execution_dir),
+        )
+
+    def view(
+        self,
+        selector: str,
+        *,
+        view: str = "overview",
+        run_id: str | None = None,
+        attempt: int | None = None,
+        tail: int = 200,
+        points: int = 200,
+    ) -> dict[str, Any]:
+        """Read one ordinary Work/Attempt without executing or importing its project code."""
+        from lambdaforge.work.result_projection import projection
+
+        selected = self.select(selector)
+        directory = self._evidence_dir(Path(str(selected["_manifest_path"])).resolve())
+        value = projection(
+            directory, selected, view=view, run_id=run_id, attempt=attempt, tail=tail, points=points
+        )
+        value["imported"] = bool(selected.get("imported"))
+        return value
+
+    def output_preview(
+        self, selector: str, name: str, *, run_id: str | None = None, attempt: int | None = None
+    ) -> dict[str, Any]:
+        """Explicit verified UTF-8 preview, bounded to 64 KiB and one owned artifact."""
+        from lambdaforge.work.result_projection import preview_artifact
+
+        return preview_artifact(
+            self.view(selector, view="outputs", run_id=run_id, attempt=attempt), name
+        )
+
+    def work_report(self, selector: str, output: str | Path) -> Path:
+        """Explicitly generate a generic Work report; no HPO or Study analysis is fabricated."""
+        from lambdaforge.analysis.WorkReport import write_work_html
+        from lambdaforge.study_projection import read_html_sections
+
+        selected = self.select(selector)
+        directory = self._evidence_dir(Path(str(selected["_manifest_path"])).resolve())
+        overview = self.view(selector)
+        attempts = [
+            self.view(selector, view="attempt", run_id=row["run_id"], attempt=row["attempt_number"])
+            for row in overview["attempts"]
+        ]
+        return write_work_html(
+            overview,
+            attempts,
+            output,
+            sections=read_html_sections(
+                selected.get("runs", ()), directory, relocate=True, skip_unretained=True
+            ),
         )
 
     def export(
@@ -668,10 +834,7 @@ class ResultStore:
         if selected.get("already_deleted"):
             raise ValueError(f"Work Execution {selector!r} was already deleted.")
         if selected.get("imported"):
-            raise ValueError(
-                "This is already portable imported evidence. Copy its verified portable/ package "
-                "rather than generating a new producer provenance record."
-            )
+            return self._export_imported(selected, destination)
         manifest = Path(str(selected["_manifest_path"])).resolve()
         execution_dir = self._execution_dir(manifest)
         execution_id = str(selected.get("execution_id") or execution_dir.name)
@@ -702,12 +865,15 @@ class ResultStore:
         # Never invent a final conclusion for a live snapshot. Terminal evidence may still have
         # no applicable Study Analysis (for example an ordinary one-Run Work).
         analysis = None
-        if finalized:
+        from lambdaforge.work.result_projection import is_study, read_mapping
+
+        study_expected = is_study(read_mapping(execution_dir / "configuration.json"))
+        if finalized and study_expected:
             try:
                 analysis = self.analysis(execution_id)
             except (OSError, RuntimeError, ValueError, KeyError) as error:
                 warnings.append(f"Study Analysis was not applicable: {error}")
-        else:
+        elif not finalized:
             warnings.append(
                 "This is a non-final Study snapshot; active or missing Runs and conclusions may "
                 "change after capture."
@@ -761,6 +927,8 @@ class ResultStore:
             )
             reports = stage / "reports"
             reports.mkdir(parents=True, exist_ok=True)
+            if finalized and not study_expected:
+                self.work_report(execution_id, reports / "work-results.html")
             if analysis is not None:
                 atomic_json(reports / "study-analysis.json", analysis)
                 try:
@@ -790,7 +958,9 @@ class ResultStore:
                 )
 
             report_hint = (
-                "Open reports/study-analysis.html for the interactive scientific report.\n"
+                "Open reports/work-results.html for the offline Work report.\n"
+                if (reports / "work-results.html").is_file()
+                else "Open reports/study-analysis.html for the interactive scientific report.\n"
                 if (reports / "study-analysis.html").is_file()
                 else "No finalized Study Analysis report is included in this package.\n"
             )
@@ -820,6 +990,7 @@ class ResultStore:
                 inventory = _inventory(stage)
             export_manifest = {
                 "lambdaforge_export_version": 2,
+                "execution_kind": "study" if study_expected else "work",
                 "created_at_utc": captured_at.isoformat(),
                 "name": name,
                 "execution_id": execution_id,
@@ -869,7 +1040,9 @@ class ResultStore:
             "path": str(folder),
             "manifest": str(folder / "manifest.json"),
             "analysis_report": (
-                str(folder / "reports" / "study-analysis.html")
+                str(folder / "reports" / "work-results.html")
+                if (folder / "reports" / "work-results.html").is_file()
+                else str(folder / "reports" / "study-analysis.html")
                 if (folder / "reports" / "study-analysis.html").is_file()
                 else None
             ),
@@ -877,6 +1050,44 @@ class ResultStore:
             "size_bytes": sum(int(item["size_bytes"]) for item in inventory),
             "warnings": warnings,
             "profile": profile,
+        }
+
+    def _export_imported(
+        self, selected: Mapping[str, Any], destination: str | Path
+    ) -> dict[str, Any]:
+        """Copy the verified portable package without rewriting original provenance/identity."""
+        from lambdaforge.work.StudyImport import _verify
+
+        native = self._execution_dir(Path(str(selected["_manifest_path"])))
+        source = native / "portable"
+        manifest, _result, package_id = _verify(source)
+        parent = Path(destination).expanduser().absolute()
+        if parent.resolve() != parent:
+            raise ValueError("Imported export destination cannot contain symbolic parents.")
+        parent.mkdir(parents=True, exist_ok=True)
+        target = parent / f"{_portable_name(str(selected['name']))}--{selected['execution_id']}"
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(f"Export destination already exists: {target}")
+        stage = Path(tempfile.mkdtemp(prefix=".lambdaforge-imported-export-", dir=parent))
+        try:
+            shutil.copytree(source, stage, dirs_exist_ok=True)
+            if _verify(stage)[2] != package_id:
+                raise ValueError("Imported package changed while exporting.")
+            stage.replace(target)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)  # Exact unpublished transaction only.
+        return {
+            "status": "exported",
+            "path": str(target),
+            "manifest": str(target / "manifest.json"),
+            "execution_id": selected["execution_id"],
+            "file_count": manifest["file_count"],
+            "size_bytes": manifest["size_bytes"],
+            "export_kind": manifest["export_kind"],
+            "finalized": manifest["finalized"],
+            "preserved_package_id": package_id,
+            "warnings": manifest.get("warnings", []),
         }
 
     @staticmethod

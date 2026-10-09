@@ -24,10 +24,10 @@ class ResultsScreen(DataScreen):
             objective = summary.get("objective", {}) if isinstance(summary, dict) else {}
             best = summary.get("best_candidate") if isinstance(summary, dict) else None
             table.add_row(
-                str(item.get("name", "-")),
+                str(item.get("display_name", item.get("name", "-"))),
                 str(item.get("execution_id", "-")),
                 str(item.get("status", "unknown")),
-                str(len(item.get("runs", []))),
+                str(item.get("run_count", len(item.get("runs", [])))),
                 metric_display_name(best or objective.get("metric", "-")),
                 key=str(item.get("execution_id", item.get("name", "-"))),
             )

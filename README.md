@@ -33,7 +33,7 @@ projects, or an editable checkout while developing LambdaForge:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.17.1
+python -m pip install lambdaforge==0.18.0
 python -m pip install -e .
 python -m pip check
 lf --version
@@ -356,7 +356,7 @@ version probes live once in `environment.json`.
 Install the optional mature backend and use the uniform Python contract:
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.17.1"
+python -m pip install "lambdaforge[clustering]==0.18.0"
 ```
 
 ```python
@@ -1204,7 +1204,7 @@ can be run or refreshed explicitly:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.17.1"
+python -m pip install "lambdaforge[analysis-report]==0.18.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json
@@ -1341,6 +1341,12 @@ stops but already-running science continues; observation is retried and its actu
 is retained. A persistent loss of the grant fails only after no active Run remains.
 
 ## Research Console
+
+Ordinary Works also expose first-class persisted results: exact Run/Attempt selection, metrics,
+structured outputs/checkpoints, project HTML, logs, resources and provenance. Generate offline reports,
+import/export evidence and select exact historical ResultInput/ProductInput dependencies without
+editing YAML. See [Work results and dependencies](docs/WORK_RESULTS.md) and the
+[executable Study-to-visualization example](examples/work_results/README.md).
 
 Bare `lf` opens the Textual 8.2 Research Console on a TTY. The base installation includes
 `textual-plot`, a native Textual plotting widget; resource history and learning curves therefore

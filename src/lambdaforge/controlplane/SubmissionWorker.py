@@ -66,6 +66,7 @@ def serve(request_path: str | Path) -> int:
             allow_duplicate=bool(value.get("allow_duplicate", False)),
             progress=progress,
             entrypoint_builder=builder,
+            input_bindings=value.get("input_bindings"),
         )
         return 0
     except Exception as error:

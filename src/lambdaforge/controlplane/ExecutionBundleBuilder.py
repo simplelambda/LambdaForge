@@ -46,16 +46,19 @@ class ExecutionBundleBuilder:
         profile: ClusterProfile,
         *,
         dependency_policy: dict[str, object] | None = None,
+        input_bindings: Mapping[str, Any] | None = None,
     ) -> ExecutionBundle:
         """Create or reuse a content-addressed bundle without legacy materialization."""
         source = Path(config_path).expanduser().resolve()
-        config = WorkConfig.from_yaml(source)
+        config = WorkConfig.from_yaml(source, input_bindings=input_bindings)
         values = config.to_dict()
+        authored = yaml.safe_load(source.read_text(encoding="utf-8"))
         staged: list[tuple[Path, str]] = []
         shared_inputs: list[dict[str, Any]] = []
         product_inputs: list[dict[str, Any]] = []
+        result_inputs: list[dict[str, Any]] = []
         project_root = self._project_root(source.parent) or source.parent
-        values = self._pin_products(values, source.parent, product_inputs)
+        values = self._pin_products(values, source.parent, product_inputs, result_inputs)
         path_context: dict[str, Any] | None = None
         if profile.name != "local":
             values = self._stage_files(
@@ -87,6 +90,7 @@ class ExecutionBundleBuilder:
             "shared_inputs": shared_inputs,
             "path_context": path_context,
             **({"product_inputs": product_inputs} if product_inputs else {}),
+            **({"result_inputs": result_inputs} if result_inputs else {}),
         }
         digest = hashlib.sha256(
             json.dumps(identity_payload, sort_keys=True, default=str).encode()
@@ -107,6 +111,16 @@ class ExecutionBundleBuilder:
                 (temporary / "config.yaml").write_text(
                     yaml.safe_dump(values, sort_keys=False, allow_unicode=True), encoding="utf-8"
                 )
+                if profile.name == "local" and (product_inputs or result_inputs or input_bindings):
+                    (temporary / "input-pins.json").write_text(
+                        json.dumps(
+                            {"authored": authored, "pinned": values},
+                            sort_keys=True,
+                            ensure_ascii=False,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
                 (temporary / "code-identity.json").write_text(
                     json.dumps(code_identity, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
@@ -148,6 +162,7 @@ class ExecutionBundleBuilder:
             environment_policy=environment.dependency_policy if environment else None,
             shared_inputs=tuple(shared_inputs),
             product_inputs=tuple(product_inputs),
+            result_inputs=tuple(result_inputs),
         )
 
     @staticmethod
@@ -155,14 +170,25 @@ class ExecutionBundleBuilder:
         values: Mapping[str, Any],
         source_dir: Path,
         required: list[dict[str, Any]],
+        historical: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Freeze logical aliases to exact independent content; never stage model bytes."""
         from lambdaforge.products.dependency import ProductRequirement, resolve_product_input
 
         def visit(item: Any) -> Any:
             if isinstance(item, Mapping):
+                if set(item) == {"result"}:
+                    from lambdaforge.work.ResultInput import resolve_result_input
+
+                    result, _manifest = resolve_result_input(item["result"], source_dir)
+                    pinned = result.requirement.to_dict()
+                    if historical is not None and pinned not in historical:
+                        historical.append(pinned)
+                    return {"result": pinned}
                 if set(item) == {"product"}:
-                    requirement = ProductRequirement.from_mapping(item["product"])
+                    requirement = ProductRequirement.from_mapping(
+                        item["product"], source_dir=source_dir
+                    )
                     product, _manifest = resolve_product_input(item["product"], source_dir)
                     pinned = {**requirement.to_dict(), "name": product.content_id}
                     if pinned not in required:

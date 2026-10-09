@@ -648,7 +648,11 @@ def _section_page(directory: Path, source: Path, generation: str, offset: int) -
 
 
 def read_html_sections(
-    runs: Sequence[Any], owned_root: Path, *, relocate: bool = False
+    runs: Sequence[Any],
+    owned_root: Path,
+    *,
+    relocate: bool = False,
+    skip_unretained: bool = False,
 ) -> list[dict[str, str]]:
     """Explicit report-only read of finalized, checksummed project HTML artifacts.
 
@@ -719,6 +723,8 @@ def read_html_sections(
             if any(parent.is_symlink() for parent in (path, *path.parents)):
                 raise ValueError("Symlinked HTML section artifact is unsafe.")
             if not path.is_file():
+                if skip_unretained and not path.exists():
+                    continue
                 raise ValueError(f"HTML section artifact is missing: {artifact.get('name')}")
             size = path.stat().st_size
             if size > 16 * 1024 * 1024 or total + size > 64 * 1024 * 1024:
@@ -734,6 +740,11 @@ def read_html_sections(
             trial = trial.get("index") if isinstance(trial, Mapping) else trial
             label = (
                 f"Trial {trial or '—'} · seed {run.get('seed', '—')} · {artifact.get('name', name)}"
+                if trial is not None
+                else (
+                    f"{run.get('run_id', 'Run')} / {run.get('attempt_id', 'Attempt')} "
+                    f"· {artifact.get('name', name)}"
+                )
             )
             sections.append(
                 {"name": name, "title": title, "label": label, "html": content.decode("utf-8")}
