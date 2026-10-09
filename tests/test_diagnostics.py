@@ -106,6 +106,13 @@ def test_connection_markers_require_transport_semantics(message: str) -> None:
     assert value.category is ErrorCategory.CONNECTION
 
 
+def test_unhashable_internal_state_is_not_reported_as_user_configuration() -> None:
+    value = DiagnosticClassifier().classify(
+        TypeError("unhashable type: 'list'"), DiagnosticContext.from_argv(["run", "study.yaml"])
+    )
+    assert value.category is ErrorCategory.INTERNAL
+
+
 def test_gpu_admission_failures_are_never_reported_as_internal_framework_bugs() -> None:
     context = DiagnosticContext(("run", "study.yaml", "--on", "atlas"), "run", "atlas")
 

@@ -6,8 +6,10 @@ import os
 import shlex
 import subprocess
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 
+from lambdaforge.controlplane.BinaryCommand import BinaryCommand, subprocess_stream
 from lambdaforge.controlplane.CommandResult import CommandResult
 from lambdaforge.controlplane.RemoteCommandTimeout import RemoteCommandTimeout
 from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
@@ -121,6 +123,12 @@ class SshTransport(Transport):
         completed = subprocess.run(tuple(arguments), check=False, shell=False)
         if completed.returncode:
             raise RuntimeError(f"scp failed with exit code {completed.returncode}.")
+
+    def stream(self, command: Sequence[str]) -> AbstractContextManager[BinaryCommand]:
+        """Use the same audited SSH options/host keys for a bounded binary pipeline."""
+        return subprocess_stream(
+            ("ssh", *self.options, self.destination, "--", shlex.join(tuple(command)))
+        )
 
     def get(self, source: str | Path, destination: str | Path) -> None:
         """Retrieve one explicit remote path through OpenSSH scp."""

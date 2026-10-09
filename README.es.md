@@ -31,7 +31,7 @@ proyecto:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.17.0
+python -m pip install lambdaforge==0.17.1
 python -m pip install -e .
 python -m pip check
 ```
@@ -312,7 +312,7 @@ produce un error claro. La ruta y la versión consultada se registran una sola v
 ## Clustering
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.17.0"
+python -m pip install "lambdaforge[clustering]==0.17.1"
 ```
 
 ```python
@@ -987,6 +987,9 @@ válidos, podas, candidatos, seeds asignadas y decisiones. Las Runs fallidas o i
 otro Attempt: un checkpoint compatible activa `self.resuming`; sin checkpoint esa Run empieza de
 nuevo. Las Runs completadas y las podadas por rendimiento no se repiten. Los presupuestos de tiempo
 y Runs ya gastados siguen gastados: retry no concede presupuesto extra.
+El nuevo Job conserva el namespace de seeds original aunque cambie la ruta de staging. Logs y
+Resume Study apuntan al Job del último intento; Trials/Runs anteriores siguen visibles hasta que
+el nuevo worker publique telemetría. Cambios reales de configuración/entradas/seeds se rechazan.
 Para diseños repetidos/fijos, `lf retry STUDY --dry-run --json` lista Runs reutilizadas,
 reintentadas y pendientes de primer envío. Con nueve seeds correctas y una fallida se reutilizan
 nueve Runs y solo se crea otro Attempt de la fallida. No requieren estado de controlador adaptativo:
@@ -994,7 +997,9 @@ se usan registros propios de diseño y Attempts. Continuar desde una época exig
 
 Si has corregido el código consumidor, usa `lf retry STUDY --accept-code-change` **solo** cuando
 las métricas anteriores y los formatos de checkpoints sigan siendo científicamente válidos. La
-consola ofrece la misma casilla explícita de compatibilidad. Configuración, entradas, streams de
+consola ofrece la misma casilla explícita de compatibilidad. Si detecta cambios de código, bloquea
+el envío hasta reconocerlos, evitando crear un Job condenado a fallar; el worker vuelve a verificar
+el código recién preparado. Configuración, entradas, streams de
 seeds y objetivo deben seguir coincidiendo; cambiar el protocolo científico requiere otro Study.
 El manifest original no se sobrescribe y `recovery-history.jsonl` registra las revisiones reales.
 Conserva el workspace del Job original: la limpieza lo protege mientras una recuperación lo
@@ -1116,7 +1121,7 @@ y atómico. También puede calcularse o actualizarse expresamente:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.17.0"
+python -m pip install "lambdaforge[analysis-report]==0.17.1"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json
@@ -1145,6 +1150,9 @@ El perfil default conserva evidencia científica y de decisiones exacta, curvas 
 de modo determinista y telemetría de recursos resumida. `--profile full` añade los streams crudos de
 alta frecuencia. El manifest registra cada fuente transformada/omitida, motivo, bytes y SHA-256;
 ningún perfil modifica ni elimina el Study original.
+
+Parámetros finitos estructurados como `values: [[0.005, 2560.0]]` se conservan como categorías
+exactas en el análisis exportado; no requieren cambiar el YAML ni repetir el entreno.
 
 El replay de recursos lee la traza versionada del scheduler, nunca texto de terminal. Es factual
 hasta que la política elegida toma una decisión distinta; desde ahí cada métrica se etiqueta como
@@ -1360,10 +1368,29 @@ global implícita. La última carpeta hash representa la identidad del contenido
 cambia cualquier byte de los assets, debe publicarse una versión nueva en vez de reutilizar
 `NOMBRE@VERSION`. `lf datasets reconcile NOMBRE@VERSION --on CLUSTER` previsualiza una reparación
 solo de índices; añade `--apply` tras revisarla. Una colocación conflictiva existente o inaccesible
-nunca se elimina automáticamente. LambdaForge no retransmite silenciosamente un dataset remoto
-grande a través del controlador: la colocación entre dos remotos usa el servicio durable de
-transferencia del centro y después `reconcile`, cuando ya existe allí el directorio exacto con su
-manifiesto.
+nunca se elimina automáticamente.
+
+Publica una vez y replica los bytes exactos:
+
+```bash
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16  # previsualizar
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --apply
+```
+
+Consola: **Datasets → DatasetVersion → Replicate…** elige origen/destino y confirma el mismo plan.
+Tar/gzip prefiere SSH fiable existente entre hosts; si no, retransmite bytes comprimidos por
+conexiones autenticadas del controlador sin archivos intermedios locales. `--route direct|relay`
+elige política. Verifica checksums en ambos extremos y publica/registra atómicamente en destino,
+listo para `{dataset: corpus@7}`. Configura `storage.dataset_root`/runtime del destino y mantén lf
+abierto hasta terminar. Conflictos siguen siendo errores. [Guía](docs/DATASET_RECONSTRUCTION.es.md).
+
+Para resolver un conflicto explícitamente: **Datasets → identidad exacta → Manage copies…**.
+Elige referencia verificada del proyecto, retira una copia del índice conservando sus archivos,
+o borra esa copia gestionada exacta. CLI: `lf datasets adopt NOMBRE@VERSION --on ORIGEN --content-id ID`
+y `lf datasets delete/remove NOMBRE@VERSION --on DESTINO --content-id ID` previsualizan antes de
+`--apply`. Adoptar solo elige resolución futura; otras copias e identidades científicas históricas
+no cambian. Se archivan declaraciones previas y desaparecen las entradas vacías retiradas.
+[Gestión de conflictos](docs/DATASET_RECONSTRUCTION.es.md#conflictos-entre-registros).
 
 Antes de reconstruir datasets usa `lf datasets preflight` y `self.outputs.dataset_preflight`.
 [Reconstrucción de datasets](docs/DATASET_RECONSTRUCTION.es.md) explica identidad científica
@@ -1385,8 +1412,13 @@ real. Un Study individual declara `products` para publicar al finalizar; retry d
 repite entrenos. `lf import PACKAGE --json` verifica un export nativo de Study de un host sin mutación;
 `lf import PACKAGE --apply` registra su evidencia y productos sellados sin ejecutar código ni
 recalcular Analysis. Conserva procedencia original; la evidencia importada no es estado de recovery.
-**Products** en la consola muestra contratos/artifacts/auditorías y ofrece **Import Study…** con
-preview y confirmación. Promoción compuesta/Fleet, espera/replanificación e import Fleet completo
+**Studies → Import Study…** (también en Products) verifica el paquete y confirma su registro.
+Los imports aparecen en Studies/Overview como snapshots locales de solo lectura: abre trials y
+seeds para consultar curvas, logs y artifacts conservados sin contactar con el cluster original.
+El refresco raíz solo lee índices pequeños, no el resultado agregado. Se admiten agregados grandes
+verificados; el límite de 64 MiB para metadata individual no limita el tamaño del Study.
+Reaplica imports antiguos para crear estos índices visuales sin cambiar la evidencia.
+Promoción compuesta/Fleet, espera/replanificación e import Fleet completo
 siguen pendientes.
 
 El nombre de un Work es una etiqueta, no su identidad. El mismo YAML puede ejecutarse a la vez en

@@ -188,6 +188,58 @@ def test_import_pending_and_errors_are_visible_and_duplicates_blocked(tmp_path: 
         release.set()
 
 
+def test_studies_offer_import_and_open_read_only_snapshots(tmp_path: Path) -> None:
+    from textual.widgets import DataTable
+
+    from lambdaforge.tui.screens.Workspace import StudyWorkspace
+
+    product, _ = model(tmp_path)
+    product = product.to_dict()
+    services = ProductServices(product)
+    services.snapshot = {
+        "work": {
+            "items": [
+                {
+                    "name": "imported-science",
+                    "execution_id": "execution-imported",
+                    "work_id": "import:execution-imported",
+                    "study_selector": "import:execution-imported",
+                    "state": "failed",
+                    "cluster": "imported · local snapshot",
+                    "imported": True,
+                    "study_expected": True,
+                    "study": {"candidates": [], "counts": {"candidates": 2}},
+                }
+            ]
+        },
+        "clusters": [],
+    }
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(services=services)
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.click("#nav-studies")
+            await pilot.pause()
+            await pilot.click("#studies-import")
+            await pilot.pause()
+            assert isinstance(app.screen, StudyImportWorkspace)
+            await pilot.press("escape")
+            await pilot.pause()
+            table = app.query_one("#studies #screen-table", DataTable)
+            table.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, StudyWorkspace)
+            for identifier in ("study-cancel", "study-retry", "study-delete", "study-export"):
+                assert not app.screen.query_one(f"#{identifier}", Button).display
+            assert "read-only" in str(app.screen.query_one("#study-action-status", Static).render())
+            assert not any(
+                call[0] in {"submit_work", "retry_job", "cancel_work"} for call in services.calls
+            )
+
+    asyncio.run(exercise())
+
+
 def test_console_catalog_services_are_read_only_and_do_not_hash_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

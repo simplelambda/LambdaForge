@@ -10,7 +10,32 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+### Added
+
+- Explicit Dataset conflict management: choose a byte-verified project reference with `datasets adopt`,
+  retire/delete one target copy by exact content ID despite other registry identities, and Console
+  Manage copies with preview/confirmation and visible feedback. Archive old declarations under locks,
+  protect active consumers and managed paths, retire empty entries and preserve historical evidence.
+
+- Native compressed Dataset replication: CLI preview/apply with auto/direct/relay routes and
+  Console endpoint selection, confirmation and background progress. Prefer trusted direct site
+  SSH; fallback streams tar/gzip through authenticated controller connections without local disk
+  staging. Verify both ends, safe destination staging/storage admission and immutable locked
+  publication; register both indexes and reuse exact destinations. Conflicts remain errors.
+
 ### Fixed
+
+- Study export/analysis handles structured finite parameter choices (lists and mappings,
+  including conditional learned-scalar bounds). Coverage and effect grouping use canonical
+  JSON category keys, preserving original parameters, exact scientific identity and completed
+  evidence rather than failing with `TypeError: unhashable type: 'list'`.
+
+- Portable Study import accepts verified native aggregate results larger than 64 MiB without
+  weakening exact inventory/checksum/provenance validation. Studies now offers Import Study with
+  directory selection, worker feedback and confirmation. Imported snapshots appear in Studies and
+  Overview through compact local indexes, with lazy Trial/seed curves/logs/artifact browsing and no
+  original-cluster probes or executable recovery controls. Explicit reapply upgrades older imports'
+  presentation without rewriting evidence or the original import receipt.
 
 - Paired automatic sweep inference now uses explicit persisted acquisition order and only complete
   contiguous blocks (`paired-pm-eb-cs-v2`), preserving old evidence. Recovery restores the existing
@@ -169,6 +194,30 @@ metadata rather than invented release numbers.
   lease retention. Preserve original adopted wall-time/budgets and migrate valid v1 state without
   altering evidence. Pre-submit reconciliation retains unspent leases; resumed leases cannot cross
   an expired original time budget. Public pause/resume/adoption commands are not enabled here.
+
+## [0.17.1] - 2026-10-08
+
+### Fixed
+
+- Study recovery restores the original persisted seed namespace before planning a freshly staged
+  Job, including explicit seeds and automatic streams. Directory relocation no longer causes a
+  false scientific-identity mismatch; real input/design/seed/code changes remain checked. Detected
+  code changes require explicit acknowledgement before submitting recovery. Console
+  logs and retry target the latest Job while prior owned Trial/Run telemetry remains accessible;
+  an old failed snapshot cannot override the recovering Job's current lifecycle.
+
+- JSON-structured parameter domains no longer fail hashing. Resource geometry is constructed only
+  from compatible Work/device evidence and current dimensions; foreign shared history cannot
+  contaminate a Study. Internal hashing failures are not classified as user configuration errors.
+- Storage commitments use process birth identity and zombie/death observations, retaining live
+  owners across argv changes and failing closed for inaccessible/foreign owners. Verified PID reuse
+  permits stale lease collection under the existing lock. Ownership refusals report the exact lease,
+  host and owner without claiming ENOSPC; zero-byte reflinks still respect ownership and headroom.
+- Dataset publication preserves an exact source inventory and declaration before copying. Saved
+  requests can use preview-first `datasets publish-candidate` after an early refusal, without
+  recomputation, changed source bytes or silent version replacement. Older retained results can
+  prepare an explicit request through `DatasetPublisher.prepare_publication`.
+- Duplicate-submission diagnostics link to the exact existing Job and its logs, retaining refusal.
 
 ## [0.17.0] - 2026-10-04
 

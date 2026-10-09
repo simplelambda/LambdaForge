@@ -390,7 +390,18 @@ class StudyWorkspace(ResearchWorkspace):
 
     @property
     def job_id(self) -> str:
-        return str(self.work.get("study_job_id") or self.work.get("primary_job_id", ""))
+        return str(
+            self.work.get("study_selector")
+            or self.work.get("study_job_id")
+            or self.work.get("primary_job_id", "")
+        )
+
+    @property
+    def operation_job_id(self) -> str:
+        """Logs and recovery target the newest Job, not a prior telemetry-bearing Attempt."""
+        return str(
+            self.work.get("study_selector") or self.work.get("primary_job_id") or self.job_id
+        )
 
     def compose_workspace(self) -> ComposeResult:
         yield Static(id="study-header", classes="workspace-header")
@@ -586,6 +597,12 @@ class StudyWorkspace(ResearchWorkspace):
                 "cancelled",
                 "timeout",
             }
+        if self.work.get("imported"):
+            for identifier in ("study-cancel", "study-retry", "study-delete", "study-export"):
+                self.query_one(f"#{identifier}", Button).display = False
+            self.query_one("#study-action-status", Static).update(
+                "Imported read-only snapshot · recovery requires the original execution host"
+            )
         if not self.study:
             self.query_one("#study-header", Static).update(
                 f"{self.work.get('name', 'Study')}  ·  "
@@ -1843,6 +1860,7 @@ class StudyWorkspace(ResearchWorkspace):
         if (
             self.app.screen is not self
             or self._refreshing
+            or (self.work.get("imported") and not force)
             or (
                 not force
                 and str(self.work.get("state"))
@@ -1862,7 +1880,9 @@ class StudyWorkspace(ResearchWorkspace):
 
         def load() -> None:
             try:
-                value = self.services.study(self.job_id)
+                value = self.services.study_workspace(
+                    self.job_id, latest_job_id=self.operation_job_id
+                )
             except Exception as error:
                 self.app.call_from_thread(
                     self._show_study_load_error,
@@ -1904,11 +1924,13 @@ class StudyWorkspace(ResearchWorkspace):
 
     def _apply_refresh(self, value: Mapping[str, Any]) -> None:
         scrolls = _scroll_snapshot(self)
+        if value.get("telemetry_job_id"):
+            self.work["study_job_id"] = value["telemetry_job_id"]
         self.study = {**self.study, **dict(value)}
         if value.get("job_state"):
             self.work["state"] = value["job_state"]
         self._last_refresh_error = None
-        if not self._cancel_running:
+        if not self._cancel_running and not self.work.get("imported"):
             self.query_one("#study-action-status", Static).update("Live · updated just now")
         self.query_one("#study-loading").display = False
         self.query_one("#study-tabs").display = True
@@ -1935,7 +1957,7 @@ class StudyWorkspace(ResearchWorkspace):
 
         def load() -> None:
             try:
-                report = self.services.work_logs(self.job_id, tail=2_000)
+                report = self.services.work_logs(self.operation_job_id, tail=2_000)
                 text = str(report.get("text", "No scientific output yet."))
             except Exception as error:
                 text = f"{type(error).__name__}: {error}"
@@ -2190,7 +2212,7 @@ class StudyWorkspace(ResearchWorkspace):
 
         def preview() -> None:
             try:
-                value = self.services.retry_preview(self.job_id)
+                value = self.services.retry_preview(self.operation_job_id)
             except Exception as error:
                 self.app.call_from_thread(self._retry_failed, error)
             else:
@@ -2216,7 +2238,9 @@ class StudyWorkspace(ResearchWorkspace):
 
         def retry() -> None:
             try:
-                result = self.services.retry_job(self.job_id, accept_code_change=compatibility)
+                result = self.services.retry_job(
+                    self.operation_job_id, accept_code_change=compatibility
+                )
             except Exception as error:
                 self.app.call_from_thread(self._retry_failed, error)
             else:
@@ -2234,7 +2258,8 @@ class StudyWorkspace(ResearchWorkspace):
     def _retry_complete(self, result: Mapping[str, Any]) -> None:
         self._retry_running = False
         self.work["primary_job_id"] = result["job_id"]
-        self.work["study_job_id"] = result["job_id"]
+        # Keep the old telemetry source until the new worker publishes its own index.
+        self._logs_loaded_at = 0.0
         self.work["state"] = "preparing"
         self.query_one("#study-action-status", Static).update(
             "Recovery accepted · background preparation started; previous evidence is preserved"
@@ -2509,7 +2534,12 @@ class HpoParameterWorkspace(ResearchWorkspace):
 
             def write() -> Path:
                 loader = getattr(self.services, "study_analysis", None)
-                job = str(self.work.get("study_job_id") or self.work.get("primary_job_id") or "")
+                job = str(
+                    self.work.get("study_selector")
+                    or self.work.get("study_job_id")
+                    or self.work.get("primary_job_id")
+                    or ""
+                )
                 analysis = (
                     loader(job, full=True) if callable(loader) and job else dict(self.analysis)
                 )
@@ -2754,7 +2784,12 @@ class TrialWorkspace(ResearchWorkspace):
 
     def _refresh_trial(self) -> None:
         loader = getattr(self.services, "study_trial", None)
-        if not self.is_current or not callable(loader) or self._trial_loading:
+        if (
+            not self.is_current
+            or not callable(loader)
+            or self._trial_loading
+            or (self.work.get("imported") and "runs" in self.candidate)
+        ):
             return
         self._trial_loading = True
         if "runs" not in self.candidate:
@@ -2764,7 +2799,12 @@ class TrialWorkspace(ResearchWorkspace):
 
         def load() -> None:
             try:
-                job = str(self.work.get("study_job_id") or self.work.get("primary_job_id") or "")
+                job = str(
+                    self.work.get("study_selector")
+                    or self.work.get("study_job_id")
+                    or self.work.get("primary_job_id")
+                    or ""
+                )
                 value = loader(job, int(self.candidate["trial"]))
                 self.app.call_from_thread(self._apply_trial, value)
             except Exception as error:
@@ -3025,7 +3065,7 @@ class SeedWorkspace(ResearchWorkspace):
         if self._loading:
             return
         self._loading = True
-        job_id = str(self.work.get("primary_job_id", ""))
+        job_id = str(self.work.get("study_selector") or self.work.get("primary_job_id", ""))
         run_key = str(self.run.get("key", ""))
 
         def load() -> None:
@@ -3050,7 +3090,7 @@ class SeedWorkspace(ResearchWorkspace):
         )
 
     def _refresh_if_active(self) -> None:
-        if self.app.screen is self and self.active:
+        if self.app.screen is self and self.active and not self.work.get("imported"):
             self._load()
 
     def _apply_detail(self, detail: Mapping[str, Any]) -> None:
@@ -3561,9 +3601,28 @@ class StudyRetryConfirmation(ModalScreen[bool | None]):
                     "I changed code, but earlier evidence and checkpoints remain valid",
                     id="retry-compatible-code",
                 )
+                if self.preview.get("code_change_detected"):
+                    yield Static(
+                        "The current project code differs from the previous Execution revision. "
+                        "Review compatibility and tick the acknowledgement before resuming. "
+                        "Without it, no recovery Job will be submitted.",
+                        id="retry-code-change-warning",
+                        markup=False,
+                    )
             with Horizontal(classes="modal-actions"):
                 yield Button("Cancel", id="retry-cancel")
-                yield Button("Resume Study", id="retry-confirm", variant="success")
+                yield Button(
+                    "Resume Study",
+                    id="retry-confirm",
+                    variant="success",
+                    disabled=bool(self.preview.get("code_change_detected")),
+                )
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id == "retry-compatible-code" and self.preview.get(
+            "code_change_detected"
+        ):
+            self.query_one("#retry-confirm", Button).disabled = not event.value
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "retry-confirm":
@@ -4358,6 +4417,13 @@ class DatasetWorkspace(ResearchWorkspace):
         self._members: list[Mapping[str, Any]] = []
         self._members_loading = False
         self._members_loaded = False
+        self._replication_busy = False
+        self._replication_started = 0.0
+        self._replication_message = ""
+        self._replication_app: Any = None
+        self._management_busy = False
+        self._management_started = 0.0
+        self._management_message = ""
         name = f"{dataset.get('name')}@{dataset.get('version')}"
         super().__init__(f"Datasets / {name}")
 
@@ -4366,11 +4432,19 @@ class DatasetWorkspace(ResearchWorkspace):
         yield Static(f"{name} · immutable DatasetVersion", classes="workspace-header")
         with Horizontal(id="dataset-toolbar", classes="workspace-actions"):
             yield Static(
-                "Identity conflict · inspect/reconcile each cluster before dataset operations."
+                "Identity conflict · Manage copies to choose a reference or remove a specific copy."
                 if self.dataset.get("inventory_conflict")
                 else "Ready · destructive actions require an exact preview and confirmation.",
                 id="dataset-operation-status",
                 classes="status-line",
+                markup=False,
+            )
+            yield Button("Manage copies…", id="dataset-manage", variant="warning")
+            yield Button(
+                "Replicate…",
+                id="dataset-replicate",
+                variant="primary",
+                disabled=bool(self.dataset.get("inventory_conflict")),
             )
             yield Button(
                 "Delete DatasetVersion…",
@@ -4393,6 +4467,7 @@ class DatasetWorkspace(ResearchWorkspace):
                     yield Static(
                         f"LOCATIONS\n{len(self._sequence(self.dataset.get('placements')))} managed\n"
                         + (self._location_names() or "not materialized"),
+                        id="dataset-location-summary",
                         classes="metric-card",
                     )
                     yield Static(
@@ -4499,6 +4574,9 @@ class DatasetWorkspace(ResearchWorkspace):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         target: str | None = None
         action: Any = None
+        if event.button.id == "dataset-manage":
+            self._choose_management()
+            return
         if self.dataset.get("inventory_conflict"):
             self.query_one("#dataset-operation-status", Static).update(
                 "Different content identities exist. Inspect lf datasets reconcile "
@@ -4518,11 +4596,15 @@ class DatasetWorkspace(ResearchWorkspace):
         elif event.button.id == "dataset-delete":
             self._preview_delete()
             return
+        elif event.button.id == "dataset-replicate":
+            self._choose_replication()
+            return
         if target is not None and action is not None:
             self._load_into(target, action)
 
     def on_mount(self) -> None:
         self.query_one("#dataset-member-table", DataTable).display = False
+        self.set_interval(1.0, self._replication_tick)
         self._apply_logical_summary(self.dataset, exact=False)
         if self.dataset.get("inventory_conflict"):
             self.query_one("#dataset-split-note", Static).update(
@@ -4728,7 +4810,7 @@ class DatasetWorkspace(ResearchWorkspace):
 
     def _preview_delete(self) -> None:
         button = self.query_one("#dataset-delete", Button)
-        if button.disabled:
+        if button.disabled or self._management_busy:
             return
         button.disabled = True
         self._delete_status("Preparing exact deletion preview…")
@@ -4742,6 +4824,307 @@ class DatasetWorkspace(ResearchWorkspace):
             self.app.call_from_thread(self._confirm_delete, preview)
 
         Thread(target=load, daemon=True, name="lambdaforge-dataset-delete-preview").start()
+
+    def _choose_replication(self) -> None:
+        from lambdaforge.tui.screens.DatasetReplication import DatasetReplication
+
+        if (
+            self._replication_busy
+            or self._management_busy
+            or self.query_one("#dataset-delete", Button).disabled
+        ):
+            return
+        sources = tuple(
+            dict.fromkeys(
+                str(item["cluster"])
+                for item in self._sequence(self.dataset.get("placements"))
+                if isinstance(item, Mapping) and item.get("cluster")
+            )
+        )
+        if not sources:
+            self._delete_status(
+                "Replication unavailable · no source placement is registered.", error=True
+            )
+            return
+        targets = tuple(dict.fromkeys(("local", *self.services.cluster_names())))
+        self.app.push_screen(
+            DatasetReplication(self.selector, sources, targets), self._preview_replication
+        )
+
+    def _preview_replication(self, endpoints: tuple[str, str] | None) -> None:
+        if endpoints is None or self._replication_busy:
+            return
+        source, destination = endpoints
+        identity = str(self.dataset.get("content_id", self.dataset.get("dataset_id", "")))
+        request = dict(source=source, destination=destination, expected_content_id=identity)
+        self._set_replication_busy(True, "Inspecting source, destination and direct connectivity…")
+        app = self.app
+        self._replication_app = app
+
+        def preview() -> None:
+            try:
+                plan = self.services.replicate_dataset(self.selector, **request)
+            except Exception as error:
+                app.call_from_thread(self._replication_failed, error)
+                return
+            app.call_from_thread(self._confirm_replication, request, plan)
+
+        Thread(target=preview, daemon=True, name="lambdaforge-dataset-replicate-preview").start()
+
+    def _confirm_replication(self, request: dict[str, Any], plan: Mapping[str, Any]) -> None:
+        if not self._replication_present():
+            return
+        self._set_replication_busy(False, "Preview ready · replication requires confirmation.")
+        # Pin the inspected route; a failed transfer never silently starts a second copy.
+        request["route"] = "direct" if plan.get("transfer_route") == "direct-ssh" else "relay"
+        details = dict(plan)
+        details["content_id"] = request["expected_content_id"]
+        details["notice"] = (
+            "Exact checksums are verified before publication. Different existing content "
+            "is never overwritten. No archive is staged on your computer. Keep lf open until completion."
+        )
+        self.app.push_screen(
+            ExactConfirmation(f"Replicate {self.selector}", details),
+            partial(self._apply_replication, request),
+        )
+
+    def _set_replication_busy(self, busy: bool, message: str) -> None:
+        if busy and not self._replication_busy:
+            self._replication_started = time.monotonic()
+        self._replication_busy = busy
+        self._replication_message = message
+        conflict = bool(self.dataset.get("inventory_conflict"))
+        self.query_one("#dataset-replicate", Button).disabled = busy or conflict
+        self.query_one("#dataset-delete", Button).disabled = busy or conflict
+        self.query_one("#dataset-manage", Button).disabled = busy
+        self._delete_status(message)
+
+    def _choose_management(self) -> None:
+        from lambdaforge.tui.screens.DatasetManagement import DatasetManagement
+
+        if self._management_busy or self._replication_busy:
+            return
+        if (
+            not self.dataset.get("inventory_conflict")
+            and self.query_one("#dataset-delete", Button).disabled
+        ):
+            return
+        targets = tuple(
+            dict.fromkeys(
+                (
+                    *(
+                        str(item["cluster"])
+                        for item in self._sequence(self.dataset.get("placements"))
+                        if isinstance(item, Mapping) and item.get("cluster")
+                    ),
+                    "local",
+                    *self.services.cluster_names(),
+                )
+            )
+        )
+        identity = str(self.dataset.get("content_id", self.dataset.get("dataset_id", "")))
+        self.app.push_screen(
+            DatasetManagement(self.selector, identity, targets), self._preview_management
+        )
+
+    def _management_controls(self, busy: bool, message: str) -> None:
+        if busy and not self._management_busy:
+            self._management_started = time.monotonic()
+        self._management_busy = busy
+        self._management_message = message
+        for name in ("manage", "replicate", "delete"):
+            self.query_one(f"#dataset-{name}", Button).disabled = busy or (
+                name != "manage" and bool(self.dataset.get("inventory_conflict"))
+            )
+        self._delete_status(message)
+
+    def _preview_management(self, choice: tuple[str, str] | None) -> None:
+        if choice is None or self._management_busy:
+            return
+        operation, cluster = choice
+        request = dict(
+            operation=operation,
+            cluster=cluster,
+            content_id=str(self.dataset.get("content_id", self.dataset.get("dataset_id", ""))),
+        )
+        self._management_controls(True, "Inspecting the selected exact identity and target…")
+        app = self.app
+
+        def inspect() -> None:
+            try:
+                plan = self.services.manage_dataset_copy(self.selector, **request)
+            except Exception as error:
+                self._management_post(app, self._management_result, app, None, error)
+                return
+            self._management_post(app, self._confirm_management, app, request, plan)
+
+        Thread(target=inspect, daemon=True, name="lambdaforge-dataset-manage-preview").start()
+
+    def _confirm_management(
+        self, app: Any, request: dict[str, Any], plan: Mapping[str, Any]
+    ) -> None:
+        if self not in app.screen_stack:
+            return
+        if not plan.get("safe"):
+            self._management_controls(
+                False,
+                "Action blocked · "
+                + str(plan.get("reasons", plan.get("reason", "active consumers or unsafe target"))),
+            )
+            return
+        request["expected_root"] = plan.get("root") or None
+        if request["operation"] == "adopt":
+            request["expected_controller_id"] = plan.get("previous_content_id") or "-"
+        self._management_controls(True, "Exact preview ready · confirmation required.")
+        self.app.push_screen(
+            ExactConfirmation(f"Manage {self.selector} · {request['cluster']}", plan),
+            partial(self._apply_management, app, request),
+        )
+
+    def _apply_management(
+        self, app: Any, request: Mapping[str, Any], confirmed: bool | None
+    ) -> None:
+        if not confirmed:
+            self._management_controls(False, "Action cancelled · no changes made.")
+            return
+        self._management_controls(
+            True, "Applying the confirmed action · reference verification may read every byte…"
+        )
+
+        def apply() -> None:
+            try:
+                result = self.services.manage_dataset_copy(
+                    self.selector, **dict(request), apply=True
+                )
+            except Exception as error:
+                self._management_post(app, self._management_result, app, None, error)
+                return
+            self._management_post(app, self._management_result, app, result, None)
+
+        Thread(target=apply, daemon=True, name="lambdaforge-dataset-manage-apply").start()
+
+    @staticmethod
+    def _management_post(app: Any, callback: Any, *args: Any) -> None:
+        try:
+            app.call_from_thread(callback, *args)
+        except RuntimeError:
+            # Leaving the console never interrupts or misreports a native mutation.
+            pass
+
+    def _management_result(
+        self, app: Any, result: Mapping[str, Any] | None, error: Exception | None
+    ) -> None:
+        message = (
+            f"Action failed · {type(error).__name__}: {error}"
+            if error
+            else ("Action completed · other copies and scientific Run evidence are unchanged.")
+        )
+        if self not in app.screen_stack:
+            app.notify(message, severity="error" if error else "information")
+            return
+        self._management_controls(False, message)
+        if error:
+            self._delete_status(message, error=True)
+        else:
+            # Do not fabricate a merged inventory after changing just one authority.
+            app.pop_screen()
+            try:
+                screen = app.query_one("#datasets")
+            except Exception:
+                return
+            reload_screen = getattr(screen, "reload", None)
+            if callable(reload_screen):
+                reload_screen()
+            app.notify(message)
+
+    def _apply_replication(self, request: Mapping[str, Any], confirmed: bool | None) -> None:
+        if not confirmed:
+            self._delete_status("Replication cancelled · no dataset bytes changed.")
+            return
+        self._set_replication_busy(True, "Starting verified compressed transfer…")
+        app = self.app
+        self._replication_app = app
+
+        def forward(action: Any, *args: Any, **kwargs: Any) -> None:
+            try:
+                app.call_from_thread(action, *args, **kwargs)
+            except RuntimeError:
+                # UI shutdown is not a scientific transfer failure.
+                pass
+
+        def progress(value: Mapping[str, Any]) -> None:
+            message = str(value.get("message", value.get("phase", "Replicating…")))
+            if isinstance(value.get("compressed_bytes"), int):
+                message += f" · {self._bytes(value['compressed_bytes'])} compressed"
+            if self._replication_present():
+                forward(self._replication_progress, message)
+
+        def apply() -> None:
+            try:
+                result = self.services.replicate_dataset(
+                    self.selector,
+                    **dict(request),
+                    apply=True,
+                    progress=progress,
+                )
+            except Exception as error:
+                if self._replication_present():
+                    forward(self._replication_failed, error)
+                else:
+                    forward(
+                        app.notify, str(error)[-1000:], title="Replication failed", severity="error"
+                    )
+                return
+            if self._replication_present():
+                forward(self._replication_complete, result)
+            else:
+                forward(
+                    app.notify,
+                    f"Verified {self.selector} replica on {result.get('target_cluster')}.",
+                )
+
+        Thread(target=apply, daemon=True, name="lambdaforge-dataset-replicate").start()
+
+    def _replication_present(self) -> bool:
+        # Textual's mounted flag can outlive a popped Screen's children.
+        return self._replication_app is not None and self in self._replication_app.screen_stack
+
+    def _replication_progress(self, message: str) -> None:
+        if not self._replication_present():
+            return
+        self._replication_message = message
+        self._delete_status(message)
+
+    def _replication_tick(self) -> None:
+        if self._replication_busy and self._replication_present():
+            elapsed = int(time.monotonic() - self._replication_started)
+            self._delete_status(f"{self._replication_message} · {elapsed}s elapsed")
+        elif self._management_busy:
+            elapsed = int(time.monotonic() - self._management_started)
+            self._delete_status(f"{self._management_message} · {elapsed}s elapsed")
+
+    def _replication_failed(self, error: Exception) -> None:
+        if not self._replication_present():
+            return
+        message = f"Replication failed · {type(error).__name__}: {error}"
+        self._set_replication_busy(False, message)
+        self._delete_status(message, error=True)
+
+    def _replication_complete(self, result: Mapping[str, Any]) -> None:
+        if not self._replication_present():
+            return
+        self._set_replication_busy(
+            False, f"Verified replica registered on {result.get('target_cluster')}."
+        )
+        if "placements" in result:
+            self.dataset["placements"] = result["placements"]
+            self.query_one("#dataset-location-summary", Static).update(
+                f"LOCATIONS\n{len(self._sequence(result['placements']))} managed\n"
+                + self._location_names()
+            )
+            self.query_one("#dataset-locations Static", Static).update(
+                _structured_text(result["placements"], heading="MANAGED LOCATIONS")
+            )
 
     def _confirm_delete(self, preview: Mapping[str, Any]) -> None:
         self.query_one("#dataset-delete", Button).disabled = False

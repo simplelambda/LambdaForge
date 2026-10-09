@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import shlex
 import stat
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Any
 
+from lambdaforge.controlplane.BinaryCommand import BinaryCommand
 from lambdaforge.controlplane.CommandResult import CommandResult
 from lambdaforge.controlplane.RemoteCommandTimeout import RemoteCommandTimeout
 from lambdaforge.controlplane.SecretRedactor import SecretRedactor
@@ -129,6 +131,17 @@ class PasswordSshTransport(Transport):
             if self._client is not None:
                 self._client.close()
                 self._client = None
+
+    @contextmanager
+    def stream(self, command: Sequence[str]) -> Iterator[BinaryCommand]:
+        """Reuse verified password authentication without exposing/forwarding credentials."""
+        stdin, stdout, stderr = self._connection().exec_command(shlex.join(tuple(command)))
+        stream = BinaryCommand(stdin, stdout, stderr, stdout.channel)
+        try:
+            yield stream
+        finally:
+            stdin.close()
+            stdout.channel.close()
 
     def _connection(self) -> Any:
         if self._client is not None:

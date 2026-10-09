@@ -6,7 +6,10 @@ import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from lambdaforge.data.DatasetArtifact import DatasetArtifact
@@ -18,6 +21,7 @@ from lambdaforge.data.errors import (
     InvalidDatasetPublicationError,
 )
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
+from lambdaforge.work.atomic import atomic_write_json
 
 
 class DatasetRegistry:
@@ -246,6 +250,119 @@ class DatasetRegistry:
         except KeyError:
             return None
 
+    def choose(self, record: DatasetRecord, *, expected_previous_id: str | None) -> str:
+        """Explicitly select a verified reference; preserve the replaced index as audit evidence."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with CrossProcessFileLock(
+            self.path.with_suffix(".lock"),
+            shared=False,
+            timeout_seconds=10.0,
+            poll_interval_seconds=0.05,
+        ):
+            value = self._read()
+            datasets = value.setdefault("datasets", {})
+            assert isinstance(datasets, dict)
+            previous = datasets.get(record.key)
+            previous_id = previous.get("dataset_id") if isinstance(previous, Mapping) else None
+            if previous_id != expected_previous_id:
+                raise ValueError(
+                    "Controller Dataset identity changed; inspect a new selection preview."
+                )
+            if isinstance(previous, Mapping) and previous_id == record.dataset_id:
+                old = DatasetRecord.from_mapping(previous)
+                if old.metadata.get("lambdaforge_science") != record.metadata.get(
+                    "lambdaforge_science"
+                ):
+                    raise ValueError(
+                        "Identical bytes cannot silently change their scientific declaration."
+                    )
+                selected = {item.cluster: item for item in old.placements}
+                selected.update({item.cluster: item for item in record.placements})
+                record = replace(record, placements=tuple(selected.values()))
+            receipt = self._archive_change("CHOOSE_REFERENCE", previous, record.to_dict())
+            datasets[record.key] = record.to_dict()
+            self._write(value)
+            return str(receipt)
+
+    def retire(
+        self,
+        expected: Mapping[str, Any],
+        *,
+        cluster: str,
+        delete_bytes: bool = False,
+        managed_root: str | None = None,
+    ) -> str:
+        """Retire one exact placement under CAS/lock; never relabel another identity.
+
+        Back up the complete old declaration before optional physical deletion. Empty
+        records are retired too, so forgotten conflicting versions do not reappear in discovery.
+        """
+        record = DatasetRecord.from_mapping(expected)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with CrossProcessFileLock(
+            self.path.with_suffix(".lock"),
+            shared=False,
+            timeout_seconds=10.0,
+            poll_interval_seconds=0.05,
+        ):
+            value = self._read()
+            datasets = value.get("datasets", {})
+            assert isinstance(datasets, dict)
+            previous = datasets.get(record.key)
+            if (
+                not isinstance(previous, Mapping)
+                or DatasetRecord.from_mapping(previous).to_dict() != record.to_dict()
+            ):
+                raise ValueError(
+                    "Target Dataset registration changed; inspect a new retirement preview."
+                )
+            placements = tuple(item for item in record.placements if item.cluster != cluster)
+            updated = replace(record, placements=placements).to_dict() if placements else None
+            receipt = self._archive_change(
+                "DELETE_EXACT_PLACEMENT" if delete_bytes else "RETIRE_EXACT_PLACEMENT",
+                previous,
+                updated,
+            )
+            if delete_bytes:
+                from lambdaforge.data.DatasetOperations import DatasetOperations
+
+                selected = [item for item in record.placements if item.cluster == cluster]
+                if len(selected) != 1 or managed_root is None:
+                    raise ValueError("Physical retirement requires one exact managed placement.")
+                from lambdaforge.work.snapshot import validate_path
+
+                validate_path(Path(selected[0].root).expanduser().absolute())
+                validate_path(Path(managed_root).expanduser().absolute())
+                if DatasetOperations.inspect(selected[0].root).get("exists"):
+                    DatasetOperations.delete(
+                        selected[0].root, record.dataset_id, managed_root=managed_root, apply=True
+                    )
+            if updated is None:
+                datasets.pop(record.key)
+            else:
+                datasets[record.key] = updated
+            self._write(value)
+            return str(receipt)
+
+    def _archive_change(self, action: str, previous: Any, requested: Any) -> Path:
+        """Immutable before/desired snapshots, not a claim that a subsequent write succeeded."""
+        path = self.path.parent / "dataset-registry-history" / f"change-{uuid4().hex}.json"
+        from lambdaforge.work.snapshot import validate_path
+
+        validate_path(path)
+        atomic_write_json(
+            path,
+            {
+                "version": 1,
+                "action": action,
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "previous": previous,
+                "requested": requested,
+                "scope": "registry declaration; scientific Run evidence is unchanged",
+            },
+        )
+        return path
+
     def _read(self, *, validate: bool = True) -> dict[str, object]:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
@@ -286,6 +403,16 @@ class DatasetRegistry:
     @classmethod
     def main(cls, argv: Sequence[str] | None = None) -> int:
         values = tuple(argv if argv is not None else sys.argv[1:])
+        if len(values) == 6 and values[0] == "retire-exact" and values[4] in {"0", "1"}:
+            print(
+                cls(values[1]).retire(
+                    json.loads(values[2]),
+                    cluster=values[3],
+                    delete_bytes=values[4] == "1",
+                    managed_root=values[5] or None,
+                )
+            )
+            return 0
         if len(values) != 2 or values[0] != "inventory":
             raise SystemExit("Usage: DatasetRegistry inventory PATH")
         print(json.dumps(cls.inventory(values[1]), sort_keys=True))

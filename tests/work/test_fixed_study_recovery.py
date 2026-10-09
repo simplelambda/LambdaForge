@@ -96,6 +96,67 @@ def test_sweep_recovery_preserves_every_completed_cell(
     assert {run.run_dir for run in first.runs if run.ok} <= {run.run_dir for run in second.runs}
 
 
+@pytest.mark.parametrize("sweep", [None, {"space": {"choice": [0, 1]}}])
+def test_new_job_directory_preserves_seed_context_and_completed_evidence(
+    tmp_path: Path, inline_dispatch: None, sweep: Any
+) -> None:
+    old, new = tmp_path / "original-job" / "work", tmp_path / "retry-job" / "work"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    options = {"sweep": sweep} if sweep else {}
+    config = config_at(old, **options)
+    first = WorkRunner().run(config)
+    current = config_at(new, **options)
+    assert current.levels[0].runs[0].seed_metadata != config.levels[0].runs[0].seed_metadata
+    original_manifest = (first.execution_dir / "execution.json").read_bytes()
+    evidence = {r.run_dir: (r.run_dir / "result.json").read_bytes() for r in first.runs if r.ok}
+    before = {p: p.read_bytes() for p in first.execution_dir.rglob("*") if p.is_file()}
+    plan = WorkRunner().run(current, resume_execution=first.execution_dir, dry_run=True)
+    assert plan.scientific_fingerprint == first.scientific_fingerprint
+    assert before == {p: p.read_bytes() for p in first.execution_dir.rglob("*") if p.is_file()}
+    recovered = WorkRunner().run(current, resume_execution=first.execution_dir)
+    assert recovered.status == "succeeded"
+    assert recovered.execution_id == first.execution_id
+    assert all((p / "result.json").read_bytes() == data for p, data in evidence.items())
+    assert (first.execution_dir / "execution.json").read_bytes() == original_manifest
+    namespace = config.levels[0].runs[0].seed_metadata[0]["namespace"]
+    for run in recovered.runs:
+        assert run.seed_metadata["namespace"] == namespace
+    assert fixed_inventory(first.execution_dir)["spent_runs"] == len(first.runs) + 1
+
+
+@pytest.mark.parametrize("change", [{"seeds": [7, 4]}, {"replicates": 2}, {"with": {"choice": 1}}])
+def test_relocated_recovery_does_not_waive_scientific_changes(
+    tmp_path: Path, inline_dispatch: None, change: Any
+) -> None:
+    old, new = tmp_path / "job-a", tmp_path / "job-b"
+    old.mkdir()
+    new.mkdir()
+    first = WorkRunner().run(config_at(old))
+    raw = dict(config_at(new).raw)
+    if "replicates" in change:
+        raw.pop("seeds")
+    raw.update(change)
+    changed = WorkConfig.from_mapping(raw, source=new / "fixed.yaml")
+    before = {p: p.read_bytes() for p in first.execution_dir.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="seed|unchanged|incompatible|differ"):
+        WorkRunner().run(changed, resume_execution=first.execution_dir, accept_code_change=True)
+    assert before == {p: p.read_bytes() for p in first.execution_dir.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("broken", [None, {}, {"namespace": "unsafe/path"}])
+def test_recovery_missing_or_corrupt_seed_context_is_refused(
+    tmp_path: Path, inline_dispatch: None, broken: Any
+) -> None:
+    first = WorkRunner().run(config_at(tmp_path))
+    from lambdaforge.work.recovery import restore_seed_context
+
+    manifest = json.loads((first.execution_dir / "execution.json").read_text())
+    manifest["study_designs"][0]["seed_source"] = broken
+    with pytest.raises(ValueError, match="seed context|project_id"):
+        restore_seed_context(config_at(tmp_path), manifest)
+
+
 def test_multiple_failures_keep_latest_outcome_and_physical_cost(
     tmp_path: Path, inline_dispatch: None
 ) -> None:

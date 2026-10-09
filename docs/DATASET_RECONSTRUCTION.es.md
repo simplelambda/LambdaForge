@@ -23,11 +23,41 @@ final sigue comprobando identidad bajo el lock del registro.
 
 1. **Reutilizar**: `lf datasets materialize corpus@6 --on DESTINO` previsualiza la colocación exacta;
    revisar y añadir `--apply`. `replicate` elige origen/destino explícitos. Copia y verifica el
-   contenido publicado, no reconstruye arrays. Se mantienen las restricciones de transferencia
-   entre remotos; no hay retransmisión implícita de grandes assets por el controlador.
+   contenido publicado, no reconstruye arrays. La réplica nativa comprimida admite ubicaciones
+   locales/remotas y prefiere SSH directo entre clústeres; véase abajo.
 2. **Reconstruir**: calcular un candidato independiente, sellado y no registrado para compararlo.
 3. **Publicar**: usar una versión nueva para bytes distintos, incluso con equivalencia científica.
    No se admiten representaciones alternativas bajo la misma versión ni placements con otro hash.
+
+## Publicar una vez, replicar el contenido exacto
+
+```bash
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --json
+# Revisar ruta, tamaño y destino; después aplicar:
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --apply
+```
+
+En `lf`, abre **Datasets → DatasetVersion → Replicate…**, elige origen/destino, revisa el plan nativo
+y confirma. La consola sigue respondiendo y muestra fases/tiempo transcurrido y bytes comprimidos
+en la ruta retransmitida. Mantén la sesión abierta hasta terminar. Locations se actualiza tras el
+registro. El destino requiere `storage.dataset_root` y runtime LambdaForge disponible (existente o
+preparado mediante bootstrap); no ejecuta Work científico/claim GPU. Mantiene el scope del proyecto.
+
+`--route auto` comprueba SSH desde origen a destino con clave de host fiable, sin prompts ni
+forwarding de agente/credenciales. Si funciona, los bytes viajan directamente entre hosts. Configura
+en el origen autenticación no interactiva autorizada por el centro y claves de host fiables para
+habilitarlo; LambdaForge no instala claves ni copia credenciales locales. `--route direct` exige esa
+conexión. `--route relay` usa los transportes autenticados del controlador con un **stream comprimido
+en memoria acotada**, no un archivo intermedio en tu equipo ni en `/tmp`.
+
+Tar/gzip en streaming (nivel 3) verifica el origen completo, rechaza enlaces/entradas especiales y
+rutas peligrosas, usa staging/admisión de almacenamiento en destino y comprueba contenido exacto
+antes de promocionar/registrar atómicamente bajo lock. Ambos índices exponen el mismo content ID
+a entradas Dataset tipadas. Un destino idéntico se verifica/reutiliza; otro contenido se rechaza.
+Las copias interrumpidas no registran contenido parcial. Reintentar reutiliza una colocación exacta
+ya publicada o transfiere de nuevo; no es reanudación por offset de bytes. Admite rutas antiguas
+registradas de origen. Nunca reconstruye/cambia identidades/borra origen ni reconcilia versiones
+conflictivas automáticamente: inspecciona divergencias o publica una versión nueva primero.
 
 LambdaForge no puede inferir la versión de salida desde Python arbitrario antes de `Work.run()`.
 El proyecto productor debe usar el preflight público como primera operación:
@@ -140,17 +170,80 @@ checkpoints. `lf retry` ordinario sí invoca código del Work; no equivale a est
 Local usa `storage.dataset_root` configurado o `datasets/published` junto al índice local; remoto
 exige raíz permanente configurada.
 
+### Fallos antes del sellado (0.17.1)
+
+Antes de copiar, `outputs.dataset` guarda `publication-request.json` y un `members.jsonl` streaming
+con checksums exactos de las fuentes en su colección de checkpoints de publicación. Si ese volumen
+no acepta los metadatos iniciales, usa `.publication-requests` en el volumen de publicación.
+El fallo informa de la ruta exacta. El mismo
+`lf datasets publish-candidate DIRECTORIO_SOLICITUD [--on CLUSTER] [--apply]` acepta la solicitud:
+preview verifica bytes/declaración y apply solo copia/sella/registra bajo los locks existentes.
+Fuentes modificadas, rutas inseguras y conflictos de versión inmutable se rechazan. No se invoca
+ningún Work ni se convierte el Attempt fallido en correcto.
+
+Un fallo antiguo puede conservar fuentes validadas y su índice, pero no una solicitud completa.
+No inventar metadatos científicos ausentes: restituir explícitamente la declaración original de
+miembros/assets, schema, metadata y procedencia mediante la API pública de preparación:
+
+```python
+from lambdaforge.data import DatasetIndex, DatasetPublisher
+
+# Debe coincidir con la declaración del productor, incluidos assets adicionales de diseño.
+original_members = (member.to_dict() for member in DatasetIndex(source / "members.jsonl"))
+request = DatasetPublisher().prepare_publication(
+    name, version, original_members,
+    source_root=source, request_root=recovery_directory,
+    build_provenance=original_provenance,
+    metadata=original_metadata, target_schema=original_target_schema,
+    scientific_identity=original_scientific_identity,
+)
+print(request)  # publish-candidate sobre esta ruta, primero preview.
+```
+
+En el preprocessing antiguo de WISDOM, las evidencias de partida son
+`attempt-0001/dataset/members.jsonl` y `dna-validation/dna-validation-report.json` retenidos.
+También se debe mantener el asset `dataset_design` del primer miembro y la declaración original;
+no inferirlas del interior de los NPZ. Solo se repite verificación/publicación, no geometría/anotación.
+
 ## Conflictos entre registros
 
 `lf datasets list --all` y Datasets en la consola descubren los índices pequeños de todos los
 clústeres configurados. Mismo nombre/versión/content fusiona ubicaciones; contenido distinto sigue
 en filas separadas y marcadas **CONFLICT**. Listar no modifica registros y el descubrimiento
-incompleto queda visible. Las filas conflictivas solo exponen resumen cacheado, no operaciones de
-miembros/eliminación con selector lógico ambiguo. Inspecciona cada destino con
-`lf datasets reconcile corpus@6 --on CLUSTER`: copias divergentes existentes/inaccesibles se
-rechazan; solo una inscripción cuyo directorio se demuestra ausente puede retirarse con `--apply`.
-El investigador elige la referencia, no el orden de descubrimiento ni la mayoría. Conserva los bytes
-divergentes y publícalos bajo versión nueva explícita después de revisar su evidencia.
+incompleto queda visible. Lectura de miembros y borrado global nunca adivinan una identidad en conflicto.
+**Datasets → fila de identidad exacta → Manage copies…** sigue habilitado: selecciona destino y
+**Keep as project reference**, **Remove registration · keep files** o **Delete managed copy**.
+Cada acción previsualiza el hash/ruta y exige confirmación. REFERENCE marca la referencia del
+controlador; las otras filas siguen CONFLICT hasta retirarlas explícitamente.
+
+Los mismos comandos nativos solo previsualizan salvo que se añada `--apply`:
+
+```bash
+lf datasets list --on gpu16 --json  # obtener el content ID completo
+lf datasets adopt corpus@6 --on gpu16 --content-id sha256:ID_COMPLETO_16
+lf datasets adopt corpus@6 --on gpu16 --content-id sha256:ID_COMPLETO_16 --apply
+lf datasets delete corpus@6 --on gpu12 --content-id sha256:ID_COMPLETO_12  # previsualizar
+lf datasets delete corpus@6 --on gpu12 --content-id sha256:ID_COMPLETO_12 --apply
+# Alternativa: retirar solo el índice, incluso copia rota/ausente o ruta externa antigua:
+lf datasets remove corpus@6 --on gpu12 --content-id sha256:ID_COMPLETO_12 --apply
+```
+
+Sustituye los IDs de ejemplo por hashes completos observados. Adoptar verifica todos los checksums
+en origen antes de archivar/sustituir la declaración del controlador. Elige la **resolución futura**,
+no certifica equivalencia científica: no reescribe otros registros, cambia identidad de bytes,
+sobrescribe publicaciones ni modifica Runs previas, inputs fijados, checkpoints o procedencia.
+Para conservar una representación divergente como publicación usa otra versión explícita.
+
+Borrar exactamente selecciona la identidad del índice de destino aunque el controlador apunte a otra.
+Exige manifiesto coincidente, ruta gestionada y ningún consumidor activo. Retirar registro no borra
+bytes ni libera espacio y permite retirar copias físicas corruptas/ausentes; el índice debe ser legible
+y válido. Se retiran entradas vacías para que no reaparezcan. Ambas operaciones rechazan cambios de
+hash/ruta, bloquean el registro y archivan la declaración previa en `dataset-registry-history/change-*.json`
+antes de modificarlo. Ese archivo registra estado previo/solicitado, no prueba éxito de la escritura.
+Registros inaccesibles/corruptos no se consideran ausentes. Si la retirada remota termina pero falla la
+limpieza del controlador, inspecciona ambos índices de nuevo; nunca reintentes suponiendo una identidad.
+No se borra evidencia histórica. Las operaciones sin hash siguen rechazando ambigüedad;
+`reconcile` sigue conservando identidad.
 
 ## Certificados de equivalencia durables
 

@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +54,27 @@ class ProcessIdentity:
             return digest == self.command_sha256
         except Exception:
             return False
+
+    def storage_status(self) -> Literal["alive", "dead", "reused", "unresolved"]:
+        """Resolve a commitment owner without signalling or trusting PID existence alone.
+
+        A storage commitment belongs to a process lifetime, not its current argv. An exec
+        can change argv while retaining that commitment. Signal permission still requires
+        the stricter matches() contract. Inaccessible owners remain fail-closed.
+        """
+        import psutil
+
+        try:
+            process = psutil.Process(self.pid)
+            if process.create_time() != self.create_time:
+                return "reused"
+            if process.status() in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+                return "dead"
+            return "alive"
+        except psutil.NoSuchProcess:
+            return "dead"
+        except (psutil.AccessDenied, OSError):
+            return "unresolved"
 
     def to_dict(self) -> dict[str, int | float | str]:
         return {

@@ -66,6 +66,30 @@ def observation(
     )
 
 
+def test_shared_foreign_structured_history_does_not_change_compatible_predictions() -> None:
+    schema = {"width": {"values": [64, 128]}}
+    compatible = [observation("known", 10 * GIB, parameters={"width": 64})]
+    foreign = observation(
+        "foreign",
+        70 * GIB,
+        compatibility="other-work",
+        parameters={"log_sum_exp_beta_bounds": [0.005, 2560.0], "nested": {"a": [1, 2]}},
+    )
+    clean = ResourceDemandModel(compatible, parameter_schema=schema)
+    shared = ResourceDemandModel([foreign, *compatible], parameter_schema=schema)
+    assert shared.parameter_space.names == ("width",)
+    options = dict(
+        candidate_key="known",
+        compatibility_key="compatible",
+        parameters={"width": 64},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+    # Use the test helper's native compatibility identity, not an invented family.
+    options["compatibility_key"] = compatible[0].compatibility_key
+    assert clean.predict(**options) == shared.predict(**options)
+
+
 def prediction(
     key: str,
     peak: int,
@@ -300,10 +324,10 @@ def test_three_gpu_runtime_baselines_allow_a_real_one_to_two_probe() -> None:
 
     assert probe
     assert probe[0].admission_mode == "EXPLORATORY_ADMISSION"
-    assert not {
-        value.rejection_reason
-        for value in planner.last_exploration_evaluations
-    } & {"UNVALIDATED_LADDER_STEP", "PROTECTED_LANE"}
+    assert not {value.rejection_reason for value in planner.last_exploration_evaluations} & {
+        "UNVALIDATED_LADDER_STEP",
+        "PROTECTED_LANE",
+    }
 
 
 def test_empty_gpu_is_filled_before_colocating_on_an_occupied_gpu() -> None:
@@ -362,9 +386,7 @@ def test_empty_gpu_baseline_ignores_a_conservative_learned_future_envelope() -> 
 def test_admission_diagnostics_explain_every_allocated_or_revoked_gpu(
     monkeypatch: Any,
 ) -> None:
-    monkeypatch.setenv(
-        "LAMBDAFORGE_GPU_VISIBILITY_COMMAND", '["gpu", "env"]'
-    )
+    monkeypatch.setenv("LAMBDAFORGE_GPU_VISIBILITY_COMMAND", '["gpu", "env"]')
     baseline = ActiveResourceCommitment(
         "baseline",
         20 * GIB,
@@ -1534,9 +1556,7 @@ def test_scientifically_pruned_run_can_publish_phase_complete_resource_evidence(
     from lambdaforge.work.runner import _resource_observation_for_result
 
     metrics = tmp_path / "training-metrics.jsonl"
-    metrics.write_text(
-        '{"name":"gpu_mem_mb","value":10240,"step":8}\n', encoding="utf-8"
-    )
+    metrics.write_text('{"name":"gpu_mem_mb","value":10240,"step":8}\n', encoding="utf-8")
     trajectory = BoundedResourceTrajectory(
         tuple(
             ResourceTrajectorySample(
@@ -1667,21 +1687,16 @@ def test_why_wait_history_ignores_poll_noise_but_records_decision_changes(
     store.record_exploration_evaluations((waiting(regret=0.01),))
     store.record_exploration_evaluations((waiting(regret=0.02),))
 
-    evaluations = (tmp_path / "exploration-evaluations.jsonl").read_text(
-        encoding="utf-8"
-    ).splitlines()
-    wait_events = (tmp_path / "resource-events.jsonl").read_text(
-        encoding="utf-8"
-    ).splitlines()
+    evaluations = (
+        (tmp_path / "exploration-evaluations.jsonl").read_text(encoding="utf-8").splitlines()
+    )
+    wait_events = (tmp_path / "resource-events.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(evaluations) == 1
     assert len(wait_events) == 1
 
-    store.record_exploration_evaluations(
-        (waiting(regret=0.02, reason="PROTECTED_LANE"),)
+    store.record_exploration_evaluations((waiting(regret=0.02, reason="PROTECTED_LANE"),))
+    assert (
+        len((tmp_path / "exploration-evaluations.jsonl").read_text(encoding="utf-8").splitlines())
+        == 2
     )
-    assert len(
-        (tmp_path / "exploration-evaluations.jsonl").read_text(encoding="utf-8").splitlines()
-    ) == 2
-    assert len(
-        (tmp_path / "resource-events.jsonl").read_text(encoding="utf-8").splitlines()
-    ) == 2
+    assert len((tmp_path / "resource-events.jsonl").read_text(encoding="utf-8").splitlines()) == 2

@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from lambdaforge.analysis.Effects import mixed_distance, reference_set
-from lambdaforge.analysis.SearchSpace import valid_point
+from lambdaforge.analysis.SearchSpace import category_key, valid_point
 
 BOUNDARY_THRESHOLDS: dict[str, float] = {
     "edge_fraction": 0.10,
@@ -107,12 +107,20 @@ def _marginal(
     inactive = sum(name not in row for row in observed)
     if rule["kind"] == "categorical":
         levels = list(rule.get("values", ()))
+        attempted_keys = [category_key(value) for value in attempted]
+        completed_keys = [category_key(value) for value in completed]
         return {
             "kind": "categorical",
             "authored_levels": levels,
-            "observed_levels": sorted(set(attempted), key=str),
-            "level_counts": {str(level): attempted.count(level) for level in levels},
-            "full_fidelity_level_counts": {str(level): completed.count(level) for level in levels},
+            "observed_levels": sorted(
+                {category_key(value): value for value in attempted}.values(), key=str
+            ),
+            "level_counts": {
+                str(level): attempted_keys.count(category_key(level)) for level in levels
+            },
+            "full_fidelity_level_counts": {
+                str(level): completed_keys.count(category_key(level)) for level in levels
+            },
             "active_fraction": len(attempted) / len(observed) if observed else 0.0,
             "inactive_fraction": inactive / len(observed) if observed else 0.0,
         }

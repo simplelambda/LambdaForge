@@ -63,6 +63,35 @@ def test_retry_keeps_valid_evidence_and_resumes_only_failed_attempt(tmp_path: Pa
     assert state["public_trial_map"] == original_map
 
 
+@pytest.mark.parametrize("automatic_seeds", [False, True])
+def test_adaptive_recovery_relocates_without_changing_original_stream(
+    tmp_path: Path, automatic_seeds: bool
+) -> None:
+    old, new = tmp_path / "job-original", tmp_path / "job-recovery"
+    old.mkdir()
+    new.mkdir()
+    config = config_at(old)
+    if automatic_seeds:
+        raw = dict(config.raw)
+        raw.pop("seeds")
+        config = WorkConfig.from_mapping(raw, source=config.source)
+    first = WorkRunner().run(config)
+    current = WorkConfig.from_mapping(config.raw, source=new / "study.yaml")
+    original = (first.execution_dir / "execution.json").read_bytes()
+    before = {p: p.read_bytes() for p in first.execution_dir.rglob("*") if p.is_file()}
+    plan = WorkRunner().run(current, resume_execution=first.execution_dir, dry_run=True)
+    assert plan.scientific_fingerprint == first.scientific_fingerprint
+    assert before == {p: p.read_bytes() for p in first.execution_dir.rglob("*") if p.is_file()}
+    second = WorkRunner().run(current, resume_execution=first.execution_dir)
+    assert second.status == "succeeded"
+    assert {r.seed for r in second.runs} == {r.seed for r in first.runs}
+    assert (first.execution_dir / "execution.json").read_bytes() == original
+    assert (
+        next(r for r in second.runs if r.parameters["choice"] == 1).run_dir
+        == next(r for r in first.runs if r.ok).run_dir
+    )
+
+
 def test_code_fix_requires_acknowledgement_and_preserves_real_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

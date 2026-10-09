@@ -303,8 +303,8 @@ def test_reconcile_removes_only_a_missing_conflicting_remote_registration(
     assert registry.get("wisdom@6").dataset_id == controller.dataset_id
 
 
-def test_remote_replication_refuses_an_implicit_controller_relay(tmp_path: Path) -> None:
-    storage = ClusterStoragePolicy("/state", "/cache", "/jobs", "/datasets")
+def test_replication_refuses_missing_destination_storage(tmp_path: Path) -> None:
+    storage = ClusterStoragePolicy("/state", "/cache", "/jobs", None)
     service = DatasetService(
         DatasetRegistry(tmp_path / "datasets.json"),
         ClusterCatalog({"gpu16": ClusterProfile("gpu16", workspace="/remote", storage=storage)}),
@@ -324,5 +324,5 @@ def test_remote_replication_refuses_an_implicit_controller_relay(tmp_path: Path)
         (placement,),
     )
 
-    with pytest.raises(LambdaForgeError, match="durable data-transfer provider"):
+    with pytest.raises(LambdaForgeError, match="permanent dataset storage"):
         service._replicate(record, placement, "gpu16")

@@ -1158,7 +1158,7 @@ class LambdaForgeApp(App[None]):
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "products-import":
+        if event.button.id in {"products-import", "studies-import"}:
             self.push_screen(StudyImportWorkspace(self.services))
             return
         if event.button.id == "nav-exit":

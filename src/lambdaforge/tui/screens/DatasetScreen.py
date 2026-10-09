@@ -35,7 +35,8 @@ class DatasetScreen(DataScreen):
                 str(item.get("sample_count", 0)),
                 self._bytes(self._dataset_size(item)),
                 ", ".join(str(entry.get("cluster")) for entry in placements) or "none",
-                ("CONFLICT · " if item.get("inventory_conflict") else "")
+                ("REFERENCE · " if item.get("project_reference") else "")
+                + ("CONFLICT · " if item.get("inventory_conflict") else "")
                 + str(item.get("dataset_id", ""))[-12:],
                 key=f"{item.get('name')}@{item.get('version')}:{item.get('dataset_id')}",
             )
@@ -61,8 +62,13 @@ class DatasetScreen(DataScreen):
             f"Content ID   {item.get('content_id', item.get('dataset_id', 'unavailable'))}\n"
             + (
                 "CONFLICT: the same version has different content across indexes. "
-                "No identity was chosen; inspect lf datasets reconcile NAME@VERSION --on CLUSTER.\n"
+                "Open Manage copies to explicitly choose a reference or retire one exact copy.\n"
                 if item.get("inventory_conflict")
+                else ""
+            )
+            + (
+                "PROJECT REFERENCE: used for future dataset resolution, not an equivalence claim.\n"
+                if item.get("project_reference")
                 else ""
             )
             + (

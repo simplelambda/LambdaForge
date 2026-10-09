@@ -308,6 +308,23 @@ sin refit. No importa código del proyecto, ejecuta, continúa epochs ni abre HT
 Configuración importada no sirve como recovery nativo. `portable/` ya es el paquete reutilizable;
 no necesita generar otra procedencia de export.
 
+En la consola, **Studies → Import Study…** (también desde Products y Ctrl+P) permite seleccionar
+una carpeta, verificarla en un worker, revisar su identidad y confirmar el registro. Aparece como
+snapshot read-only en Studies/Overview del proyecto actual. Trials/seeds usan proyecciones locales
+jerárquicas y el dashboard compartido de Run; métricas/logs/artifacts conservados se leen localmente,
+no del cluster original. Un snapshot running no es un controlador vivo. Cancel, retry, borrado de
+historial y export del productor quedan ocultos; eliminar el archivo importado sigue siendo una
+acción explícita de Results. Los HTML incluidos siguen disponibles en `portable/reports/`.
+
+El agregado nativo `execution/result.json` puede superar 64 MiB en un Study válido grande.
+Import verifica primero tamaño declarado y SHA-256 exactos de todos los archivos y después valida
+estrictamente el agregado sin aplicarle el límite de metadata individual. Siguen intactas las
+comprobaciones de checksum, rutas/propiedad, claves duplicadas y valores no finitos. El refresco
+raíz solo lee `import-study.json` pequeños, no el agregado. Reaplica un import antiguo para crear
+`import-view/` bajo su lock: registros científicos y recibo original permanecen intactos.
+Import copia los bytes conservados y necesita espacio local para el paquete y su índice;
+nunca vuelve a descargar artifacts.
+
 Export incluye productos de la declaración/recibo nativo, sus bytes independientes e historial del
 productor. Transferencia trae solo esos objetos, no todo el catálogo; muestreo de telemetría nunca
 altera bytes de productos. Ausencias fallan explícitamente. Publicaciones de operador no declaradas

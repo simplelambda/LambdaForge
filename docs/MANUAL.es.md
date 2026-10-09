@@ -390,6 +390,32 @@ bytes antes del verificador científico. `lf datasets publish-candidate RAIZ --v
 --on CLUSTER` previsualiza recuperación solo de publicación; `--apply` publica sin recalcular.
 La consola descubre todas las ubicaciones configuradas y señala conflictos de identidad.
 [Reconstrucción de datasets](DATASET_RECONSTRUCTION.es.md): contratos, seguridad, retención y WISDOM.
+En 0.17.1, `publish-candidate` también acepta solicitudes guardadas antes de copiar: verifica
+inventario/declaración y `--apply` solo copia/registra, sin ejecutar Work. Para índices antiguos
+retenidos, `DatasetPublisher.prepare_publication` requiere la declaración original explícita;
+nunca infiere contratos científicos ausentes ni cambia identidades de bytes.
+
+### 6.2 Réplica nativa comprimida
+
+`lf datasets replicate NOMBRE@VERSION --source ORIGEN --destination DESTINO` previsualiza; `--apply`
+copia bytes exactos y registra la colocación verificada en destino y controlador.
+`--route auto|direct|relay` prefiere SSH entre hosts o exige directo/retransmisión comprimida.
+SSH directo no copia credenciales del controlador; relay no usa archivos intermedios locales.
+Consola **Datasets → DatasetVersion → Replicate…** usa el mismo servicio, confirmación y progreso
+en segundo plano. Mantén la sesión abierta hasta terminar. El destino requiere `storage.dataset_root`
+y runtime LambdaForge disponible, no Work científico/claim GPU. Checksums, staging seguro,
+admisión en destino e identidad inmutable siguen siendo obligatorios. Rechaza conflictos y reutiliza
+destinos idénticos. [Guía](DATASET_RECONSTRUCTION.es.md#publicar-una-vez-replicar-el-contenido-exacto).
+
+### 6.3 Gestión explícita de conflictos
+
+Gestión nativa de conflictos con preview/apply: `datasets adopt NOMBRE@VERSION --on ORIGEN
+--content-id ID` elige referencia futura del controlador tras verificar todos los bytes;
+`datasets delete/remove NOMBRE@VERSION --on DESTINO --content-id ID` selecciona una identidad
+exacta incluso en conflicto. Delete borra bytes gestionados, remove los conserva; ambos bloquean
+consumidores activos y archivan índices previos. Consola **Datasets → identidad → Manage copies…**
+expone las mismas acciones confirmadas. No cambia otras copias/Runs antiguas; operaciones sin hash
+siguen rechazando ambigüedad. [Detalles](DATASET_RECONSTRUCTION.es.md#conflictos-entre-registros).
 
 ## 7. Secuencia, paralelismo, seeds y búsqueda
 
@@ -1293,6 +1319,12 @@ Execution original bajo propiedad del framework. No se copian pesos ni artefacto
 reintentar: solo índices pequeños de consola y referencias a decisiones. Logs, métricas,
 checkpoints y evidencia siguen referenciados en su ubicación original.
 
+La recuperación resuelve seeds en el namespace original persistido, no en la carpeta del nuevo Job.
+Conserva valores/orden explícitos y coordenadas del stream automático; rechaza coordenadas ausentes
+o corruptas y cambios de política. En consola, Logs y Resume Study apuntan al último Job. Hasta que
+publique telemetría, la evidencia propia anterior de Trials/Runs sigue visible sin sustituir su
+estado actual. No requiere modificar el YAML ni saltarse las comprobaciones de identidad.
+
 La operación cubre Studies adaptativos, seeds repetidas y sweeps fijos. Los diseños fijos leen
 el diseño inmutable y Attempts propios, consideran el último resultado y reutilizan Runs correctas;
 no requieren ni inventan estado de controlador adaptativo. `lf retry STUDY --dry-run --json`
@@ -1314,7 +1346,10 @@ El estado agregado considera el último Attempt de cada Run lógica: recuperar u
 
 `lf retry STUDY --accept-code-change` permite reconocer explícitamente una corrección compatible:
 el investigador debe saber que métricas anteriores y formatos de checkpoints siguen siendo válidos.
-La consola ofrece la misma casilla, desmarcada por defecto. Esto no omite comprobaciones de
+La consola ofrece la misma casilla, desmarcada por defecto. Si la previsualización detecta cambios
+de código, rechaza el envío antes de crear un Job salvo reconocimiento explícito; Resume queda
+deshabilitado hasta marcar la casilla. El worker recién preparado vuelve a comprobar compatibilidad.
+Esto no omite comprobaciones de
 configuración científica, contenido de entradas, objetivo, streams de seeds ni política de búsqueda.
 Si la corrección invalida resultados previos, crea otro Study. `execution.json` permanece inmutable;
 `current-code.json`, procedencia de cada Run y `recovery-history.jsonl` muestran las revisiones reales.
@@ -1351,7 +1386,14 @@ explícitamente. Catálogos propios del proyecto, no de Jobs/cachés desechables
 automática de dependencias y export Fleet completo todavía no están implementados.
 `lf import PACKAGE` verifica exports de un host; `--apply` registra evidencia y productos sin ejecutar.
 Procedencia original intacta; registros importados son read-only, no recovery nativo. Consola
-**Products → Import Study…** ofrece el mismo flujo confirmado.
+**Studies → Import Study…** (también en Products) ofrece el mismo flujo verificado y confirmado,
+con explorador de carpetas. El import aparece en Studies y Overview identificado como snapshot
+importado/read-only con su estado capturado. Trials/seeds leen métricas, logs y artifacts locales
+conservados; Analysis lee evidencia incluida sin recalcularla. No muestra cancel/retry remoto.
+Reaplica un import antiguo para añadir sus índices visuales locales. El refresco raíz nunca vuelve
+a analizar el resultado agregado. El `result.json` agregado verificado no tiene un límite fijo de
+64 MiB; tamaño/SHA del inventario, JSON estricto y procedencia siguen comprobándose.
+Verificación y registro se realizan fuera del bucle de eventos de la consola.
 
 Cada Attempt escribe `result.json`, `environment.json`, `work.log`, JSONL de métricas, progreso,
 outputs y artefactos. La Execution escribe `execution.json`, su configuración inmutable y un
@@ -1370,6 +1412,11 @@ su estado actual, incluye artefactos finalizados externos y crea un inventario d
 estado de runtime compartido. La evidencia final puede incluir análisis/replay; la activa,
 cancelada o fallida queda identificada como snapshot. Si un nombre identifica varios Works falla
 como ambiguo; usa el `work_id` que muestra `lf overview --json`.
+
+Valores finitos estructurados como `values: [[0.005, 2560.0]]` representan un único valor
+categórico, no dos límites independientes a optimizar. Cobertura/efectos los agrupan mediante JSON
+canónico sin reescribir los parámetros. Exportar su evidencia completada no requiere modificar
+el YAML ni repetir entrenamientos.
 
 El export remoto crea primero un ZIP64/Deflate y lo elimina siempre tras transferirlo. Descarga y
 extracción local se alojan bajo `PADRE_LOCAL`, no en `/tmp`; ese filesystem debe admitir el ZIP y

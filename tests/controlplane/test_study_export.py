@@ -29,8 +29,9 @@ from lambdaforge.work import WorkConfig, WorkRunner
         (JobState.CANCELLED, True),
     ),
 )
+@pytest.mark.parametrize("structured", (False, True))
 def test_study_export_downloads_bounded_job_evidence(
-    tmp_path: Path, state: JobState, finalized: bool
+    tmp_path: Path, state: JobState, finalized: bool, structured: bool
 ) -> None:
     job_id = "job-20260923000000-export"
     job_root = tmp_path / "jobs" / job_id
@@ -41,23 +42,41 @@ def test_study_export_downloads_bounded_job_evidence(
         yaml.safe_dump(
             {
                 "name": "remote-study",
-                "run": "tests.work_cases.SeedWork",
+                "run": (
+                    "tests.work_cases.StructuredSweepWork"
+                    if structured
+                    else "tests.work_cases.SeedWork"
+                ),
                 "seeds": [2, 4],
                 "objective": {"metric": "score", "mode": "max"},
+                **(
+                    {
+                        "sweep": {
+                            "space": {
+                                "family": {"values": ["learned", "fixed"]},
+                                "bounds": {
+                                    "values": [[0.005, 2560.0], {"low": 0.05, "high": 128.0}],
+                                    "when": {"family": "learned"},
+                                },
+                            }
+                        }
+                    }
+                    if structured
+                    else {}
+                ),
             },
             sort_keys=False,
         ),
         encoding="utf-8",
     )
     result = WorkRunner().run(WorkConfig.from_yaml(config_path))
+    original_result = (result.execution_dir / "result.json").read_bytes()
     if not finalized:
         (result.execution_dir / "result.json").unlink()
     elif state is not JobState.SUCCEEDED:
         terminal = json.loads((result.execution_dir / "result.json").read_text(encoding="utf-8"))
         terminal["status"] = state.value
-        (result.execution_dir / "result.json").write_text(
-            json.dumps(terminal), encoding="utf-8"
-        )
+        (result.execution_dir / "result.json").write_text(json.dumps(terminal), encoding="utf-8")
     unrelated = work_root / ".lambdaforge" / "runs" / "other" / "execution-old"
     unrelated.mkdir(parents=True)
     (unrelated / "secret.txt").write_text("not this experiment", encoding="utf-8")
@@ -140,6 +159,16 @@ def test_study_export_downloads_bounded_job_evidence(
     ]
     assert progress[-1]["terminal"] is True
     assert not list((tmp_path / "exports").glob(".lambdaforge-export-transfer-*"))
+    if structured and finalized:
+        analysis = json.loads((package / "reports" / "study-analysis.json").read_text())
+        assert analysis["summary"]["complete_run_count"] == 6
+        assert analysis["coverage"]["marginal"]["bounds"]["observed_levels"] == [
+            [0.005, 2560.0],
+            {"low": 0.05, "high": 128.0},
+        ]
+        assert (package / "reports" / "study-analysis.html").is_file()
+        if state is JobState.SUCCEEDED:
+            assert (result.execution_dir / "result.json").read_bytes() == original_result
 
 
 def test_study_export_captures_pre_execution_attempt(tmp_path: Path) -> None:
@@ -151,9 +180,7 @@ def test_study_export_captures_pre_execution_attempt(tmp_path: Path) -> None:
         "name: preparing-study\nrun: tests.work_cases.SeedWork\n",
         encoding="utf-8",
     )
-    (job_root / "lifecycle.jsonl").write_text(
-        '{"state":"preparing"}\n', encoding="utf-8"
-    )
+    (job_root / "lifecycle.jsonl").write_text('{"state":"preparing"}\n', encoding="utf-8")
     record = JobRecord(
         job_id=job_id,
         cluster="local",
@@ -222,9 +249,7 @@ def test_study_export_rejects_archive_traversal(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("profile", ("default", "full"))
-def test_remote_archive_profiles_account_for_compaction(
-    tmp_path: Path, profile: str
-) -> None:
+def test_remote_archive_profiles_account_for_compaction(tmp_path: Path, profile: str) -> None:
     job = tmp_path / "job-20260926000000-profile"
     execution = job / "work" / ".lambdaforge" / "runs" / "study" / "execution-profile"
     run = execution / "runs" / "run-1"

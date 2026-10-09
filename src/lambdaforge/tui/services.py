@@ -117,12 +117,31 @@ class ConsoleServices:
 
     def overview_snapshot(self) -> dict[str, Any]:
         value = self.overview.snapshot()
+        self._include_imports(value)
         self._last_overview = value
         return value
 
     def research_snapshot(self) -> dict[str, Any]:
         """Load only collection-level Work/Study data for those root screens."""
-        return self.overview.research_snapshot()
+        value = self.overview.research_snapshot()
+        self._include_imports(value)
+        return value
+
+    def _include_imports(self, value: dict[str, Any]) -> None:
+        from lambdaforge.work.ImportedStudy import ImportedStudy
+
+        items = value.setdefault("work", {}).setdefault("items", [])
+        existing = {item.get("work_id") for item in items}
+        items.extend(
+            row for row in ImportedStudy.rows(self.results.root) if row["work_id"] not in existing
+        )
+
+    def _imported(self, selector: str) -> Any:
+        from lambdaforge.work.ImportedStudy import ImportedStudy
+
+        return (
+            ImportedStudy(self.results.root, selector) if selector.startswith("import:") else None
+        )
 
     def cluster_rows(self) -> list[dict[str, Any]]:
         clusters = (self._last_overview or {}).get("clusters", ())
@@ -148,12 +167,14 @@ class ConsoleServices:
                 + "; ".join(self.datasets.discovery_failures)
             )
         identities: dict[str, set[str]] = {}
+        references = {record.key: record.dataset_id for record in self.datasets.registry.records()}
         for record in records:
             identities.setdefault(record.key, set()).add(record.dataset_id)
         return [
             record.to_dict()
             | {
                 "inventory_conflict": len(identities[record.key]) > 1,
+                "project_reference": references.get(record.key) == record.dataset_id,
                 "discovery_warnings": list(self.datasets.discovery_warnings),
             }
             for record in records
@@ -230,37 +251,63 @@ class ConsoleServices:
         self, job_id: str, run_key: str, *, tail: int = 2_000, curve_points: int = 200
     ) -> dict[str, Any]:
         """Load one bounded local/remote Run dashboard through ``JobService``."""
+        imported = self._imported(job_id)
+        if imported:
+            return imported.run(run_key, tail=tail, curve_points=curve_points)
         return self.jobs.study_run(job_id, run_key, tail=tail, curve_points=curve_points)
 
     def study(self, job_id: str) -> dict[str, Any]:
         """Refresh one bounded study snapshot without rebuilding the global overview."""
-        value = self.jobs.study(job_id)
+        imported = self._imported(job_id)
+        value = imported.view("interactive") if imported else self.jobs.study(job_id)
         if value is None:
             raise KeyError(f"Job {job_id!r} has no Study telemetry.")
         return value
 
+    def study_workspace(self, job_id: str, *, latest_job_id: str) -> dict[str, Any]:
+        if self._imported(job_id):
+            return self.study(job_id)
+        value = self.jobs.study_workspace(job_id, latest_job_id=latest_job_id)
+        if value is None:
+            raise KeyError(f"Job {latest_job_id!r} has no Study telemetry.")
+        return value
+
     def study_trial(self, job_id: str, trial: int) -> dict[str, Any]:
+        imported = self._imported(job_id)
+        if imported:
+            return imported.view("trial", trial=trial)
         return self.jobs.study_trial(job_id, trial)
 
     def study_trials(self, job_id: str, *, query: str) -> dict[str, Any]:
+        imported = self._imported(job_id)
+        if imported:
+            return imported.view("interactive", query=query)
         return self.jobs.study_trials(job_id, query=query)
 
     def study_panel(self, job_id: str, view: str) -> dict[str, Any]:
+        imported = self._imported(job_id)
+        if imported:
+            return imported.view(view)
         return self.jobs.study_panel(job_id, view)
 
     def study_analysis(self, job_id: str, *, full: bool = False) -> dict[str, Any]:
         """Read final analysis, or compute/cache it on its execution host on explicit demand."""
+        imported = self._imported(job_id)
+        if imported:
+            return imported.analysis(full=full)
         return self.jobs.study_panel(job_id, "analysis-report" if full else "analysis")
 
     def study_report_sections(self, job_id: str) -> list[dict[str, str]]:
         """Explicit report generation only; ordinary Study views never fetch project HTML."""
+        if self._imported(job_id):
+            return []  # Original project HTML remains in the portable archive.
         return self.jobs.study_panel(job_id, "report-sections").get("sections", [])
 
     def study_hpo(self, job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         """Present existing live HPO conclusions, without refitting analysis on the controller."""
         from lambdaforge.analysis.Effects import infer_space
 
-        panel = self.jobs.study_panel(job_id, "hpo")
+        panel = self.study_panel(job_id, "hpo")
         hpo = panel.get("hpo_analysis") or {}
         initialization = (panel.get("controller") or {}).get("initialization") or {}
         policy = initialization.get("policy") or {}
@@ -284,6 +331,9 @@ class ConsoleServices:
 
     def study_actions(self, job_id: str) -> tuple[dict[str, Any], ...]:
         """Load complete HPO decisions only when a Study workspace requests them."""
+        imported = self._imported(job_id)
+        if imported:
+            return imported.actions()
         return self.jobs.study_actions(job_id)
 
     def result_analysis(self, selector: str) -> dict[str, Any]:
@@ -324,6 +374,9 @@ class ConsoleServices:
 
     def work_logs(self, job_id: str, *, tail: int = 2_000) -> dict[str, Any]:
         """Load structured Work logs without exposing provider paths to widgets."""
+        imported = self._imported(job_id)
+        if imported:
+            return self.results.log_report(job_id.removeprefix("import:"), tail=tail)
         return self.jobs.log_report(job_id, tail=tail, include_traceback=False)
 
     def cancel_work(self, selector: str) -> dict[str, Any]:
@@ -354,9 +407,75 @@ class ConsoleServices:
     def dataset_verify(self, selector: str) -> dict[str, Any]:
         return self.datasets.verify(selector)
 
+    def replicate_dataset(
+        self,
+        selector: str,
+        *,
+        source: str,
+        destination: str,
+        expected_content_id: str,
+        apply: bool = False,
+        route: str = "auto",
+        progress: Callable[[Mapping[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Use the native preview/apply placement operation, never a console-only copy."""
+        result = self.datasets.replicate(
+            selector,
+            source=source,
+            destination=destination,
+            apply=apply,
+            expected_content_id=expected_content_id,
+            route=route,
+            progress=progress,
+        ).to_dict()
+        if apply:
+            result["placements"] = [
+                item.to_dict() for item in self.datasets.registry.get(selector).placements
+            ]
+        return result
+
     def delete_dataset(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
         """Preview or remove an entire DatasetVersion through its domain service."""
         return self.datasets.delete_version(selector, apply=apply)
+
+    def manage_dataset_copy(
+        self,
+        selector: str,
+        *,
+        operation: str,
+        cluster: str,
+        content_id: str,
+        apply: bool = False,
+        expected_root: str | None = None,
+        expected_controller_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Same exact-reference/placement preview and apply as the public CLI."""
+        if operation == "adopt":
+            return self.datasets.adopt(
+                selector,
+                cluster=cluster,
+                content_id=content_id,
+                apply=apply,
+                expected_root=expected_root,
+                expected_controller_id=expected_controller_id,
+            )
+        if operation == "remove":
+            return self.datasets.retire(
+                selector,
+                cluster=cluster,
+                content_id=content_id,
+                apply=apply,
+                expected_root=expected_root,
+            )
+        if operation == "delete":
+            return self.datasets.delete(
+                selector,
+                cluster=cluster,
+                content_id=content_id,
+                apply=apply,
+                expected_root=expected_root,
+            ).to_dict()
+        raise ValueError("Unknown Dataset copy operation.")
 
     def delete_result(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
         return self.results.delete(selector, apply=apply)

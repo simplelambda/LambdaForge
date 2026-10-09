@@ -6,10 +6,8 @@ import importlib
 import json
 import os
 import shlex
-import shutil
-import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -287,9 +285,31 @@ class DatasetService:
         payload["placement_consistency"] = resolution.to_dict()
         return payload
 
-    def resolve_placement(self, selector: str, cluster: str) -> DatasetPlacementResolution:
+    def resolve_placement(
+        self,
+        selector: str,
+        cluster: str,
+        *,
+        reference: DatasetRecord | None = None,
+        content_id: str | None = None,
+    ) -> DatasetPlacementResolution:
         """Reconcile controller, target index and bounded manifest identity in one path."""
-        controller_record = self._select_record(self.registry.records(), selector)
+        known = self._select_record(self.registry.records(), selector)
+        if reference is not None and (
+            self._select_record((reference,), selector) is None
+            or (
+                known is not None
+                and (
+                    known.dataset_id != reference.dataset_id
+                    or known.metadata.get("lambdaforge_science")
+                    != reference.metadata.get("lambdaforge_science")
+                )
+            )
+        ):
+            raise UnsafeDatasetOperationError(
+                "Replication reference conflicts with the controller Dataset identity."
+            )
+        controller_record = reference or known
         target_records: tuple[DatasetRecord, ...] = ()
         if cluster != "local":
             try:
@@ -317,6 +337,16 @@ class DatasetService:
                     reason=f"Target state could not be observed: {error}",
                 )
         target_record = self._select_record(target_records, selector)
+        if content_id is not None:
+            # Only an explicit exact identity may select the target's conflicting record.
+            # Physical manifest/path validation below remains unchanged.
+            exact_record = known if cluster == "local" else target_record
+            if exact_record is None or exact_record.dataset_id != content_id:
+                raise UnsafeDatasetOperationError(
+                    "Selected target does not register the exact requested content ID; "
+                    "refresh its inventory before acting."
+                )
+            controller_record = exact_record
         if controller_record is None and target_record is None:
             raise UnknownDatasetError(
                 selector, tuple(record.key for record in self.registry.records())
@@ -671,11 +701,27 @@ class DatasetService:
             self._remove_remote(selector, cluster)
         return self.registry.discard(selector, cluster=cluster)
 
-    def delete(self, selector: str, *, cluster: str, apply: bool = False) -> DatasetDeletionPlan:
+    def delete(
+        self,
+        selector: str,
+        *,
+        cluster: str,
+        apply: bool = False,
+        content_id: str | None = None,
+        expected_root: str | None = None,
+    ) -> DatasetDeletionPlan:
         """Preview or converge deletion of one exact manifest-backed managed placement."""
-        resolution = self.resolve_placement(selector, cluster)
+        resolution = (
+            self.resolve_placement(selector, cluster, content_id=content_id)
+            if content_id is not None
+            else self.resolve_placement(selector, cluster)
+        )
         record = resolution.record
         placement = resolution.placement
+        if expected_root is not None and (placement is None or placement.root != expected_root):
+            raise UnsafeDatasetOperationError(
+                "Target root changed; inspect a new deletion preview."
+            )
         reasons: list[str] = []
         consumers = self._active_consumers(record, cluster)
         if consumers:
@@ -720,7 +766,16 @@ class DatasetService:
                 raise UnsafeDatasetOperationError(
                     "Dataset deletion is unsafe: " + " ".join(reasons)
                 )
-            if action == "DELETE_PLACEMENT":
+            if content_id is not None:
+                self._retire_exact_record(
+                    selector,
+                    cluster=cluster,
+                    content_id=content_id,
+                    delete_bytes=action == "DELETE_PLACEMENT",
+                    expected_root=placement.root if placement else None,
+                )
+                applied = True
+            elif action == "DELETE_PLACEMENT":
                 assert placement is not None and managed_root is not None
                 self._operation(
                     cluster,
@@ -730,10 +785,11 @@ class DatasetService:
                     managed_root,
                     "--apply",
                 )
-            if cluster != "local":
-                self._remove_remote(record.key, cluster)
-            self.registry.discard(record.key, cluster=cluster)
-            applied = True
+            if content_id is None:
+                if cluster != "local":
+                    self._remove_remote(record.key, cluster)
+                self.registry.discard(record.key, cluster=cluster)
+                applied = True
         return DatasetDeletionPlan(
             record.key,
             cluster,
@@ -748,6 +804,179 @@ class DatasetService:
             resolution.state.value,
             consumers,
         )
+
+    def adopt(
+        self,
+        selector: str,
+        *,
+        cluster: str,
+        content_id: str,
+        apply: bool = False,
+        expected_controller_id: str | None = None,
+        expected_root: str | None = None,
+    ) -> dict[str, Any]:
+        """Choose one exact reference for future resolution, never merge divergent bytes."""
+        resolution = self.resolve_placement(selector, cluster, content_id=content_id)
+        if expected_root is not None and (
+            resolution.placement is None or resolution.placement.root != expected_root
+        ):
+            raise UnsafeDatasetOperationError(
+                "Source root changed; inspect a new adoption preview."
+            )
+        previous = self._select_record(self.registry.records(), selector)
+        previous_id = previous.dataset_id if previous else None
+        if expected_controller_id is not None and expected_controller_id != (previous_id or "-"):
+            raise UnsafeDatasetOperationError("Reference changed; inspect a new adoption preview.")
+        safe = resolution.physically_available and resolution.placement is not None
+        payload = {
+            "dataset": resolution.record.key,
+            "cluster": cluster,
+            "content_id": content_id,
+            "previous_content_id": previous_id,
+            "root": resolution.placement.root if resolution.placement else None,
+            "action": "CHOOSE_REFERENCE",
+            "reason": resolution.reason,
+            "verification": "Full source checksum verification is required on apply.",
+            "safe": safe,
+            "applied": False,
+            "notice": "Selects future controller resolution only. Other copies and past Runs "
+            "are unchanged; retire unwanted copies separately by exact content ID.",
+        }
+        if apply:
+            if not safe or resolution.placement is None:
+                raise UnsafeDatasetOperationError(
+                    f"Reference selection refused: {resolution.reason}"
+                )
+            if not self._operation(cluster, "verify", resolution.placement.root, content_id).get(
+                "valid"
+            ):
+                raise UnsafeDatasetOperationError(
+                    "Chosen reference failed exact byte verification."
+                )
+            latest = self.resolve_placement(selector, cluster, content_id=content_id)
+            if latest.record.to_dict() != resolution.record.to_dict():
+                raise UnsafeDatasetOperationError("Source changed during reference verification.")
+            payload["history"] = self.registry.choose(
+                resolution.record, expected_previous_id=previous_id
+            )
+            payload["applied"] = True
+        return payload
+
+    def retire(
+        self,
+        selector: str,
+        *,
+        cluster: str,
+        content_id: str,
+        apply: bool = False,
+        expected_root: str | None = None,
+    ) -> dict[str, Any]:
+        """Explicit index-only retirement, even when another cluster has different bytes."""
+        resolution = self.resolve_placement(selector, cluster, content_id=content_id)
+        placement = (
+            resolution.target_placement or resolution.controller_placement or resolution.placement
+        )
+        root = placement.root if placement else None
+        if expected_root is not None and root != expected_root:
+            raise UnsafeDatasetOperationError(
+                "Target root changed; inspect a new retirement preview."
+            )
+        consumers = self._active_consumers(resolution.record, cluster)
+        # Index-only retirement never follows or removes physical paths, even when
+        # their manifest is corrupt. The target registry itself must be authoritative.
+        safe = resolution.state is not DatasetPlacementState.UNREACHABLE and not consumers
+        payload = {
+            "dataset": resolution.record.key,
+            "cluster": cluster,
+            "content_id": content_id,
+            "root": root,
+            "reason": resolution.reason,
+            "action": "RETIRE_EXACT_PLACEMENT",
+            "safe": safe,
+            "applied": False,
+            "active_consumers": list(consumers),
+            "notice": "Remove the selected registry placement only; retain physical bytes "
+            "and immutable history. This does not free disk space.",
+        }
+        if apply:
+            if not safe:
+                raise UnsafeDatasetOperationError(
+                    "Retirement refused: active consumers or unsafe "
+                    f"target state ({resolution.reason})."
+                )
+            payload["history"] = self._retire_exact_record(
+                selector,
+                cluster=cluster,
+                content_id=content_id,
+                delete_bytes=False,
+                expected_root=root,
+            )
+            payload["applied"] = True
+        return payload
+
+    def _retire_exact_record(
+        self,
+        selector: str,
+        *,
+        cluster: str,
+        content_id: str,
+        delete_bytes: bool,
+        expected_root: str | None,
+    ) -> str:
+        # Re-observe target authority; retain controller state belonging to a different identity.
+        record = self._select_record(
+            self.registry.records()
+            if cluster == "local"
+            else self._remote_records(cluster, full=True),
+            selector,
+        )
+        if record is None or record.dataset_id != content_id:
+            raise UnsafeDatasetOperationError("Target changed before retirement.")
+        selected = next((item for item in record.placements if item.cluster == cluster), None)
+        if (selected.root if selected else None) != expected_root:
+            raise UnsafeDatasetOperationError("Target root changed before retirement.")
+        if self._active_consumers(record, cluster):
+            raise UnsafeDatasetOperationError(
+                "Dataset gained active consumers; retry after they stop."
+            )
+        profile = self.clusters.get(cluster)
+        assert profile.storage is not None
+        managed = profile.storage.dataset_root
+        if cluster == "local":
+            return self.registry.retire(
+                record.to_dict(), cluster=cluster, delete_bytes=delete_bytes, managed_root=managed
+            )
+        # Ship the native registry implementation, as immutable worker environments may predate it.
+        helper = Path(__file__).with_name("DatasetRegistry.py").read_text(encoding="utf-8")
+        transport = self.factory.transport(profile)
+        result = transport.run(
+            (
+                *profile.command_prefix,
+                self._python(cluster, transport),
+                "-c",
+                helper,
+                "retire-exact",
+                str(PurePosixPath(profile.storage.state_root) / "datasets.json"),
+                json.dumps(record.to_dict()),
+                cluster,
+                "1" if delete_bytes else "0",
+                managed or "",
+            ),
+            timeout=3600,
+        )
+        if result.returncode:
+            raise UnsafeDatasetOperationError("Target retirement failed: " + result.stderr[-2000:])
+        known = self._select_record(self.registry.records(), selector)
+        if known is not None and known.dataset_id == content_id:
+            try:
+                self.registry.retire(known.to_dict(), cluster=cluster)
+            except Exception as error:
+                raise UnsafeDatasetOperationError(
+                    "Target retirement completed, but controller index cleanup failed. "
+                    "Inspect both inventories before any further action; remote archive: "
+                    f"{result.stdout.strip()}. Cause: {error}"
+                ) from error
+        return result.stdout.strip()
 
     def delete_version(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
         """Preview or remove every placement and then forget one logical DatasetVersion.
@@ -910,9 +1139,13 @@ class DatasetService:
         try:
             resolution = self.resolve_placement(selector, cluster)
         except (KeyError, UnknownDatasetError) as error:
-            raise UnknownDatasetError(
-                str(selector), tuple(record.key for record in self.list())
-            ) from error
+            try:
+                reference = self.show(selector)
+            except UnknownDatasetError:
+                raise UnknownDatasetError(
+                    str(selector), tuple(record.key for record in self.list())
+                ) from error
+            resolution = self.resolve_placement(selector, cluster, reference=reference)
         record = resolution.record
         if resolution.state is DatasetPlacementState.UNREACHABLE:
             raise OfflineClusterError(cluster, resolution.reason)
@@ -934,6 +1167,8 @@ class DatasetService:
                 cluster,
                 "NOOP",
                 reason="The target index and exact physical DatasetArtifact agree.",
+                content_id=record.dataset_id,
+                applied=apply,
             )
         if resolution.state is DatasetPlacementState.DISCOVERED_UNREGISTERED:
             plan = DatasetMaterializationPlan(
@@ -944,6 +1179,8 @@ class DatasetService:
                     "The exact physical DatasetArtifact already exists; repair placement indexes "
                     "instead of copying or rebuilding bytes."
                 ),
+                content_id=record.dataset_id,
+                applied=apply,
             )
             if apply:
                 self.reconcile(record.key, cluster=cluster, apply=True)
@@ -964,22 +1201,25 @@ class DatasetService:
             )
         if source is None:
             raise RuntimeError("Dataset has neither a placement nor a usable producer.")
-        plan = DatasetMaterializationPlan(
-            record.key,
-            cluster,
-            "REPLICATE",
-            source.cluster,
-            estimated_bytes=source.size_bytes,
-            reason="Copy the registered immutable dataset bytes to the target dataset root.",
-            requires_controller_online=True,
-        )
-        if apply:
-            self._replicate(record, source, cluster)
-        return plan
+        return self.replicate(record.key, source=source.cluster, destination=cluster, apply=apply)
 
     def replicate(
-        self, selector: str, *, source: str, destination: str, apply: bool = False
+        self,
+        selector: str,
+        *,
+        source: str,
+        destination: str,
+        apply: bool = False,
+        route: str = "auto",
+        progress: Callable[[Mapping[str, Any]], None] | None = None,
+        expected_content_id: str | None = None,
     ) -> DatasetMaterializationPlan:
+        if route not in {"auto", "direct", "relay"}:
+            raise ValueError("Dataset transfer route must be auto, direct or relay.")
+        if progress:
+            progress(
+                {"phase": "resolving", "message": "Inspecting source and destination indexes."}
+            )
         resolution = self.resolve_placement(selector, source)
         if resolution.state is DatasetPlacementState.UNREACHABLE:
             raise OfflineClusterError(source, resolution.reason)
@@ -988,8 +1228,12 @@ class DatasetService:
                 f"Dataset source {source!r} is {resolution.state.value}: {resolution.reason}"
             )
         record = resolution.record
+        if expected_content_id is not None and record.dataset_id != expected_content_id:
+            raise UnsafeDatasetOperationError(
+                "Selected Dataset content identity changed; replication refused."
+            )
         placement = resolution.placement
-        target_resolution = self.resolve_placement(record.key, destination)
+        target_resolution = self.resolve_placement(record.key, destination, reference=record)
         if target_resolution.state is DatasetPlacementState.UNREACHABLE:
             raise OfflineClusterError(destination, target_resolution.reason)
         if target_resolution.state is DatasetPlacementState.CONFLICT:
@@ -1004,6 +1248,16 @@ class DatasetService:
                 + next_step
             )
         if target_resolution.state is DatasetPlacementState.AVAILABLE:
+            if apply:
+                assert target_resolution.placement is not None
+                verification = self._operation(
+                    destination, "verify", target_resolution.placement.root, record.dataset_id
+                )
+                if not verification.get("valid"):
+                    raise UnsafeDatasetOperationError(
+                        "Existing destination failed checksum verification."
+                    )
+                self.registry.register(target_resolution.record)
             return DatasetMaterializationPlan(
                 record.key,
                 destination,
@@ -1011,7 +1265,32 @@ class DatasetService:
                 source,
                 estimated_bytes=placement.size_bytes,
                 reason="The destination already has the exact immutable DatasetArtifact.",
+                content_id=record.dataset_id,
+                applied=apply,
             )
+        if target_resolution.state is DatasetPlacementState.DISCOVERED_UNREGISTERED:
+            plan = DatasetMaterializationPlan(
+                record.key,
+                destination,
+                "RECONCILE",
+                source,
+                reason="Exact bytes already exist; only the placement indexes need repair.",
+                content_id=record.dataset_id,
+                applied=apply,
+            )
+            if apply:
+                assert target_resolution.placement is not None
+                if not self._operation(
+                    destination, "verify", target_resolution.placement.root, record.dataset_id
+                ).get("valid"):
+                    raise UnsafeDatasetOperationError(
+                        "Existing unregistered destination failed checksum verification."
+                    )
+                if destination != "local":
+                    self._publish_remote(target_resolution.record, destination)
+                self.registry.register(target_resolution.record)
+            return plan
+        selected_route = self._transfer_route(source, destination, route)
         plan = DatasetMaterializationPlan(
             record.key,
             destination,
@@ -1020,10 +1299,79 @@ class DatasetService:
             estimated_bytes=placement.size_bytes,
             reason="Explicit placement replication.",
             requires_controller_online=True,
+            transfer_route=selected_route,
+            compression="tar-gzip-3",
+            content_id=record.dataset_id,
+            applied=apply,
+            stages=tuple(
+                {"phase": phase}
+                for phase in ("verify-source", "transfer", "verify-destination", "register")
+            ),
         )
         if apply:
-            self._replicate(record, placement, destination)
+            self._replicate(record, placement, destination, route=selected_route, progress=progress)
         return plan
+
+    def _transfer_route(self, source: str, destination: str, route: str) -> str:
+        """Probe site SSH without credentials forwarding or any dataset mutation."""
+        origin, target = self.clusters.get(source), self.clusters.get(destination)
+        if target.storage is None or (
+            target.storage.dataset_root is None and destination != "local"
+        ):
+            raise ValueError(
+                "Configure storage.dataset_root on the destination before replication."
+            )
+        if origin.transport == "local" or target.transport == "local":
+            return "local-stream" if origin.transport == target.transport else "controller-stream"
+        if route == "relay":
+            return "controller-stream"
+        transport = self.factory.transport(origin)
+        python = self._python(destination, self.factory.transport(target))
+        try:
+            result = transport.run(
+                self._site_ssh(
+                    target,
+                    (*target.command_prefix, python, "-c", "print('LF_DATA_TRANSFER_READY')"),
+                ),
+                timeout=20,
+            )
+            ready = result.returncode == 0 and result.stdout.strip() == "LF_DATA_TRANSFER_READY"
+        except Exception:
+            ready = False
+        if ready:
+            return "direct-ssh"
+        if route == "direct":
+            raise UnsafeDatasetOperationError(
+                "Direct site SSH is unavailable. Configure host keys/site authentication between "
+                "the clusters, or use --route auto/relay for compressed streaming "
+                "without local disk."
+            )
+        return "controller-stream"
+
+    @staticmethod
+    def _site_ssh(target: Any, command: tuple[str, ...]) -> tuple[str, ...]:
+        return (
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "ForwardAgent=no",
+            "-o",
+            "IdentityAgent=none",
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-p",
+            str(target.port),
+            f"{target.user}@{target.host}" if target.user else str(target.host),
+            "--",
+            shlex.join(command),
+        )
 
     def _remote_profile(
         self,
@@ -1066,8 +1414,37 @@ class DatasetService:
             raise TypeError("Remote dataset profiler must return a JSON object.")
         return payload
 
-    def _replicate(self, record: DatasetRecord, source: DatasetPlacement, destination: str) -> None:
+    def _replicate(
+        self,
+        record: DatasetRecord,
+        source: DatasetPlacement,
+        destination: str,
+        *,
+        route: str | None = None,
+        progress: Callable[[Mapping[str, Any]], None] | None = None,
+    ) -> None:
+        import time
+        from dataclasses import replace
+
         target = self.clusters.get(destination)
+        assert target.storage is not None
+        if destination == "local" and target.storage.dataset_root is None:
+            target = replace(
+                target,
+                storage=replace(
+                    target.storage,
+                    dataset_root=str(self.registry.path.parent / "datasets" / "published"),
+                ),
+            )
+        assert target.storage is not None
+        if target.transport == "local" and target.storage.dataset_root is not None:
+            target = replace(
+                target,
+                storage=replace(
+                    target.storage,
+                    dataset_root=str(Path(target.storage.dataset_root).expanduser().absolute()),
+                ),
+            )
         assert target.storage is not None
         if target.storage.dataset_root is None:
             raise LambdaForgeError(
@@ -1122,131 +1499,125 @@ class DatasetService:
             / record.version
             / record.dataset_id.removeprefix("sha256:")[:16]
         )
-        if source.cluster != "local":
-            raise LambdaForgeError(
-                diagnostic(
-                    ErrorCategory.OPERATION_REFUSED,
-                    f"Cannot relay {record.key!r} directly between two remote clusters.",
-                    "LambdaForge has no configured durable data-transfer provider for this route.",
-                    reason=(
-                        "SSH control transports intentionally stage only small control data. "
-                        "Relaying a potentially multi-terabyte dataset through the controller "
-                        "would consume local disk/bandwidth and is not a safe implicit fallback."
-                    ),
-                    impact=("No bytes or registry entries were changed on either cluster.",),
-                    fixes=(
-                        "Use the site's durable transfer service to copy the exact manifest-backed "
-                        "directory, then run dataset reconciliation on the destination.",
-                        "Alternatively publish newly generated content under a new dataset "
-                        "version.",
-                    ),
-                    commands=(
-                        (
-                            "Inspect the source placement",
-                            f"lf datasets show {shlex.quote(record.key)} --on "
-                            f"{shlex.quote(source.cluster)}",
-                        ),
-                        (
-                            "Reconcile after an external exact transfer",
-                            f"lf datasets reconcile {shlex.quote(record.key)} --on "
-                            f"{shlex.quote(destination)}",
-                        ),
-                    ),
-                    context={
-                        "dataset": record.key,
-                        "source_cluster": source.cluster,
-                        "source_root": source.root,
-                        "target_cluster": destination,
-                        "target_root": target_root,
-                    },
-                    operation="dataset replication preflight",
-                )
+        selected_route = route or self._transfer_route(source.cluster, destination, "auto")
+        origin = self.clusters.get(source.cluster)
+        sender = self.factory.transport(origin)
+        receiver = self.factory.transport(target)
+        source_python = (
+            origin.python if origin.transport == "local" else self._python(source.cluster, sender)
+        )
+        target_python = (
+            target.python if target.transport == "local" else self._python(destination, receiver)
+        )
+        helper = Path(__file__).with_name("DatasetTransfer.py").read_text(encoding="utf-8")
+        options = json.dumps(
+            {
+                "root": target.storage.dataset_root,
+                "record": record.to_dict(),
+                "cluster": destination,
+                "registry": str(self.registry.path)
+                if destination == "local"
+                else str(PurePosixPath(target.storage.state_root) / "datasets.json"),
+                "storage": target.storage.to_dict(),
+            }
+        )
+        receive_command = (*target.command_prefix, target_python, "-c", helper, "receive", options)
+        if progress:
+            progress(
+                {
+                    "phase": "transfer",
+                    "route": selected_route,
+                    "message": "Verifying source, then transferring compressed Dataset bytes.",
+                }
             )
-        if target.transport == "local":
-            destination_path = Path(target_root)
-            if destination_path.exists():
-                verification = DatasetOperations.verify(destination_path, record.dataset_id)
-                if not verification["valid"]:
-                    raise self._immutable_target_error(record, destination, target_root)
-            else:
-                staging = destination_path.with_name(f".{destination_path.name}.{uuid4().hex}.tmp")
-                destination_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    shutil.copytree(source.root, staging)
-                    verification = DatasetOperations.verify(staging, record.dataset_id)
-                    if not verification["valid"]:
-                        raise RuntimeError("Replicated dataset failed validation before publish.")
-                    os.replace(staging, destination_path)
-                finally:
-                    if staging.exists():
-                        shutil.rmtree(staging)
+        if selected_route == "direct-ssh":
+            result = sender.run(
+                (
+                    *origin.command_prefix,
+                    source_python,
+                    "-c",
+                    helper,
+                    "direct",
+                    source.root,
+                    record.dataset_id,
+                    json.dumps(self._site_ssh(target, receive_command)),
+                ),
+                timeout=86400,
+            )
+            if result.returncode:
+                raise RuntimeError("Direct Dataset replication failed: " + result.stderr[-3000:])
+            response = json.loads(result.stdout)
         else:
-            transport = self.factory.transport(target)
-            exists = transport.run(("test", "-e", target_root))
-            if exists.returncode == 0:
-                verified = self._operation(destination, "verify", target_root, record.dataset_id)
-                if not verified.get("valid"):
-                    raise self._immutable_target_error(record, destination, target_root)
-            else:
-                remote_staging = f"{target_root}.tmp-{uuid4().hex}"
-                created = transport.run(("mkdir", "-p", str(PurePosixPath(remote_staging).parent)))
-                if created.returncode:
-                    raise RuntimeError(f"Cannot create remote dataset staging: {created.stderr}")
-                destination_value = (
-                    f"{target.user + '@' if target.user else ''}{target.host}:{remote_staging}"
-                )
-                completed = subprocess.run(
+            transferred = 0
+            last_update = 0.0
+            with (
+                receiver.stream(receive_command) as sink,
+                sender.stream(
                     (
-                        "rsync",
-                        "-a",
-                        "--protect-args",
-                        "--",
-                        source.root.rstrip("/") + "/",
-                        destination_value.rstrip("/") + "/",
-                    ),
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    shell=False,
-                )
-                if completed.returncode:
-                    transport.run(("rm", "-rf", remote_staging))
-                    raise RuntimeError(f"Dataset replication failed: {completed.stderr}")
-                verified = self._operation(destination, "verify", remote_staging, record.dataset_id)
-                if not verified.get("valid"):
-                    transport.run(("rm", "-rf", remote_staging))
-                    raise RuntimeError("Replicated dataset failed validation before publish.")
-                published = transport.run(("mv", remote_staging, target_root))
-                if published.returncode:
-                    raise RuntimeError(f"Atomic dataset publish failed: {published.stderr}")
-        placement = DatasetPlacement(
-            destination,
-            target_root,
-            datetime.now(timezone.utc).isoformat(),
-            source.size_bytes,
-            source.file_count,
-            True,
-        )
-        updated = DatasetRecord(
-            record.name,
-            record.version,
-            record.dataset_id,
-            record.sample_count,
-            record.splits,
-            record.created_at_utc,
-            (*record.placements, placement),
-            record.producer,
-            record.lineage,
-            record.metadata,
-            record.build_id,
-            record.index,
-            record.partitions,
-            record.target_schema,
-            record.global_assets,
-            record.lineage_graph,
-        )
+                        *origin.command_prefix,
+                        source_python,
+                        "-c",
+                        helper,
+                        "pack",
+                        source.root,
+                        record.dataset_id,
+                    )
+                ) as content,
+            ):
+                while chunk := content.stdout.read(1024 * 1024):
+                    try:
+                        sink.stdin.write(chunk)
+                    except BrokenPipeError:
+                        sink.wait()
+                        raise
+                    transferred += len(chunk)
+                    now = time.monotonic()
+                    if progress and now - last_update >= 1.0:
+                        progress(
+                            {
+                                "phase": "transfer",
+                                "route": selected_route,
+                                "compressed_bytes": transferred,
+                                "message": "Streaming compressed Dataset bytes.",
+                            }
+                        )
+                        last_update = now
+                content.wait()
+                sink.finish_input()
+                if progress:
+                    progress(
+                        {
+                            "phase": "verify-destination",
+                            "compressed_bytes": transferred,
+                            "message": "Verifying checksums and registering the destination.",
+                        }
+                    )
+                acknowledgement = sink.stdout.read(65537)
+                sink.wait()
+                if len(acknowledgement) > 65536:
+                    raise ValueError(
+                        "Dataset replication acknowledgement exceeds its metadata bound."
+                    )
+                response = json.loads(acknowledgement)
+        if response.get("root") != target_root or not response.get("verified"):
+            raise ValueError("Dataset replication returned an invalid destination acknowledgement.")
+        placement = DatasetPlacement.from_mapping(response["placement"])
+        if (
+            placement.cluster != destination
+            or placement.root != target_root
+            or not placement.verified
+        ):
+            raise ValueError("Dataset replication returned mismatched placement metadata.")
+        updated = replace(record, placements=(*record.placements, placement))
         self.registry.register(updated)
-        self._publish_remote(updated, destination)
+        if progress:
+            progress(
+                {
+                    "phase": "completed",
+                    "route": selected_route,
+                    "message": "Dataset verified and registered; ready for typed Work inputs.",
+                }
+            )
 
     @staticmethod
     def _immutable_target_error(
@@ -1283,7 +1654,7 @@ class DatasetService:
             )
         )
 
-    def _remote_records(self, cluster: str) -> tuple[DatasetRecord, ...]:
+    def _remote_records(self, cluster: str, *, full: bool = False) -> tuple[DatasetRecord, ...]:
         profile = self.clusters.get(cluster)
         assert profile.storage is not None
         transport = self.factory.transport(profile)
@@ -1337,7 +1708,7 @@ class DatasetService:
             placements = tuple(
                 placement for placement in record.placements if placement.cluster == cluster
             )
-            records.append(self._with_placements(record, placements))
+            records.append(record if full else self._with_placements(record, placements))
         return tuple(records)
 
     def _publish_remote(self, record: DatasetRecord, cluster: str) -> None:

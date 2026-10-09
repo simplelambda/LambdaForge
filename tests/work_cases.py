@@ -69,6 +69,17 @@ class SeedWork(lf.Work):
         return {"seed": self.seed, "score": score}
 
 
+class StructuredSweepWork(lf.Work):
+    """Finite JSON categories remain one parameter, including conditional bounds."""
+
+    def run(
+        self, family: str, bounds: list[float] | dict[str, float] | None = None
+    ) -> dict[str, Any]:
+        score = 0.5 + float(self.seed or 0) / 100
+        self.metrics.log("score", score, step=1)
+        return {"family": family, "bounds": bounds, "score": score}
+
+
 class ScoredModelSnapshotWork(lf.Work):
     """Tiny CPU-only fixture binds a model snapshot to its own evaluated metrics."""
 

@@ -234,6 +234,51 @@ def test_preview_fails_closed_for_foreign_execution(
         jobs.retry_preview(previous.job_id)
 
 
+def test_detected_code_change_refuses_submission_but_not_inspection(
+    recovery_jobs: tuple[JobService, JobRecord, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, previous, execution = recovery_jobs
+    monkeypatch.setattr(
+        jobs,
+        "retry_preview",
+        lambda job_id: {
+            "resumable": True,
+            "execution_dir": str(execution),
+            "owner_job_id": previous.job_id,
+            "code_change_detected": True,
+        },
+    )
+    before = {p: p.read_bytes() for p in jobs.store.root.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="--accept-code-change.*No recovery Job"):
+        jobs.retry(previous.job_id)
+    assert jobs.retry(previous.job_id, dry_run=True).recovery_plan["code_change_detected"]
+    assert before == {p: p.read_bytes() for p in jobs.store.root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_preview_compares_current_project_to_last_recovered_code_revision(
+    recovery_jobs: tuple[JobService, JobRecord, Path], changed: bool
+) -> None:
+    from lambdaforge.ProjectContext import ProjectContext
+    from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
+
+    jobs, previous, execution = recovery_jobs
+    current = CodeIdentity.capture(ProjectContext.discover(previous.config_path).root).to_dict()
+    origin = {**current, "revision": "old-origin"}
+    recorded = {**current, "revision": "changed-revision"} if changed else current
+    atomic_json(
+        execution / "execution.json",
+        {"execution_id": execution.name, "code_identity": origin},
+    )
+    atomic_json(execution / "current-code.json", {"code_identity": recorded})
+    before = {path: path.read_bytes() for path in execution.rglob("*") if path.is_file()}
+    preview = jobs.retry_preview(previous.job_id)
+    assert preview["previous_code_identity"] == recorded
+    assert preview["current_code_identity"] == current
+    assert preview["code_change_detected"] is changed
+    assert before == {path: path.read_bytes() for path in execution.rglob("*") if path.is_file()}
+
+
 def test_fixed_preview_and_retry_handoff_preserve_nine_runs_without_adaptive_state(
     recovery_jobs: tuple[JobService, JobRecord, Path],
     monkeypatch: pytest.MonkeyPatch,

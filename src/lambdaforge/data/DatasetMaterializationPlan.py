@@ -21,6 +21,10 @@ class DatasetMaterializationPlan:
     prerequisites: tuple[dict[str, Any], ...] = ()
     stages: tuple[dict[str, Any], ...] = ()
     job_id: str | None = None
+    transfer_route: str | None = None
+    compression: str | None = None
+    content_id: str | None = None
+    applied: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,4 +39,8 @@ class DatasetMaterializationPlan:
             "prerequisites": [dict(value) for value in self.prerequisites],
             "stages": [dict(value) for value in self.stages],
             "job_id": self.job_id,
+            "transfer_route": self.transfer_route,
+            "compression": self.compression,
+            "content_id": self.content_id,
+            "applied": self.applied,
         }

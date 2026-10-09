@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
 import shutil
+import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -81,6 +83,25 @@ class DatasetPublisher:
         source = Path(source_root).resolve()
         if not source.is_dir() or source.is_symlink():
             raise ValueError("Dataset member source_root must be a safe directory.")
+        request: Path | None = None
+        if recovery_root is not None:
+            # Persist the complete declaration and exact source inventory BEFORE copying.
+            # An ownership/space refusal can occur on the first asset, before sealing.
+            request = self.prepare_publication(
+                dataset_name,
+                dataset_version,
+                members,
+                source_root=source,
+                request_root=recovery_root,
+                build_provenance=build_provenance,
+                metadata=metadata,
+                target_schema=target_schema,
+                scientific_identity=scientific_identity,
+                intent=intent,
+                fallback_root=Path(publication_root) / ".publication-requests",
+            )
+            source_index = DatasetIndex(request / "members.jsonl")
+            members = (member.to_dict() for member in source_index)
         root = Path(publication_root).expanduser().resolve()
         staging_parent = root / dataset_name / dataset_version
         staging = staging_parent / f".publication.{os.getpid()}.{uuid4().hex}.tmp"
@@ -214,6 +235,14 @@ class DatasetPublisher:
                     "Retry publication only with lf datasets publish-candidate; "
                     "use a new version for changed content. Computation need not repeat."
                 ) from error
+            if request is not None:
+                print(
+                    f"Exact publication request retained at {request}. "
+                    "Retry only publication with lf datasets publish-candidate PATH "
+                    "(preview first, then --apply). Original source bytes must remain unchanged.",
+                    file=sys.stderr,
+                    flush=True,
+                )
             raise
         finally:
             try:
@@ -262,6 +291,14 @@ class DatasetPublisher:
         from lambdaforge.work.snapshot import copy_tree, validate_path
 
         candidate = Path(root).expanduser().absolute()
+        if not (candidate / "dataset-artifact.json").exists():
+            return self._publish_request(
+                candidate,
+                publication_root=publication_root,
+                cluster=cluster,
+                version=version,
+                apply=apply,
+            )
         validate_path(candidate / "dataset-artifact.json")
         artifact = DatasetArtifact.read_json(candidate / "dataset-artifact.json")
         self._publication_label(artifact.name, field="name")
@@ -357,13 +394,194 @@ class DatasetPublisher:
                 raise
         return {**payload, "applied": True, "record": record.to_dict()}
 
+    def prepare_publication(
+        self,
+        name: str,
+        version: str,
+        members: Iterable[Mapping[str, Any]],
+        *,
+        source_root: str | Path,
+        request_root: str | Path,
+        build_provenance: Mapping[str, Any],
+        metadata: Mapping[str, Any] | None = None,
+        target_schema: Mapping[str, Any] | None = None,
+        scientific_identity: Mapping[str, Any] | None = None,
+        intent: str = "publish",
+        fallback_root: Path | None = None,
+    ) -> Path:
+        """Freeze a publication declaration and source checksums, without copying or registering.
+
+        Useful for retained pre-upgrade results with an explicit member index/declaration.
+        This is publication preparation, not reconstruction or scientific validation.
+        """
+        from lambdaforge.work.models import atomic_json
+        from lambdaforge.work.snapshot import validate_path
+
+        name = self._publication_label(name, field="name")
+        version = self._publication_label(version, field="version")
+        if intent not in {"publish", "rebuild"}:
+            raise ValueError("Publication request intent must be publish or rebuild.")
+        source = Path(source_root).expanduser().absolute()
+        validate_path(source)
+        if not source.is_dir():
+            raise ValueError("Publication source must be an existing directory.")
+        request = Path(request_root).expanduser().absolute() / f"request-{uuid4().hex}"
+        declaration = {
+            "dataset_publication_request_version": 1,
+            "name": name,
+            "version": version,
+            "source_root": str(source),
+            "index_sha256": None,
+            "build_provenance": dict(build_provenance),
+            "metadata": dict(metadata or {}),
+            "target_schema": dict(target_schema or {}),
+            "scientific_identity": scientific_identity,
+            "intent": intent,
+        }
+        validate_path(request)
+        try:
+            # Probe metadata publication before consuming a streaming member iterable.
+            request.mkdir(parents=True, exist_ok=False)
+            atomic_json(request / "publication-request.json", declaration)
+        except OSError as error:
+            if error.errno != errno.ENOSPC or fallback_root is None:
+                raise
+            request = fallback_root.absolute() / f"request-{uuid4().hex}"
+            validate_path(request)
+            request.mkdir(parents=True, exist_ok=False)
+            atomic_json(request / "publication-request.json", declaration)
+        index = DatasetIndex.write(
+            request / "members.jsonl",
+            self._materialize_members(members, source=source, staging=None),
+        )
+        atomic_json(
+            request / "publication-request.json",
+            {**declaration, "index_sha256": index.file_sha256()},
+        )
+        return request
+
+    def _publish_request(
+        self,
+        candidate: Path,
+        *,
+        publication_root: str | Path,
+        cluster: str,
+        version: str | None,
+        apply: bool,
+    ) -> dict[str, Any]:
+        """Replay a saved exact member declaration; never import or execute Work code."""
+        from lambdaforge.work.snapshot import validate_path
+
+        request_path = candidate / "publication-request.json"
+        index_path = candidate / "members.jsonl"
+        for path in (request_path, index_path):
+            validate_path(path)
+            if not path.is_file():
+                raise InvalidDatasetPublicationError(
+                    "No sealed candidate or complete saved publication request. "
+                    "Do not rerun scientific computation blindly; inspect retained source/index."
+                )
+        with request_path.open(encoding="utf-8") as stream:
+            request = json.load(stream)
+        if (
+            not isinstance(request, Mapping)
+            or type(request.get("dataset_publication_request_version")) is not int
+            or request["dataset_publication_request_version"] != 1
+            or request.get("intent") != "publish"
+            or not all(
+                isinstance(request.get(key), str)
+                for key in ("name", "version", "source_root", "index_sha256")
+            )
+            or not all(
+                isinstance(request.get(key), Mapping)
+                for key in ("metadata", "target_schema", "build_provenance")
+            )
+            or (
+                request.get("scientific_identity") is not None
+                and not isinstance(request["scientific_identity"], Mapping)
+            )
+        ):
+            raise InvalidDatasetPublicationError("Invalid saved publication request contract.")
+        source = Path(request["source_root"])
+        validate_path(source)
+        if not source.is_absolute() or not source.is_dir():
+            raise InvalidDatasetPublicationError("Saved publication source is missing or unsafe.")
+        index = DatasetIndex(index_path)
+        if index.file_sha256() != request.get("index_sha256"):
+            raise InvalidDatasetPublicationError("Saved publication member index checksum differs.")
+        validation = index.validate(
+            source, target_schema=request["target_schema"], require_checksums=True
+        )
+        if not validation["valid"]:
+            raise InvalidDatasetPublicationError(
+                "Saved publication source is corrupt: " + "; ".join(validation["errors"])
+            )
+        name = self._publication_label(request["name"], field="name")
+        selected_version = self._publication_label(version or request["version"], field="version")
+        expected = DatasetArtifact.create_v2(
+            name=name,
+            version=selected_version,
+            index=index,
+            index_path="index.jsonl",
+            build_provenance=request["build_provenance"],
+            metadata=request["metadata"],
+            target_schema=request["target_schema"],
+            scientific_identity=request["scientific_identity"],
+        )
+        self._require_compatible_registration(
+            name,
+            selected_version,
+            expected.dataset_id,
+            scientific_identity=expected.scientific_identity,
+        )
+        payload: dict[str, Any] = {
+            "dataset": f"{name}@{selected_version}",
+            "content_id": expected.dataset_id,
+            "scientific_id": expected.scientific_id,
+            "candidate": str(candidate),
+            "source_root": str(source),
+            "destination": str(
+                Path(publication_root).expanduser().absolute()
+                / name
+                / selected_version
+                / expected.dataset_id.removeprefix("sha256:")[:16]
+            ),
+            "recovery_kind": "publication-only",
+            "will_execute": False,
+            "applied": False,
+        }
+        validate_path(Path(payload["destination"]))
+        if not apply:
+            return payload
+        with CrossProcessFileLock(
+            candidate / ".publication.lock",
+            shared=False,
+            timeout_seconds=30,
+            poll_interval_seconds=0.1,
+        ):
+            record = self.publish_members(
+                name,
+                selected_version,
+                (member.to_dict() for member in index),
+                source_root=source,
+                publication_root=publication_root,
+                build_provenance=request["build_provenance"],
+                cluster=cluster,
+                metadata=request["metadata"],
+                target_schema=request["target_schema"],
+                scientific_identity=request["scientific_identity"],
+            )
+            if record.dataset_id != expected.dataset_id:
+                raise InvalidDatasetPublicationError("Recovered publication identity differs.")
+        return {**payload, "record": record.to_dict(), "applied": True}
+
     @classmethod
     def _materialize_members(
         cls,
         members: Iterable[Mapping[str, Any]],
         *,
         source: Path,
-        staging: Path,
+        staging: Path | None,
     ) -> Iterable[DatasetMember]:
         for index, raw in enumerate(members):
             if not isinstance(raw, Mapping):
@@ -409,24 +627,36 @@ class DatasetPublisher:
                 safe_id = cls._safe_segment(member_id or str(index))
                 safe_name = cls._safe_segment(str(logical_name))
                 relative = Path("assets") / safe_id / safe_name
-                destination = staging / relative
+                destination = staging / relative if staging is not None else resolved
                 if resolved.is_dir():
-                    cls._copy_tree(resolved, destination)
+                    if staging is not None:
+                        cls._copy_tree(resolved, destination)
                     kind = "directory"
                 elif resolved.is_file():
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    from lambdaforge.work.snapshot import copy_file
+                    if staging is not None:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        from lambdaforge.work.snapshot import copy_file
 
-                    copy_file(resolved, destination)
+                        copy_file(resolved, destination)
                     kind = "file"
                 else:
                     raise ValueError(f"Unsupported dataset asset: {resolved}")
                 digest, size = DatasetAsset.fingerprint_path(destination)
+                if (
+                    descriptor.get("sha256") is not None
+                    and str(descriptor["sha256"]).removeprefix("sha256:") != digest
+                ) or (
+                    descriptor.get("size_bytes") is not None and descriptor["size_bytes"] != size
+                ):
+                    raise InvalidDatasetPublicationError(
+                        f"Dataset source changed: {member_id}.{logical_name}. "
+                        "Refusing publication of different bytes."
+                    )
                 asset_metadata = descriptor.get("metadata", {})
                 if not isinstance(asset_metadata, Mapping):
                     raise TypeError(f"Dataset asset {logical_name!r} metadata must be a mapping.")
                 assets[str(logical_name)] = DatasetAsset(
-                    relative.as_posix(),
+                    (relative if staging is not None else resolved.relative_to(source)).as_posix(),
                     str(descriptor.get("kind", kind)),
                     f"sha256:{digest}",
                     size,

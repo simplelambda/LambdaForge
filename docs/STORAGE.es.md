@@ -42,8 +42,20 @@ se suman capacidades libres de volúmenes diferentes.
 Se exige `libre físico - otros compromisos activos - nuevo compromiso >= seguridad` y disponibilidad
 de inodos cuando el filesystem los informa. El consumo medido no reduce el compromiso declarado;
 se libera al terminar el supervisor o al verificar positivamente la muerte del propietario.
-Propiedad ilegible, corrupta o ambigua bloquea nuevos compromisos. Un PID reutilizado no demuestra
-la muerte del propietario. Workers y ofertas Fleet no reservan dos veces una asignación propia.
+Propiedad ilegible, corrupta o ambigua bloquea nuevos compromisos. La existencia de un PID por sí
+sola no demuestra que su propietario siga vivo. Se compara el nacimiento registrado: uno distinto prueba
+que el propietario original ya no tiene ese PID; un proceso zombi/muerto no puede usar su compromiso.
+Esas leases antiguas del mismo host se retiran solo durante admisión bajo lock, nunca al consultar
+estado. Un proceso vivo del mismo nacimiento conserva su compromiso aunque cambie argv (exec);
+autorizar señales sigue exigiendo el match estricto de nacimiento/comando. Propietarios inaccesibles
+o de otro host siguen protegidos. Workers y ofertas Fleet no duplican una asignación propia.
+
+Un bloqueo de ownership genera `StorageOwnershipError`, no ENOSPC. El diagnóstico incluye lease,
+host y propietario; `lf storage status --json` muestra incidencias de ownership acotadas. Inspeccionar
+el host registrado, restaurar permisos de inspección o esperar a salida verificada antes de
+reintentar publicación. No borrar leases vivas/remotas ni resetear historial científico. Incluso
+un reflink de cero bytes verifica propiedad, margen físico e inodos; las transacciones anidadas
+tienen identidades independientes de liberación exacta.
 
 Si falta espacio, los Jobs directos esperan antes de adquirir CPU/GPU. El estado informa bytes
 solicitados/libres/reservados/de seguridad y motivo. La misma autoridad puede ejecutarse dentro de

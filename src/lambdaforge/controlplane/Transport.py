@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 
+from lambdaforge.controlplane.BinaryCommand import BinaryCommand
 from lambdaforge.controlplane.CommandResult import CommandResult
 
 
@@ -29,3 +31,7 @@ class Transport(ABC):
     def get(self, source: str | Path, destination: str | Path) -> None:
         """Retrieve one explicit small file/directory when the provider supports it."""
         raise NotImplementedError(f"{type(self).__name__} does not support retrieval.")
+
+    def stream(self, command: Sequence[str]) -> AbstractContextManager[BinaryCommand]:
+        """Stream an explicit durable-data command, separate from small control messages."""
+        raise NotImplementedError(f"{type(self).__name__} does not support binary streaming.")

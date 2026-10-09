@@ -43,8 +43,19 @@ Admission requires `physical free - other active commitments - new commitment >=
 available inodes when the filesystem reports them. Usage does not shrink the declared commitment;
 it is released at supervisor completion or after positively verified owner death. Unreadable,
 corrupt or ambiguous ownership blocks new commitments rather than granting fictitious capacity.
-PID reuse alone does not prove death. An existing owned allocation is not reserved again by its
-workers or Fleet offer.
+PID existence alone is not liveness. Storage checks the recorded birth time: a different birth
+proves that the original owner no longer holds that PID; a zombie/dead process cannot use its
+commitment. Those stale same-host records are reclaimed only during locked admission. Read-only
+status never deletes them. A matching living lifetime retains its commitment across argv changes
+(exec), while signal authorization still requires the stricter birth/command match. Inaccessible
+and foreign-host identities remain protected. An existing owned allocation is not reserved again
+by its workers or Fleet offer.
+
+Ownership refusals raise `StorageOwnershipError`, not ENOSPC. Diagnostics name the lease, host
+and owner; `lf storage status --json` exposes bounded ownership issues. Inspect the recorded host,
+restore process-inspection access or wait for verified owner exit, then retry the publication.
+Do not delete live/foreign leases or reset scientific history. Even a zero-byte reflink checks
+ownership, physical safety and inodes; nested transactions have independent exact release identities.
 
 When admission cannot proceed, direct Jobs wait before acquiring CPU/GPU leases. The state
 includes requested/free/reserved/safety bytes and the reason. The same authority is available

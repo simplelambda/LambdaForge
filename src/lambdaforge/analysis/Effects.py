@@ -14,6 +14,7 @@ from lambdaforge.analysis.SearchSpace import (
     INACTIVE,
     assign_values,
     build_space,
+    category_key,
     grid,
     sample_point,
     valid_point,
@@ -266,14 +267,21 @@ def top_region_importance(
             _bin(value.get("parameters", {}).get(name, INACTIVE), rule) for value in ordered
         ]
         top_labels = [_bin(value.get("parameters", {}).get(name, INACTIVE), rule) for value in top]
-        labels = sorted(set(all_labels) | set(top_labels), key=str)
+        labels = sorted(
+            {category_key(value): value for value in (*all_labels, *top_labels)}.values(),
+            key=str,
+        )
+        all_keys = [category_key(value) for value in all_labels]
+        top_keys = [category_key(value) for value in top_labels]
         smooth = 1e-12
         p = [
-            (top_labels.count(label) + smooth) / (len(top_labels) + smooth * len(labels))
+            (top_keys.count(category_key(label)) + smooth)
+            / (len(top_labels) + smooth * len(labels))
             for label in labels
         ]
         q = [
-            (all_labels.count(label) + smooth) / (len(all_labels) + smooth * len(labels))
+            (all_keys.count(category_key(label)) + smooth)
+            / (len(all_labels) + smooth * len(labels))
             for label in labels
         ]
         output[name] = {
@@ -322,7 +330,8 @@ def response_curve(
                     statistics.fmean(values),
                     statistics.fmean(uncertainties),
                     sum(
-                        candidate.get("parameters", {}).get(name, INACTIVE) == level
+                        category_key(candidate.get("parameters", {}).get(name, INACTIVE))
+                        == category_key(level)
                         for candidate in candidates
                     ),
                 )
@@ -494,7 +503,7 @@ def mixed_distance(
                 left_value, right_value = math.log(left_value), math.log(right_value)
             distances.append(abs(left_value - right_value) / max(high - low, 1e-12))
         else:
-            distances.append(0.0 if left[name] == right[name] else 1.0)
+            distances.append(0.0 if category_key(left[name]) == category_key(right[name]) else 1.0)
     return math.sqrt(statistics.fmean(value * value for value in distances)) if distances else 0.0
 
 
@@ -513,8 +522,8 @@ def _bin(value: Any, rule: Mapping[str, Any]) -> Any:
 def _group_variance(labels: Sequence[Any], values: Sequence[float]) -> float:
     grouped: dict[Any, list[float]] = {}
     for label, value in zip(labels, values, strict=True):
-        grouped.setdefault(label, []).append(value)
-    weighted_means = [statistics.fmean(grouped[label]) for label in labels]
+        grouped.setdefault(category_key(label), []).append(value)
+    weighted_means = [statistics.fmean(grouped[category_key(label)]) for label in labels]
     return statistics.pvariance(weighted_means) if len(weighted_means) > 1 else 0.0
 
 

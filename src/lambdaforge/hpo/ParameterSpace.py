@@ -142,7 +142,7 @@ class ParameterSpace:
             values = (
                 tuple(raw_values)
                 if isinstance(raw_values, Sequence) and not isinstance(raw_values, str | bytes)
-                else tuple(dict.fromkeys(present))
+                else tuple({_value_key(value): value for value in present}.values())
             )
             raw_range = rule.get("range")
             if (
@@ -296,7 +296,11 @@ class ParameterSpace:
                     )
                 )
             else:
-                distances.append(0.0 if left[descriptor.name] == right[descriptor.name] else 1.0)
+                distances.append(
+                    0.0
+                    if _value_key(left[descriptor.name]) == _value_key(right[descriptor.name])
+                    else 1.0
+                )
         return (
             math.sqrt(sum(value * value for value in distances) / len(distances))
             if distances
@@ -310,7 +314,7 @@ class ParameterSpace:
         descriptor = self._by_name[name]
         if descriptor.kind in {"continuous", "integer"}:
             return abs(descriptor.normalize(left) - descriptor.normalize(right))
-        return 0.0 if left == right else 1.0
+        return 0.0 if _value_key(left) == _value_key(right) else 1.0
 
     def transformed_bounds(self) -> tuple[tuple[float, float], ...]:
         bounds: list[tuple[float, float]] = []

@@ -7,6 +7,7 @@ on a host and released only on verified owner death or explicit supervisor compl
 from __future__ import annotations
 
 import errno
+import math
 import os
 import socket
 from collections.abc import Iterator, Mapping
@@ -18,6 +19,29 @@ from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
 from lambdaforge.controlplane.ProcessIdentity import ProcessIdentity
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 from lambdaforge.work.models import atomic_json
+
+
+class StorageOwnershipError(RuntimeError):
+    """A fail-closed ownership refusal, never a claim that the disk is full."""
+
+    def __init__(self, purpose: str, destination: Path, observation: Mapping[str, Any]) -> None:
+        self.purpose = purpose
+        self.destination = destination
+        self.observation = dict(observation)
+        super().__init__(
+            f"Storage {purpose} refused: {observation['reason']}. "
+            f"Lease: {observation.get('blocking_lease', 'lock acquisition')}; "
+            f"host: {observation.get('blocking_host', 'unknown')}; "
+            f"owner: {observation.get('blocking_owner', 'unknown')}. "
+            f"Destination: {destination}; free={observation['free_bytes']} bytes. "
+            "This is an ownership conflict, not exhausted disk space. "
+            "Inspect lf storage status and the named owner on its recorded host. "
+            "Retry after verified owner exit or restored access; do not delete active leases. "
+            "No partial publication was committed; retained source evidence is unchanged."
+        )
+
+    def __reduce__(self) -> Any:
+        return type(self), (self.purpose, self.destination, self.observation)
 
 
 class StorageAdmission:
@@ -59,6 +83,8 @@ class StorageAdmission:
         try:
             observed = cls.reserve(descriptor, owner, requested_bytes)
             if not observed.get("admitted"):
+                if observed["reason"] != "storage-admission":
+                    raise StorageOwnershipError(purpose, destination, observed)
                 from lambdaforge.controlplane.StorageOperations import StorageOperations
 
                 cache = cls.filesystem(Path(descriptor["cache_root"]), descriptor)
@@ -80,6 +106,8 @@ class StorageAdmission:
                         pass
                     observed = cls.reserve(descriptor, owner, requested_bytes)
                 if not observed.get("admitted"):
+                    if observed["reason"] != "storage-admission":
+                        raise StorageOwnershipError(purpose, destination, observed)
                     raise OSError(
                         errno.ENOSPC,
                         f"Storage {purpose} blocked on destination filesystem: "
@@ -150,18 +178,28 @@ class StorageAdmission:
                     "reserved_bytes": 0,
                     "reservations": 0,
                     "ownership_unresolved": False,
+                    "ownership_issues": [],
                 },
             )
             volume["roots"].append(name)
         for device, volume in volumes.items():
             for path in (cls._lease_root(descriptor) / device).glob("job-*.json"):
                 record = StorageOperations._read_json(path)
+                issue = {
+                    "lease": str(path),
+                    "host": record.get("host") if record else None,
+                    "owner": record.get("owner") if record else None,
+                }
                 if record is None:
                     volume["ownership_unresolved"] = True
+                    if len(volume["ownership_issues"]) < 128:
+                        volume["ownership_issues"].append(issue)
                     continue
                 if record.get("host") != socket.gethostname():
                     # A missing local PID says nothing about an owner on a shared mount.
                     volume["ownership_unresolved"] = True
+                    if len(volume["ownership_issues"]) < 128:
+                        volume["ownership_issues"].append(issue)
                     continue
                 try:
                     owner = ProcessIdentity.from_mapping(record["owner"])
@@ -173,16 +211,21 @@ class StorageAdmission:
                         or requested < 0
                     ):
                         raise ValueError("Corrupt storage commitment")
-                    if cls._dead(owner.pid):
+                    state = owner.storage_status()
+                    if state in {"dead", "reused"}:
                         continue
-                    if not owner.matches():
+                    if state == "unresolved":
                         volume["ownership_unresolved"] = True
-                    if owner.job_id == owner_job_id and owner.matches():
+                        if len(volume["ownership_issues"]) < 128:
+                            volume["ownership_issues"].append(issue)
+                    if owner.job_id == owner_job_id and state == "alive":
                         continue  # This owner's existing commitment is not a second reservation.
                     volume["reserved_bytes"] += requested
                     volume["reservations"] += 1
                 except (KeyError, TypeError, ValueError):
                     volume["ownership_unresolved"] = True
+                    if len(volume["ownership_issues"]) < 128:
+                        volume["ownership_issues"].append(issue)
             remaining = volume["free_bytes"] - volume["reserved_bytes"] - volume["safety_bytes"]
             volume["admissible_bytes"] = max(0, remaining)
             if volume["ownership_unresolved"]:
@@ -307,14 +350,27 @@ class StorageAdmission:
             count = 0
             for path in root.glob("job-*.json"):
                 record = StorageOperations._read_json(path)
+
+                def blocked(
+                    reason: str, *, lease: Path = path, value: Mapping[str, Any] | None = record
+                ) -> dict[str, Any]:
+                    return {
+                        **observation,
+                        "admitted": False,
+                        "reason": reason,
+                        "blocking_lease": str(lease),
+                        "blocking_host": value.get("host") if value else None,
+                        "blocking_owner": value.get("owner") if value else None,
+                    }
+
                 if not record:
                     # Unknown commitment is not permission to overcommit.
-                    return {**observation, "admitted": False, "reason": "unresolved-storage-lease"}
+                    return blocked("unresolved-storage-lease")
                 if record.get("host") != socket.gethostname():
-                    return {**observation, "admitted": False, "reason": "unresolved-storage-host"}
+                    return blocked("unresolved-storage-host")
                 identity = record.get("owner")
                 if not isinstance(identity, Mapping):
-                    return {**observation, "admitted": False, "reason": "unresolved-storage-owner"}
+                    return blocked("unresolved-storage-owner")
                 try:
                     prior = ProcessIdentity.from_mapping(identity)
                     cls._validate_owner(prior)
@@ -326,18 +382,18 @@ class StorageAdmission:
                     ):
                         raise ValueError("Negative commitment")
                 except (KeyError, TypeError, ValueError):
-                    return {**observation, "admitted": False, "reason": "corrupt-storage-lease"}
-                if not prior.matches():
-                    # matches() returning false alone can mean an inaccessible process.
-                    if cls._dead(prior.pid):
-                        path.unlink()
-                        continue
-                    return {**observation, "admitted": False, "reason": "unresolved-storage-owner"}
+                    return blocked("corrupt-storage-lease")
+                state = prior.storage_status()
+                if state in {"dead", "reused"}:
+                    path.unlink()
+                    continue
+                if state == "unresolved":
+                    return blocked("unresolved-storage-owner")
                 if prior.job_id != owner.job_id:
                     reserved += int(record["requested_bytes"])
                     count += 1
                 elif prior.to_dict() != owner.to_dict():
-                    return {**observation, "admitted": False, "reason": "storage-owner-conflict"}
+                    return blocked("storage-owner-conflict")
             observation = cls.filesystem(run_root, descriptor)
             remaining = observation["free_bytes"] - reserved - requested_bytes
             admitted = remaining >= observation["safety_bytes"] and (
@@ -403,15 +459,11 @@ class StorageAdmission:
     def _validate_owner(owner: ProcessIdentity) -> None:
         import re
 
-        if re.fullmatch(r"job-[a-z0-9-]+", owner.job_id) is None or owner.pid <= 0:
+        if (
+            re.fullmatch(r"job-[a-z0-9-]+", owner.job_id) is None
+            or owner.pid <= 0
+            or not math.isfinite(owner.create_time)
+            or owner.create_time <= 0
+            or re.fullmatch(r"[0-9a-f]{64}", owner.command_sha256) is None
+        ):
             raise ValueError("Invalid owned storage lease identity.")
-
-    @staticmethod
-    def _dead(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        return False

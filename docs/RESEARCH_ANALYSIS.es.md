@@ -2,7 +2,7 @@
 
 [English](RESEARCH_ANALYSIS.md) · [Manual](MANUAL.es.md#16-análisis-de-estudios)
 
-Versión actual de la aplicación: **0.17.0**. Análisis v8 y vistas guardadas v1 siguen compatibles;
+Versión actual de la aplicación: **0.17.1**. Análisis v8 y vistas guardadas v1 siguen compatibles;
 los informes siguientes conservan el contexto histórico de su implementación.
 
 ## Índice

@@ -92,6 +92,14 @@ def classify_failure(
                     ),
                 )
     # Exact allocation failures only. CUDA illegal-access/dtype/kernel errors are not OOMs.
+    if "StorageOwnershipError" in kinds:
+        return FailureDisposition(
+            ErrorCategory.STORAGE,
+            "storage_ownership",
+            "wait_for_verified_ownership",
+            RetryDisposition.AFTER_FIX,
+            termination_type="infrastructure_failed",
+        )
     if kinds & {"OutOfMemoryError", "CUDAOutOfMemoryError"} or (
         kinds & {"RuntimeError", "AcceleratorError"}
         and any(

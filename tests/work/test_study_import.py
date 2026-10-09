@@ -120,6 +120,170 @@ def test_export_delete_import_satisfies_product_and_reads_logs(
     assert products.verify("models")["verified"]
 
 
+def test_imported_views_are_lazy_local_and_read_only(
+    package: tuple[Path, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lambdaforge.tui.services import ConsoleServices
+    from lambdaforge.work.ImportedStudy import ImportedStudy
+
+    source, execution = package
+    store, registry = roots(tmp_path)
+    store.import_export(source, product_root=registry.root, apply=True)
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Root Studies must not load result envelopes or contact providers.")
+
+    monkeypatch.setattr(ResultStore, "list", forbidden)
+    services = object.__new__(ConsoleServices)
+    services.results = store
+    services.jobs = SimpleNamespace(study=forbidden, study_run=forbidden, study_trial=forbidden)
+    values: dict[str, Any] = {}
+    services._include_imports(values)
+    row = values["work"]["items"][0]
+    selector = row["study_selector"]
+    assert "primary_job_id" not in row  # Imports are evidence, never fabricated scheduler Jobs.
+    assert row["imported"] is True and row["state"] == "succeeded"
+    assert row["work_id"] == "import:" + execution.execution_id
+    assert "runs" not in row and "candidates" not in row["study"]
+    assert len(json.dumps(row)) < 2048
+    study = services.study(selector)
+    assert len(study["candidates"]) == 1
+    assert "runs" not in study["candidates"][0]
+    trial = services.study_trial(selector, 1)
+    assert len(trial["runs"]) == 2
+    run = services.study_run(selector, trial["runs"][0]["key"])
+    assert run["state"] == "succeeded" and "log" in run
+    assert run["paths"]["run_dir"].startswith(str(store.root))
+    assert services.study_analysis(selector)["source"]["execution_id"] == execution.execution_id
+    assert ImportedStudy.rows(store.root) == [row]
+    services._include_imports(values)
+    assert values["work"]["items"] == [row]
+
+
+def test_import_index_does_not_present_ordinary_works_as_studies(
+    package: tuple[Path, Any],
+) -> None:
+    from lambdaforge.work.ImportedStudy import import_index
+
+    source, _ = package
+    manifest = json.loads((source / "manifest.json").read_text())
+    result = json.loads((source / "execution/result.json").read_text())
+    configuration = source / "execution/configuration.json"
+    configuration.write_text(json.dumps({"name": "ordinary", "run": "consumer.Ordinary"}))
+    result["summary"] = {}
+    assert import_index(manifest, result, package=source)["study_expected"] is False
+    configuration.write_text(
+        json.dumps({"steps": [{"parallel": [{"run": "consumer.Repeated", "seeds": [4, 7]}]}]})
+    )
+    assert import_index(manifest, result, package=source)["study_expected"] is True
+
+
+def test_large_verified_aggregate_is_not_an_individual_metadata_document(
+    package: tuple[Path, Any], tmp_path: Path
+) -> None:
+    from lambdaforge.work.StudyImport import _mapping
+
+    source, execution = package
+    path = source / "execution/result.json"
+    # Whitespace padding reproduces the real 102 MiB native envelope without constructing
+    # a giant artificial scientific object. Re-seal only this test-owned export.
+    with path.open("ab") as stream:
+        stream.write(b" " * (65 * 1024 * 1024))
+    reseal(source)
+    store, registry = roots(tmp_path)
+    before = snapshot(tmp_path / "consumer")
+    assert store.import_export(source, product_root=registry.root)["finalized"]
+    assert snapshot(tmp_path / "consumer") == before
+    with pytest.raises(ValueError, match="oversized"):
+        _mapping(path)
+    result = store.import_export(source, product_root=registry.root, apply=True)
+    assert result["applied"] and result["execution_id"] == execution.execution_id
+    assert store.import_export(source, product_root=registry.root, apply=True)["reused"]
+
+
+def test_existing_import_can_explicitly_regenerate_missing_presentation_indexes(
+    package: tuple[Path, Any], tmp_path: Path
+) -> None:
+    from lambdaforge.work.ImportedStudy import ImportedStudy
+
+    source, _ = package
+    store, registry = roots(tmp_path)
+    imported = store.import_export(source, product_root=registry.root, apply=True)
+    directory = Path(imported["path"])
+    original = (directory / "import.json").read_bytes()
+    (directory / "import-study.json").unlink()
+    # A partially completed older presentation upgrade may already have a view directory.
+    # Reapply replaces only that disposable view and leaves the scientific archive intact.
+    assert ImportedStudy.rows(store.root) == []
+    assert store.import_export(source, product_root=registry.root, apply=True)["reused"]
+    assert (directory / "import.json").read_bytes() == original
+    assert len(ImportedStudy.rows(store.root)) == 1
+
+
+@pytest.mark.parametrize("damage", ["run-path", "log-path", "result-symlink", "view-symlink"])
+def test_imported_observation_refuses_paths_outside_its_local_archive(
+    package: tuple[Path, Any], tmp_path: Path, damage: str
+) -> None:
+    from lambdaforge.work.ImportedStudy import ImportedStudy
+
+    source, execution = package
+    store, registry = roots(tmp_path)
+    imported = store.import_export(source, product_root=registry.root, apply=True)
+    observer = ImportedStudy(store.root, "import:" + execution.execution_id)
+    run = observer.view("trial", trial=1)["runs"][0]
+    path = Path(imported["path"]) / "import-view/runs" / (run["key"] + ".json")
+    value = json.loads(path.read_text())
+    if damage == "view-symlink":
+        path.unlink()
+        path.symlink_to(source / "manifest.json")
+    elif damage == "result-symlink":
+        from lambdaforge.work.StudyImport import relative_run_path
+
+        native = dict(value["run"])
+        native["run_id"] = Path(native["run_dir"]).parts[-3]
+        result_path = observer.portable / "execution" / relative_run_path(native) / "result.json"
+        result_path.unlink()
+        result_path.symlink_to(source / "manifest.json")
+    else:
+        value["run"]["run_dir" if damage == "run-path" else "log_path"] = "/etc/passwd"
+        path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="safe|symbolic|Symbolic|outside|escaped|Attempt"):
+        observer.run(run["key"], tail=30, curve_points=80)
+
+
+def test_imported_published_artifacts_use_local_verified_package_paths(
+    package: tuple[Path, Any], tmp_path: Path
+) -> None:
+    from lambdaforge.work.ImportedStudy import ImportedStudy
+    from lambdaforge.work.StudyImport import relative_run_path
+
+    source, execution = package
+    path = source / "execution/result.json"
+    result = json.loads(path.read_text())
+    native = result["runs"][0]
+    artifact = native["artifacts"][0]
+    body = (source / "execution" / relative_run_path(native) / artifact["path"]).read_bytes()
+    artifact["metadata"].update(published_to="/original-host/model", retention="published-only")
+    run_path = source / "execution" / relative_run_path(native) / "result.json"
+    value = json.loads(run_path.read_text())
+    value["artifacts"][0] = artifact
+    run_path.write_text(json.dumps(value))
+    path.write_text(json.dumps(result))
+    published = source / "published-artifacts/run-00000/0000-model"
+    published.parent.mkdir(parents=True)
+    published.write_bytes(body)
+    reseal(source)
+    store, registry = roots(tmp_path)
+    store.import_export(source, product_root=registry.root, apply=True)
+    observer = ImportedStudy(store.root, "import:" + execution.execution_id)
+    key = observer.view("trial", trial=1)["runs"][0]["key"]
+    detail = observer.run(key, tail=30, curve_points=80)
+    found = next(a for a in detail["artifacts"] if a["name"] == "model")
+    assert Path(found["path"]).is_relative_to(store.root)
+    assert Path(found["path"]).read_bytes() == body
+    assert found["published_path"] == "/original-host/model"
+
+
 def test_concurrent_idempotent_import_preserves_one_receipt(
     package: tuple[Path, Any], tmp_path: Path
 ) -> None:

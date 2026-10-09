@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -96,6 +97,51 @@ def _snapshot() -> dict:
             for i in range(1, 101)
         ],
     }
+
+
+@pytest.mark.parametrize("state", [JobState.PREPARING, JobState.RUNNING, JobState.FAILED])
+def test_workspace_keeps_old_telemetry_but_observes_latest_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: JobState
+) -> None:
+    service, original, _root, _transport = _service(tmp_path)
+    recovery = replace(
+        original,
+        job_id="job-recovery",
+        state=state,
+        metadata={"recovery_dependencies": [original.job_id]},
+    )
+    service.store.write(recovery)
+    observed = []
+
+    def study(job_id):
+        observed.append(job_id)
+        return None if job_id == recovery.job_id else pytest.fail("Prior status must not override")
+
+    monkeypatch.setattr(service, "study", study)
+    monkeypatch.setattr(service, "_provider", lambda record: (None, None, None))
+    monkeypatch.setattr(service, "_load_study_summary", lambda record, transport: _snapshot())
+    snapshot = service.study_workspace(original.job_id, latest_job_id=recovery.job_id)
+    assert snapshot["job_state"] == state.value
+    assert snapshot["telemetry_job_id"] == original.job_id
+    assert snapshot["candidates"] == _snapshot()["candidates"]
+    assert observed == [recovery.job_id]
+
+
+def test_workspace_switches_to_new_telemetry_and_refuses_unowned_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, original, _root, _transport = _service(tmp_path)
+    new = replace(original, job_id="job-new", metadata={})
+    service.store.write(new)
+    monkeypatch.setattr(service, "study", lambda job_id: {"candidates": [], "job_state": "running"})
+    assert service.study_workspace(original.job_id, latest_job_id=new.job_id) == {
+        "candidates": [],
+        "job_state": "running",
+        "telemetry_job_id": new.job_id,
+    }
+    monkeypatch.setattr(service, "study", lambda job_id: None)
+    with pytest.raises(ValueError, match="not owned"):
+        service.study_workspace(original.job_id, latest_job_id=new.job_id)
 
 
 def test_oversized_legacy_summary_is_projected_before_transfer(tmp_path: Path) -> None:
@@ -190,9 +236,7 @@ def test_panels_exclude_unshown_evidence_and_admission_history() -> None:
     assert "space" not in hpo["design"]
     assert "admission" not in hpo
     resources = panel_detail(value, "resources")
-    assert resources == {
-        "admission": {"current": {"status": "waiting"}, "updated_at_utc": "now"}
-    }
+    assert resources == {"admission": {"current": {"status": "waiting"}, "updated_at_utc": "now"}}
     assert len(json.dumps(hpo)) < 500
     assert len(value["design"]["evidence"]["requirements"]) == 100_000
 
@@ -391,9 +435,9 @@ def test_host_reader_passes_sweep_geometry_to_an_older_analysis_runtime(
     value = json.loads(base64.b64decode(page["data"]))
     assert value["search_space"] == space
     assert len(calls) == 1
-    assert projection_page(
-        str(root), {"view": "analysis", "fingerprint": page["fingerprint"]}
-    )["unchanged"]
+    assert projection_page(str(root), {"view": "analysis", "fingerprint": page["fingerprint"]})[
+        "unchanged"
+    ]
 
 
 def test_remote_analysis_failure_preserves_the_terminal_exception(tmp_path: Path) -> None:

@@ -33,7 +33,7 @@ projects, or an editable checkout while developing LambdaForge:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.17.0
+python -m pip install lambdaforge==0.17.1
 python -m pip install -e .
 python -m pip check
 lf --version
@@ -356,7 +356,7 @@ version probes live once in `environment.json`.
 Install the optional mature backend and use the uniform Python contract:
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.17.0"
+python -m pip install "lambdaforge[clustering]==0.17.1"
 ```
 
 ```python
@@ -1099,6 +1099,9 @@ completed/pruned evidence, candidate identities, seed assignments and decisions.
 interrupted Runs create new Attempts: compatible checkpoints enable `self.resuming`; without a
 checkpoint that Run starts again. Valid completed Runs and performance-pruned Runs are not repeated.
 Already spent Run/time budgets stay spent; retry does not grant more budget.
+The new Job retains the original persisted seed namespace despite its different staging path.
+Logs and Resume Study target the latest Attempt Job; earlier Trial/Run telemetry remains visible
+until the new worker publishes it. Genuine configuration/input/seed changes still fail closed.
 For repeated/fixed designs, `lf retry STUDY --dry-run --json` lists Runs to reuse, retry and run
 for the first time. Nine successful seeds plus one failed seed reuse nine Runs and create only
 one new Attempt of the failed Run. Fixed recovery uses owned design/Attempt records, not adaptive
@@ -1106,7 +1109,9 @@ controller state. Checkpoints are application state: epoch-level continuation re
 
 After fixing consumer code, use `lf retry STUDY --accept-code-change` **only** if previous metrics
 and checkpoint formats remain scientifically valid. The console offers the same explicit
-compatibility checkbox. Configuration, inputs, seed streams and objective must still match; a
+compatibility checkbox. Detected code changes block submission until acknowledged, rather than
+creating a Job that will predictably fail; the worker still rechecks the freshly staged code.
+Configuration, inputs, seed streams and objective must still match; a
 different scientific protocol requires a new Study. The original manifest remains immutable and
 `recovery-history.jsonl` records actual code revisions. Keep the original Job workspace: cleanup
 protects it while a recovered Study references its evidence. Missing/corrupt recovery state fails
@@ -1199,7 +1204,7 @@ can be run or refreshed explicitly:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.17.0"
+python -m pip install "lambdaforge[analysis-report]==0.17.1"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json
@@ -1231,6 +1236,9 @@ The default profile preserves exact scientific and decision evidence, determinis
 metric trajectories and summarized resource telemetry. `--profile full` also keeps raw
 high-frequency streams. The manifest records each transformed/omitted source, reason, byte size and
 SHA-256; neither profile changes or deletes the original Study.
+
+Finite structured parameters such as `values: [[0.005, 2560.0]]` remain exact categorical
+choices in exported analysis; no YAML changes or retraining are needed to export them.
 
 Resource replay reads the Study's versioned scheduler trace, never terminal prose. It is factual
 until the selected compatibility policy first disagrees; every later metric is explicitly marked
@@ -1470,10 +1478,29 @@ its explicitly registered unscoped path; it is durable evidence, not an implicit
 The final hash directory is the content identity. If preprocessing changes any asset bytes, publish
 a new dataset version rather than reusing `NAME@VERSION`. Use `lf datasets reconcile NAME@VERSION
 --on CLUSTER` to preview index-only repair and `--apply` only after review; an existing or
-unreachable conflicting placement is never removed automatically. LambdaForge does not silently
-relay a large remote dataset through the controller: remote-to-remote placement uses the site's
-durable transfer facility, followed by `reconcile` after the exact manifest-backed directory is in
-place.
+unreachable conflicting placement is never removed automatically.
+
+Publish once, then replicate exact bytes:
+
+```bash
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16  # preview
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --apply
+```
+
+Console: **Datasets → DatasetVersion → Replicate…** selects endpoints and confirms the same plan.
+Tar/gzip transfer prefers existing trusted site SSH; otherwise compressed bytes stream through
+authenticated controller connections without local disk staging. `--route direct|relay` explicitly
+selects policy. Both ends verify exact checksums, atomically publish/register the destination and
+enable `{dataset: corpus@7}`. Configure target `storage.dataset_root`/runtime; keep lf open until
+completion. Conflicting identities remain errors. See [replication](docs/DATASET_RECONSTRUCTION.md).
+
+To resolve an existing conflict deliberately, open **Datasets → exact identity → Manage copies…**.
+Choose a verified project reference, unregister a specific cluster copy while keeping its files,
+or delete that exact managed copy. CLI: `lf datasets adopt NAME@VERSION --on SOURCE --content-id ID`
+and `lf datasets delete/remove NAME@VERSION --on TARGET --content-id ID` preview before `--apply`.
+Adoption selects future resolution only; other copies and historical scientific identities are
+unchanged. Prior declarations are archived and empty retired entries disappear from inventory.
+[Conflict management](docs/DATASET_RECONSTRUCTION.md#conflicting-local-and-remote-registries).
 
 Before expensive reconstruction, use `lf datasets preflight` and `self.outputs.dataset_preflight`.
 [Dataset reconstruction](docs/DATASET_RECONSTRUCTION.md) covers explicit scientific declarations,
@@ -1497,8 +1524,13 @@ declare `products` for native finalization; publication-only retry preserves all
 `lf import PACKAGE --json` verifies a native single-host Study export without mutation;
 `lf import PACKAGE --apply` registers its evidence and sealed products without executing code or
 recomputing Analysis. Original provenance stays intact; imported evidence is not recovery state.
-Console **Products** browses contracts/artifacts/audits and offers **Import Study…** with preview
-and confirmation. Composed/Fleet promotion, dependency waiting/replanning and complete Fleet import
+Console **Studies → Import Study…** (also available in Products) verifies a selected package and
+confirms registration. Imports appear in Studies/Overview as read-only local snapshots: open Trials
+and seeds to inspect retained curves, logs and artifacts without contacting the original cluster.
+Root refresh reads only small import indexes, not the aggregate result. Large verified aggregate
+results are accepted; the 64 MiB individual-metadata bound is not a Study-size limit. Reapply an
+older import to build these presentation indexes without changing its evidence.
+Composed/Fleet promotion, dependency waiting/replanning and complete Fleet import
 remain pending.
 
 Work names are display labels, not identities. The same authored Work may run locally and on one or

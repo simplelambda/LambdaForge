@@ -224,7 +224,7 @@ class StudyImportWorkspace(ResearchWorkspace):
         self.busy = False
         self.source: Path | None = None
         self.preview: dict[str, Any] | None = None
-        super().__init__("Products / Import Study")
+        super().__init__("Studies / Import Study")
 
     def compose_workspace(self) -> ComposeResult:
         yield Static(
@@ -322,7 +322,7 @@ class StudyImportWorkspace(ResearchWorkspace):
         self.query_one("#study-import-status", Static).update(
             f"Import failed · {error}"
             if error
-            else "Evidence registered; no computation launched."
+            else "Evidence registered in Studies as a read-only snapshot; no computation launched."
             if value and value["applied"]
             else "Verified. Review the plan, then confirm import."
         )

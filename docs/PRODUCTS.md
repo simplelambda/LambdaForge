@@ -313,6 +313,24 @@ Analysis without refitting. No application imports, computation, checkpoint cont
 HTML opening occur. Imported configuration cannot become native recovery state. An imported
 archive's `portable/` directory is already the reusable package; it needs no new producer export.
 
+In the Research Console, **Studies → Import Study…** (also accessible from Products and Ctrl+P)
+selects a package directory, verifies it in a worker, previews its exact identity and asks for
+confirmation. Registration adds a labelled read-only snapshot to Studies/Overview in the current
+project. Trials/seeds use local hierarchical projections and the shared selected-Run dashboard;
+retained metrics/logs/artifacts are read locally, not from the original cluster. Captured running
+snapshots are not live controllers. Cancel, retry, history deletion and producer export controls
+are hidden; imported archive deletion remains an explicit Results operation. HTMLs included in the
+package remain accessible in its `portable/reports/` directory.
+
+The native aggregate `execution/result.json` may exceed 64 MiB in a large valid Study. Import first
+verifies its exact declared size and SHA-256 along with every file, then strictly parses/validates
+that aggregate without applying the individual-metadata size ceiling. Checksums, path/ownership,
+duplicate-field and non-finite-value checks are unchanged. Root-screen refresh only reads small
+`import-study.json` indexes, not the aggregate. Reapply an older verified import once to build its
+`import-view/` presentation files under the import lock; scientific records and the original receipt
+remain untouched. Import copies retained bytes and therefore needs local space for the package and
+its local index; it never downloads artifacts again.
+
 Export includes products published through the native declaration/receipt, their independent bytes
 and original producer history. Provider transfer fetches only those objects, never the whole catalog;
 telemetry sampling cannot alter product bytes. Missing published products fail explicitly. Undeclared

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 from lambdaforge.analysis.Effects import (
     AnalysisSurrogate,
+    _group_variance,
     analyze_effects,
     reference_set,
     response_curve,
@@ -67,6 +69,56 @@ def _study(rows: list[tuple[dict[str, Any], float]]) -> dict[str, Any]:
             for index, (parameters, value) in enumerate(rows, 1)
         ],
     }
+
+
+def test_analysis_preserves_structured_conditional_sweep_categories() -> None:
+    rows = [
+        ({"family": "learned", "bounds": bounds}, score)
+        for bounds, score in (
+            ([0.005, 2560.0], 0.65),
+            ([0.05, 128.0], 0.7),
+            ({"low": 0.0, "high": 2000.0}, 0.75),
+            ({"high": 2048.0, "low": 1.0}, 0.8),
+        )
+    ] + [({"family": "fixed"}, 0.6)]
+    source = _study(rows)
+    original = copy.deepcopy(source)
+    authored = {
+        "family": {"values": ["learned", "fixed"]},
+        "bounds": {
+            "values": [
+                [0.005, 2560.0],
+                [0.05, 128.0],
+                {"high": 2000.0, "low": 0.0},
+                {"low": 1.0, "high": 2048.0},
+            ],
+            "when": {"family": "learned"},
+        },
+    }
+    analysis = StudyAnalysis.compute(source, authored_space=authored)
+    assert source == original
+    assert analysis["summary"]["complete_run_count"] == 15
+    assert analysis["summary"]["observed_candidate_count"] == 5
+    assert [candidate["parameters"] for candidate in analysis["candidates"]] == [
+        row[0] for row in rows
+    ]
+    coverage = analysis["coverage"]["marginal"]["bounds"]
+    assert len(coverage["observed_levels"]) == 4
+    assert list(coverage["full_fidelity_level_counts"].values()) == [1, 1, 1, 1]
+    assert coverage["inactive_fraction"] == pytest.approx(0.2)
+    assert analysis["response_curves"]["bounds"]["points"]
+    assert analysis["top_region_importance"]["bounds"]["status"] == "available"
+    assert analysis["interactions"]["surfaces"]
+    json.dumps(analysis, allow_nan=False)
+
+
+def test_categorical_grouping_uses_json_identity_not_python_hashability() -> None:
+    # Dictionary order is operational; sequence order/types retain their exact meaning.
+    assert _group_variance(
+        [{"low": 1, "high": 2}, {"high": 2, "low": 1}, [1, 2], "[1,2]"],
+        [0.0, 2.0, 4.0, 8.0],
+    ) == pytest.approx(8.25)
+    assert _group_variance([False, 0, "0"], [0.0, 1.0, 2.0]) == pytest.approx(2 / 3)
 
 
 def test_dominant_parameter_has_larger_global_importance() -> None:

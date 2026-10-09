@@ -385,6 +385,16 @@ def build_parser() -> argparse.ArgumentParser:
     listing.add_argument("--on")
     listing.add_argument("--all", action="store_true")
     listing.add_argument("--json", action="store_true")
+    adopt = dataset_commands.add_parser(
+        "adopt", help="Explicitly choose a verified content identity as the project reference."
+    )
+    adopt.add_argument("dataset")
+    adopt.add_argument("--on", required=True)
+    adopt.add_argument(
+        "--content-id", required=True, help="Exact sha256:… ID from target inventory."
+    )
+    adopt.add_argument("--apply", action="store_true")
+    adopt.add_argument("--json", action="store_true")
     for operation in (
         "show",
         "locations",
@@ -403,6 +413,11 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--schema", type=Path)
         item.add_argument("--strategy", choices=("auto", "replicate"), default="auto")
         item.add_argument("--json", action="store_true")
+        if operation in {"delete", "remove"}:
+            item.add_argument(
+                "--content-id",
+                help="Select this exact target identity despite conflicts; preview unless --apply.",
+            )
     members = dataset_commands.add_parser("members")
     members.add_argument("dataset")
     members.add_argument("--on", default="local")
@@ -430,6 +445,12 @@ def build_parser() -> argparse.ArgumentParser:
     replicate.add_argument("--source", required=True)
     replicate.add_argument("--destination", required=True)
     replicate.add_argument("--apply", action="store_true")
+    replicate.add_argument(
+        "--route",
+        choices=("auto", "direct", "relay"),
+        default="auto",
+        help="Prefer/require site SSH, or relay compressed bytes without local disk staging.",
+    )
     replicate.add_argument("--json", action="store_true")
 
     products = commands.add_parser(

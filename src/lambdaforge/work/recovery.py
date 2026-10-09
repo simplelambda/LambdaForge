@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from lambdaforge.work.config import WorkConfig
     from lambdaforge.work.models import WorkResult
 
 
@@ -24,6 +25,31 @@ def read_owned_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Invalid recovery document: {path}")
     return value
+
+
+def restore_seed_context(config: WorkConfig, manifest: Mapping[str, Any]) -> WorkConfig:
+    """Re-resolve authored seeds in the validated original Execution's namespace.
+
+    A new Job directory is not a new seed stream. Reparse rather than overwrite the design:
+    changed seeds, replicate counts or policies must still fail the scientific identity checks.
+    Inputs remain anchored to the newly staged YAML; no persisted scientific record is changed.
+    """
+    from lambdaforge.work.config import WorkConfig
+
+    design = manifest["study_designs"][0]
+    seed_source = design.get("seed_source")
+    if not isinstance(seed_source, Mapping) or not isinstance(seed_source.get("namespace"), str):
+        raise ValueError("Persisted Study seed context is missing or corrupt; recovery refused.")
+    restored = WorkConfig.from_mapping(
+        config.raw, source=config.source, seed_namespace=seed_source["namespace"]
+    )
+    current = restored.levels[0].runs[0].study_design
+    if current is None or current.to_dict()["seed_source"] != dict(seed_source):
+        raise ValueError(
+            "Study recovery requires unchanged configuration, inputs and seed policy. "
+            "The authored seeds/replicates or persisted seed coordinates differ."
+        )
+    return restored
 
 
 def validate_execution(path: Path, *, seed_stream: Any = None) -> dict[str, Any]:

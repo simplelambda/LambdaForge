@@ -118,6 +118,7 @@ from lambdaforge.work.recovery import (
     fixed_requirements,
     latest_outcomes,
     read_owned_json,
+    restore_seed_context,
     validate_execution,
 )
 from lambdaforge.work.retention import compact_attempt
@@ -346,10 +347,7 @@ class WorkRunner:
                 "Declared Fleet product promotion is not integrated yet. "
                 "Refusing to start a Study whose model publication cannot be fulfilled."
             )
-        plan = self.plan(config, rerun=rerun)
-        execution_dir = (
-            self._execution_root_override or self._execution_root(plan.source, config.name)
-        ) / plan.execution_id
+        manifest: Mapping[str, Any] | None = None
         if resume_execution is not None:
             if (
                 len(config.levels) != 1
@@ -361,6 +359,11 @@ class WorkRunner:
                 raise ValueError("Study recovery cannot be combined with --rerun or --restart.")
             execution_dir = Path(resume_execution).expanduser().absolute()
             manifest = validate_execution(execution_dir)
+            config = restore_seed_context(config, manifest)
+        elif accept_code_change or resume_study_path is not None:
+            raise ValueError("Recovery options require an existing Study execution.")
+        plan = self.plan(config, rerun=rerun)
+        if manifest is not None:
             if config.levels[0].runs[0].search_policy is None:
                 _validate_fixed_recovery(
                     config.levels[0].runs[0], plan.source, execution_dir, manifest
@@ -384,8 +387,10 @@ class WorkRunner:
                     "and checkpoints remain scientifically compatible; otherwise start a new Study."
                 )
             plan = replace(plan, execution_id=str(manifest["execution_id"]), reuse=False)
-        elif accept_code_change or resume_study_path is not None:
-            raise ValueError("Recovery options require an existing Study execution.")
+        else:
+            execution_dir = (
+                self._execution_root_override or self._execution_root(plan.source, config.name)
+            ) / plan.execution_id
         if dry_run:
             return plan
         from lambdaforge.controlplane.StorageAdmission import StorageAdmission

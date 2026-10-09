@@ -241,6 +241,9 @@ class FakeServices:
                 return value
         raise KeyError(job_id)
 
+    def study_workspace(self, job_id, *, latest_job_id):
+        return self.study(latest_job_id)
+
     def study_run(self, job_id, run_key, *, tail=2_000, curve_points=200):
         assert tail > 0 and curve_points >= 10
         curves = {

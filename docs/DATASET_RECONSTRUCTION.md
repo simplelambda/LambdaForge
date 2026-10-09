@@ -23,12 +23,42 @@ the final publisher still checks identity under the registry lock.
 
 1. **Reuse**: `lf datasets materialize corpus@6 --on TARGET` previews native exact placement;
    review and add `--apply`. `replicate` explicitly selects source/destination. This copies/verifies
-   published content; it does not rebuild scientific arrays. Remote-to-remote transfer restrictions
-   still apply; no implicit relay of huge assets through the controller.
+   published content; it does not rebuild scientific arrays. Native compressed replication supports
+   local/remote placements, preferring direct site SSH; see below.
 2. **Rebuild**: compute an independently sealed, unregistered reconstruction and compare it.
 3. **Publish**: use a fresh version for changed bytes, even after an equivalence report.
    Additional representations under the same version are not supported; there is no silent
    alternative-content placement policy.
+
+## Publish once, replicate exact content
+
+```bash
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --json
+# Review the route, size and destination, then apply:
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --apply
+```
+
+In bare `lf`, open **Datasets → DatasetVersion → Replicate…**, choose endpoints, review the native
+preview and confirm. The Console stays responsive; inline phases/elapsed time and compressed byte
+counts (on the relay route) show progress. Keep the session open until completion. Locations updates
+after registration. The target needs `storage.dataset_root` and a usable LambdaForge runtime
+(existing or bootstrapped); no scientific Work or GPU claim runs. Effective roots remain project-scoped.
+
+`--route auto` probes site SSH from source to destination with trusted host-key checking, without
+prompts or agent/credential forwarding. If available, bytes travel directly between hosts.
+Configure site-authorized noninteractive authentication and trusted host keys on the source host
+to enable it; LambdaForge never installs keys or copies controller credentials. `--route direct`
+requires that connection. `--route relay` uses existing authenticated controller transports with
+a bounded **compressed in-memory stream**, not an archive staged on your computer or in `/tmp`.
+
+Streaming tar/gzip (level 3) verifies the complete source, rejects symbolic/special entries and
+unsafe archive paths, uses owned destination staging/storage admission, and checks exact content
+before locked atomic promotion/registration. Both indexes expose the same content ID to typed
+Dataset inputs. An identical destination is verified/reused; different existing content is refused.
+Interrupted copies never register partial content. Deliberate retry reuses an already committed
+exact placement or transfers again; it is not byte-offset resume. Legacy registered source paths
+remain usable. Replication never rebuilds/relabels/deletes source data or automatically reconciles
+conflicting versions; inspect existing divergence or publish a fresh version first.
 
 LambdaForge cannot infer an output name/version from arbitrary Python before calling `Work.run()`.
 The producing project must perform the public preflight as its first operation:
@@ -141,17 +171,81 @@ are not deleted by this command. Ordinary `lf retry` still invokes Work code; it
 publication-only operation. Local publication uses configured `storage.dataset_root`, or the local
 registry's sibling `datasets/published`; remote publication requires a configured permanent root.
 
+### Failures before sealing (0.17.1)
+
+Before the first copy, `outputs.dataset` now stores `publication-request.json` and a streaming
+`members.jsonl` with exact source checksums in its publication checkpoint collection. If that
+volume cannot accept the initial metadata, it uses an owned `.publication-requests` directory on
+the publication volume. A failure prints the exact request directory. The same
+`lf datasets publish-candidate REQUEST_DIRECTORY [--on CLUSTER] [--apply]` handles this request:
+preview checks every source byte and the declaration; apply only copies/seals/registers those
+bytes under existing locks. Source mutation, unsafe paths and immutable-version conflicts fail
+closed. It does not invoke a Work or rewrite the original failed Attempt as succeeded.
+
+Older failures may have retained validated source files and their member index, but no complete
+publication request. Do not invent missing scientific metadata. Explicitly restore the original
+member/asset declaration, schema, metadata and provenance, then use the public preparation API:
+
+```python
+from lambdaforge.data import DatasetIndex, DatasetPublisher
+
+# original_members must match the producer's declaration, including any extra design assets.
+# An existing validated index can provide the basic members, without recalculating geometry.
+original_members = (member.to_dict() for member in DatasetIndex(source / "members.jsonl"))
+request = DatasetPublisher().prepare_publication(
+    name, version, original_members,
+    source_root=source, request_root=recovery_directory,
+    build_provenance=original_provenance,
+    metadata=original_metadata, target_schema=original_target_schema,
+    scientific_identity=original_scientific_identity,
+)
+print(request)  # Use publish-candidate on this directory, preview first.
+```
+
+For WISDOM's older preprocessing failure, its retained `attempt-0001/dataset/members.jsonl`
+and `dna-validation/dna-validation-report.json` are the starting evidence. Preserve its original
+first-member `dataset_design` asset and publication declaration too; do not infer them from NPZ
+internals. This repeats only inventory verification/publication, not geometry or annotation.
+
 ## Conflicting local and remote registries
 
 `lf datasets list --all` and the Console Datasets screen discover every configured cluster's small
 registry. Equal name/version/content merges locations; distinct content stays in separate visible
 rows, marked **CONFLICT** in the Console. Listing never changes indexes and incomplete discovery is
-visible. Conflicting Console rows expose cached identity metadata, not member/deletion actions
-against an ambiguous logical selector. Use `lf datasets reconcile corpus@6 --on CLUSTER` to inspect
-each target. An existing/unreachable divergent copy is refused; only a proven-absent stale
-registration can be removed with explicit `--apply`. Choose the reference as a researcher, not by
-majority or discovery order; preserve divergent bytes and publish them under an explicit new version
-after reviewing scientific evidence.
+visible. Member reads and whole-version deletion never guess an identity in a conflict.
+**Datasets → exact identity row → Manage copies…** remains enabled: choose a target and
+**Keep as project reference**, **Remove registration · keep files**, or **Delete managed copy**.
+Every operation previews the exact hash/root and requires confirmation. REFERENCE marks the
+controller reference; other divergent rows remain CONFLICT until explicitly retired.
+
+The same native CLI operations are preview-only unless `--apply` is supplied:
+
+```bash
+lf datasets list --on gpu16 --json  # obtain the full exact content ID
+lf datasets adopt corpus@6 --on gpu16 --content-id sha256:FULL_ID_16
+lf datasets adopt corpus@6 --on gpu16 --content-id sha256:FULL_ID_16 --apply
+lf datasets delete corpus@6 --on gpu12 --content-id sha256:FULL_ID_12  # preview
+lf datasets delete corpus@6 --on gpu12 --content-id sha256:FULL_ID_12 --apply
+# Index-only alternative, including a broken/missing copy or legacy external root:
+lf datasets remove corpus@6 --on gpu12 --content-id sha256:FULL_ID_12 --apply
+```
+
+Replace the example IDs with complete observed hashes. Adoption verifies all source checksums
+on its host before archiving/replacing the controller declaration. It chooses **future resolution**,
+not a scientific equivalence certificate: it does not rewrite other registries, relabel bytes,
+overwrite immutable publications or change previous Runs, pinned input IDs, checkpoints or provenance.
+To retain a divergent representation as published evidence, use a distinct explicit version.
+
+Exact deletion independently selects the target registry identity, even if the controller points
+elsewhere. It requires a matching manifest, managed path and no active consumers. Index-only removal
+does not delete bytes or free disk space and can retire a corrupt/missing physical copy; the registry
+must still be readable and valid. Empty entries are retired so they do not reappear in inventory.
+Both operations reject a changed hash/root, lock the target registry, and archive the previous
+declaration in `dataset-registry-history/change-*.json` before mutation. Archive entries record
+before/requested state, not proof a subsequent write succeeded. Unreachable/corrupt registries cannot
+be treated as absent. If remote retirement succeeds but controller cleanup fails, inspect both
+inventories again; never retry against an assumed identity. Historical evidence is never deleted.
+Ordinary unpinned operations still fail closed; `reconcile` remains identity-preserving.
 
 ## Durable equivalence certificates
 

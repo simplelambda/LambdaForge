@@ -9,7 +9,32 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+### Añadido
+
+- Gestión explícita de conflictos Dataset: `datasets adopt` elige referencia verificada byte a byte,
+  retirar/borrar una copia por content ID exacto pese a otras identidades y Manage copies en consola
+  con preview/confirmación y feedback visible. Archiva declaraciones bajo lock, protege consumidores
+  activos/rutas gestionadas, retira entradas vacías y conserva evidencia histórica.
+
+- Réplica nativa comprimida de datasets: CLI preview/apply con rutas auto/direct/relay y consola
+  con selección, confirmación y progreso en segundo plano. Prefiere SSH directo fiable; fallback
+  tar/gzip por conexiones autenticadas del controlador sin archivos intermedios locales. Verifica
+  ambos extremos, staging/admisión segura en destino y publicación inmutable bajo lock; registra
+  ambos índices y reutiliza destinos exactos. Los conflictos siguen siendo errores.
+
 ### Corregido
+
+- Export/análisis de Studies admite valores finitos estructurados (listas y mappings, incluidos
+  límites condicionales de escalares aprendidos). Cobertura y efectos agrupan mediante claves JSON
+  canónicas y conservan parámetros originales, identidad científica exacta y evidencia completada,
+  evitando `TypeError: unhashable type: 'list'`.
+
+- Import de Study admite agregados nativos verificados superiores a 64 MiB sin relajar inventario,
+  checksums ni procedencia. Studies ofrece Import Study con explorador, feedback y confirmación.
+  Los snapshots importados aparecen en Studies/Overview mediante índices locales compactos, con
+  navegación lazy de trials/seeds/curvas/logs/artifacts, sin contactar con el cluster original ni
+  habilitar recovery ejecutable. Reaplicar imports antiguos actualiza solo su presentación y
+  conserva evidencia y recibo original.
 
 - Inferencia pareada automática en orden persistido de adquisición y solo bloques continuos
   completos (`paired-pm-eb-cs-v2`), conservando evidencia histórica. Recovery restaura el compromiso
@@ -157,6 +182,30 @@ metadata empaquetada.
   previas al envío. Mantiene reloj/presupuestos originales al adoptar y migra v1 sin alterar evidencia.
   Reconciliar conserva leases no enviadas y reanudar no elude el presupuesto temporal original.
   Este cambio interno aún no habilita comandos públicos pause/resume/adopción.
+
+## [0.17.1] - 2026-10-08
+
+### Corregido
+
+- La recuperación restaura el namespace de seeds original antes de planificar el nuevo Job,
+  tanto para seeds explícitas como streams automáticos. Otra carpeta de staging ya no provoca
+  un conflicto falso de identidad; cambios reales en entradas/diseño/seeds/código siguen
+  comprobándose. Un cambio de código detectado exige reconocimiento explícito antes de enviar
+  la recuperación. Logs y retry de consola apuntan al último Job conservando la telemetría propia
+  de Trials/Runs anterior; su estado fallido no reemplaza el estado actual de la recuperación.
+
+- Dominios con parámetros JSON estructurados sin errores de hashing. La geometría de recursos usa
+  solo evidencia compatible Work/dispositivo y dimensiones actuales; el historial de otros estudios
+  no contamina el Study. Los fallos internos de hashing no se presentan como configuración errónea.
+- Las leases usan identidad de nacimiento y estados muerto/zombi, conservan propietarios vivos
+  aunque cambien argv y bloquean ante propietarios inaccesibles o de otro host. La reutilización
+  comprobada de PID permite retirar leases antiguas bajo lock. Los bloqueos muestran lease, host y
+  propietario sin afirmar ENOSPC; los reflinks de cero bytes mantienen ownership y margen físico.
+- La publicación conserva inventario exacto y declaración antes de copiar. Las solicitudes guardadas
+  permiten `datasets publish-candidate` con preview tras un fallo temprano, sin recalcular, aceptar
+  fuentes modificadas ni reemplazar versiones silenciosamente. Para resultados antiguos retenidos,
+  `DatasetPublisher.prepare_publication` prepara una solicitud explícita.
+- El rechazo de envíos duplicados apunta al Job existente exacto y sus logs; mantiene la protección.
 
 ## [0.17.0] - 2026-10-04
 

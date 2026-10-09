@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -10,6 +11,15 @@ from lambdaforge.hpo.ActivationCondition import ActivationCondition
 from lambdaforge.hpo.ParameterSpace import ParameterDescriptor, ParameterSpace
 
 INACTIVE = "<inactive>"
+
+
+def category_key(value: Any) -> str:
+    """Hashable canonical JSON key; retain the original value in scientific records.
+
+    Lists/mappings are valid finite choices (for example one pair of model bounds),
+    not extra dimensions. Sorted object keys match ParameterSpace's category identity.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def build_space(

@@ -1,7 +1,7 @@
 """Verify portable native evidence, not consumer code, before registering an imported Study.
 
-The original package is retained intact below an owned ResultStore entry. Its small result envelope
-is indexed beside an import receipt; machine paths are relocated only in observer read models.
+The original package is retained intact below an owned ResultStore entry. Compact presentation
+indexes sit beside an import receipt; machine paths are relocated only in observer read models.
 Product publication uses the existing exact product transaction, not a second execution engine.
 """
 
@@ -27,9 +27,13 @@ from lambdaforge.work.atomic import _fsync_directory
 from lambdaforge.work.models import atomic_json
 
 
-def _mapping(path: Path) -> dict[str, Any]:
+def _mapping(path: Path, *, verified_aggregate: bool = False) -> dict[str, Any]:
     """Explicit import may inspect a large aggregate, never an unbounded individual document."""
-    if path.resolve() != path or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+    if (
+        path.resolve() != path
+        or not path.is_file()
+        or (not verified_aggregate and path.stat().st_size > 64 * 1024 * 1024)
+    ):
         raise ValueError(f"Missing, symbolic or oversized Study import document: {path.name}")
 
     def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -43,9 +47,8 @@ def _mapping(path: Path) -> dict[str, Any]:
     def invalid(value: str) -> None:
         raise ValueError(f"Non-finite Study metadata: {value}")
 
-    value = json.loads(
-        path.read_text(encoding="utf-8"), object_pairs_hook=unique, parse_constant=invalid
-    )
+    with path.open(encoding="utf-8") as stream:
+        value = json.load(stream, object_pairs_hook=unique, parse_constant=invalid)
     if not isinstance(value, dict):
         raise ValueError(f"Study import metadata must be an object: {path.name}")
     return value
@@ -143,7 +146,10 @@ def _verify(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
     if type(finalized) is not bool or manifest.get("export_kind") not in {"snapshot", "final"}:
         raise ValueError("Invalid Study final/snapshot declaration.")
     if finalized:
-        result = _mapping(root / "execution" / "result.json")
+        # A native aggregate grows with the number of Runs. Its exact size and every byte
+        # were verified against the inventory above; the individual-document cap is not a
+        # Study-size limit. Only this explicitly requested, verified aggregate is exempt.
+        result = _mapping(root / "execution" / "result.json", verified_aggregate=True)
         if (
             type(result.get("execution_result_version")) is not int
             or result["execution_result_version"] != 1
@@ -282,6 +288,34 @@ class StudyImport:
         ):
             if destination.exists():
                 cls._existing(destination, package_id)
+                # Older valid imports can acquire local presentation indexes on explicit
+                # re-apply. Never migrate them implicitly while refreshing a root screen.
+                if not (destination / "import-study.json").exists():
+                    from lambdaforge.work.ImportedStudy import import_index, write_import_views
+
+                    stage = destination.with_name(f".{destination.name}-view-{uuid4().hex}")
+                    prior = stage / "previous-view"
+                    view = destination / "import-view"
+                    try:
+                        write_import_views(stage, result, package=destination / "portable")
+                        if view.is_symlink() or view.resolve() != view:
+                            raise ValueError("Imported presentation root cannot be symbolic.")
+                        if view.exists():
+                            os.replace(view, prior)
+                        os.replace(stage / "import-view", view)
+                        atomic_json(
+                            destination / "import-study.json",
+                            import_index(manifest, result, package=destination / "portable"),
+                        )
+                    except Exception:
+                        if prior.exists():
+                            if view.exists():
+                                os.replace(view, stage / "discarded-view")
+                            os.replace(prior, view)
+                        raise
+                    finally:
+                        if stage.exists():
+                            shutil.rmtree(stage)  # Exact unpublished presentation only.
             else:
                 if destination.resolve() != destination:
                     raise ValueError("Study import destination ownership changed.")
@@ -308,6 +342,13 @@ class StudyImport:
                         }
                         atomic_json(stage / "result.json", result)
                         atomic_json(stage / "import.json", receipt)
+                        from lambdaforge.work.ImportedStudy import import_index, write_import_views
+
+                        atomic_json(
+                            stage / "import-study.json",
+                            import_index(manifest, result, package=stage / "portable"),
+                        )
+                        write_import_views(stage, result)
                         os.replace(stage, destination)
                         _fsync_directory(destination.parent)
                     finally:
@@ -333,5 +374,8 @@ class StudyImport:
                 "Existing Execution is not this verified Study import; refusing overwrite."
             )
         _, result, existing_id = _verify(destination / "portable")
-        if existing_id != package_id or _mapping(destination / "result.json") != result:
+        if (
+            existing_id != package_id
+            or _mapping(destination / "result.json", verified_aggregate=True) != result
+        ):
             raise ValueError("Previously imported Study evidence/index is corrupt.")

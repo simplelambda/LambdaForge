@@ -840,10 +840,9 @@ class ResourceDemandModel:
         self.active_evidence = tuple(active_evidence)
         self.placement_failures = tuple(placement_failures)
         self.parameter_schema = dict(parameter_schema or {})
-        points = tuple(value.parameters for value in self.observations) + tuple(
-            value.parameters for value in self.active_evidence
-        )
-        self.parameter_space = ParameterSpace.from_schema(self.parameter_schema, points)
+        # Shared history contains other Work families. Only authored geometry is global;
+        # inferred dimensions must be constructed after compatibility filtering below.
+        self.parameter_space = ParameterSpace.from_schema(self.parameter_schema)
         self._prediction_cache: dict[str, ResourcePrediction] = {}
 
     def phase_model(self, compatibility_key: str, hardware: str) -> ResourcePhaseModel:
@@ -923,29 +922,39 @@ class ResourceDemandModel:
             for value in self.observations
             if value.compatibility_key == compatibility_key and value.hardware == hardware
         ]
+        active_compatible = [
+            value
+            for value in self.active_evidence
+            if value.compatibility_key == compatibility_key and value.hardware == hardware
+        ]
+        names = set(self.parameter_schema) | set(parameters)
+        points = tuple(
+            {key: value for key, value in point.items() if key in names}
+            for point in (
+                parameters,
+                *(value.parameters for value in compatible),
+                *(value.parameters for value in active_compatible),
+            )
+        )
+        parameter_space = ParameterSpace.from_schema(self.parameter_schema, points)
         candidate_matches = [value for value in compatible if value.candidate_key == candidate_key]
         evidence = (
             candidate_matches
             or sorted(
                 compatible,
                 key=lambda value: (
-                    _mixed_distance(parameters, value.parameters, self.parameter_space),
+                    _mixed_distance(parameters, value.parameters, parameter_space),
                     value.timestamp_utc,
                 ),
             )[: min(24, len(compatible))]
         )
-        active_compatible = [
-            value
-            for value in self.active_evidence
-            if value.compatibility_key == compatibility_key and value.hardware == hardware
-        ]
         active_matches = [
             value for value in active_compatible if value.candidate_key == candidate_key
         ]
         active_distances = sorted(
             (
                 (
-                    _mixed_distance(parameters, value.parameters, self.parameter_space),
+                    _mixed_distance(parameters, value.parameters, parameter_space),
                     value,
                 )
                 for value in active_compatible
@@ -958,7 +967,7 @@ class ResourceDemandModel:
                 item[1].running_peak_bytes,
             ),
         )
-        support_scale = _active_support_scale(active_distances, self.parameter_space)
+        support_scale = _active_support_scale(active_distances, parameter_space)
         active_support = max(
             (
                 math.exp(-distance / max(support_scale, 1e-12))
@@ -1026,7 +1035,7 @@ class ResourceDemandModel:
                 active_draws: list[int] = []
                 active_weights: list[float] = []
                 for value in active_near:
-                    distance = _mixed_distance(parameters, value.parameters, self.parameter_space)
+                    distance = _mixed_distance(parameters, value.parameters, parameter_space)
                     proximity = (
                         1.0
                         if value in active_matches
@@ -1085,7 +1094,7 @@ class ResourceDemandModel:
             predicted = max(known_lower, exact_peaks[0])
             distance = min(
                 (
-                    _mixed_distance(parameters, value.parameters, self.parameter_space)
+                    _mixed_distance(parameters, value.parameters, parameter_space)
                     for value in evidence
                 ),
                 default=1.0,
@@ -1126,9 +1135,9 @@ class ResourceDemandModel:
                     duration_source,
                 )
             )
-        weighted = _weighted_peaks(parameters, evidence, self.parameter_space)
+        weighted = _weighted_peaks(parameters, evidence, parameter_space)
         samples = _deterministic_bootstrap(weighted)
-        residuals = _loo_underprediction_residuals(evidence, self.parameter_space)
+        residuals = _loo_underprediction_residuals(evidence, parameter_space)
         calibrated = tuple(
             max(known_lower, sample + residuals[index % len(residuals)])
             for index, sample in enumerate(samples)
@@ -1140,7 +1149,7 @@ class ResourceDemandModel:
                 max(value.observed_peak_bytes, value.lower_bound_bytes)
                 * max(
                     0.0,
-                    1.0 - _mixed_distance(parameters, value.parameters, self.parameter_space),
+                    1.0 - _mixed_distance(parameters, value.parameters, parameter_space),
                 )
             )
             for value in evidence
@@ -1153,13 +1162,10 @@ class ResourceDemandModel:
         lower = max(known_lower, min(calibrated))
         upper = max(lower, max(calibrated))
         nearest = min(
-            (
-                _mixed_distance(parameters, value.parameters, self.parameter_space)
-                for value in evidence
-            ),
+            (_mixed_distance(parameters, value.parameters, parameter_space) for value in evidence),
             default=1.0,
         )
-        loo_support = _empirical_support_distance(evidence, self.parameter_space)
+        loo_support = _empirical_support_distance(evidence, parameter_space)
         nonconformity = nearest / max(loo_support, 1e-12) if loo_support > 0 else nearest
         if nonconformity > 1.0:
             tail = int(upper + min(1.0, nonconformity - 1.0) * (total_bytes - upper))

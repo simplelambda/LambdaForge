@@ -235,9 +235,17 @@ class WorkConfig:
 
     @classmethod
     def from_mapping(
-        cls, value: Mapping[str, Any], *, source: str | Path | None = None
+        cls,
+        value: Mapping[str, Any],
+        *,
+        source: str | Path | None = None,
+        seed_namespace: str | None = None,
     ) -> WorkConfig:
-        """Normalize the only supported YAML language and reject historical fields."""
+        """Normalize Work YAML; owned recovery may retain its original seed namespace.
+
+        ``seed_namespace`` affects seed coordinates only, not the source/input directory.
+        Ordinary configuration discovery uses the current project without an override.
+        """
         data = copy.deepcopy(dict(value))
         unexpected = set(data) - _TOP_FIELDS
         if unexpected:
@@ -250,6 +258,9 @@ class WorkConfig:
             data.get("name", source_path.stem if source_path is not None else None), "name"
         )
         project = ProjectContext.discover(source_path or Path.cwd())
+        if seed_namespace is not None:
+            # Owned recovery restores stream coordinates, not the old machine's input paths.
+            project = ProjectContext(project.root, seed_namespace)
         if ("run" in data) == ("steps" in data):
             raise ValueError("A Work YAML must define exactly one run or steps.")
         default_resources = _work_resources(data.get("resources"))

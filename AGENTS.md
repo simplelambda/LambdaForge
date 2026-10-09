@@ -1,6 +1,6 @@
 # LambdaForge agent guide
 
-This is the low-token source of truth for agents using or modifying LambdaForge 0.17.0. Spanish is
+This is the low-token source of truth for agents using or modifying LambdaForge 0.17.1. Spanish is
 in `AGENTS.es.md`. Read the relevant section of `docs/MANUAL.md` only when more detail is needed,
 then inspect the public signature or implementation being changed. Current tests and code override
 assumptions.
@@ -33,7 +33,7 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Monitor semantic work | Research Console; `lf overview --json` |
 | Work operations | `lf show/logs/cancel/retry/delete SELECTOR`; study Run: `show/logs WORK --run KEY` |
 | Low-level jobs | `lf jobs list/show/logs/cancel/retry/delete`; `lf jobs clear [--apply]` |
-| Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
+| Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/replicate/delete` |
 | Dataset reconstruction/publication | `lf datasets preflight/compare/publish-candidate`; `docs/DATASET_RECONSTRUCTION.md` |
 | Explicit durable dataset equivalence | `lambdaforge.data.DatasetEquivalenceCertificate`; `docs/DATASET_RECONSTRUCTION.md` |
 | Durable products / decisions / selection | `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`; `docs/PRODUCTS.md` |
@@ -70,11 +70,25 @@ and full Fleet lifecycle are not implemented merely because they appear in the p
 `lf import PACKAGE [--apply]` verifies/registers native single-host exports and sealed products.
 Original records remain in `portable/`, placement in `import.json`; imported evidence is read-only,
 not executable recovery. Provider export never samples product bytes. See `docs/PRODUCTS.md`.
+Console Studies/Overview include imported read-only snapshots through local compact indexes;
+Studies → Import Study uses the same preview/apply service as CLI. Never create fake Jobs or contact
+the original host to read an import. Selected Trial/Run views relocate only owned evidence paths.
+Verified aggregate result size is not limited by the individual metadata-document safety bound.
+Resource prediction infers geometry only after Work/device compatibility filtering; structured JSON
+values retain canonical meaning. Storage lifetime checks do not reuse signal/argv identity as a
+death test: live commitments survive exec, verified PID reuse/zombies permit locked reclamation,
+and inaccessible/foreign owners remain protected. Ownership refusal is not ENOSPC. Dataset
+publication requests preserve exact source inventories before copy; `datasets publish-candidate`
+can retry that declaration without executing Work code. Older retained indexes require an explicit
+original declaration via `DatasetPublisher.prepare_publication`, never guessed NPZ metadata.
 
 Study recovery (adaptive, repeated seeds or fixed sweep) is `lf retry STUDY` or **Resume Study…**
 in its console workspace. `--dry-run --json` exposes reuse/retry/pending evidence without launching.
 Fixed designs restore owned execution/design/Attempt records, never require or fabricate adaptive
 `hpo-control/state.json`; adaptive recovery still requires that state. It
+restores the original seed namespace before re-planning a newly staged Job, never substitutes
+persisted seeds for changed authored values or mutates origin records. Console telemetry may use
+an older referenced Job, but lifecycle/logs/retry use the newest owned recovery Job. It
 reconnects a freshly prepared Job to the exact original owned Execution on the same cluster;
 valid completed/pruned evidence, HPO decisions, seeds and spent budgets remain intact. Failed and
 interrupted Runs create new Attempts from compatible checkpoints or start fresh when absent.
@@ -515,6 +529,8 @@ For sweeps without adaptive INITIALIZE, persisted StudyDesign.space owns the Ana
 never infer unconditional required keys from sparse branches. Host readers pass sweep geometry
 explicitly to old immutable runtimes. Empty valid response contexts are insufficient evidence;
 bounded remote errors must preserve the terminal exception, not only the traceback header.
+Finite JSON list/mapping choices are categories: coverage/effect grouping uses canonical JSON
+keys and keeps the original values, never hash raw choices or flatten model bounds into dimensions.
 
 Stable screening stops ordinary optimization, not scientific work: material feasible support and
 interaction debt plus confirmation continue until exhausted or hard-budgeted. Compute
@@ -726,6 +742,21 @@ is read-only, merges (name, version, content ID), discovers all configured Conso
 shows conflicts without ambiguous mutations. See `docs/DATASET_RECONSTRUCTION.md` (Spanish sibling).
 
 ## Control-plane invariants
+
+Conflicted Dataset rows retain explicit Manage copies: native `datasets adopt --on SOURCE
+--content-id ID` verifies bytes then archives/selects the future controller reference only.
+Exact `datasets delete/remove --on TARGET --content-id ID` preview before apply, operate on target
+authority independently of a different controller ID, block active consumers, archive old records
+under CAS/lock and drop empty entries. Remove is index-only; delete still requires safe managed
+paths/exact manifests. Never relabel bytes, rewrite old Runs or treat adoption as equivalence.
+
+Dataset replication is explicit preview/apply: `lf datasets replicate NAME@VERSION --source SOURCE
+--destination TARGET [--route auto|direct|relay] [--apply]`; Console Dataset → Replicate uses the same
+service. Prefer host-key-verified site SSH without credential/agent forwarding; fallback streams
+tar/gzip through authenticated controller transports without local disk staging. Verify both ends,
+safe archive paths, destination-volume admission and locked immutable publication, then register
+both indexes. Never rebuild/overwrite conflicting identities. Keep the session online. Legacy
+source placements remain usable; loopback tests do not certify real site SSH connectivity.
 
 Public `lf run CONFIG --on-fleet NAME` supports fresh adaptive/fixed/repeated/automatic paired Studies,
 local coordinator and managed member profiles. Run Work exposes the same targets. Checkpoint/fidelity

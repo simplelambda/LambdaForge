@@ -313,8 +313,9 @@ class JobService:
                     "Use --allow-duplicate only when concurrent duplicate work is intentional.",
                 ),
                 commands=(
-                    ("Work status", f"lf show {shlex.quote(name)}"),
+                    ("Work status", f"lf show {selected.job_id}"),
                     ("Existing job", f"lf jobs show {selected.job_id}"),
+                    ("Existing logs", f"lf logs {selected.job_id}"),
                     ("Intentional duplicate", rerun),
                 ),
                 context={
@@ -594,6 +595,25 @@ class JobService:
         value = self._load_study_summary(record, transport)
         return {**value, "job_state": record.state.value} if value is not None else None
 
+    def study_workspace(self, job_id: str, *, latest_job_id: str) -> dict[str, Any] | None:
+        """Keep prior owned telemetry while observing the latest recovery Job's lifecycle."""
+        current = self.study(latest_job_id)
+        if current is not None:
+            return {**current, "telemetry_job_id": latest_job_id}
+        if latest_job_id == job_id:
+            return None
+        latest = self.get(latest_job_id, refresh=False)
+        if job_id not in latest.metadata.get("recovery_dependencies", ()):
+            raise ValueError("Study telemetry fallback is not owned by this recovery Job.")
+        prior = self.get(job_id, refresh=False)
+        _profile, transport, _scheduler = self._provider(prior)
+        value = self._load_study_summary(prior, transport)
+        return (
+            {**value, "job_state": latest.state.value, "telemetry_job_id": job_id}
+            if value is not None
+            else None
+        )
+
     def study_actions(self, job_id: str) -> tuple[dict[str, Any], ...]:
         """Read the complete append-only HPO decision history on explicit demand."""
         record = self.get(job_id, refresh=False)
@@ -736,7 +756,6 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
         if detail is None:
             raise KeyError(f"Job {job_id} has no study telemetry.")
         selected = detail.get("run")
-        candidate_parameters = dict(detail.get("parameters", {}))
         if not isinstance(selected, dict) or selected.get("key") != run_key:
             raise KeyError(f"Unknown study Run {run_key!r} in Job {job_id}.")
         # The selected-Run route has already read its native record on the execution host.
@@ -754,7 +773,6 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             _profile, transport, _scheduler = self._provider(owner)
         log_path = self._owned_study_path(record, selected.get("log_path"))
         run_dir = self._owned_study_path(record, selected.get("run_dir"))
-        result_path = run_dir / "result.json" if run_dir is not None else None
         metric_paths = tuple(
             path
             for path in (
@@ -763,7 +781,44 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             )
             if path is not None
         )
-        log_text, log_truncated = self._read_study_log(transport, log_path, tail=tail)
+        return self._study_run_dashboard(
+            detail,
+            transport,
+            job_id=job_id,
+            cluster=record.cluster,
+            run_key=run_key,
+            log_path=log_path,
+            run_dir=run_dir,
+            metric_paths=metric_paths,
+            tail=tail,
+            curve_points=curve_points,
+        )
+
+    @classmethod
+    def _study_run_dashboard(
+        cls,
+        detail: Mapping[str, Any],
+        transport: Any,
+        *,
+        job_id: str,
+        cluster: str,
+        run_key: str,
+        log_path: PurePosixPath | None,
+        run_dir: PurePosixPath | None,
+        metric_paths: Sequence[PurePosixPath],
+        tail: int | None,
+        curve_points: int,
+    ) -> dict[str, Any]:
+        """Render one selected Run after its caller has resolved owned evidence paths.
+
+        Shared by provider observation and local portable evidence; no Job or execution is
+        fabricated for an import, and this renderer never schedules or mutates anything.
+        """
+        selected = detail["run"]
+        candidate_parameters = dict(detail.get("parameters", {}))
+        placement = selected.get("placement")
+        result_path = run_dir / "result.json" if run_dir is not None else None
+        log_text, log_truncated = cls._read_study_log(transport, log_path, tail=tail)
         failure = selected.get("failure")
         failure = dict(failure) if isinstance(failure, Mapping) else None
         persisted: Mapping[str, Any] | None = None
@@ -774,7 +829,7 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             "cancelled",
         }
         if result_path is not None and (result_ready or failure is not None):
-            result_text, _result_truncated = self._read_bounded_file(
+            result_text, _result_truncated = cls._read_bounded_file(
                 transport, result_path, limit=8 * 1024 * 1024
             )
             if result_text:
@@ -795,7 +850,7 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
         chart_filter: dict[str, Any] = {}
         metrics_truncated = False
         for path in metric_paths:
-            text, truncated = self._read_bounded_file(transport, path, limit=16 * 1024 * 1024)
+            text, truncated = cls._read_bounded_file(transport, path, limit=16 * 1024 * 1024)
             metrics_truncated = metrics_truncated or truncated
             for line in text.splitlines():
                 try:
@@ -853,14 +908,14 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             else selected.get("best_objective")
         )
         normalized_series: dict[str, Sequence[dict[str, float | int]]] = {
-            name: self._downsample_curve(values, curve_points, preserve_step=best_step)
+            name: cls._downsample_curve(values, curve_points, preserve_step=best_step)
             for name, values in sorted(series.items())
         }
         latest = {name: values[-1]["value"] for name, values in normalized_series.items() if values}
         return {
             "study_run_version": 1,
             "job_id": job_id,
-            "cluster": record.cluster,
+            "cluster": cluster,
             "key": run_key,
             "placement": dict(placement) if isinstance(placement, Mapping) else None,
             "trial": selected.get("trial"),
@@ -893,7 +948,7 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             "log": log_text,
             "log_truncated": log_truncated,
             "metrics_truncated": metrics_truncated,
-            "artifacts": self._study_artifacts(persisted, run_dir),
+            "artifacts": cls._study_artifacts(persisted, run_dir),
             "paths": {
                 "run_dir": selected.get("run_dir"),
                 "log": str(log_path) if log_path is not None else None,
@@ -1764,6 +1819,7 @@ if paths:
    exec(seed_source.replace(", slots=True", ""))
    stream=ProjectSeedStream
   out=fixed_recovery_preview(p,seed_stream=stream)
+  out["previous_code_identity"]=read(p/"current-code.json").get("code_identity",manifest.get("code_identity"))
   json.dump(out,sys.stdout); sys.exit(0)
  if not (p/"hpo-control"/"state.json").is_file():
   raise SystemExit("Persisted adaptive Study recovery state is missing; refusing a silent restart")
@@ -1775,6 +1831,7 @@ if paths:
       "failed_attempts":sum(r.get("status")=="failed" for r in state.get("runs",[])),
       "pending_actions":len(state.get("pending_actions",[])),
       "proposed_candidates":len(state.get("proposed_pool_trials",[]))}
+ out["previous_code_identity"]=read(p/"current-code.json").get("code_identity",manifest.get("code_identity"))
 json.dump(out,sys.stdout)
 """
         observed = transport.run(
@@ -1802,6 +1859,17 @@ json.dump(out,sys.stdout)
         if observed.returncode:
             raise ValueError(f"Cannot inspect Study recovery: {observed.stderr.strip()[-1000:]}")
         plan = json.loads(observed.stdout)
+        previous_code = plan.get("previous_code_identity")
+        source_config = self._retry_source_config(previous)
+        if plan.get("resumable") and isinstance(previous_code, Mapping) and source_config:
+            from lambdaforge.ProjectContext import ProjectContext
+            from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
+
+            current_code = CodeIdentity.capture(
+                ProjectContext.discover(source_config).root
+            ).to_dict()
+            plan["code_change_detected"] = current_code != previous_code
+            plan["current_code_identity"] = current_code
         plan.update(
             {
                 "job_id": job_id,
@@ -1883,6 +1951,12 @@ json.dump(out,sys.stdout)
                 elif argument != "--accept-code-change":
                     cleaned.append(argument)
             preview = self.retry_preview(job_id) if previous.metadata.get("study_expected") else {}
+            if preview.get("code_change_detected") and not accept_code_change and not dry_run:
+                raise ValueError(
+                    "Consumer code changed. Review the recovery plan and use --accept-code-change "
+                    "only if previous metrics and checkpoints remain scientifically compatible. "
+                    "No recovery Job was submitted."
+                )
             recovery_metadata: dict[str, Any] = {}
             if preview.get("resumable"):
                 cleaned = [

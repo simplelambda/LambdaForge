@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 import yaml
@@ -89,16 +90,36 @@ class DatasetCommands:
         elif operation == "lineage":
             payload = service.lineage(arguments.dataset)
         elif operation == "remove":
-            removed = service.remove(arguments.dataset, cluster=arguments.on)
-            payload = {"removed": True, "remaining": removed.to_dict() if removed else None}
+            if arguments.content_id:
+                payload = service.retire(
+                    arguments.dataset,
+                    cluster=arguments.on,
+                    content_id=arguments.content_id,
+                    apply=arguments.apply,
+                )
+            else:
+                removed = service.remove(arguments.dataset, cluster=arguments.on)
+                payload = {"removed": True, "remaining": removed.to_dict() if removed else None}
+        elif operation == "adopt":
+            payload = service.adopt(
+                arguments.dataset,
+                cluster=arguments.on,
+                content_id=arguments.content_id,
+                apply=arguments.apply,
+            )
         elif operation == "reconcile":
             payload = service.reconcile(
                 arguments.dataset, cluster=arguments.on, apply=arguments.apply
             )
         elif operation == "delete":
             payload = service.delete(
-                arguments.dataset, cluster=arguments.on, apply=arguments.apply
+                arguments.dataset,
+                cluster=arguments.on,
+                apply=arguments.apply,
+                content_id=arguments.content_id,
             ).to_dict()
+            if arguments.content_id:
+                payload["explicit_content_id"] = arguments.content_id
         elif operation == "materialize":
             payload = service.materialize(
                 arguments.dataset,
@@ -112,6 +133,8 @@ class DatasetCommands:
                 source=arguments.source,
                 destination=arguments.destination,
                 apply=arguments.apply,
+                route=getattr(arguments, "route", "auto"),
+                progress=None if getattr(arguments, "json", False) else cls._replication_progress,
             ).to_dict()
         if getattr(arguments, "json", False):
             if isinstance(payload, dict) and getattr(arguments, "default_cluster_source", None):
@@ -128,12 +151,26 @@ class DatasetCommands:
             print(f"Warning: dataset discovery degraded: {warning}", file=sys.stderr)
         return (
             2
-            if operation == "preflight" and not payload["allowed"]
+            if (operation == "preflight" and not payload["allowed"])
+            or (
+                operation in {"adopt", "remove", "delete"}
+                and isinstance(payload, dict)
+                and payload.get("safe") is False
+                and getattr(arguments, "content_id", None)
+            )
             else 1
             if operation == "compare"
             and payload["status"] in {"invalid", "different", "unresolved"}
             else 0
         )
+
+    @staticmethod
+    def _replication_progress(value: Mapping[str, Any]) -> None:
+        message = str(value.get("message", value.get("phase", "replication")))
+        transferred = value.get("compressed_bytes")
+        if isinstance(transferred, int):
+            message += f" · {transferred / 1048576:.1f} MiB compressed"
+        print(message, file=sys.stderr, flush=True)
 
     @staticmethod
     def _partition(value: str) -> tuple[str, str]:
@@ -150,6 +187,29 @@ class DatasetCommands:
         default_source: str | None = None,
         verbose: bool = False,
     ) -> None:
+        if operation == "adopt" or operation == "remove" and "content_id" in payload:
+            print(
+                "CHOOSE DATASET REFERENCE" if operation == "adopt" else "REMOVE EXACT REGISTRATION"
+            )
+            print(f"Dataset: {payload['dataset']} · cluster: {payload['cluster']}")
+            print(f"Content: {payload['content_id']}")
+            print(f"Root: {payload.get('root') or 'not materialized'}")
+            if operation == "adopt":
+                print(f"Previous reference: {payload.get('previous_content_id') or 'none'}")
+            print(payload["notice"])
+            print(f"Safe: {payload['safe']} · applied: {payload['applied']}")
+            if not payload["safe"]:
+                print(f"Reason: {payload.get('reason') or 'active consumers or unsafe target'}")
+                if payload.get("active_consumers"):
+                    print("Active consumers: " + ", ".join(payload["active_consumers"]))
+            if payload.get("history"):
+                print(f"Archived declaration: {payload['history']}")
+            if payload["safe"] and not payload["applied"]:
+                print(
+                    f"Apply: lf datasets {operation} {payload['dataset']} "
+                    f"--on {payload['cluster']} --content-id {payload['content_id']} --apply"
+                )
+            return
         if operation == "preflight":
             print(f"Dataset: {payload['dataset']} · {payload['intent']}")
             print(f"Preflight: {'ALLOWED' if payload['allowed'] else 'BLOCKED'}")
@@ -263,12 +323,18 @@ class DatasetCommands:
                 print("Reasons:")
                 for reason in payload["reasons"]:
                     print(f"  - {reason}")
-            print("Logical DatasetVersion: PRESERVED")
+            print("Other identities and scientific Run evidence: PRESERVED")
             print(f"Applied: {payload.get('applied')}")
             if payload.get("safe") and not payload.get("applied"):
                 print(
                     "Apply: lf datasets delete "
-                    f"{payload['dataset']} --on {payload['cluster']} --apply"
+                    f"{payload['dataset']} --on {payload['cluster']} "
+                    + (
+                        f"--content-id {payload['explicit_content_id']} "
+                        if payload.get("explicit_content_id")
+                        else ""
+                    )
+                    + "--apply"
                 )
             return
         if operation == "reconcile":

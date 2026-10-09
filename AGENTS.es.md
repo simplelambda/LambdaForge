@@ -1,6 +1,6 @@
 # Guía de LambdaForge para agentes
 
-Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.17.0. Consulta solo la
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.17.1. Consulta solo la
 sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
 
 ## Arquitectura no negociable
@@ -14,6 +14,14 @@ constructor/método, grafos arbitrarios, construcción recursiva `target/ref/par
 runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada de otro runner.
 
 ## Rutas rápidas
+
+La réplica de datasets usa `lf datasets replicate NOMBRE@VERSION --source ORIGEN --destination
+DESTINO [--route auto|direct|relay] [--apply]` o Dataset → Replicate en consola. Es preview/apply,
+tar/gzip comprimido, preferentemente SSH directo fiable sin forwarding de credenciales; fallback
+stream autenticado por controlador sin archivos intermedios locales. Verifica ambos extremos,
+staging/rutas seguras, admisión en destino, publicación bajo lock y registra ambos índices.
+Nunca reconstruye/sobrescribe conflictos; mantén la sesión abierta. Pruebas loopback no certifican
+SSH real entre clústeres. Admite placements antiguos registrados.
 
 | Necesidad | Comando |
 |---|---|
@@ -29,7 +37,7 @@ runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada 
 | Monitorizar | Consola de investigación; `lf overview --json` |
 | Operar Work | `lf show/logs/cancel/retry/delete SELECTOR`; Run: `show/logs WORK --run CLAVE` |
 | Jobs de bajo nivel | `lf jobs list/show/logs/cancel/retry/delete/clear`; `lf doctor --on CLUSTER` |
-| Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/delete` |
+| Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/replicate/delete` |
 | Reconstruir/publicar datasets | `lf datasets preflight/compare/publish-candidate`; `docs/DATASET_RECONSTRUCTION.es.md` |
 | Productos durables / decisiones / selección | `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`; `docs/PRODUCTS.es.md` |
 | Equivalencia durable explícita de datasets | `lambdaforge.data.DatasetEquivalenceCertificate`; `docs/DATASET_RECONSTRUCTION.es.md` |
@@ -62,6 +70,17 @@ no están implementados por aparecer en el plan.
 `lf import PACKAGE [--apply]` verifica/registra exports nativos de un host y productos sellados.
 Originales en `portable/`, ubicación en `import.json`; evidencia importada es read-only, no recovery
 ejecutable. Export de provider nunca muestrea bytes de productos. Ver `docs/PRODUCTS.es.md`.
+Studies/Overview incluyen snapshots importados read-only mediante índices locales compactos;
+Studies → Import Study usa el mismo servicio preview/apply que CLI. Nunca crea Jobs ficticios ni
+contacta con el host original para leer imports. Trials/Runs reubican solo rutas propias verificadas.
+El límite de metadata individual no limita el tamaño del resultado agregado verificado.
+Recursos infiere geometría solo tras filtrar compatibilidad Work/dispositivo y conserva significado
+de parámetros JSON estructurados. La identidad para señales no es una prueba de muerte para storage:
+leases vivas sobreviven exec, nacimiento distinto/zombi permiten reclamación bajo lock y propietarios
+inaccesibles/remotos siguen protegidos. Ownership no es ENOSPC. Las solicitudes de publicación guardan
+inventarios exactos antes de copiar; `datasets publish-candidate` reintenta sin ejecutar Work.
+Índices antiguos retenidos requieren declaración original explícita mediante
+`DatasetPublisher.prepare_publication`, nunca inferir metadatos del NPZ.
 
 ActivationCondition es la autoridad inmutable AND de igualdad/pertenencia compartida por
 ParameterSpace. `when: {parent: valor}` y `{parent: {eq: valor}}` normalizan igual; `in` requiere
@@ -76,7 +95,10 @@ Guía: docs/CONDITIONAL_STUDIES.es.md.
 Un Study adaptativo, de seeds repetidas o sweep fijo se recupera con `lf retry STUDY` o
 **Resume Study…** en su ventana. `--dry-run --json` explica Runs reutilizadas, reintentadas y
 pendientes sin lanzar. Diseños fijos usan registros propios de Execution/diseño/Attempts, nunca
-requieren ni inventan `hpo-control/state.json`; los adaptativos sí lo requieren. Se prepara
+requieren ni inventan `hpo-control/state.json`; los adaptativos sí lo requieren. Restaura el
+namespace de seeds original antes de replanificar el nuevo Job; no reemplaces valores authored
+modificados por los persistidos ni alteres registros originales. Telemetría puede proceder de un
+Job referenciado anterior, pero estado/logs/retry usan el último Job propio. Se prepara
 otro Job conectado a la Execution original exacta del mismo clúster: conserva evidencia completa/
 podada, decisiones HPO, seeds y presupuestos gastados. Runs fallidas/interrumpidas crean Attempts
 desde checkpoints compatibles o empiezan de nuevo si no existen. `--accept-code-change` reconoce
@@ -458,6 +480,9 @@ no infieras claves obligatorias incondicionales de ramas incompletas. El lector 
 geometría explícitamente a runtimes antiguos e inmutables. Contextos de respuesta válidos ausentes
 significan evidencia insuficiente. Errores remotos acotados conservan la excepción final, no solo
 la cabecera del traceback.
+Valores finitos JSON lista/mapping son categorías: cobertura/efectos usan claves JSON canónicas
+y conservan los valores originales; nunca hashees elecciones crudas ni dividas límites del modelo
+en dimensiones independientes.
 
 Un screening estable detiene optimización ordinaria, no trabajo científico: confirmation y deuda
 material/factible de soporte e interacciones continúan hasta agotarse o alcanzar un presupuesto
@@ -654,6 +679,13 @@ artifacts/checkpoints y candidato; `datasets publish-candidate` recupera solo pu
 preview/apply, sin recalcular ni reescribir historial. Inventario read-only fusiona solo
 (nombre, versión, content ID), descubre todas las ubicaciones y señala conflictos sin acciones
 ambiguas. Contrato y WISDOM: `docs/DATASET_RECONSTRUCTION.es.md`.
+
+Filas conflictivas mantienen Manage copies: `datasets adopt --on ORIGEN --content-id ID` verifica
+bytes y archiva/elige solo la referencia futura del controlador. `datasets delete/remove --on
+DESTINO --content-id ID` previsualiza antes de apply, usa autoridad del destino aunque el controlador
+tenga otro ID, bloquea consumidores activos, archiva bajo CAS/lock y retira entradas vacías.
+Remove solo retira índice; delete exige rutas gestionadas/manifiestos exactos. Nunca cambia identidad
+de bytes, reescribe Runs previas ni presenta adoptar como equivalencia científica.
 
 Los datasets publicados son objetos durables independientes. Los resultados y checkpoints son
 estado científico; bundles, entornos compartidos y caché son reconstruibles. Todo borrado debe ser

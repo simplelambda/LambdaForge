@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from textual.widgets import DataTable, Static
+from textual.app import ComposeResult
+from textual.widgets import Button, DataTable, Static
 
 from lambdaforge.tui.screens.Base import DataScreen, EntitySelected
 from lambdaforge.tui.viewmodels import entity_key, format_value, objective_display_name
@@ -19,6 +20,10 @@ class StudyScreen(DataScreen):
         super().__init__(loader, *args, **kwargs)
         self._selected_key: str | None = None
         self._rendering = False
+
+    def compose(self) -> ComposeResult:
+        yield Button("Import Study…", id="studies-import", flat=True, variant="primary")
+        yield from super().compose()
 
     def on_mount(self) -> None:
         super().on_mount()
@@ -54,7 +59,7 @@ class StudyScreen(DataScreen):
             objective = study.get("objective", {})
             table.add_row(
                 str(item.get("name", "-")),
-                str(item.get("state", "unknown")),
+                str(item.get("state", "unknown")) + (" · imported" if item.get("imported") else ""),
                 objective_display_name(objective),
                 f"{counts.get('candidates', 0)}",
                 f"{counts.get('active_runs', 0)}",
@@ -141,14 +146,14 @@ class StudyScreen(DataScreen):
             reason = current.get("reason")
             lines.append(f"Admission   {status}" + (f" · {reason}" if reason else ""))
         if partial_leader is not None:
-            partial_value = partial_leader.get(
-                "best_objective", partial_leader.get("value")
-            )
+            partial_value = partial_leader.get("best_objective", partial_leader.get("value"))
             lines.append(
                 f"Best partial/censored  Trial {partial_leader.get('trial')} · best observed "
                 f"{format_value(partial_value)}† · not a final seed mean"
             )
         lines.append("Enter/right opens Trials, seeds, HPO analysis, resources and logs.")
+        if item.get("imported"):
+            lines.append("Imported read-only snapshot · not a local or remote execution.")
         return "\n".join(lines)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:

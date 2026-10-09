@@ -441,6 +441,33 @@ scientific_identity=...)` seals a pinned unregistered candidate; exact checksums
 and marks conflicting identities. [Dataset reconstruction](DATASET_RECONSTRUCTION.md) documents
 the complete public contracts, safety, retention and required WISDOM changes.
 
+ROOT may also be a saved pre-copy publication request (0.17.1): exact member/source checksums and
+the original declaration are verified, then `--apply` copies/registers without executing Work code.
+For older retained indexes, explicitly prepare the original declaration with
+`DatasetPublisher.prepare_publication`; never infer missing scientific contracts or relabel bytes.
+
+### 6.2 Native compressed replication
+
+`lf datasets replicate NAME@VERSION --source SOURCE --destination TARGET` previews; `--apply`
+copies exact bytes and registers the verified placement on the target and controller.
+`--route auto|direct|relay` prefers site SSH or explicitly requires direct/compressed relay.
+Site SSH never forwards controller credentials; relay uses no local disk staging. Console
+**Datasets → DatasetVersion → Replicate…** uses the same service, confirmation and background
+progress. Keep the session open until completion. The target needs `storage.dataset_root` and
+an available LambdaForge runtime, not a scientific Work/GPU claim. Checksums, safe staging,
+destination-volume admission and immutable identity remain mandatory. Conflicts fail closed;
+identical destinations are reused. See [replication](DATASET_RECONSTRUCTION.md#publish-once-replicate-exact-content).
+
+### 6.3 Explicit conflict management
+
+Dataset conflict management uses native preview/apply: `datasets adopt NAME@VERSION --on SOURCE
+--content-id ID` chooses a fully verified future controller reference; `datasets delete/remove
+NAME@VERSION --on TARGET --content-id ID` selects one exact target identity even in a conflict.
+Delete removes owned bytes, remove keeps them; both block active consumers and archive old indexes.
+Console **Datasets → exact identity → Manage copies…** exposes the same confirmed actions.
+Other copies/old Runs are unchanged; unpinned operations remain fail-closed.
+See [details](DATASET_RECONSTRUCTION.md#conflicting-local-and-remote-registries).
+
 ## 7. Sequence, parallelism, seeds and search
 
 Conditional branches belong to one Study when they answer one joint experimental question. Use
@@ -1436,6 +1463,12 @@ the runner to the original owned Execution directory. It never copies weights or
 merely to retry: only compact console indexes and decision references move to the new Job. Original
 logs, scalar files, checkpoints and evidence remain referenced in place.
 
+Recovery resolves seeds in the original persisted namespace, not the new Job's staging directory.
+Explicit values/order and automatic stream coordinates remain unchanged; missing/corrupt coordinates
+or changed seed policy are refused. In the Console, Logs and Resume Study target the latest Job.
+Until it publishes telemetry, prior owned Trial/Run evidence stays visible without replacing the
+latest Job's lifecycle state. No YAML workaround or identity-check bypass is required.
+
 Adaptive, repeated-seed and fixed-sweep Studies share this operation. For fixed designs, recovery
 reads the immutable design and owned per-Run Attempt records, reconciles the latest outcome and
 reuses successful Runs. It never fabricates an adaptive controller or requires its state file.
@@ -1457,7 +1490,10 @@ not poison success; exhausted recovery still reports failure honestly.
 
 `lf retry STUDY --accept-code-change` explicitly acknowledges a compatible code fix: the researcher
 must know that earlier metrics and checkpoint formats remain valid. The console exposes the same
-unchecked-by-default acknowledgement. It does not waive checks on configuration, inputs, objective,
+unchecked-by-default acknowledgement. When the preview detects changed project code, submission
+is refused before creating a recovery Job unless acknowledged; Resume remains disabled until the
+checkbox is selected. The freshly staged worker checks compatibility again. This does not waive
+checks on configuration, inputs, objective,
 seed streams or search policy. If the fix invalidates earlier results, launch a new Study instead.
 The original `execution.json` stays immutable; `current-code.json`, per-Run provenance and append-only
 `recovery-history.jsonl` expose actual revisions instead of pretending the code never changed.
@@ -1494,7 +1530,14 @@ explicit access. Product catalogs are project-owned, not disposable Job or cache
 does not yet implement automatic dependency waiting/replanning or complete distributed Fleet export.
 `lf import PACKAGE` verifies single-host exports; `--apply` registers portable evidence and sealed
 products without execution. Original provenance remains intact; imported records are read-only,
-not native recovery state. Console **Products → Import Study…** exposes the same confirmed workflow.
+not native recovery state. Console **Studies → Import Study…** (also in Products) exposes the same
+verified, confirmed workflow with a directory picker. Registered imports appear in Studies and
+Overview with an imported/read-only label, retaining their captured status. Trial/seed drill-down
+reads local retained metrics, logs and artifacts; Analysis reads included evidence without refitting.
+No imported snapshot exposes remote cancel/retry controls. Reapply an older import once to add the
+local presentation indexes. Root refresh never reparses a large imported result. The verified native
+aggregate `result.json` has no fixed 64 MiB ceiling; inventory size/SHA and strict JSON/provenance
+validation remain mandatory. Verification and registration run off the Console event loop.
 
 Each Attempt writes `result.json`, `environment.json`, `work.log`, metrics JSONL, optional progress,
 outputs and artifacts. An Execution writes `execution.json` and aggregate `result.json` atomically.
@@ -1544,6 +1587,11 @@ exact Attempt, records its current state, includes external finalized artifacts 
 checksum inventory while excluding shared runtime state. Final evidence can include analysis and
 replay; active, cancelled or failed evidence is labelled as a point-in-time snapshot. Names that
 identify several Works fail as ambiguous; use the `work_id` shown by `lf overview --json`.
+
+Structured finite choices such as `values: [[0.005, 2560.0]]` are one categorical parameter
+value, not two independent bounds to optimize. Coverage/effects group them by canonical JSON
+without rewriting the authored parameters. Exporting their completed evidence requires neither
+editing the YAML nor repeating training.
 
 Remote export first creates a ZIP64/Deflate archive and always removes it after transfer. Local
 transfer and extraction temporaries are allocated below `LOCAL_PARENT`, not system `/tmp`; ensure

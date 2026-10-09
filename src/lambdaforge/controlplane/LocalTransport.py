@@ -5,8 +5,10 @@ from __future__ import annotations
 import shutil
 import subprocess
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 
+from lambdaforge.controlplane.BinaryCommand import BinaryCommand, subprocess_stream
 from lambdaforge.controlplane.CommandResult import CommandResult
 from lambdaforge.controlplane.RemoteCommandTimeout import RemoteCommandTimeout
 from lambdaforge.controlplane.Transport import Transport
@@ -52,3 +54,7 @@ class LocalTransport(Transport):
     def get(self, source: str | Path, destination: str | Path) -> None:
         """Retrieve locally using the same exact-path copy contract."""
         self.put(source, destination)
+
+    def stream(self, command: Sequence[str]) -> AbstractContextManager[BinaryCommand]:
+        """Stream compressed durable data through one owned local process."""
+        return subprocess_stream(command)

@@ -82,6 +82,24 @@ class DiagnosticClassifier:
         """Return an actionable diagnosis while leaving unknown failures explicitly internal."""
         if isinstance(error, LambdaForgeError):
             return error.diagnostic
+        from lambdaforge.controlplane.StorageAdmission import StorageOwnershipError
+
+        if isinstance(error, StorageOwnershipError):
+            return diagnostic(
+                ErrorCategory.OPERATION_REFUSED,
+                "Storage ownership could not be safely resolved.",
+                str(error),
+                reason="An existing lease cannot be safely reused or reclaimed.",
+                impact=("No publication was committed; retained source evidence is unchanged.",),
+                fixes=(
+                    "Inspect the named lease/owner on its recorded host; "
+                    "never remove a live lease.",
+                    "Restore access or wait for verified owner exit, then retry publication only.",
+                ),
+                commands=(("Inspect storage", "lf storage status"),),
+                context=error.observation,
+                operation=context.operation,
+            )
         message = SecretRedactor.redact(error)
         lowered = message.lower()
         job_match = self._JOB.search(message)
@@ -698,7 +716,8 @@ class DiagnosticClassifier:
                 job_id=job_id,
             )
         internal_model_transport = isinstance(error, TypeError) and (
-            "cannot pickle 'mappingproxy' object" in lowered
+            "unhashable type:" in lowered
+            or "cannot pickle 'mappingproxy' object" in lowered
             or "cannot pickle 'frozenjson" in lowered
             or "'activeresourceevidence' and 'activeresourceevidence'" in lowered
             or "object of type posixpath is not json serializable" in lowered

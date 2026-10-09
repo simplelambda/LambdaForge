@@ -4,11 +4,34 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from lambdaforge.hpo.AdaptiveResources import _mixed_distance
 from lambdaforge.hpo.AdaptiveSampler import AdaptiveSampler
 from lambdaforge.hpo.BayesianSampler import BayesianSampler
 from lambdaforge.hpo.ParameterSpace import ParameterSpace
 from lambdaforge.hpo.SobolSearch import SobolSearch
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [[1.5, 3.0, 6.0], [1.5, 3.0, 6.0], [1.5, 6.0, 3.0]],
+        [{"a": [1, {"b": True}]}, {"a": [1, {"b": True}]}, {"a": [1, {"b": False}]}],
+        [{"a": 1, "b": 2}, {"b": 2, "a": 1}, {"a": 2, "b": 1}],
+        [{"flag": True}, {"flag": True}, {"flag": 1}],
+    ],
+)
+def test_structured_observed_values_keep_json_meaning(values) -> None:
+    space = ParameterSpace.from_schema(
+        {"initialization_profile": {"values": ["baseline", "same_diffusion"]}},
+        [{"structured": value} for value in values],
+    )
+    assert len(space.descriptor("structured").values) == 2
+    assert space.distance({"structured": values[0]}, {"structured": values[1]}) == 0
+    assert space.distance({"structured": values[0]}, {"structured": values[2]}) > 0
+    restored = ParameterSpace.from_schema(space.to_schema())
+    assert restored.decode(restored.encode({"structured": values[0]}))["structured"] == values[0]
 
 
 def test_log_and_linear_distances_follow_the_authored_topology() -> None:
@@ -21,9 +44,7 @@ def test_log_and_linear_distances_follow_the_authored_topology() -> None:
     )
 
     linear = ParameterSpace.from_schema({"x": {"range": [0.0, 10.0]}})
-    assert linear.distance({"x": 0.0}, {"x": 1.0}) < linear.distance(
-        {"x": 1.0}, {"x": 10.0}
-    )
+    assert linear.distance({"x": 0.0}, {"x": 1.0}) < linear.distance({"x": 1.0}, {"x": 10.0})
 
 
 def test_integer_categorical_and_conditional_semantics_are_explicit() -> None:
