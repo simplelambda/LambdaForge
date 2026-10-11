@@ -15,7 +15,202 @@ from lambdaforge.diagnostics.models import (
     FailureDisposition,
     LambdaForgeError,
     RetryDisposition,
+    diagnostic,
 )
+
+
+def provider_observation_category(error: Mapping[str, Any]) -> ErrorCategory:
+    """Classify failed reads without turning every exception into a network outage.
+
+    Use confirmed exception types, not arbitrary message substrings or scientific state.
+    Unclassified query/data errors leave connectivity unknown, even after repeated polls.
+    """
+    kind = str(error.get("type"))
+    if kind in {"AuthenticationError", "AuthenticationException", "BadAuthenticationType"}:
+        return ErrorCategory.AUTHENTICATION
+    if kind in {
+        "TimeoutError",
+        "ConnectionError",
+        "ConnectionResetError",
+        "ConnectionRefusedError",
+        "ConnectionAbortedError",
+        "BrokenPipeError",
+        "SSHError",
+        "SSHException",
+        "NoValidConnectionsError",
+    }:
+        return ErrorCategory.CONNECTION
+    return ErrorCategory.WARNING
+
+
+def operational_diagnostic(
+    health: Mapping[str, Any],
+    *,
+    state: str,
+    failure: Mapping[str, Any] | None = None,
+    failure_phase: str | None = None,
+    failure_category: str | None = None,
+) -> dict[str, Any] | None:
+    """Explain provider/runtime facts using the native diagnostic taxonomy.
+
+    This is presentation, not dispatch permission. In particular, an exit signal, a CUDA
+    message or missing metrics cannot prove OOM or process loss. Scientific failure records
+    must be supplied explicitly; the observer never opens their artifact/epoch files.
+    """
+    facts = health.get("provider_evidence", {})
+    facts = facts if isinstance(facts, Mapping) else {}
+    source = str(facts.get("source") or health.get("source") or "unobserved")
+    reason = str(health.get("reason") or "NO_PROVIDER_OBSERVATION")
+    status = str(health.get("health") or "unknown")
+    error = health.get("last_error")
+    error = error if isinstance(error, Mapping) else {}
+    raw = str(facts.get("raw_state", "")).split(" ")[0].rstrip("+")
+    confirmed = health.get("freshness") == "fresh" and status in {"healthy", "lost_confirmed"}
+    disposition: FailureDisposition
+    title: str
+    recommendation: str
+    if error:
+        # A malformed/unreadable observation is not necessarily an unreachable host.
+        category = provider_observation_category(error)
+        disposition = FailureDisposition(
+            category,
+            "provider_observation_failed",
+            "wait_for_verified_ownership",
+            RetryDisposition.AFTER_FIX,
+            termination_type="unknown",
+        )
+        title = "Provider observation failed; computation status is unconfirmed."
+        recommendation = "Restore provider access and reconcile ownership before recovery."
+    elif status == "lost_confirmed":
+        disposition = FailureDisposition(
+            ErrorCategory.EXECUTION,
+            "owned_processes_lost",
+            "deliberate_study_recovery",
+            RetryDisposition.AFTER_FIX,
+            termination_type="infrastructure_failed",
+        )
+        title = "The execution host confirms that the owned processes are absent."
+        recommendation = "Preview native retry; preserve completed Runs and validate checkpoints."
+    elif status in {"degraded", "stale", "unknown"}:
+        disposition = FailureDisposition(
+            ErrorCategory.WARNING,
+            "observation_unconfirmed",
+            "wait_for_verified_ownership",
+            RetryDisposition.UNKNOWN,
+            termination_type="unknown",
+        )
+        title = "Execution is not currently verified; silence is not proof of failure."
+        recommendation = "Inspect provider, heartbeat and child ownership; do not duplicate work."
+    elif source in {"squeue", "sacct"} and raw in {
+        "NODE_FAIL",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "TIMEOUT",
+        "CANCELLED",
+        "BOOT_FAIL",
+    }:
+        category, specific, title, recommendation = {
+            "NODE_FAIL": (
+                ErrorCategory.EXECUTION,
+                "scheduler_node_failure",
+                "SLURM reports a node failure.",
+                "Check node/storage availability, then preview deliberate recovery.",
+            ),
+            "BOOT_FAIL": (
+                ErrorCategory.ENVIRONMENT,
+                "scheduler_boot_failure",
+                "SLURM reports a boot failure.",
+                "Inspect the node/runtime before selecting a compatible recovery placement.",
+            ),
+            "OUT_OF_MEMORY": (
+                ErrorCategory.RESOURCE,
+                "scheduler_memory_limit",
+                "SLURM reports a memory-limit failure.",
+                "Inspect host/cgroup memory limits; this alone does not identify CUDA OOM.",
+            ),
+            "PREEMPTED": (
+                ErrorCategory.EXECUTION,
+                "scheduler_preemption",
+                "SLURM reports preemption.",
+                "Check requeue/ownership before retrying the interrupted scientific Runs.",
+            ),
+            "TIMEOUT": (
+                ErrorCategory.RESOURCE,
+                "scheduler_time_limit",
+                "SLURM reports a time-limit expiry.",
+                "Review the allocation duration and compatible checkpoint recovery.",
+            ),
+            "CANCELLED": (
+                ErrorCategory.CANCELLED,
+                "scheduler_cancellation",
+                "SLURM reports cancellation.",
+                "Cancellation does not identify its requester; recovery remains deliberate.",
+            ),
+        }[raw]
+        disposition = FailureDisposition(
+            category,
+            specific,
+            "deliberate_study_recovery",
+            RetryDisposition.AFTER_FIX,
+            termination_type="aborted" if raw == "CANCELLED" else "infrastructure_failed",
+        )
+    elif failure is not None:
+        disposition = classify_failure(failure, phase=failure_phase)
+        title = "Persisted failure evidence identifies the execution error."
+        recommendation = (
+            "Review safer placement and live headroom before deliberate recovery."
+            if disposition.reason == "gpu_memory_allocation"
+            else "Correct the reported failure; generic CUDA/consumer errors are not OOM retries."
+        )
+    elif state in {"failed", "timeout", "cancelled"}:
+        try:
+            category = (
+                ErrorCategory(failure_category) if failure_category else ErrorCategory.EXECUTION
+            )
+        except ValueError:
+            category = ErrorCategory.EXECUTION
+        disposition = FailureDisposition(
+            category,
+            "terminal_cause_unavailable",
+            "inspect_persisted_failure",
+            RetryDisposition.AFTER_FIX,
+            termination_type="unknown",
+        )
+        title = "Execution is terminal; its scientific cause has not been inspected."
+        recommendation = "Read the persisted failure/logs before changing science or retrying."
+    else:
+        return None
+    job_id = str(health.get("job_id") or "")
+    event_time = (
+        facts.get("finished_at_utc")
+        or health.get("last_attempt_at_utc")
+        or health.get("last_confirmed_at_utc")
+    )
+    return {
+        **diagnostic(
+            disposition.category,
+            title,
+            reason,
+            reason=disposition.reason,
+            impact=("Scientific evidence and physical Attempt costs remain unchanged.",),
+            fixes=(recommendation,),
+            commands=(("Inspect exact Job", f"lf jobs show {job_id} --json"),),
+            context={
+                "source": source,
+                "confirmation": "verified" if confirmed else "unconfirmed",
+                "event_time_utc": event_time,
+                "cluster": health.get("cluster"),
+                "scheduler_id": health.get("scheduler_id"),
+                "execution_id": health.get("execution_id"),
+                "failure_phase": failure_phase,
+            },
+            retryable=disposition.retryable,
+            operation="operational observation",
+            job_id=job_id,
+            failure_disposition=disposition,
+        ).to_dict(),
+        "severity": "warning" if disposition.category is ErrorCategory.WARNING else "error",
+    }
 
 
 def classify_failure(

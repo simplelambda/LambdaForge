@@ -50,6 +50,25 @@ def run_job_command(arguments: argparse.Namespace) -> int:
     selected_job_id: str = (
         jobs.resolve_selector(arguments.job_id) if hasattr(arguments, "job_id") else ""
     )
+    if arguments.job_command == "recovery":
+        audit = jobs.recovery_history(
+            selected_job_id, offset=arguments.offset, limit=arguments.limit
+        )
+        if arguments.json:
+            print(json.dumps(audit, indent=2))
+        else:
+            print(f"Saved recovery audit · {selected_job_id} · provider not queried")
+            for linked in audit["jobs"]:
+                recovery = linked["recovery"] or {}
+                print(
+                    f"{linked['job_id']} · {linked['state']} · {recovery.get('phase', 'origin')} · "
+                    f"{recovery.get('request_id', 'no recovery request')}"
+                )
+            for event in reversed(audit["events"]["items"]):
+                print(jobs._format_event(event))
+            if audit["events"]["next_offset"] is not None:
+                print(f"Older events: --offset {audit['events']['next_offset']}")
+        return 0
     if arguments.job_command in {"status", "show"}:
         job_record = jobs.get(selected_job_id)
         if arguments.job_command == "show":
@@ -134,7 +153,10 @@ def run_job_command(arguments: argparse.Namespace) -> int:
         print(json.dumps(group_payload, indent=2))
         return 0
     handle = jobs.retry(
-        selected_job_id, dry_run=arguments.dry_run, accept_code_change=arguments.accept_code_change
+        selected_job_id,
+        dry_run=arguments.dry_run,
+        accept_code_change=arguments.accept_code_change,
+        config=getattr(arguments, "config", None),
     )
     print(json.dumps(handle.to_dict(), indent=2))
     return 0

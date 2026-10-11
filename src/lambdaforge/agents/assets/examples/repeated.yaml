@@ -1,0 +1,6 @@
+name: agent-repeated
+run: agent_examples.work.Example
+with: {value: 1.0}
+seeds: [4, 7, 32]
+objective: {metric: score, mode: max}
+resources: {cpu: 1, memory: 128MiB}

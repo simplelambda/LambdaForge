@@ -1,0 +1,12 @@
+name: agent-search
+run: agent_examples.work.Example
+seeds: [4, 7]
+search:
+  budget: {trials: 3}
+  space:
+    value: {values: [0.5, 1.0, 2.0]}
+  replication: {minimum: 1, maximum: 2}
+  confirmation_seeds: []
+objective: {metric: score, mode: max}
+execution: {max_parallel: 1}
+resources: {cpu: 1, memory: 128MiB}

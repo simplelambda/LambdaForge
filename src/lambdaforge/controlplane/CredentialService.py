@@ -32,6 +32,14 @@ class CredentialService:
             return self.environment.get(reference, prompt=prompt)
         return self.keyring.get(reference, prompt=prompt)
 
+    def resolve_reference(self, reference: str) -> str:
+        """Resolve a noninteractive notification credential without persisting the value."""
+        if reference.startswith("env:"):
+            return self.environment.get(reference, prompt="")
+        if reference.startswith("keyring:"):
+            return self.keyring.get(reference, prompt="")
+        raise ValueError("Notification credentials require an env: or keyring: reference.")
+
     def store(self, reference: str, secret: str) -> None:
         """Store a password under an explicit keyring reference."""
         self.keyring.set(reference, secret)

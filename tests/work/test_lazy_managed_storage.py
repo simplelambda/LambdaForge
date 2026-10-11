@@ -47,7 +47,9 @@ def test_first_write_creates_only_needed_metadata_and_still_serializes_builds(
     checkpoints = CheckpointCollection(tmp_path / "checkpoints")
     checkpoints.save_json("state.json", {"epoch": 1})
     assert checkpoints.load_json("state.json") == {"epoch": 1}
-    assert not (checkpoints._root / ".managed").exists()
+    # JSON checkpoints now seal integrity/owner/cadence metadata, but missing reads above
+    # still create nothing. One actual write creates only its own managed record.
+    assert len(tuple((checkpoints._root / ".managed/records").glob("*.json"))) == 1
     assert not (root / "unrelated").exists()
 
 

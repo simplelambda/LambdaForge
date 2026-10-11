@@ -43,6 +43,7 @@ class JobHandle:
     scheduler_id: str | None = None
     preview: dict[str, Any] | None = None
     recovery_plan: dict[str, Any] | None = None
+    recovery_request_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a concise CLI/API payload."""
@@ -53,6 +54,11 @@ class JobHandle:
             "scheduler_id": self.scheduler_id,
             **({"scheduler_preview": self.preview} if self.preview is not None else {}),
             **({"recovery_plan": self.recovery_plan} if self.recovery_plan is not None else {}),
+            **(
+                {"recovery_request_id": self.recovery_request_id}
+                if self.recovery_request_id
+                else {}
+            ),
         }
 
 
@@ -119,13 +125,18 @@ class JobRecord:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the durable JSON representation."""
+        from lambdaforge.controlplane.OperationalHealth import OperationalHealth
+        from lambdaforge.controlplane.RecoveryObservation import RecoveryObservation
+
         return {
             "job_record_version": 2,
+            "recovery": RecoveryObservation.describe(self),
             "job_id": self.job_id,
             "cluster": self.cluster,
             "scheduler": self.scheduler,
             "scheduler_id": self.scheduler_id,
             "state": self.state.value,
+            "operational": OperationalHealth.describe(self),
             "command": list(self.command),
             "work_dir": self.work_dir,
             "resources": copy.deepcopy(self.resources),

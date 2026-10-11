@@ -37,9 +37,7 @@ def _canonical_entries(
     if path.is_file():
         raw = path.name
         return (("file", "", raw, path, (), (raw.encode("utf-8", errors="strict"),)),)
-    entries: list[
-        tuple[str, str, str, Path, tuple[bytes, ...], tuple[bytes, ...]]
-    ] = []
+    entries: list[tuple[str, str, str, Path, tuple[bytes, ...], tuple[bytes, ...]]] = []
     identities: dict[str, Path] = {}
     for item in path.rglob("*"):
         if item.is_symlink():
@@ -298,9 +296,11 @@ class ManagedFileStore:
         *,
         build: Callable[[Path], Any] | None = None,
         validate: Callable[[ManagedFile], bool] | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> ManagedFile:
         """Restore or atomically build one key under an exclusive per-key lock."""
         selected = self._key(key)
+        annotations = self._annotations(metadata)
         restored = self._restore(selected, validate=validate)
         if restored is not None:
             return restored
@@ -340,6 +340,7 @@ class ManagedFileStore:
                 "key": selected,
                 "sha256": digest,
                 "size_bytes": size,
+                **annotations,
             }
             atomic_json(self._record_path(selected), metadata)
             return ManagedFile(selected, destination, digest, size, self.scope, metadata)
@@ -355,17 +356,7 @@ class ManagedFileStore:
         selected = self._key(key)
         if not isinstance(value, bytes):
             raise TypeError("Managed file bytes must be a bytes object.")
-        annotations = dict(metadata or {})
-        reserved = {
-            "managed_file_version",
-            "scope",
-            "key",
-            "sha256",
-            "size_bytes",
-        }
-        overlap = reserved.intersection(annotations)
-        if overlap:
-            raise ValueError(f"Managed metadata uses reserved fields: {sorted(overlap)}.")
+        annotations = self._annotations(metadata)
         destination = owned_path(self.data_root, selected)
         digest = hashlib.sha256()
         digest.update(destination.name.encode("utf-8"))
@@ -398,6 +389,23 @@ class ManagedFileStore:
             }
             atomic_json(self._record_path(selected), record)
             return ManagedFile(selected, destination, actual_digest, size, self.scope, record)
+
+    @staticmethod
+    def _annotations(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Validate writer annotations before building or replacing any bytes."""
+        annotations = dict(metadata or {})
+        reserved = {
+            "managed_file_version",
+            "scope",
+            "key",
+            "sha256",
+            "size_bytes",
+        }
+        overlap = reserved.intersection(annotations)
+        if overlap:
+            raise ValueError(f"Managed metadata uses reserved fields: {sorted(overlap)}.")
+        json.dumps(annotations, allow_nan=False)
+        return annotations
 
     def restore(
         self,
@@ -445,7 +453,9 @@ class ManagedFileStore:
         return managed
 
     def _record_path(self, key: str) -> Path:
-        return self.records_root / f"{hashlib.sha256(key.encode()).hexdigest()}.json"
+        return owned_path(
+            self.root, self.records_root / f"{hashlib.sha256(key.encode()).hexdigest()}.json"
+        )
 
     @staticmethod
     def _key(value: str) -> str:

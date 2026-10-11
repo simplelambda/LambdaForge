@@ -52,7 +52,12 @@ class Scheduler(ABC):
         raise NotImplementedError("Resume is not supported by this scheduler.")
 
     def inventory(self) -> tuple[dict[str, object], ...]:
-        """Return durable provider-owned LambdaForge jobs when discoverable."""
+        """Return durable provider-owned LambdaForge jobs when discoverable.
+
+        Direct providers may return bounded ``observation_error`` rows keyed to an
+        inspected directory. Those rows report uncertainty only, never new ownership.
+        Whole-query failures must raise rather than return a successful empty inventory.
+        """
         return ()
 
     def details(self, scheduler_id: str) -> Mapping[str, Any]:

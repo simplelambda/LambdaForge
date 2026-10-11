@@ -20,6 +20,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.events import MouseDown, MouseMove, MouseUp, Resize
+from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
@@ -39,6 +40,7 @@ from textual.widgets import (
 )
 
 from lambdaforge.analysis.Report import write_html, write_metric_html, write_parameter_html
+from lambdaforge.controlplane.SecretRedactor import SecretRedactor
 from lambdaforge.scientific_format import format_parameter_value
 from lambdaforge.tui.viewmodels import (
     confirmation_text,
@@ -47,6 +49,8 @@ from lambdaforge.tui.viewmodels import (
     format_value,
     metric_display_name,
     objective_display_name,
+    operational_detail,
+    operational_label,
     structured_text,
     visible_metrics,
 )
@@ -410,6 +414,7 @@ class StudyWorkspace(ResearchWorkspace):
             yield Button("Resume Study…", id="study-retry", variant="success")
             yield Button("Export Study…", id="study-export", variant="success")
             yield Button("Delete Study History…", id="study-delete", variant="error")
+            yield Button("Recovery history", id="study-recovery-history", flat=True, compact=True)
             yield Static("", id="study-action-status", classes="freshness-line")
         with Vertical(id="study-loading", classes="workspace-loading"):
             yield LoadingIndicator()
@@ -561,11 +566,7 @@ class StudyWorkspace(ResearchWorkspace):
             "timeout",
         }
         self.query_one("#study-cancel", Button).disabled = terminal or not bool(self._selector)
-        self.query_one("#study-retry", Button).disabled = str(self.work.get("state")) not in {
-            "failed",
-            "cancelled",
-            "timeout",
-        }
+        self.query_one("#study-retry", Button).disabled = not self._recovery_eligible()
         self.query_one("#study-export", Button).disabled = not bool(self._selector)
         self.query_one("#study-delete", Button).disabled = not bool(self._selector)
         self.query_one("#study-loading").display = not bool(self.study)
@@ -592,13 +593,15 @@ class StudyWorkspace(ResearchWorkspace):
 
     def _render_workspace(self) -> None:
         if not self._retry_running:
-            self.query_one("#study-retry", Button).disabled = str(self.work.get("state")) not in {
-                "failed",
-                "cancelled",
-                "timeout",
-            }
+            self.query_one("#study-retry", Button).disabled = not self._recovery_eligible()
         if self.work.get("imported"):
-            for identifier in ("study-cancel", "study-retry", "study-delete", "study-export"):
+            for identifier in (
+                "study-cancel",
+                "study-retry",
+                "study-delete",
+                "study-export",
+                "study-recovery-history",
+            ):
                 self.query_one(f"#{identifier}", Button).display = False
             self.query_one("#study-action-status", Static).update(
                 "Imported read-only snapshot · recovery requires the original execution host"
@@ -626,6 +629,7 @@ class StudyWorkspace(ResearchWorkspace):
         best_candidate = ranked[0] if ranked else best_candidate
         self.query_one("#study-header", Static).update(
             f"{self.work.get('name', 'Study')}  ·  {str(self.work.get('state', 'unknown')).upper()}\n"
+            f"Operational health: {operational_label(self.work)}\n"
             f"{self.study.get('strategy', 'Study')} · {self.work.get('cluster', 'local')}   "
             f"best {objective_display_name(objective)} "
             f"{format_value((best_candidate or {}).get('selection_objective'))}   "
@@ -1929,9 +1933,18 @@ class StudyWorkspace(ResearchWorkspace):
         self.study = {**self.study, **dict(value)}
         if value.get("job_state"):
             self.work["state"] = value["job_state"]
+        if isinstance(value.get("operational"), Mapping):
+            self.work["operational"] = value["operational"]
+        if isinstance(value.get("recovery"), Mapping):
+            self.work["recovery"] = value["recovery"]
         self._last_refresh_error = None
         if not self._cancel_running and not self.work.get("imported"):
-            self.query_one("#study-action-status", Static).update("Live · updated just now")
+            recovery = self.work.get("recovery", {})
+            self.query_one("#study-action-status", Static).update(
+                f"Recovery {recovery['request_id']} · {recovery['phase'].replace('_', ' ')}"
+                if isinstance(recovery, Mapping) and recovery.get("request_id")
+                else "Live · updated just now"
+            )
         self.query_one("#study-loading").display = False
         self.query_one("#study-tabs").display = True
         self._render_workspace()
@@ -2017,6 +2030,8 @@ class StudyWorkspace(ResearchWorkspace):
             self.app.push_screen(ExactConfirmation("Cancel Study", preview), self._apply_cancel)
         elif event.button.id == "study-retry":
             self._preview_retry()
+        elif event.button.id == "study-recovery-history":
+            self._open_recovery_history()
         elif event.button.id == "study-delete":
             self._preview_delete()
         elif event.button.id == "study-export":
@@ -2201,32 +2216,50 @@ class StudyWorkspace(ResearchWorkspace):
         )
         self._render_workspace()
 
+    def _recovery_eligible(self) -> bool:
+        from lambdaforge.controlplane.RecoveryObservation import RecoveryObservation
+
+        facts = self.work.get("operational", {})
+        return not self.work.get("imported") and RecoveryObservation.eligible(
+            str(self.work.get("state")), facts if isinstance(facts, Mapping) else {}
+        )
+
     def _preview_retry(self) -> None:
         if self._retry_running:
             return
         self._retry_running = True
+        self._retry_operation_phase = "Preview / validation"
         self.query_one("#study-retry", Button).disabled = True
         self.query_one("#study-action-status", Static).update(
             "Inspecting persisted recovery state…"
         )
+        app = self.app
 
         def preview() -> None:
             try:
                 value = self.services.retry_preview(self.operation_job_id)
             except Exception as error:
-                self.app.call_from_thread(self._retry_failed, error)
+                if self.is_mounted:
+                    app.call_from_thread(self._retry_failed, error)
             else:
-                self.app.call_from_thread(self._confirm_retry, value)
+                if self.is_mounted:
+                    app.call_from_thread(self._confirm_retry, value)
 
         Thread(target=preview, daemon=True, name="lambdaforge-study-retry-preview").start()
 
     def _confirm_retry(self, preview: Mapping[str, Any]) -> None:
+        if not self.is_mounted:
+            return
+        self._last_recovery_plan = dict(preview)
         self.query_one("#study-action-status", Static).update(
             "Recovery plan ready · confirmation required"
         )
-        self.app.push_screen(StudyRetryConfirmation(preview), self._apply_retry)
+        self.app.push_screen(
+            StudyRetryConfirmation(preview, services=self.services, job_id=self.operation_job_id),
+            self._apply_retry,
+        )
 
-    def _apply_retry(self, compatibility: bool | None) -> None:
+    def _apply_retry(self, compatibility: bool | Mapping[str, Any] | None) -> None:
         if compatibility is None:
             self._retry_running = False
             self.query_one("#study-retry", Button).disabled = False
@@ -2235,27 +2268,72 @@ class StudyWorkspace(ResearchWorkspace):
             )
             return
         self.query_one("#study-action-status", Static).update("Submitting recovered Study…")
+        self._retry_operation_phase = "Apply"
+        options: dict[str, Any] = (
+            dict(compatibility)
+            if isinstance(compatibility, Mapping)
+            else {"accept_code_change": compatibility}
+        )
+        app = self.app
 
         def retry() -> None:
             try:
                 result = self.services.retry_job(
-                    self.operation_job_id, accept_code_change=compatibility
+                    self.operation_job_id,
+                    **options,
                 )
             except Exception as error:
-                self.app.call_from_thread(self._retry_failed, error)
+                if self.is_mounted:
+                    app.call_from_thread(self._retry_failed, error)
             else:
-                self.app.call_from_thread(self._retry_complete, result)
+                if self.is_mounted:
+                    app.call_from_thread(self._retry_complete, result)
 
         Thread(target=retry, daemon=True, name="lambdaforge-study-retry").start()
 
     def _retry_failed(self, error: Exception) -> None:
+        if not self.is_mounted:
+            return
         self._retry_running = False
         self.query_one("#study-retry", Button).disabled = False
         self.query_one("#study-action-status", Static).update(
-            f"Recovery failed · {type(error).__name__}: {error}"
+            f"Recovery failed · {type(error).__name__}: {SecretRedactor.redact(error)[:1000]}"
+        )
+        from lambdaforge.tui.screens.RecoveryWorkspace import RecoveryFailureDialog
+
+        self.app.push_screen(
+            RecoveryFailureDialog(
+                error,
+                job_id=self.operation_job_id,
+                phase=getattr(self, "_retry_operation_phase", "Preview / validation"),
+                has_plan=bool(getattr(self, "_last_recovery_plan", None)),
+            ),
+            self._recovery_failure_action,
         )
 
+    def _open_recovery_history(self) -> None:
+        from lambdaforge.tui.screens.RecoveryWorkspace import RecoveryWorkspace
+
+        if not self.work.get("imported"):
+            self.app.push_screen(RecoveryWorkspace(self.services, self.operation_job_id))
+
+    def _recovery_failure_action(self, action: str | None) -> None:
+        if not self.is_mounted:
+            return
+        if action == "history":
+            self._open_recovery_history()
+        elif action == "logs":
+            self.query_one("#study-loading").display = False
+            tabs = self.query_one("#study-tabs", TabbedContent)
+            tabs.display, tabs.active = True, "study-logs"
+            self._load_study_logs(force=True)
+        elif action == "plan" and getattr(self, "_last_recovery_plan", None):
+            self._retry_running = True
+            self._confirm_retry(self._last_recovery_plan)
+
     def _retry_complete(self, result: Mapping[str, Any]) -> None:
+        if not self.is_mounted:
+            return
         self._retry_running = False
         self.work["primary_job_id"] = result["job_id"]
         # Keep the old telemetry source until the new worker publishes its own index.
@@ -2263,6 +2341,7 @@ class StudyWorkspace(ResearchWorkspace):
         self.work["state"] = "preparing"
         self.query_one("#study-action-status", Static).update(
             "Recovery accepted · background preparation started; previous evidence is preserved"
+            + (f" · {result['recovery_request_id']}" if result.get("recovery_request_id") else "")
         )
         self.query_one("#study-retry", Button).disabled = True
         self.query_one("#study-cancel", Button).disabled = False
@@ -3551,17 +3630,57 @@ class CredentialDialog(ModalScreen[str | None]):
             self.dismiss(secret or None)
 
 
-class StudyRetryConfirmation(ModalScreen[bool | None]):
+class RecoveryConfigurationReady(Message):
+    """Deliver the validated plan and the exact YAML selection it inspected."""
+
+    def __init__(self, preview: Mapping[str, Any], selected: str) -> None:
+        super().__init__()
+        self.preview, self.selected = preview, selected
+
+
+class RecoveryConfigurationFailed(Message):
+    """Deliver a native recovery rejection for persistent UI presentation."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+
+class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
     """An explicit scientific compatibility acknowledgement, never inferred from a code fix."""
 
-    def __init__(self, preview: Mapping[str, Any]) -> None:
+    def __init__(
+        self, preview: Mapping[str, Any], *, services: Any = None, job_id: str = ""
+    ) -> None:
         super().__init__()
         self.preview = dict(preview)
+        self.services = services
+        self.job_id = job_id
+        self._valid_config = self.preview.get("configuration", {}).get("selected_exists", True)
+        self._config_override: dict[str, Any] = {}
+        self._validating = False
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal-card wide-modal"):
             yield Label("Resume Study", classes="modal-title")
             with VerticalScroll():
+                configuration = self.preview.get("configuration", {})
+                if self.services is not None:
+                    yield Label(
+                        "Recovery YAML · historical snapshot remains the scientific reference"
+                    )
+                    yield Static(
+                        f"Historical path: {configuration.get('historical_path') or 'not recorded'}\n"
+                        f"Selected file exists: {'yes' if self._valid_config else 'no — choose its new location'}",
+                        markup=False,
+                    )
+                    yield Input(
+                        value=str(configuration.get("selected_path") or ""), id="retry-config"
+                    )
+                    with Horizontal(classes="modal-actions"):
+                        yield Button("Browse YAML…", id="retry-config-browse")
+                        yield Button("Validate recovery plan", id="retry-config-validate")
+                    yield Static("", id="retry-config-status", markup=False)
                 rows = self.preview.get("runs", [])
                 if "reuse_runs" in self.preview:
                     yield Static(
@@ -3576,6 +3695,7 @@ class StudyRetryConfirmation(ModalScreen[bool | None]):
                         {key: value for key, value in self.preview.items() if key != "runs"}
                     ),
                     markup=False,
+                    id="retry-plan-detail",
                 )
                 if rows:
                     yield Static(
@@ -3590,6 +3710,32 @@ class StudyRetryConfirmation(ModalScreen[bool | None]):
                         ),
                         markup=False,
                     )
+                checkpoints = [
+                    row
+                    for row in (rows or self.preview.get("checkpoints", []))
+                    if isinstance(row, Mapping)
+                    and isinstance(row.get("checkpoint"), Mapping)
+                    and row["checkpoint"].get("last")
+                ]
+                if checkpoints:
+                    yield Label(
+                        "Registered checkpoint evidence · payload hashes not checked by preview"
+                    )
+                    table: DataTable[str] = DataTable(id="retry-checkpoints", cursor_type="row")
+                    table.add_columns("Run", "Written", "Step", "Integrity", "Continuation")
+                    for row in checkpoints[:50]:
+                        last = row["checkpoint"]["last"]
+                        table.add_row(
+                            str(row.get("run_id") or "unknown"),
+                            str(last.get("written_at_utc") or "not recorded"),
+                            str(
+                                last.get("step") if last.get("step") is not None else "not recorded"
+                            ),
+                            str(last.get("integrity") or "not checked"),
+                            "Requires Work support",
+                        )
+                    table.styles.height = min(12, len(checkpoints) + 2)
+                    yield table
                 yield Static(
                     "Completed and pruned Runs will not be repeated. Failed/interrupted Runs use "
                     "compatible application checkpoints when available, otherwise start again. "
@@ -3615,19 +3761,150 @@ class StudyRetryConfirmation(ModalScreen[bool | None]):
                     "Resume Study",
                     id="retry-confirm",
                     variant="success",
-                    disabled=bool(self.preview.get("code_change_detected")),
+                    disabled=bool(self.preview.get("code_change_detected"))
+                    or not self._valid_config,
                 )
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id == "retry-compatible-code" and self.preview.get(
             "code_change_detected"
         ):
-            self.query_one("#retry-confirm", Button).disabled = not event.value
+            self.query_one("#retry-confirm", Button).disabled = (
+                not event.value or not self._valid_config
+            )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "retry-config" and event.value != self.preview.get(
+            "configuration", {}
+        ).get("selected_path", ""):
+            self._valid_config = False
+            self.query_one("#retry-confirm", Button).disabled = True
+            self.query_one("#retry-config-status", Static).update(
+                "Configuration changed · validate a new recovery plan before submitting."
+            )
+
+    def _yaml_picked(self, selected: Path | None) -> None:
+        if selected is not None and self.is_mounted:
+            self.query_one("#retry-config", Input).value = str(selected)
+
+    def _validate_config(self) -> None:
+        if self._validating:
+            return
+        selected = self.query_one("#retry-config", Input).value.strip()
+        self._validating = True
+        self.query_one("#retry-config-validate", Button).disabled = True
+        self.query_one("#retry-confirm", Button).disabled = True
+        self.query_one("#retry-config-status", Static).update(
+            "Checking original identity and selected configuration…"
+        )
+        def validate() -> None:
+            try:
+                preview = self.services.retry_preview(self.job_id, config=selected)
+            except Exception as error:
+                self.post_message(RecoveryConfigurationFailed(error))
+            else:
+                self.post_message(RecoveryConfigurationReady(preview, selected))
+
+        Thread(target=validate, daemon=True, name="lambdaforge-recovery-configuration").start()
+
+    def on_recovery_configuration_ready(self, event: RecoveryConfigurationReady) -> None:
+        event.stop()
+        self._configuration_ready(event.preview, event.selected)
+
+    def on_recovery_configuration_failed(self, event: RecoveryConfigurationFailed) -> None:
+        event.stop()
+        self._configuration_failed(event.error)
+
+    def _configuration_failed(self, error: Exception) -> None:
+        if not self.is_mounted:
+            return
+        self._validating = False
+        self._valid_config = False
+        self.query_one("#retry-config-validate", Button).disabled = False
+        self.query_one("#retry-config-status", Static).update(
+            f"Recovery blocked · {type(error).__name__}: {SecretRedactor.redact(error)[:1000]}"
+        )
+        from lambdaforge.tui.screens.RecoveryWorkspace import RecoveryFailureDialog
+
+        self.app.push_screen(
+            RecoveryFailureDialog(
+                error, job_id=self.job_id, phase="Configuration validation", has_plan=True
+            ),
+            self._configuration_failure_action,
+        )
+
+    def _configuration_failure_action(self, action: str | None) -> None:
+        if not self.is_mounted:
+            return
+        if action == "history":
+            from lambdaforge.tui.screens.RecoveryWorkspace import RecoveryWorkspace
+
+            self.app.push_screen(RecoveryWorkspace(self.services, self.job_id))
+        elif action == "logs":
+            workspace = next(
+                (screen for screen in reversed(self.app.screen_stack) if isinstance(screen, StudyWorkspace)),
+                None,
+            )
+            if workspace is not None:
+                self.dismiss(None)
+                workspace._recovery_failure_action("logs")
+            else:
+                self.query_one("#retry-config-status", Static).update(
+                    f"Recovery logs: lf jobs logs {self.job_id} --tail 100"
+                )
+
+    def _configuration_ready(self, preview: Mapping[str, Any], selected: str) -> None:
+        if not self.is_mounted:
+            return
+        self._validating = False
+        self.query_one("#retry-config-validate", Button).disabled = False
+        if self.query_one("#retry-config", Input).value.strip() != selected:
+            self._valid_config = False
+            self.query_one("#retry-config-status", Static).update(
+                "Selection changed while validating · validate again."
+            )
+            return
+        self.preview = dict(preview)
+        configuration = preview["configuration"]
+        self._config_override = {
+            "config": configuration["selected_path"],
+            "config_sha256": configuration["sha256"],
+        }
+        self._valid_config = True
+        acknowledgement = self.query_one("#retry-compatible-code", Checkbox).value
+        self.query_one("#retry-confirm", Button).disabled = (
+            bool(preview.get("code_change_detected")) and not acknowledgement
+        )
+        self.query_one("#retry-plan-detail", Static).update(
+            confirmation_text({key: value for key, value in preview.items() if key != "runs"})
+        )
+        self.query_one("#retry-config-status", Static).update(
+            "Scientific identity verified · original evidence and budgets are preserved. "
+            + (
+                "Code changed: explicit compatibility acknowledgement is required."
+                if preview.get("code_change_detected")
+                else "Ready to confirm."
+            )
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "retry-confirm":
-            self.dismiss(self.query_one("#retry-compatible-code", Checkbox).value)
-        else:
+            acknowledgement = self.query_one("#retry-compatible-code", Checkbox).value
+            if self._valid_config and (
+                not self.preview.get("code_change_detected") or acknowledgement
+            ):
+                self.dismiss(
+                    {**self._config_override, "accept_code_change": acknowledgement}
+                    if self._config_override
+                    else acknowledgement
+                )
+        elif event.button.id == "retry-config-browse":
+            from lambdaforge.tui.App import YamlFilePicker
+
+            self.app.push_screen(YamlFilePicker(Path.cwd()), self._yaml_picked)
+        elif event.button.id == "retry-config-validate":
+            self._validate_config()
+        elif event.button.id == "retry-cancel":
             self.dismiss(None)
 
 
@@ -4231,6 +4508,12 @@ class WorkWorkspace(ResearchWorkspace):
             f"{self.work.get('name')} · {str(self.work.get('state', 'unknown')).upper()} · "
             f"{self.work.get('cluster', 'local')}",
             classes="workspace-header",
+        )
+        yield Static(
+            operational_detail(self.work),
+            id="work-operational-health",
+            markup=False,
+            classes="freshness-line",
         )
         with Horizontal(classes="workspace-actions"):
             yield Button("Cancel", id="work-cancel", variant="warning")

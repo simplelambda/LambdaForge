@@ -9,6 +9,68 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+## [0.19.0] - 2026-10-11
+
+Fundamentos nativos para agentes y fiabilidad operativa sobre el modelo de ejecución existente.
+Esta versión incluye las capas disponibles, no la reforma integral terminada: siguen pendientes
+las mutaciones científicas aprobadas, búsqueda semántica, vinculación de vaults externos y parte
+de la aceptación de extremo a extremo; consulta `docs/ai/IMPLEMENTATION.es.md`.
+
+### Añadido y corregido
+
+- Fundamentos para agentes: fachada tipada fijada al proyecto, catálogo acotado y MCP stdio
+  opcional con SDK oficial; las mutaciones científicas continúan deshabilitadas.
+- Aprobaciones humanas de notas firmadas/caducables, revisión CLI/Console, apply único bajo lock y
+  auditoría; sin autoaprobación del agente. Instalación opcional explícita conserva archivos del proyecto.
+- MCP HTTP loopback emparejado, verificación de token/proyecto/Host/Origin por petición y límites;
+  aceptación real de descubrimiento/llamadas Codex con configuración temporal aislada.
+- Contratos de modelos y recetas instalados sin Torch; consultas nativas perezosas de Run/productos/
+  recursos/notas relacionadas sin descarga automática de modelos o artifacts.
+- Memoria Markdown con referencias exactas, índice FTS reconstruible, conflictos de revisión,
+  Obsidian sin escritorio y panel de consola para estado, preparación y búsqueda.
+- ZIP de notas con bytes/checksums exactos y aprobación separada; auditoría de revisiones paginada
+  por bytes. Trece prompts MCP y recursos acotados por toolset, sin duplicar evidencia científica.
+- Diagnóstico Obsidian pasivo; prueba CLI/apertura requieren acción local explícita y no cambian
+  preferencias. Markdown headless sigue funcionando sin aplicación/CLI.
+- 24 Skills empaquetadas, guía de consumidor y sync preview/apply que preserva archivos
+  personalizados. AGENTS raíz breve; contratos extensos conservados y aceptación pendiente explícita.
+
+- Un Job histórico corrupto ya no convierte en UNKNOWN/degraded todos los Works/Studies del host.
+  Inventario conserva los Jobs válidos y muestra fallos acotados por Job; no adopta entradas no
+  verificadas ni permite recovery por ellas. La siguiente consulta válida limpia el error anterior.
+- Las sondas directas recopilan métodos y auxiliares por nombre desde una sola lectura de código,
+  evitando perder `_required_mapping` al actualizar fuentes con una consola/monitor aún abierto.
+- Auditoría guardada paginada con `lf jobs recovery` y **Recovery history** de consola: inspección
+  explícita y apply rechazado conservan ID/causa aunque no exista nuevo Job. Diálogo persistente
+  de fallo con logs, historial y el mismo plan, sin avisos repetidos de sondeo.
+- Cargar Runs reutilizados, cambiar totales o observar pérdida/fallo no acredita progreso de
+  recovery. SLURM consulta accounting acotado tras fallo de transporte en cola, sin mostrar
+  detalles obsoletos ni inventar confirmación si accounting está vacío.
+- Excepciones genéricas de consulta repetidas no acreditan desconexión; errores tipados de conexión
+  y autenticación conservan su diagnóstico nativo diferenciado.
+- Carga/sustitución de checkpoints rechaza registros corruptos o Execution/Run ajenos antes de tocar
+  bytes, conservando Attempts anteriores del mismo Run lógico.
+- Sondas monitor/consola coordinadas por proyecto/proveedor sin actualizar relojes de caché;
+  Jobs SLURM independientes. SMTP lento no bloquea incidentes ni confirma transiciones nuevas.
+- UNKNOWN con pérdida confirmada reciente no bloquea su propio recovery; otros Jobs y checks de
+  propiedad siguen protegidos. Resolver incidente del origen exige progreso científico posterior
+  a una recuperación auditada y conserva el fallo histórico.
+- Salud/frescura operativa separada de ciencia, incidentes persistentes deduplicados y monitor
+  independiente: CLI health/incidents/monitor, panel de consola, instalación systemd-user
+  preview/apply y SMTP TLS opcional mediante referencias seguras.
+- Retry single-host con YAML trasladado (`--config`), comprobación semántica contra origen,
+  hash fijado y petición auditable enlazada a fases/eventos Job. Recovery Fleet sigue pendiente;
+  no se simula como otro runner.
+- Cadencia/retención terminal optativas de checkpoints, propietario/paso/fecha, inventario con
+  verificación en host y preview/tabla sin descargar pesos ni prometer continuar epoch.
+  Diagnósticos nativos distinguen hechos del scheduler de causas desconocidas.
+- Fallos del proveedor no parecen inventarios vacíos ni running fresco: verificación real de
+  identidades/marcadores, razones SLURM y contabilidad incierta, orden/locks para conservar última
+  confirmación y cancelaciones. Preparación/correo fallidos muestran resultado durable acotado.
+- Guía bilingüe operativa/de emergencia y registro honesto de aceptación incluidos en paquete.
+- Sonda directa sin exigir LF instalado en su intérprete. Metadata interna no simula checkpoint;
+  retención modificada se comprueba antes de limpiar.
+
 ## [0.18.0] - 2026-10-09
 
 Resultados de Work de primera clase, dependencias históricas exactas y productos científicos

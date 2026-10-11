@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sys
 from pathlib import Path
 
 from packaging.version import Version
@@ -19,9 +20,35 @@ def _framework_requirement() -> str:
     return f"lambdaforge>={major}.{minor},<{major}.{minor + 1}"
 
 
-def initialize(directory: Path, *, force: bool, template: str = "minimal") -> int:
+def initialize(
+    directory: Path,
+    *,
+    force: bool,
+    template: str = "minimal",
+    agents: str = "none",
+    knowledge: str = "none",
+    interactive: bool = False,
+    install_deps: bool = False,
+) -> int:
     """Create a minimal installable consumer project without overwriting by default."""
     resolved = directory.expanduser().resolve()
+    if directory.expanduser().absolute() != resolved:
+        raise ValueError("Scaffold destination must not contain symlinks.")
+    if interactive:
+        if not sys.stdin.isatty():
+            raise ValueError("Interactive init needs a TTY; use --agents and --knowledge instead.")
+        agents = input("Agent setup [none/portable/codex] (portable): ").strip() or "portable"
+        knowledge = (
+            input("Project memory [none/markdown/obsidian] (markdown): ").strip() or "markdown"
+        )
+    if agents not in {"none", "portable", "codex"} or knowledge not in {
+        "none",
+        "markdown",
+        "obsidian",
+    }:
+        raise ValueError("Invalid agent or knowledge mode; no project was written.")
+    if install_deps and agents == "none":
+        raise ValueError("--install-deps requires --agents portable/codex; no project was written.")
     slug = re.sub(r"[^a-zA-Z0-9_-]", "-", resolved.name).strip("-")[:40] or "project"
     project_id = f"{slug}-{hashlib.sha256(str(resolved).encode()).hexdigest()[:16]}"
     files = {
@@ -51,9 +78,8 @@ class Example(lf.Work):
     """Write one small artifact and return the final structured result."""
 
     def run(self, message: str = "ready") -> dict[str, str]:
-        path = self.run_dir / "output.txt"
-        path.write_text(message + "\\n", encoding="utf-8")
-        self.outputs.artifact("output", path, role="report", media_type="text/plain")
+        report = self.outputs.file("output", filename="output.txt", role="report")
+        report.write_text(message + "\\n")
         return {"status": message}
 ''',
         "experiments/work.yaml": """name: example
@@ -97,11 +123,10 @@ import lambdaforge as lf
 class Preprocess(lf.Work):
     """Process JSONL with normal Python and register the resulting directory."""
     def run(self, source: Path) -> dict[str, int]:
-        output = self.run_dir / "processed.jsonl"
+        output = self.outputs.file("processed", filename="processed.jsonl", role="dataset")
         records = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
         output.write_text("".join(json.dumps(row) + "\\n" for row in records))
         self.metrics.log("records", len(records))
-        self.outputs.artifact("processed", output, role="dataset")
         return {"records": len(records)}
 ''',
         "data/raw.jsonl": '{"id": "example", "value": 1}\n',
@@ -179,9 +204,46 @@ lambdaforge run {entry}
     collisions = [directory / relative for relative in files if (directory / relative).exists()]
     if collisions and not force:
         raise ValueError(f"Refusing to overwrite {collisions[0]}; use --force if intentional.")
+    for relative in files:
+        path = resolved / relative
+        if path.resolve() != path:
+            raise ValueError(f"Refusing a symbolic scaffold path: {path}")
     for relative, content in files.items():
         path = directory / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     print(f"Initialized LambdaForge consumer project: {directory.resolve()}")
+    if agents != "none" or knowledge != "none":
+        from lambdaforge.agents.integration import IntegrationService
+
+        integration = IntegrationService(resolved)
+        plan = integration.preview(agents=agents, knowledge=knowledge)
+        applied = integration.apply(plan_hash=plan["plan_hash"], agents=agents, knowledge=knowledge)
+        print(f"Agent assets prepared; {len(applied['custom_files_preserved'])} custom files kept.")
+        if agents == "codex":
+            print(
+                "Review .lambdaforge/agents/codex-config.example.toml; client config is unchanged."
+            )
+        if install_deps:
+            from lambdaforge.agents.dependencies import DependencyService
+
+            dependencies = DependencyService(integration.scope)
+            dependency_plan = dependencies.preview()
+            print(
+                "Installing declared optional agent dependencies in "
+                + dependency_plan["interpreter"]
+            )
+            installed = dependencies.install(plan_hash=dependency_plan["plan_hash"], consent=True)
+            print("Agent dependencies: " + installed["status"])
+            if installed["status"] == "error":
+                print(installed["diagnostic"], file=sys.stderr)
+                print(
+                    "Project files are preserved. Use lf ai dependencies check/install to repair.",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            print(
+                "Optional MCP SDK is not installed automatically: pip install 'lambdaforge[agents]'"
+            )
     return 0

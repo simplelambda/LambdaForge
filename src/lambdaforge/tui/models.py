@@ -83,6 +83,14 @@ CONSOLE_ACTIONS = (
     _action("system", "doctor", "overview"),
     _action("system", "resources", "overview"),
     _action("system", "clean", "overview", destructive=True),
+    _action(
+        "system",
+        "operational health",
+        "overview",
+        status="IMPLEMENTED",
+        handler="operational_health",
+        service="operational_snapshot",
+    ),
     _action("job", "list", "work"),
     _action("job", "show", "work", selection=True),
     _action("job", "logs", "work", selection=True),
@@ -118,7 +126,11 @@ CONSOLE_ACTIONS = (
     _action("result", "list", "results", status="IMPLEMENTED", handler="navigate"),
     _action("product", "list", "products", status="IMPLEMENTED", handler="navigate"),
     _action(
-        "study", "import", "products", status="IMPLEMENTED", handler="study_import",
+        "study",
+        "import",
+        "products",
+        status="IMPLEMENTED",
+        handler="study_import",
         service="import_study",
     ),
     _action(

@@ -8,7 +8,13 @@ from textual.app import ComposeResult
 from textual.widgets import Button, DataTable, Static
 
 from lambdaforge.tui.screens.Base import DataScreen, EntitySelected
-from lambdaforge.tui.viewmodels import entity_key, format_value, objective_display_name
+from lambdaforge.tui.viewmodels import (
+    entity_key,
+    format_value,
+    objective_display_name,
+    operational_detail,
+    operational_label,
+)
 
 
 class StudyScreen(DataScreen):
@@ -49,7 +55,7 @@ class StudyScreen(DataScreen):
         self._rendering = True
         table.clear(columns=True)
         table.add_columns(
-            "Study", "State", "Objective", "Candidates", "Running", "Waiting", "Pruned"
+            "Study", "State", "Health", "Objective", "Candidates", "Running", "Waiting", "Pruned"
         )
         studies = self._studies(value)
         for index, item in enumerate(studies):
@@ -60,6 +66,7 @@ class StudyScreen(DataScreen):
             table.add_row(
                 str(item.get("name", "-")),
                 str(item.get("state", "unknown")) + (" · imported" if item.get("imported") else ""),
+                operational_label(item),
                 objective_display_name(objective),
                 f"{counts.get('candidates', 0)}",
                 f"{counts.get('active_runs', 0)}",
@@ -126,6 +133,7 @@ class StudyScreen(DataScreen):
         lines = [
             f"{item.get('name', 'Study')} · {str(item.get('state', 'unknown')).upper()} · "
             f"{item.get('cluster', 'local')}",
+            operational_detail(item),
             f"Objective   {objective_display_name(objective)} ({objective.get('mode', '-')})",
             "Runs        "
             f"{counts.get('active_runs', 0)} active · {counts.get('queued_runs', 0)} waiting · "

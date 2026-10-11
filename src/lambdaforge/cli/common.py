@@ -8,6 +8,7 @@ import traceback
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,24 @@ def report_error(error: BaseException) -> int:
     """Classify, persist and render one boundary failure with consistent exit semantics."""
     context = current_diagnostic_context()
     value = DiagnosticClassifier().classify(error, context)
+    request_id = getattr(error, "recovery_request_id", None)
+    job_id = getattr(error, "recovery_job_id", None)
+    if isinstance(request_id, str) and isinstance(job_id, str):
+        value = replace(
+            value,
+            job_id=job_id,
+            context={**value.context, "recovery_request_id": request_id},
+            details=(*value.details, f"Recovery request: {request_id}"),
+            commands=(
+                *value.commands,
+                ("Saved recovery history", f"lf jobs recovery {shlex.quote(job_id)} --json"),
+            ),
+        )
+        audit_error = getattr(error, "recovery_audit_error", None)
+        if isinstance(audit_error, str):
+            value = replace(
+                value, details=(*value.details, f"Audit persistence failed: {audit_error}")
+            )
     record = DiagnosticRecorder().record(value, error, context)
     if record is not None:
         value = value.with_diagnostic_path(str(record))

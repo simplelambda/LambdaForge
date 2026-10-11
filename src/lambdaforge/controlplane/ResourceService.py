@@ -6,7 +6,6 @@ import json
 import os
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -85,9 +84,9 @@ class ResourceService:
                 requested=tuple(previous.get("requested", ())) if previous else (),
                 personal=previous.get("personal", {}) if previous else {},
                 observed_at_utc=(
-                    str(previous.get("observed_at_utc", datetime.now(timezone.utc).isoformat()))
+                    str(previous.get("observed_at_utc") or "")
                     if previous
-                    else datetime.now(timezone.utc).isoformat()
+                    else ""
                 ),
                 error=f"{error.__class__.__name__}: {error}",
             )

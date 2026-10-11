@@ -6,7 +6,22 @@ LambdaForge es un runtime gestionado para investigación científica reproducibl
 escribe Python normal en una clase `lambdaforge.Work`; el framework se ocupa de ejecución local o
 remota, recursos, reintentos, métricas, artefactos, datasets, procedencia, resultados y limpieza.
 
+[Salud operativa y recuperación](docs/OPERATIONAL_RELIABILITY.es.md): `lf health`, incidentes
+persistentes, `lf monitor` independiente, SMTP opcional y retry con YAML trasladado (`--config`).
+**Operational health…** en consola usa los mismos servicios; running en caché no demuestra
+procesos vivos. La guía incluye emergencias y límites Fleet todavía pendientes.
+La política de checkpoints es optativa; el preview distingue bytes registrados de continuación del
+consumidor. Sondas concurrentes mantienen última vista sin fingir frescura.
+`lf jobs recovery JOB --json` y **Recovery history** del Study muestran peticiones/eventos guardados
+y paginados, incluso sin conexión. Los rechazos quedan auditados aunque no se cree un nuevo Job.
+
 ## Índice
+
+La [integración de agentes](docs/ai/INTEGRATION.es.md) añade fachada Python fijada al proyecto,
+MCP stdio opcional, 24 Skills empaquetadas y memoria Markdown. `lf init --agents portable
+--knowledge markdown` prepara consumidores; **Agents / knowledge…** utiliza los mismos servicios.
+Ya incluye aprobación humana local de notas, dependencias opcionales y HTTP loopback emparejado;
+mutaciones científicas y otros requisitos de la reforma siguen explícitamente pendientes.
 
 La [auditoría de corrección científica](docs/SCIENTIFIC_AUDIT.es.md) documenta inferencia pareada
 en orden de adquisición, recovery de bloques anticipados comprometidos y separación de conclusiones
@@ -31,7 +46,7 @@ proyecto:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.18.0
+python -m pip install lambdaforge==0.19.0
 python -m pip install -e .
 python -m pip check
 ```
@@ -312,7 +327,7 @@ produce un error claro. La ruta y la versión consultada se registran una sola v
 ## Clustering
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.18.0"
+python -m pip install "lambdaforge[clustering]==0.19.0"
 ```
 
 ```python
@@ -1036,6 +1051,9 @@ este contrato compacto; `lf show WORK` y `lf show WORK --run CLAVE --json` añad
 niveles de detalle. Si el proveedor no permite confirmar un Job más allá de `unknown`, el borrado
 ofrece una operación explícita solo sobre el historial local: no toca el proceso ni el workspace
 remotos no verificados. Si el cómputo aún puede estar activo, primero hay que reconectar y cancelarlo.
+El inventario directo aísla cada Job corrupto en lugar de marcar UNKNOWN/degraded a todos los demás;
+los Jobs válidos recuperan estado fresco en la siguiente consulta. Observar nunca repara archivos
+científicos ni adopta entradas de error no verificadas.
 El worker mantiene `study/interactive.json` como índice compacto separado del resumen rico
 autoritativo. Ficheros específicos de HPO/recursos/Trial evitan leer el resumen entero; el post-hoc
 provisional se cachea en un proceso de lectura separado en el host, nunca en el heartbeat HPO.
@@ -1121,7 +1139,7 @@ y atómico. También puede calcularse o actualizarse expresamente:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.18.0"
+python -m pip install "lambdaforge[analysis-report]==0.19.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json

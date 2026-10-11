@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from lambdaforge.work.checkpoint_policy import checkpoint_payloads
+
 
 def owned(root: Path, relative: str) -> Path:
     """Reject traversal and symlinks, including missing paths below symbolic parents."""
@@ -285,8 +287,7 @@ def projection(
                         "not a historical Attempt snapshot"
                     ),
                 }
-                for path in sorted(checkpoint_root.rglob("*"))
-                if path.is_file() and path.resolve() == path
+                for path in sorted(checkpoint_payloads(checkpoint_root))
             ]
             if checkpoint_root.exists()
             else []

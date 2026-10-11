@@ -22,6 +22,7 @@ from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.jobs import JobHandle, JobRecord, JobState
 from lambdaforge.controlplane.JobStore import JobStore
+from lambdaforge.controlplane.SecretRedactor import SecretRedactor
 from lambdaforge.diagnostics import (
     DiagnosticClassifier,
     DiagnosticContext,
@@ -427,34 +428,33 @@ class JobService:
         refresh: bool = True,
         include_study: bool = True,
     ) -> JobRecord:
-        """Load and optionally refresh a non-terminal scheduler state."""
+        """Load/refresh one native Job without overlapping inventory/provider probes."""
+        from lambdaforge.controlplane.ObservationGate import ObservationGate
+
         record = self.store.get(job_id)
         if not refresh or record.scheduler_id is None or record.state.terminal:
             return record
-        profile, transport, scheduler = self._provider(record)
+        gate_key = (
+            f"{record.cluster}:slurm:{job_id}" if record.scheduler == "slurm" else record.cluster
+        )
+        with ObservationGate(self.store.root, gate_key, scope=job_id) as probe:
+            if not probe:
+                return self.store.get(job_id)
+            return self._get_observation(job_id, include_study=include_study)
+
+    def _get_observation(self, job_id: str, *, include_study: bool) -> JobRecord:
+        """Caller owns the short-lived per-project provider probe gate."""
+        record = self.store.get(job_id)
+        if record.scheduler_id is None or record.state.terminal:
+            return record
+        started = datetime.now(timezone.utc).isoformat()
         try:
+            profile, transport, scheduler = self._provider(record)
             state = scheduler.state(record.scheduler_id)
             provider_details = scheduler.details(record.scheduler_id)
         except Exception as error:
             previous_state = record.state
-            metadata = dict(record.metadata)
-            metadata.update(
-                {
-                    "last_known_state": (
-                        metadata.get("last_known_state", JobState.UNKNOWN.value)
-                        if record.state is JobState.UNKNOWN
-                        else record.state.value
-                    ),
-                    "unreachable_error": f"{error.__class__.__name__}: {error}",
-                    "last_refresh_at_utc": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            record = record.with_updates(
-                state=JobState.UNKNOWN,
-                metadata=metadata,
-                updated_at_utc=datetime.now(timezone.utc).isoformat(),
-            )
-            self.store.write(record)
+            record = self.observation_failed(job_id, error, started=started)
             if previous_state is not JobState.UNKNOWN:
                 self.store.append_event(
                     job_id,
@@ -465,39 +465,44 @@ class JobService:
                     source="scheduler",
                 )
             return record
-        metadata = dict(record.metadata)
-        metadata.pop("unreachable_error", None)
-        metadata.pop("last_known_state", None)
-        metadata["last_refresh_at_utc"] = datetime.now(timezone.utc).isoformat()
-        if provider_details:
-            metadata["remote_state"] = dict(provider_details)
-        if profile.scheduler == "slurm" and state in {JobState.RUNNING, JobState.PAUSED}:
-            progress_path = str(PurePosixPath(record.work_dir).parent / "progress.json")
-            progress_result = transport.run(("cat", progress_path), timeout=5.0)
-            if progress_result.returncode == 0:
-                try:
-                    progress = json.loads(progress_result.stdout)
-                except (TypeError, ValueError):
-                    progress = None
-                if isinstance(progress, Mapping):
-                    remote_state = metadata.get("remote_state", {})
-                    remote_state = dict(remote_state) if isinstance(remote_state, Mapping) else {}
-                    remote_state["progress"] = dict(progress)
-                    metadata["remote_state"] = remote_state
-        study = self._load_study_summary(record, transport) if include_study else None
-        if study is not None:
-            remote_state = metadata.get("remote_state", {})
-            remote_state = dict(remote_state) if isinstance(remote_state, Mapping) else {}
-            remote_state["study"] = study
-            metadata["remote_state"] = remote_state
-        if state is not record.state or metadata != record.metadata:
-            previous_state = record.state
-            record = record.with_updates(
-                state=state,
-                metadata=metadata,
-                updated_at_utc=datetime.now(timezone.utc).isoformat(),
-            )
-            self.store.write(record)
+        details = dict(provider_details)
+        observed_at = datetime.now(timezone.utc).isoformat()
+        try:
+            if profile.scheduler == "slurm" and state in {JobState.RUNNING, JobState.PAUSED}:
+                progress_path = str(PurePosixPath(record.work_dir).parent / "progress.json")
+                progress_result = transport.run(("cat", progress_path), timeout=5.0)
+                if progress_result.returncode == 0:
+                    try:
+                        progress = json.loads(progress_result.stdout)
+                    except (TypeError, ValueError):
+                        progress = None
+                    if isinstance(progress, Mapping):
+                        details["progress"] = dict(progress)
+            study = self._load_study_summary(record, transport) if include_study else None
+            if study is not None:
+                details["study"] = study
+        except Exception as error:
+            # The scheduler observation succeeded. A telemetry read error must not rewrite
+            # its meaning as "host unreachable" or discard the last good scientific model.
+            details["telemetry_error"] = {
+                "type": type(error).__name__,
+                "message": SecretRedactor.redact(error)[:1000],
+            }
+        previous_state = record.state
+        record = self.store.record_observation(
+            job_id,
+            started=started,
+            finished=observed_at,
+            source=profile.scheduler,
+            state=state,
+            details=details,
+        )
+        if (
+            record.metadata.get("operational_observation", {}).get("last_attempt_started_at_utc")
+            != started
+        ):
+            return record
+        if record.state is state:
             if state is not previous_state:
                 self.store.append_event(
                     job_id,
@@ -508,6 +513,7 @@ class JobService:
                     source="scheduler",
                 )
                 if state.terminal and state is not JobState.PLANNED:
+                    metadata: dict[str, Any]
                     try:
                         from lambdaforge.controlplane.StorageService import StorageService
 
@@ -515,7 +521,6 @@ class JobService:
                             self.catalog, self.factory, jobs=self
                         ).compact_job(record.cluster, record.job_id, apply=True)
                         metadata = {
-                            **dict(record.metadata),
                             "workspace_compaction": {
                                 "reclaimed_bytes": int(compacted["reclaimed_bytes"]),
                                 "preserved": list(compacted["preserved"]),
@@ -523,12 +528,23 @@ class JobService:
                         }
                     except Exception as error:
                         metadata = {
-                            **dict(record.metadata),
                             "workspace_compaction_warning": f"{type(error).__name__}: {error}",
                         }
-                    record = record.with_updates(metadata=metadata)
-                    self.store.write(record)
+                    record = self.store.merge_metadata(job_id, metadata)
         return record
+
+    def observation_failed(
+        self, job_id: str, error: Exception, *, started: str | None = None, source: str = "provider"
+    ) -> JobRecord:
+        """Persist a failed probe without discarding the last confirmed scientific state."""
+        now = datetime.now(timezone.utc).isoformat()
+        return self.store.record_observation(
+            job_id,
+            started=started or now,
+            finished=now,
+            source=source,
+            error=error,
+        )
 
     def list(
         self,
@@ -545,15 +561,18 @@ class JobService:
             refreshable = tuple(record for record in stored if not record.state.terminal)
             refreshed: dict[str, JobRecord] = {}
             with ThreadPoolExecutor(max_workers=min(8, max(1, len(refreshable)))) as executor:
-                futures = {
-                    executor.submit(self.get, record.job_id): record for record in refreshable
-                }
+                futures = {}
+                for record in refreshable:
+                    dispatched_at = datetime.now(timezone.utc).isoformat()
+                    futures[executor.submit(self.get, record.job_id)] = (record, dispatched_at)
                 for future in as_completed(futures):
-                    original = futures[future]
+                    original, dispatched_at = futures[future]
                     try:
                         refreshed[original.job_id] = future.result()
-                    except Exception:
-                        refreshed[original.job_id] = original
+                    except Exception as error:
+                        refreshed[original.job_id] = self.observation_failed(
+                            original.job_id, error, started=dispatched_at
+                        )
             records = tuple(refreshed.get(record.job_id, record) for record in stored)
         else:
             records = stored
@@ -593,7 +612,16 @@ class JobService:
         record = self.get(job_id, include_study=False)
         _profile, transport, _scheduler = self._provider(record)
         value = self._load_study_summary(record, transport)
-        return {**value, "job_state": record.state.value} if value is not None else None
+        return (
+            {
+                **value,
+                "job_state": record.state.value,
+                "operational": record.to_dict()["operational"],
+                "recovery": record.to_dict()["recovery"],
+            }
+            if value is not None
+            else None
+        )
 
     def study_workspace(self, job_id: str, *, latest_job_id: str) -> dict[str, Any] | None:
         """Keep prior owned telemetry while observing the latest recovery Job's lifecycle."""
@@ -609,7 +637,13 @@ class JobService:
         _profile, transport, _scheduler = self._provider(prior)
         value = self._load_study_summary(prior, transport)
         return (
-            {**value, "job_state": latest.state.value, "telemetry_job_id": job_id}
+            {
+                **value,
+                "job_state": latest.state.value,
+                "telemetry_job_id": job_id,
+                "operational": latest.to_dict()["operational"],
+                "recovery": latest.to_dict()["recovery"],
+            }
             if value is not None
             else None
         )
@@ -803,6 +837,7 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
         import base64
 
         from lambdaforge.work import result_projection
+        from lambdaforge.work.checkpoint_policy import checkpoint_payloads
 
         record = self.get(job_id, refresh=False)
         profile, transport, _scheduler = self._provider(record)
@@ -818,7 +853,12 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
                 raise ValueError("Unowned Work recovery result.")
             allowed.append(recovery)
         script = (
-            Path(result_projection.__file__).read_text(encoding="utf-8")
+            Path(result_projection.__file__)
+            .read_text(encoding="utf-8")
+            .replace(
+                "from lambdaforge.work.checkpoint_policy import checkpoint_payloads",
+                inspect.getsource(checkpoint_payloads),
+            )
             + """
 import sys
 owner = Path(sys.argv[1])
@@ -1612,21 +1652,54 @@ exec "$fallback" "$@"
     def reconcile(
         self, *, cluster: str | None = None, all_clusters: bool = False
     ) -> tuple[JobRecord, ...]:
-        """Discover durable provider jobs and rebuild/update the local index."""
+        """Coalesce monitor/Console observations while retaining cross-cluster parallelism."""
+        from lambdaforge.controlplane.ObservationGate import ObservationGate
+
+        names = self.catalog.names() if all_clusters else (cluster or "local",)
+
+        def probe_cluster(name: str) -> tuple[JobRecord, ...]:
+            with ObservationGate(self.store.root, name) as probe:
+                if not probe:
+                    return tuple(
+                        record for record in self.store.records() if record.cluster == name
+                    )
+                return self._reconcile(cluster=name)
+
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(names)))) as executor:
+            results = executor.map(probe_cluster, names)
+            return tuple(record for group in results for record in group)
+
+    def _reconcile(
+        self, *, cluster: str | None = None, all_clusters: bool = False
+    ) -> tuple[JobRecord, ...]:
+        """Merge exact provider facts while the cluster's observation gate is held."""
         names = self.catalog.names() if all_clusters else (cluster or "local",)
         discovered: list[JobRecord] = []
         inventories: dict[str, tuple[Mapping[str, object], ...]] = {}
+        attempts = {name: datetime.now(timezone.utc).isoformat() for name in names}
+        failures: dict[str, Exception] = {}
         with ThreadPoolExecutor(max_workers=min(8, max(1, len(names)))) as executor:
             futures = {executor.submit(self._inventory, name): name for name in names}
             for future in as_completed(futures):
                 name = futures[future]
                 try:
                     inventories[name] = future.result()
-                except Exception:
-                    # One unavailable cluster must not prevent reconciliation elsewhere.
-                    inventories[name] = ()
+                except Exception as error:
+                    failures[name] = error
+        known = self.store.records()
+        for record in known:
+            if record.cluster in failures and not record.state.terminal:
+                self.observation_failed(
+                    record.job_id,
+                    failures[record.cluster],
+                    started=attempts[record.cluster],
+                    source="inventory",
+                )
         for name in names:
+            if name in failures:
+                continue
             profile = self.catalog.get(name)
+            seen: set[str] = set()
             for item in inventories.get(name, ()):
                 request = item.get("request")
                 state_value = item.get("state")
@@ -1635,10 +1708,30 @@ exec "$fallback" "$@"
                 job_id = str(request.get("job_id", ""))
                 if not job_id.startswith("job-"):
                     continue
+                seen.add(job_id)
                 try:
                     previous = self.store.get(job_id)
                 except FileNotFoundError:
                     previous = None
+                if previous is not None and previous.cluster != name:
+                    raise ValueError("Provider inventory Job identity belongs to another cluster.")
+                item_error = item.get("observation_error")
+                if isinstance(item_error, Mapping):
+                    # The directory name is a routing key, not scientific/ownership
+                    # evidence. Never adopt a failed probe as a new native Job.
+                    if previous is not None:
+                        discovered.append(
+                            self.observation_failed(
+                                job_id,
+                                ValueError(
+                                    f"Could not observe {job_id}: "
+                                    f"{item_error['type']}: {item_error['message']}"
+                                ),
+                                started=attempts[name],
+                                source="inventory",
+                            )
+                        )
+                    continue
                 now = datetime.now(timezone.utc).isoformat()
                 state = JobState(str(state_value.get("state", JobState.UNKNOWN.value)))
                 previous_remote = (
@@ -1690,7 +1783,16 @@ exec "$fallback" "$@"
                         job_type="command",
                     )
                 )
-                self.store.write(record)
+                if previous is None:
+                    self.store.write(record)
+                record = self.store.record_observation(
+                    job_id,
+                    started=attempts[name],
+                    finished=now,
+                    source="inventory",
+                    state=state,
+                    details=reconciled_remote,
+                )
                 if previous is None or previous.state is not state:
                     self.store.append_event(
                         job_id,
@@ -1706,12 +1808,59 @@ exec "$fallback" "$@"
                         source="provider",
                     )
                 discovered.append(record)
+            # A successful but empty/partial inventory is not an outage, nor proof of death.
+            # SLURM's base inventory is intentionally absent; its queue/accounting is queried
+            # by get(), so never manufacture a new SLURM observation here.
+            if profile.scheduler != "slurm":
+                for previous in known:
+                    if (
+                        previous.cluster == name
+                        and not previous.state.terminal
+                        and previous.scheduler_id
+                        and previous.job_id not in seen
+                    ):
+                        self.store.record_observation(
+                            previous.job_id,
+                            started=attempts[name],
+                            finished=datetime.now(timezone.utc).isoformat(),
+                            source="inventory",
+                            state=JobState.UNKNOWN,
+                            details={
+                                "provider_observation": "unknown",
+                                "observation_reason": "NOT_IN_PROVIDER_INVENTORY",
+                            },
+                        )
         return tuple(discovered)
 
     def _inventory(self, cluster: str) -> tuple[Mapping[str, object], ...]:
         profile = self.catalog.get(cluster)
         scheduler = self.factory.scheduler(profile, self.factory.transport(profile))
-        return tuple(scheduler.inventory())
+        values = tuple(scheduler.inventory())
+        if any(
+            not isinstance(value, Mapping)
+            or not isinstance(value.get("request"), Mapping)
+            or not isinstance(value.get("state"), Mapping)
+            for value in values
+        ):
+            raise ValueError("Provider inventory contains corrupt or partial Job records.")
+        for value in values:
+            if "observation_error" not in value:
+                continue
+            error = value["observation_error"]
+            request, state = value["request"], value["state"]
+            assert isinstance(request, Mapping) and isinstance(state, Mapping)
+            job_id = request.get("job_id")
+            if (
+                not isinstance(error, Mapping)
+                or not isinstance(error.get("type"), str)
+                or not isinstance(error.get("message"), str)
+                or not isinstance(job_id, str)
+                or state.get("job_id") != job_id
+                or state.get("state") != JobState.UNKNOWN.value
+            ):
+                raise ValueError("Provider inventory contains a malformed per-Job error.")
+            self.store._validate_id(job_id)
+        return values
 
     def _lifecycle(self, job_id: str, operation: str, target: JobState) -> JobRecord:
         record = self.get(job_id)
@@ -1885,13 +2034,20 @@ exec "$fallback" "$@"
         state = str(value.get("state", "unknown"))
         return f"[{timestamp}] [{phase}] {state}: {value.get('message', '')}"
 
-    def retry_preview(self, job_id: str) -> dict[str, Any]:
+    def retry_preview(self, job_id: str, *, config: str | Path | None = None) -> dict[str, Any]:
         """Read a bounded recovery plan on its execution host; never copy scientific bytes."""
         from lambdaforge.work.sweep_blocks import sweep_block_inventory
 
         previous = self.get(job_id)
-        if previous.state not in {JobState.FAILED, JobState.CANCELLED, JobState.TIMEOUT}:
+        if previous.metadata.get("fleet") or previous.metadata.get("fleet_role") == "member":
+            raise ValueError(
+                "Fleet recovery is not integrated yet. Inspect the coordinator and exact member "
+                "Jobs with lf jobs show/logs; native leases and checkpoint transfer must be "
+                "reconciled before recovery. Refusing a single-host recovery preview or replay."
+            )
+        if not self._recovery_eligible(previous):
             raise ValueError("Retry requires a failed, cancelled or timed-out Job.")
+        operational_verification = self._verify_recovery_provider(previous)
         owner_id = str(previous.metadata.get("recovery_owner_job") or previous.job_id)
         owner = self.get(owner_id, refresh=False)
         _profile, transport, _scheduler = self._provider(previous)
@@ -1937,6 +2093,9 @@ if paths:
    exec(seed_source.replace(", slots=True", ""))
    stream=ProjectSeedStream
   out=fixed_recovery_preview(p,seed_stream=stream)
+  keys=("execution_id","scientific_fingerprint","code_identity",
+        "study_designs","expected_products","source")
+  out["origin_manifest"]={k:manifest[k] for k in keys if k in manifest}
   out["previous_code_identity"]=read(p/"current-code.json").get("code_identity",manifest.get("code_identity"))
   json.dump(out,sys.stdout); sys.exit(0)
  if not (p/"hpo-control"/"state.json").is_file():
@@ -1949,7 +2108,17 @@ if paths:
       "failed_attempts":sum(r.get("status")=="failed" for r in state.get("runs",[])),
       "pending_actions":len(state.get("pending_actions",[])),
       "proposed_candidates":len(state.get("proposed_pool_trials",[]))}
+ latest={}
+ for r in state.get("runs",[]):
+  key=r.get("run_id")
+  if key and r.get("attempt_number",0)>=latest.get(key,{}).get("attempt_number",0): latest[key]=r
+ out["preserved_completed_runs"]=sum(r.get("status")=="succeeded" for r in latest.values())
+ out["checkpoints"]=[{"run_id":key,"checkpoint":checkpoint_recovery_preview(p,key)}
+                     for key in latest]
  out["previous_code_identity"]=read(p/"current-code.json").get("code_identity",manifest.get("code_identity"))
+ keys=("execution_id","scientific_fingerprint","code_identity",
+       "study_designs","expected_products","source")
+ out["origin_manifest"]={k:manifest[k] for k in keys if k in manifest}
 json.dump(out,sys.stdout)
 """
         observed = transport.run(
@@ -1978,8 +2147,49 @@ json.dump(out,sys.stdout)
             raise ValueError(f"Cannot inspect Study recovery: {observed.stderr.strip()[-1000:]}")
         plan = json.loads(observed.stdout)
         previous_code = plan.get("previous_code_identity")
-        source_config = self._retry_source_config(previous)
-        if plan.get("resumable") and isinstance(previous_code, Mapping) and source_config:
+        historical_config = self._retry_source_config(previous)
+        source_config = self._retry_source_config(previous, config=config)
+        exists = source_config is not None and Path(source_config).is_file()
+        plan["configuration"] = {
+            "historical_path": historical_config,
+            "selected_path": source_config,
+            "selected_exists": exists,
+            "scientific_compatibility": "verified-by-worker",
+        }
+        if config is not None:
+            from lambdaforge.work.config import WorkConfig
+            from lambdaforge.work.recovery import (
+                restore_seed_context,
+                validate_recovery_configuration,
+            )
+
+            if not exists or source_config is None:
+                raise ValueError(
+                    "Selected recovery YAML does not exist; "
+                    "choose an existing project configuration."
+                )
+            selected = Path(source_config)
+            if selected.is_symlink():
+                raise ValueError("Recovery YAML must be a regular project-owned file.")
+            origin = plan.get("origin_manifest")
+            if not isinstance(origin, Mapping):
+                raise ValueError(
+                    "Original configuration snapshot is missing; recovery cannot be verified."
+                )
+            restored = restore_seed_context(WorkConfig.from_yaml(selected), origin)
+            scientific = validate_recovery_configuration(restored, origin)
+            plan["configuration"].update(
+                scientific_compatibility="verified",
+                scientific_identity=scientific,
+                sha256=hashlib.sha256(selected.read_bytes()).hexdigest(),
+            )
+        plan.pop("origin_manifest", None)
+        if (
+            plan.get("resumable")
+            and isinstance(previous_code, Mapping)
+            and exists
+            and source_config
+        ):
             from lambdaforge.ProjectContext import ProjectContext
             from lambdaforge.reproducibility.CodeIdentity import CodeIdentity
 
@@ -1991,6 +2201,7 @@ json.dump(out,sys.stdout)
         plan.update(
             {
                 "job_id": job_id,
+                "operational_verification": operational_verification,
                 "cluster": previous.cluster,
                 "owner_job_id": owner_id,
                 "will_preserve": (
@@ -2025,17 +2236,145 @@ json.dump(out,sys.stdout)
             or record.job_id == parent
         )
 
+    def recovery_history(self, job_id: str, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+        """Read native audit evidence even when the execution provider is unreachable."""
+        from lambdaforge.controlplane.RecoveryAudit import recovery_history
+
+        return recovery_history(self.store, job_id, offset=offset, limit=limit)
+
+    def inspect_recovery(self, job_id: str, *, config: str | Path | None = None) -> dict[str, Any]:
+        """Explicit Console inspection with operational audit, not a mutating dry-run.
+
+        ``retry_preview`` and ``retry(dry_run=True)`` remain read-only. This user action
+        records success or rejection in native events, never execution/scientific state.
+        """
+        previous = self.store.get(job_id)
+        request_id = "recovery-preview-" + uuid4().hex
+        self.store.append_event(
+            job_id,
+            state=previous.state.value,
+            source="study-recovery",
+            phase="RECOVERY_INSPECTING",
+            recovery_request_id=request_id,
+            message="Explicit recovery inspection requested; no computation will be admitted.",
+            details={
+                "selected_config": SecretRedactor.redact(config) if config is not None else None
+            },
+        )
+        try:
+            preview = self.retry_preview(job_id, config=config)
+        except Exception as error:
+            self._audit_recovery_failure(job_id, request_id, error)
+            raise
+        self.store.append_event(
+            job_id,
+            state=self.store.get(job_id).state.value,
+            source="study-recovery",
+            phase="RECOVERY_PREVIEW_READY",
+            recovery_request_id=request_id,
+            message="Inspection complete; plan only, not a recovered execution.",
+            details={key: preview.get(key) for key in ("reuse_runs", "retry_runs", "pending_runs")},
+        )
+        return {**preview, "preview_request_id": request_id}
+
+    def _audit_recovery_failure(self, job_id: str, request_id: str, error: Exception) -> None:
+        """Retain native exception semantics, including an explicit audit-I/O failure."""
+        try:
+            self.store.append_event(
+                job_id,
+                state=self.store.get(job_id).state.value,
+                source="study-recovery",
+                phase=(
+                    "RECOVERY_BLOCKED"
+                    if isinstance(error, (ValueError, TypeError))
+                    else "RECOVERY_REQUEST_FAILED"
+                ),
+                recovery_request_id=request_id,
+                message=f"{type(error).__name__}: {SecretRedactor.redact(error)[:1000]}",
+                details={
+                    "exception_type": type(error).__name__,
+                    "new_job_admission": "not_confirmed",
+                },
+            )
+        except Exception as audit_error:
+            error.recovery_audit_error = SecretRedactor.redact(audit_error)[:500]  # type: ignore[attr-defined]
+        error.recovery_request_id = request_id  # type: ignore[attr-defined]
+        error.recovery_job_id = job_id  # type: ignore[attr-defined]
+
     def retry(
-        self, job_id: str, *, dry_run: bool = False, accept_code_change: bool = False
+        self,
+        job_id: str,
+        *,
+        dry_run: bool = False,
+        accept_code_change: bool = False,
+        config: str | Path | None = None,
+        config_sha256: str | None = None,
     ) -> JobHandle:
-        """Create a new auditable job from one terminal job's exact request."""
+        """Apply native recovery with an audit identity even when validation blocks it.
+
+        Read-only preview deliberately never appends events. This wrapper records only
+        operational user actions; scientific state and the original exception type remain
+        unchanged. The existing locked enqueue path is still the execution authority.
+        """
+        previous = self.store.get(job_id)
+        request_id = (
+            "recovery-" + uuid4().hex
+            if not dry_run
+            and (previous.metadata.get("study_expected") or previous.metadata.get("fleet"))
+            else None
+        )
+        if request_id is not None:
+            self.store.append_event(
+                job_id,
+                state=previous.state.value,
+                source="study-recovery",
+                phase="RECOVERY_INSPECTING",
+                recovery_request_id=request_id,
+                message=(
+                    "Recovery requested; validating ownership, configuration and evidence. "
+                    "No Job admitted."
+                ),
+                details={
+                    "historical_config": self._retry_source_config(previous),
+                    "selected_config": SecretRedactor.redact(str(config))
+                    if config is not None
+                    else None,
+                    "config_sha256": config_sha256,
+                    "accept_code_change": accept_code_change,
+                },
+            )
+        try:
+            return self._retry(
+                job_id,
+                dry_run=dry_run,
+                accept_code_change=accept_code_change,
+                config=config,
+                config_sha256=config_sha256,
+                request_id=request_id,
+            )
+        except Exception as error:
+            if request_id is not None:
+                self._audit_recovery_failure(job_id, request_id, error)
+            raise
+
+    def _retry(
+        self,
+        job_id: str,
+        *,
+        dry_run: bool = False,
+        accept_code_change: bool = False,
+        config: str | Path | None = None,
+        config_sha256: str | None = None,
+        request_id: str | None = None,
+    ) -> JobHandle:
+        """Existing native recovery/submit path; the wrapper owns request auditing."""
         previous = self.get(job_id)
         if previous.metadata.get("fleet") or previous.metadata.get("fleet_role") == "member":
             raise ValueError(
                 "Fleet recovery is not integrated yet. Refusing to restart the Study as a "
                 "single-cluster execution or replay a member as an independent Work."
             )
-        if previous.state not in {JobState.FAILED, JobState.CANCELLED, JobState.TIMEOUT}:
+        if not self._recovery_eligible(previous):
             raise ValueError(
                 "Retry applies only to failed, cancelled or timed-out attempts. "
                 "Use 'lf run CONFIG --rerun' for deliberate repetition after success."
@@ -2045,9 +2384,10 @@ json.dump(out,sys.stdout)
         retry_metadata.pop("failure_category", None)
         retry_metadata["attempt"] = self._attempt_number(previous.job_id)
         if previous.metadata.get("submission_mode") == "asynchronous" or (
-            previous.metadata.get("study_expected") and self._retry_source_config(previous)
+            previous.metadata.get("study_expected")
+            and (config is not None or self._retry_source_config(previous))
         ):
-            source_config = self._retry_source_config(previous)
+            source_config = self._retry_source_config(previous, config=config)
             if source_config is None:
                 raise ValueError("The asynchronous submission has no source configuration path.")
             arguments = previous.metadata.get("run_arguments", ())
@@ -2068,7 +2408,28 @@ json.dump(out,sys.stdout)
                     skip = True
                 elif argument != "--accept-code-change":
                     cleaned.append(argument)
-            preview = self.retry_preview(job_id) if previous.metadata.get("study_expected") else {}
+            preview = (
+                (
+                    self.retry_preview(job_id, config=config)
+                    if config is not None
+                    else self.retry_preview(job_id)
+                )
+                if previous.metadata.get("study_expected")
+                else {}
+            )
+            if (
+                config_sha256 is not None
+                and preview.get("configuration", {}).get("sha256") != config_sha256
+            ):
+                raise ValueError(
+                    "Selected YAML changed after recovery preview; "
+                    "inspect a new plan before applying."
+                )
+            if not Path(source_config).is_file():
+                raise ValueError(
+                    "Historical recovery YAML is missing. Use lf retry SELECTOR "
+                    "--config PATH --dry-run to choose and verify its new location."
+                )
             if preview.get("code_change_detected") and not accept_code_change and not dry_run:
                 raise ValueError(
                     "Consumer code changed. Review the recovery plan and use --accept-code-change "
@@ -2099,8 +2460,13 @@ json.dump(out,sys.stdout)
                     recovery_identity,
                     previous.cluster,
                     name=str(previous.metadata.get("name", job_id)),
+                    # Eligibility/preview require fresh confirmed ownership loss for UNKNOWN.
+                    # The exact origin must not block its own recovery as an active Job.
+                    # Every other active identity remains protected, and apply rechecks below.
+                    exclude_job_id=previous.job_id,
                 )
                 recovery_metadata = {
+                    "recovery_configuration": preview.get("configuration"),
                     "recovery_execution_dir": preview["execution_dir"],
                     "recovery_owner_job": preview["owner_job_id"],
                     "recovery_work_identity": recovery_identity,
@@ -2154,20 +2520,68 @@ json.dump(out,sys.stdout)
                     timeout_seconds=30.0,
                     poll_interval_seconds=0.05,
                 ):
+                    self._verify_recovery_provider(self.get(previous.job_id, refresh=False))
                     self.refuse_active_execution(
                         str(recovery_metadata["recovery_work_identity"]),
                         previous.cluster,
                         name=str(previous.metadata.get("name", job_id)),
+                        exclude_job_id=previous.job_id,
                     )
-                    return SubmissionService(self.catalog, self).enqueue(
-                        str(source_config),
-                        cluster=previous.cluster,
-                        resources=request,
-                        run_arguments=run_arguments,
-                        group_id=previous.group_id,
-                        retry_of=previous.job_id,
-                        metadata=recovery_metadata,
+                    request_id = request_id or "recovery-" + uuid4().hex
+                    recovery_metadata["recovery_request"] = {
+                        "request_id": request_id,
+                        "origin_job_id": previous.job_id,
+                        "owner_job_id": preview["owner_job_id"],
+                        "execution_dir": preview["execution_dir"],
+                        "requested_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "accept_code_change": accept_code_change,
+                        "plan": {
+                            key: preview.get(key)
+                            for key in (
+                                "reuse_runs",
+                                "retry_runs",
+                                "pending_runs",
+                                "preserved_completed_runs",
+                            )
+                        },
+                    }
+                    self.store.append_event(
+                        previous.job_id,
+                        state=previous.state.value,
+                        source="study-recovery",
+                        phase="RECOVERY_REQUESTED",
+                        recovery_request_id=request_id,
+                        message=f"{request_id}: validated recovery requested; no progress claimed.",
                     )
+                    try:
+                        handle = SubmissionService(self.catalog, self).enqueue(
+                            str(source_config),
+                            cluster=previous.cluster,
+                            resources=request,
+                            run_arguments=run_arguments,
+                            group_id=previous.group_id,
+                            retry_of=previous.job_id,
+                            metadata=recovery_metadata,
+                        )
+                    except Exception as error:
+                        self.store.append_event(
+                            previous.job_id,
+                            state=previous.state.value,
+                            source="study-recovery",
+                            phase="RECOVERY_REQUEST_FAILED",
+                            recovery_request_id=request_id,
+                            message=f"{request_id}: {SecretRedactor.redact(error)[:1000]}",
+                        )
+                        raise
+                    self.store.append_event(
+                        previous.job_id,
+                        state=previous.state.value,
+                        source="study-recovery",
+                        phase="RECOVERY_ACCEPTED",
+                        recovery_request_id=request_id,
+                        message=f"{request_id}: accepted as {handle.job_id}; awaiting preparation.",
+                    )
+                    return replace(handle, recovery_request_id=request_id)
             return SubmissionService(self.catalog, self).enqueue(
                 str(source_config),
                 cluster=previous.cluster,
@@ -2191,8 +2605,59 @@ json.dump(out,sys.stdout)
             group_id=previous.group_id,
         )
 
-    def _retry_source_config(self, previous: JobRecord) -> str | None:
+    @staticmethod
+    def _recovery_eligible(record: JobRecord) -> bool:
+        from lambdaforge.controlplane.OperationalHealth import OperationalHealth
+        from lambdaforge.controlplane.RecoveryObservation import RecoveryObservation
+
+        return RecoveryObservation.eligible(record.state.value, OperationalHealth.describe(record))
+
+    def _verify_recovery_provider(self, record: JobRecord) -> dict[str, Any]:
+        """Recheck exact execution ownership; cached UNKNOWN is never permission to duplicate."""
+        if record.scheduler_id is None:
+            return {
+                "source": "controller",
+                "state": record.state.value,
+                "reason": "No provider execution was admitted.",
+            }
+        _profile, _transport, scheduler = self._provider(record)
+        try:
+            state = scheduler.state(record.scheduler_id)
+            details = dict(scheduler.details(record.scheduler_id))
+        except Exception as error:
+            raise ValueError(
+                "Recovery blocked: provider ownership could not be verified. "
+                + SecretRedactor.redact(error)[:500]
+            ) from error
+        proven_loss = details.get("provider_observation") == "lost_confirmed"
+        if details.get("provider_observation") in {"degraded", "unknown"} or (
+            not state.terminal and not proven_loss
+        ):
+            raise ValueError(
+                "Recovery blocked: execution may still own live processes or provider state "
+                "is unresolved. Diagnose/reconcile before retrying."
+            )
+        return {
+            "source": details.get("source", record.scheduler),
+            "state": state.value,
+            "ownership": "lost_confirmed" if proven_loss else "terminal_confirmed",
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "provider_evidence": details,
+        }
+
+    def _retry_source_config(
+        self, previous: JobRecord, *, config: str | Path | None = None
+    ) -> str | None:
         """Recover the controller-side Work config recorded for asynchronous retry."""
+        if config is not None:
+            selected = Path(config).expanduser().absolute()
+            if selected.is_symlink() or selected.resolve() != selected:
+                raise ValueError("Recovery YAML path must not traverse symlinks.")
+            if self.catalog.project is not None and not self.catalog.project.owns_source(
+                str(selected)
+            ):
+                raise ValueError("Recovery YAML must belong to the current project.")
+            return str(selected)
         configured = previous.metadata.get("source_config_path")
         if configured:
             return str(configured)

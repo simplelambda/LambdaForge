@@ -19,6 +19,8 @@ from lambdaforge.tui.viewmodels import (
     format_duration,
     format_value,
     objective_display_name,
+    operational_detail,
+    operational_label,
 )
 from lambdaforge.tui.widgets import ResourceDashboard
 
@@ -162,12 +164,13 @@ class OverviewScreen(DataScreen):
     def _populate_work(self, value: Any) -> None:
         table = self.query_one("#overview-work", DataTable)
         table.clear(columns=True)
-        table.add_columns("Work", "Target", "State", "Progress")
+        table.add_columns("Work", "Target", "State", "Health", "Progress")
         for index, item in enumerate(self._ordinary_work(value)):
             table.add_row(
                 str(item.get("name", "-")),
                 str(item.get("cluster", "local")),
                 self._state_cell(item.get("state")),
+                operational_label(item),
                 self._progress_text(item.get("progress")),
                 key=entity_key(item, kind="work", fallback_index=index),
             )
@@ -175,13 +178,14 @@ class OverviewScreen(DataScreen):
     def _populate_studies(self, value: Any) -> None:
         table = self.query_one("#overview-studies", DataTable)
         table.clear(columns=True)
-        table.add_columns("Study", "State", "Objective", "Progress")
+        table.add_columns("Study", "State", "Health", "Objective", "Progress")
         for index, item in enumerate(self._studies(value)):
             study = self._mapping(item.get("study"))
             objective = self._mapping(study.get("objective"))
             table.add_row(
                 str(item.get("name", "-")),
                 self._state_cell(item.get("state")),
+                operational_label(item),
                 objective_display_name(objective) if objective else "Telemetry unavailable",
                 self._study_progress(study, item.get("progress")),
                 key=entity_key(item, kind="study", fallback_index=index),
@@ -344,6 +348,7 @@ class OverviewScreen(DataScreen):
             f"Attempts     {len(attempts)}",
             f"Created      {work.get('created_at_utc', 'unavailable')}",
             f"Last update  {work.get('updated_at_utc', 'unavailable')}",
+            operational_detail(work),
             "",
             "ATTEMPT HISTORY",
         ]
@@ -359,6 +364,7 @@ class OverviewScreen(DataScreen):
         if not study:
             return (
                 f"{work.get('name', 'Study')}  ·  {str(work.get('state', 'unknown')).upper()}\n"
+                f"{operational_detail(work)}\n"
                 "Study identity is preserved, but detailed telemetry is not currently reachable.\n"
                 "Enter opens the Study workspace; Logs retain the terminal failure."
             )
@@ -388,6 +394,7 @@ class OverviewScreen(DataScreen):
         )
         lines = [
             f"{work.get('name', 'Study')}  ·  {str(work.get('state', 'unknown')).upper()}  ·  {study.get('strategy', 'search')}",
+            operational_detail(work),
             f"Objective     {objective_display_name(objective)} ({objective.get('mode', '-')})",
             f"Run progress  {self._bar(completed, total)}  {completed}/{total or '?'} terminal",
             f"Candidates    {counts.get('candidates', len(candidates))} total  ·  {counts.get('active_runs', 0)} active  ·  {counts.get('queued_runs', 0)} waiting  ·  {counts.get('pruned_runs', 0)} pruned",

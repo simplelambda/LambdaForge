@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from lambdaforge.controlplane.jobs import JobRecord
+from lambdaforge.controlplane.OperationalHealth import OperationalHealth
 
 
 class JobObservation:
@@ -42,6 +43,7 @@ class JobObservation:
         observed = remote.get("observed_usage", {})
         observed = copy.deepcopy(observed) if isinstance(observed, Mapping) else {}
         return {
+            "operational": OperationalHealth.describe(record, now=current),
             "timing": {
                 "created_at_utc": record.created_at_utc,
                 "started_at_utc": remote.get("started_at_utc"),

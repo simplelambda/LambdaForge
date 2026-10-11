@@ -7,7 +7,7 @@ from typing import Any
 from textual.widgets import DataTable, Static
 
 from lambdaforge.tui.screens.Base import DataScreen, EntitySelected
-from lambdaforge.tui.viewmodels import entity_key
+from lambdaforge.tui.viewmodels import entity_key, operational_detail, operational_label
 
 
 class WorkScreen(DataScreen):
@@ -43,13 +43,14 @@ class WorkScreen(DataScreen):
     def populate(self, table: DataTable[Any], value: Any) -> None:
         self._rendering = True
         table.clear(columns=True)
-        table.add_columns("Work", "Cluster", "State", "Attempt", "Progress")
+        table.add_columns("Work", "Cluster", "State", "Health", "Attempt", "Progress")
         items = self._items(value)
         for index, item in enumerate(items):
             table.add_row(
                 str(item.get("name", "-")),
                 str(item.get("cluster", "local")),
                 str(item.get("state", "unknown")),
+                operational_label(item),
                 str(len(item.get("attempt_history", []))),
                 self._progress(item.get("progress")),
                 key=entity_key(item, kind="work", fallback_index=index),
@@ -76,6 +77,7 @@ class WorkScreen(DataScreen):
             f"Work ID: {item.get('work_id', item.get('execution_id', '-'))}\n"
             f"Cluster: {item.get('cluster')}\n"
             f"State: {item.get('state')}\n"
+            f"{operational_detail(item)}\n"
             f"Attempts: {len(item.get('attempt_history', []))}\n\n"
             "Enter opens details; Ctrl+P exposes logs, cancel, retry, delete and Advanced Jobs."
         )

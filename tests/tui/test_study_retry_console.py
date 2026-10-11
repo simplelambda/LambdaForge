@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 pytest.importorskip("textual")
-from textual.widgets import Button, Checkbox, TabbedContent  # noqa: E402
+from textual.widgets import Button, Checkbox, DataTable, TabbedContent  # noqa: E402
 
 from lambdaforge.tui.App import LambdaForgeApp  # noqa: E402
 from lambdaforge.tui.screens.Workspace import StudyRetryConfirmation, StudyWorkspace  # noqa: E402
@@ -88,14 +88,22 @@ def test_failed_recovery_preview_is_visible_and_can_be_retried() -> None:
     }
 
     async def exercise() -> None:
+        from lambdaforge.tui.screens.RecoveryWorkspace import RecoveryFailureDialog
+
         app = LambdaForgeApp(services)
         async with app.run_test(size=(130, 38)) as pilot:
-            app.push_screen(StudyWorkspace(work, services))
+            workspace = StudyWorkspace(work, services)
+            app.push_screen(workspace)
             await pilot.pause()
             await pilot.click("#study-retry")
             await pilot.pause()
-            assert "missing" in str(app.screen.query_one("#study-action-status").render())
-            assert not app.screen.query_one("#study-retry", Button).disabled
+            assert isinstance(app.screen, RecoveryFailureDialog)
+            assert "missing" in str(app.screen.query_one("#recovery-failure-detail").render())
+            await pilot.click("#recovery-failure-close")
+            await pilot.pause()
+            assert app.screen is workspace
+            assert "missing" in str(workspace.query_one("#study-action-status").render())
+            assert not workspace.query_one("#study-retry", Button).disabled
 
     asyncio.run(exercise())
 
@@ -114,6 +122,43 @@ def test_detected_code_change_requires_explicit_acknowledgement_before_submit() 
             app.screen.query_one("#retry-compatible-code", Checkbox).value = False
             await pilot.pause()
             assert app.screen.query_one("#retry-confirm", Button).disabled
+
+    asyncio.run(exercise())
+
+
+def test_checkpoint_preview_is_visible_without_claiming_epoch_continuation() -> None:
+    preview = {
+        "reuse_runs": 9,
+        "retry_runs": 1,
+        "pending_runs": 0,
+        "runs": [
+            {
+                "trial": 1,
+                "seed": 54,
+                "action": "retry",
+                "run_id": "run-exact",
+                "checkpoint": {
+                    "last": {"step": 9, "written_at_utc": "2026-10-10", "integrity": "not_checked"}
+                },
+            }
+        ],
+    }
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(FakeServices())
+        async with app.run_test(size=(130, 42)) as pilot:
+            app.push_screen(StudyRetryConfirmation(preview))
+            await pilot.pause()
+            table = app.screen.query_one("#retry-checkpoints", DataTable)
+            assert table.row_count == 1
+            assert table.get_row_at(0) == [
+                "run-exact",
+                "2026-10-10",
+                "9",
+                "not_checked",
+                "Requires Work support",
+            ]
+            assert not app.screen.query_one("#retry-confirm", Button).disabled
 
     asyncio.run(exercise())
 

@@ -33,6 +33,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+agents = [
+    "mcp>=2.3,<2.4",
+]
 mlflow = [
     "mlflow>=2.10",
 ]
@@ -89,6 +92,12 @@ version = { attr = "lambdaforge._version.VERSION" }
 
 [tool.setuptools.package-data]
 lambdaforge = [
+    "agents/assets/consumer/*.md",
+    "agents/assets/examples/*.md",
+    "agents/assets/examples/*.py",
+    "agents/assets/examples/*.yaml",
+    "agents/assets/skills/*/SKILL.md",
+    "agents/assets/skills/*/references/*.md",
     "analysis/assets/*.js",
     "schemas/*.json",
     "tui/*.tcss",
@@ -106,6 +115,7 @@ lambdaforge = [
     "SECURITY.es.md",
 ]
 "share/lambdaforge/examples" = [
+    "examples/agent_gui.py",
     "examples/clustering.py",
     "examples/lambdaforge.clusters.yaml",
     "examples/input.txt",
@@ -114,6 +124,7 @@ lambdaforge = [
     "examples/sequence.yaml",
     "examples/search.yaml",
     "examples/conditional-sweep.yaml",
+    "examples/monitor.json",
 ]
 "share/lambdaforge/docs" = [
     "docs/MANUAL.md",
@@ -136,6 +147,17 @@ lambdaforge = [
     "docs/PRODUCTS.es.md",
     "docs/WORK_RESULTS.md",
     "docs/WORK_RESULTS.es.md",
+    "docs/OPERATIONAL_RELIABILITY.md",
+    "docs/OPERATIONAL_RELIABILITY.es.md",
+    "docs/OPERATIONAL_RELIABILITY_PROGRESS.md",
+]
+"share/lambdaforge/docs/ai" = [
+    "docs/ai/INTEGRATION.md",
+    "docs/ai/INTEGRATION.es.md",
+    "docs/ai/IMPLEMENTATION.md",
+    "docs/ai/IMPLEMENTATION.es.md",
+    "docs/ai/FRAMEWORK_CONTRACTS.md",
+    "docs/ai/AGENT_GUIDE.es.md",
 ]
 "share/lambdaforge/examples/work_results" = [
     "examples/work_results/README.md",
@@ -175,6 +197,9 @@ warn_redundant_casts = true
 [[tool.mypy.overrides]]
 module = [
     "keyring",
+    "mcp.*",
+    "starlette.*",
+    "uvicorn",
     "psutil",
     "sklearn.*",
     "threadpoolctl",

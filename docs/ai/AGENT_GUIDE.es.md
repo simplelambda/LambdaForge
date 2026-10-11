@@ -1,0 +1,794 @@
+# Guía explicativa de LambdaForge para agentes
+
+Esta traducción conserva el contexto detallado anterior. No es una fuente normativa independiente:
+la autoridad es `AGENTS.md` en la raíz y los contratos ingleses que referencia. Las APIs no cambian
+por el idioma de la explicación. Consulta `docs/ai/IMPLEMENTATION.md` para la reforma en curso.
+
+Este fichero es la entrada de bajo coste para usar o modificar LambdaForge 0.19.0. Consulta solo la
+sección necesaria de `docs/MANUAL.es.md` y después la firma, docstring o implementación concreta.
+
+## Arquitectura no negociable
+
+Un YAML ejecuta exclusivamente una o más clases que heredan `lambdaforge.Work`. `Work.run(...)` es
+la única entrada científica. El framework crea la instancia, inyecta el runtime y envuelve el
+código del usuario; el usuario nunca construye contextos, IDs, fingerprints ni rutas internas.
+
+No introduzcas otra abstracción ejecutable, funciones como targets YAML, tipos `kind`, selección de
+constructor/método, grafos arbitrarios, construcción recursiva `target/ref/params`, APIs globales de
+runtime ni rutas de compatibilidad. No conviertas el YAML actual en una fachada de otro runner.
+
+## Rutas rápidas
+
+La réplica de datasets usa `lf datasets replicate NOMBRE@VERSION --source ORIGEN --destination
+DESTINO [--route auto|direct|relay] [--apply]` o Dataset → Replicate en consola. Es preview/apply,
+tar/gzip comprimido, preferentemente SSH directo fiable sin forwarding de credenciales; fallback
+stream autenticado por controlador sin archivos intermedios locales. Verifica ambos extremos,
+staging/rutas seguras, admisión en destino, publicación bajo lock y registra ambos índices.
+Nunca reconstruye/sobrescribe conflictos; mantén la sesión abierta. Pruebas loopback no certifican
+SSH real entre clústeres. Admite placements antiguos registrados.
+
+| Necesidad | Comando |
+|---|---|
+| Validar | `lf validate CONFIG` |
+| Explicar firma y recursos | `lf explain CONFIG` |
+| Resolver toda política automática | `lf config resolve CONFIG [--format json\|yaml]` |
+| Consultar streams de seed | `lf seeds [--role confirmation] [--count N]` |
+| Plan sin efectos | `lf run CONFIG --dry-run` |
+| Ejecutar | `lf run CONFIG [--on CLUSTER]` |
+| Study Fleet fixed/pareado limitado | `lf run CONFIG --on-fleet FLEET`; límites de control plane abajo |
+| Nueva Execution deliberada | `lf run CONFIG --rerun` |
+| Operación interactiva | `lf` sin argumentos (Consola en TTY) |
+| Monitorizar | Consola de investigación; `lf overview --json` |
+| Operar Work | `lf show/logs/cancel/retry/delete SELECTOR`; Run: `show/logs WORK --run CLAVE` |
+| Jobs de bajo nivel | `lf jobs list/show/logs/cancel/retry/delete/clear`; `lf doctor --on CLUSTER` |
+| Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/replicate/delete` |
+| Reconstruir/publicar datasets | `lf datasets preflight/compare/publish-candidate`; `docs/DATASET_RECONSTRUCTION.es.md` |
+| Productos durables / decisiones / selección | `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`; `docs/PRODUCTS.es.md` |
+| Equivalencia durable explícita de datasets | `lambdaforge.data.DatasetEquivalenceCertificate`; `docs/DATASET_RECONSTRUCTION.es.md` |
+| Importar evidencia, no ejecutar | `lf import PACKAGE [--apply]`; `docs/PRODUCTS.es.md` |
+| Resultados | `lf results list/show/compare/analyze/report/replay`; Study portable: `lf export SELECTOR --output DIR` |
+| Perfiles de clúster | Consola; `lf clusters add/set/unset/...` para automatización |
+| Consultar/reconciliar almacenamiento | `lf storage status/reconcile [--on CLUSTER]`; reconcile `--apply` solo actualiza inventario |
+| Limpiar almacenamiento seguro | `lf clean`; aplicar con `--apply` |
+
+Usa `--json` para automatización y `--debug` solo para traceback interno. Los envíos locales y
+remotos devuelven control tras crear el registro durable de preparación salvo que se solicite
+`--wait-for-submit`; `--dry-run` es directo y sin efectos.
+
+## Contrato Work
+
+La evidencia de Work usa ResultStore.view/work_report y el import/export nativo, nunca un Study
+artificial. ResultInput fija evidencia de un Execution; ProductInput consume contenido sellado con
+contrato independiente. Los nombres ambiguos se rechazan. Las entradas elegidas al lanzar se fijan
+antes de encolar y no editan el YAML. La promoción ordinaria enumera outputs explícitos tras persistir
+la ciencia; sus fallos conservan bytes para reintentar solo publicación. Véase docs/WORK_RESULTS.es.md.
+Los listados de metadata nunca deben abrir bytes de artefactos.
+Una entrada de producto puede fijar un miembro `artifact` registrado exacto: mantiene contrato y
+contenido sellados y añade esa elección a la identidad del consumidor. Nunca convertirla en selector
+de rutas ni sustituir el miembro implícitamente.
+
+Base de lifecycle: `diagnostics/failure.py` clasifica fallos con ErrorCategory/RetryDisposition
+existentes. Elegibilidad de retry no evita ARI/headroom/presupuestos; EOFError/ValueError del
+consumidor y errores CUDA genéricos no autorizan retry por worker perdido/OOM. `work/state.py`
+deriva lifecycle y obligaciones; `work/attempt_history.py` conserva historial visible acotado y
+contadores físicos acumulados. Presentación consume `lifecycle`, no inventa recovery ni devuelve
+costes. Consultar `docs/ARCHITECTURAL_REFORM.es.md`. `lambdaforge.products` y `lf products`
+implementan contratos/registro/promoción/transporte/selección local explícitos (`docs/PRODUCTS.es.md`);
+selección usa métricas del mismo snapshot y últimos Attempts. `products decide` conserva selección
+nativa sin refit. Inputs product tipados resuelven contrato/expectativas, workers reciben raíz propia
+del proyecto y Attempts reales registran consumo. Study individual declara `products`; primero
+evidencia, luego publicación antes de compactar. `products finalize` reintenta solo publicación bajo
+lock; fallar al publicar no altera la ciencia. Espera/replanificación de dependencias,
+promoción compuesta/Fleet y lifecycle Fleet siguen pendientes,
+no están implementados por aparecer en el plan.
+`lf import PACKAGE [--apply]` verifica/registra exports nativos de un host y productos sellados.
+Originales en `portable/`, ubicación en `import.json`; evidencia importada es read-only, no recovery
+ejecutable. Export de provider nunca muestrea bytes de productos. Ver `docs/PRODUCTS.es.md`.
+Studies/Overview incluyen snapshots importados read-only mediante índices locales compactos;
+Studies → Import Study usa el mismo servicio preview/apply que CLI. Nunca crea Jobs ficticios ni
+contacta con el host original para leer imports. Trials/Runs reubican solo rutas propias verificadas.
+El límite de metadata individual no limita el tamaño del resultado agregado verificado.
+Recursos infiere geometría solo tras filtrar compatibilidad Work/dispositivo y conserva significado
+de parámetros JSON estructurados. La identidad para señales no es una prueba de muerte para storage:
+leases vivas sobreviven exec, nacimiento distinto/zombi permiten reclamación bajo lock y propietarios
+inaccesibles/remotos siguen protegidos. Ownership no es ENOSPC. Las solicitudes de publicación guardan
+inventarios exactos antes de copiar; `datasets publish-candidate` reintenta sin ejecutar Work.
+Índices antiguos retenidos requieren declaración original explícita mediante
+`DatasetPublisher.prepare_publication`, nunca inferir metadatos del NPZ.
+
+ActivationCondition es la autoridad inmutable AND de igualdad/pertenencia compartida por
+ParameterSpace. `when: {parent: valor}` y `{parent: {eq: valor}}` normalizan igual; `in` requiere
+escalares únicos de un dominio finito y tiene identidad independiente del orden de pertenencia.
+Ordena dependencias, omite claves inactivas y no multipliques ramas para deduplicarlas después.
+Solo resources raíz se hereda en steps; rechaza with/seeds/replicates/search/sweep/execution/
+objective/analysis raíz ignorados. Preflight distingue presupuesto del Study de techo del scheduler
+(suma secuencial, máximo paralelo). Solo un inventario GPU directo vivo/fiable puede rechazar
+solicitudes imposibles; los grants del scheduler/launcher siguen siendo autoridad del runtime.
+Guía: docs/CONDITIONAL_STUDIES.es.md.
+
+Un Study adaptativo, de seeds repetidas o sweep fijo se recupera con `lf retry STUDY` o
+**Resume Study…** en su ventana. `--dry-run --json` explica Runs reutilizadas, reintentadas y
+pendientes sin lanzar. Diseños fijos usan registros propios de Execution/diseño/Attempts, nunca
+requieren ni inventan `hpo-control/state.json`; los adaptativos sí lo requieren. Restaura el
+namespace de seeds original antes de replanificar el nuevo Job; no reemplaces valores authored
+modificados por los persistidos ni alteres registros originales. Telemetría puede proceder de un
+Job referenciado anterior, pero estado/logs/retry usan el último Job propio. Se prepara
+otro Job conectado a la Execution original exacta del mismo clúster: conserva evidencia completa/
+podada, decisiones HPO, seeds y presupuestos gastados. Runs fallidas/interrumpidas crean Attempts
+desde checkpoints compatibles o empiezan de nuevo si no existen. `--accept-code-change` reconoce
+explícitamente validez de métricas/checkpoints previos, no omite controles de configuración,
+entradas, seeds u objetivo. Mantén inmutable `execution.json`, registra revisiones reales en
+`recovery-history.jsonl`/`current-code.json`, protege Jobs referenciados de limpieza y usa el bloqueo
+entre procesos existente. Nunca reinicies silenciosamente un estado ausente/corrupto, reintentes
+automáticamente excepciones consumidoras, repitas seeds de confirmación válidas ni borres coste/
+historial de Attempts fallidos. Cubre un único Study por Execution y no migra entre clústeres.
+Recuperar el Study no garantiza continuar una época: el Work debe implementar restauración de checkpoints.
+
+La firma y el docstring de `run()` son la verdad de parámetros. Los únicos marcadores especiales
+son `{file: ...}`, `{dataset: NOMBRE@VERSION}`, `{from: PASO.SALIDA}`,
+`{result: {execution: EXECUTION, run: RUN, attempt: ATTEMPT}}` (`run`/`attempt` opcionales) y
+`{product: {name: NOMBRE, contract: CONTRATO, expect: {...}}}` (`expect` opcional;
+`from: {execution: EXECUTION, output: SALIDA}` puede sustituir `name` para una publicación exacta). Las vistas inmutables son
+`name`, `config`, `inputs`, `resources`, `seed`, `trial`, `source_dir` y `resuming`. Los servicios
+gestionados son `outputs.file/directory/value/dataset`, `metrics.log/log_many`,
+`checkpoints.file/exists/save_json/load_json`, `cache.put/get/file/fetch/rate_limit`, `tools.require/run`,
+`progress.update` y
+`log(message, level=...)`. `run_dir` es durable, `temp_dir` efímero y `map(...)` es concurrencia
+interna ordenada sin persistencia. `resume_map(..., key=...)` añade de forma explícita checkpoints
+JSON que conocen dependencias; `map(..., key=...)` antiguo delega en esta operación.
+
+Cache es reconstruible, checkpoints es estado de Run para resume y outputs es evidencia durable.
+Un Work no gestiona directorios de cache, `.part`, locks, `fsync` ni `os.replace`: usa
+`cache.put/get` para bytes/texto/JSON estricto, `cache.file/fetch` para contenido path-like,
+checkpoint files y outputs gestionados. `cache.path`, `checkpoints.path`,
+`run_dir` y `outputs.artifact` son escapes avanzados, no la vía recomendada. `ManagedFile` es
+path-like, pero `resume_map` solo serializa key/SHA/tamaño; si `lf clean` elimina o corrompe una
+dependencia, se recalcula únicamente su elemento. Nunca serialices rutas de máquina ni pickle.
+
+`outputs.file/directory(..., publish_to=RUTA)` publica un resultado verificado tras el éxito y no
+reemplaza contenido distinto salvo `overwrite=True`. Tras persistir la Execution elimina por
+defecto los bytes internos redundantes; `retain_internal=True` conserva ambos. Un Attempt fallido o
+interrumpido compacta `artifacts/`, pero mantiene logs, resultado, métricas, procedencia y
+checkpoints. No pongas bulk desechable directamente en `run_dir`. Una ruta relativa parte del
+directorio del YAML original. En remoto requiere el mirror `project_root` del clúster y se mapea al
+mismo directorio relativo; sin él se usa una ruta remota absoluta explícita. No lo describas como
+una transferencia automática al controlador.
+
+Para inputs remotos `{file: RUTA}`, hasta 10 MiB se incluye automáticamente en el bundle. Una ruta
+mayor debe pertenecer al proyecto local con `pyproject.toml` y tener una copia exacta bajo el
+`project_root` absoluto del clúster; LambdaForge verifica tipo/tamaño/SHA-256 antes del envío y en
+el worker, y nunca sincroniza ni elimina ese mirror del investigador. Las nuevas identidades de
+directorios usan el algoritmo canónico versionado, nunca `find | sort`: componentes NFC ordenados
+por bytes UTF-8, separador `/`, registros tipados/delimitados y directorios vacíos, sin metadata del
+host. Los marcadores históricos sin algoritmo usan el lector legacy. Configura con
+`lf clusters set NOMBRE project_root /proyecto/remoto/absoluto` y después
+`lf doctor --on NOMBRE`. Contenido ausente, viejo o con symlinks falla de forma segura. Para datos
+muy grandes reutilizables usa datasets gestionados: verificar un mirror lee todos los bytes en cada
+envío.
+
+Las herramientas nativas se declaran una vez en `[tool.lambdaforge.environment]` con
+`manager="conda"`, exactamente un `file` o `lockfile` contenido en el proyecto y nombres simples en
+`required_executables`. Usa `lf clusters bootstrap NOMBRE --project . --dry-run`, revisa y aplica.
+El YAML solo admite name/channels/dependencias string: no pip anidado, variables, prefix, hooks ni
+Torch/CUDA. Offline exige lock `@EXPLICIT` por plataforma con SHA-256 y `package_cache` coincidente;
+pip/Torch necesita además wheelhouse para ser totalmente offline. Se publica un único prefijo Conda
+inmutable con inventario/tools verificados. `tools.require` comprueba, nunca instala. Pip-only y
+`environment: existing` no cambian.
+
+Las herramientas externas usan `tools.require(..., version_args=...)` y `tools.run(argv, ...)`.
+Nunca uses strings de shell. Los límites de threads/env pertenecen al hijo, stdout/stderr llegan a
+los logs y la procedencia se guarda exclusivamente en `environment.json`.
+
+`print()` y el `logging` estándar aparecen en los logs del Job. Usa `self.log()` para narración
+humana con fecha y vaciado inmediato, `self.progress.update()` para avance y `metrics.log()` para
+evidencia numérica. La Consola presenta modelos de lectura acotados para Work, Studies y Results;
+no coloques ficheros de resultado, llamadas al proveedor ni lógica científica en widgets. Los
+agentes usan `lf overview --json`, `lf logs` y
+`lf jobs clear [--apply]`, nunca parsean el TUI; `work.items[].attempt_history` conserva los IDs
+para automatización. Las rutas del proveedor local pertenecen al Job
+durable y no se recalculan desde el directorio actual del observador.
+Los estudios de parámetros son Works ordinarios con `search` o varias `seeds`, no un tipo
+específico de entreno. `work.items[].study_expected` existe antes de la telemetría de ejecución y
+`study` deja de ser nulo cuando el worker actual publica su índice acotado. Los pasos, la
+composición paralela y `self.map()` por sí solos siguen la navegación ordinaria Attempt/log y no
+deben crear telemetría de estudio.
+
+`search` pasa variantes como parámetros normales. `objective` es `metric`/`mode` heredado o una
+utilidad `metrics` de rangos fijos con `weighted_mean`, `geometric` o `chebyshev`; sus componentes
+comparten un step entero. Una utilidad gobierna HPO, las constraints son guardas duras separadas y
+el frente Pareto crudo solo es diagnóstico. Toda
+búsqueda con objective activa por defecto inicio Sobol scrambled, GP mixto qLogNEI opcional y sensible al ruido con
+fallback k-NN mixto, carrera probabilística de seeds, pruning, convergencia y confirmación con seeds
+nuevas. Solo se publican candidatos propuestos. `sweep.space` canónico crea una identidad obligatoria
+por combinación finita y seed; rangos numéricos exigen `points` y `reference` opcional elige
+comparaciones pareadas explícitas. `strategy: exhaustive` normaliza al mismo `StudyDesign` fijo y
+dispatcher ARI. La evidencia de sweep no puede replanificarse científicamente, aunque ARI puede
+reordenarla, colocarla y recuperarla; la paciencia interna del Work sigue válida. Se rechazan
+controles adaptativos de candidatos, replicación, pruning y confirmación en un sweep. Las seeds de
+confirmación son disjuntas; `confirmation_seeds: []` las desactiva. `search.fidelity` declara
+presupuesto acumulativo definido por el Work; `self.fidelity` y checkpoints permiten continuar y
+LightningRunner enlaza epochs. Decisiones/snapshot viven en `hpo-control/decisions.jsonl` y
+`state.json`. Confirmación es inmune a pruning/preemption; un conjunto incompleto persiste
+`confirmation_incomplete` y no selecciona una media solo de supervivientes. El YAML se normaliza
+una vez a `StudyDesign`, `EvidencePlan`, `ExecutionPolicy` y política de objetivo. La sintaxis
+adaptativa canónica usa `search.budget`, `.space`, `.replication` y `.pruning`; los campos planos
+son aliases. `execution` raíz posee concurrencia, reintentos y límites de Runs/tiempo; aliases
+contradictorios fallan. `objective.practical_margin` es la única autoridad de equivalencia.
+`trials` explícito limita candidatos; omitido activa convergencia científica. El generador
+`scrambled-sobol-prefix-v1` amplía ventanas deterministas sin cambiar candidatos anteriores y
+`proposal_pool_size` solo ajusta la ventana computacional. El refill por eventos compara `START_NEW`, `DESIGNED_PROBE`, `ADD_SEED`,
+`PROMOTE_FIDELITY` y `RESUME_PREEMPTED` tras cada evento terminal. Equilibra automáticamente la
+oportunidad de mejora práctica posterior O con la entropía K de preguntas no resueltas por coste
+incremental observado; ninguna es ganancia de información calibrada ni confianza mostrada al
+usuario. Startup no es barrera. Los anchors iniciales derivados de geometría son obligaciones
+científicas; el resto de la cola no despachada es provisional. Usa `DEFER_STARTUP_ANCHOR`,
+`CANCEL_PLANNED_DISPATCH` y `CANCEL_SCIENTIFIC_ACTION` con su significado exacto; las identidades
+pendientes `(candidato, seed, fase, fidelidad)` evitan duplicados. Se eliminan
+`search.reduction_factor` y `search.confidence` raíz en favor de controles separados.
+Si se omite, `startup_trials` deriva un `InitialDesignPlan` determinista de rank, cobertura,
+D-optimal y maximin desde `ParameterSpace`; un valor explícito manda como presupuesto de anchors.
+Nunca depende del paralelismo. Intercala primeras seeds entre candidatos distintos antes de seeds
+extra; la capacidad sobrante puede usar `OPPORTUNISTIC_COVERAGE` replanificable.
+Tras proponer un candidato, `replication.minimum` seeds distintas son obligación, no sugerencia.
+Una poda cuenta como evidencia intentada/censurada, no como respuesta completa; un fallo de
+infraestructura solo cuenta tras agotar reintentos. Agotar candidatos detiene propuestas nuevas,
+nunca deuda requerida, continuación, fidelidad ni confirmación.
+`ScientificQuestionAnalyzer` es la única fuente compartida live/final de conclusiones de parámetros,
+interacciones por pares y región óptima práctica. `confidence` científica significa estabilidad de
+la conclusión exacta bajo remuestreo determinista por candidato/seeds compartidas, no cobertura,
+tamaño de efecto, p-valor ni intervalo frecuentista. El ruido de seed procede solo de repeticiones
+dentro de candidato; prioriza seeds compartidas, replicar el incumbent y probes contrafactuales
+válidos emparejados si reducen una comparación importante. Persiste propósito, preguntas objetivo,
+O/K, pesos automáticos, coste y alternativas. No añadas fases/pesos/umbrales de confianza a YAML,
+afirmes causalidad, inventes margen práctico, amplíes dominios declarados ni sustituyas confirmación
+con seeds frescas.
+El análisis científico dentro de la ruta crítica debe quedar acotado por la precisión viva, nunca
+por el `proposal_pool_size` bruto: reutiliza geometría/distancias, puntúa una shortlist
+representativa rotatoria e incluye siempre la propuesta del optimizador. Nunca escanees todo el
+pool por parámetro/pareja/remuestreo ni retrases la recogida de Futures, limpieza GPU o admisión por
+análisis explicativo. El pool determinista completo sigue siendo la autoridad de optimización.
+`ParameterSpace` es la única geometría authored para Sobol, sampler adaptive/Bayesian, diseño
+científico, similitud de recursos y Study Analysis. Log usa coordenadas log; integer, categorical y
+actividad condicional no se reinfieren de candidatos observados. Mappings e IDs no cambian. El
+estado de cobertura distingue search coverage intentada/censurada de response coverage completa e
+incluye diversidad de contexto emparejado. Scientific design puede pedir `COVER_PARAMETER_VALUE` o
+`COVER_INTERACTION_CELL`; su valor debe caer al resolver la pregunta con evidencia diversa. Una Run
+podada con checkpoint puede usar después `SCIENTIFIC_CONTINUATION` para una pregunta valiosa:
+conserva Trial/seed, crea nuevo Attempt, evita pruning competitivo, consume Runs/tiempo pero no
+candidatos y mantiene el prune original como evidencia censurada válida.
+`objective.constraints.METRICA.min/max` declara guardas del mismo checkpoint. Entre seeds,
+`seed_aggregation` es `mean` legacy, `worst` o `lcb` con `confidence`; evidencia ausente o LCB
+insuficiente es no factible. Un componente de utilidad también puede ser constraint. Nunca infieras guardas o pesos
+multiobjetivo ocultos desde otras métricas. Un `runs_per_gpu` entero es máximo duro por GPU y un
+`max_parallel` entero es máximo duro global. `auto`/null elimina el cap artificial, pero el techo
+interno sigue siendo finito y derivado de recursos host. `resources.gpu_memory` es opcional; si aparece es
+un suelo de seguridad del usuario por lanzamiento. La admisión efectiva usa el máximo entre ese
+suelo, una envolvente futura conservadora específica del candidato y cotas OOM conocidas. La VRAM
+física libre actual impone además el límite estricto. La VRAM física es la autoridad. Nunca
+multipliques el suelo por Runs activos ni mantengas otra reserva. Cold start crea una
+`BASELINE_ADMISSION` por cada GPU concedida y ociosa antes de co-localizar; una baseline nunca
+consume un carril exploratorio ni activa `UNVALIDATED_LADDER_STEP`. Después usa trayectorias
+PID/allocator activas censuradas, fase/progreso y checkpoints para pasos incrementales
+`SAFE_ADMISSION` o `EXPLORATORY_ADMISSION` antes de que haya Runs terminales. Conserva un carril
+protegido a concurrencia baseline, un escalón sin caracterizar por clase y comparte evidencia provisional entre
+GPU hermanas. En grupos grandes permite preguntas de recursos distintas en paralelo, pero nunca
+duplica un experimento equivalente ni ocupa el último carril protegido.
+Los máximos minúsculos del allocator son deriva cuando la evidencia robusta lo indica; crecimiento
+con signo persistente sigue siendo rampa. `ResourceTrajectoryStatistics`, no la curva visual
+acotada, es la autoridad incremental. El hazard avanza por progreso/asignación, nunca por sondeos
+duplicados; conserva colas raras por fase y aprende fases relevantes de Works compatibles. Integra
+WaitRegret por tramos físicos exactos, persístelo entre reinicios y reinícialo solo cuando desaparece
+o se satisface la oportunidad ociosa útil. Compara WAIT/EXPLORE/CHECKPOINT_THEN_EXPLORE hasta el
+próximo evento; rollback es por residente, el coste de checkpoint se aprende y una petición no es
+confirmación durable. No inventes duración de un segundo ni uses el score bruto: consume rango,
+valor normalizado, incertidumbre y coste de `ScientificActionValue`. Persiste evaluaciones cambiadas
+y WHY-WAIT sin spam. La estimación del próximo evento conserva incertidumbre de cadencia si hay
+intervalos repetidos; en otro caso sigue desconocida. El pruning científico no determina completitud
+de recursos. Cada hijo usa su `HostResourceLease` de dispatch: al cambiar residentes rebalancea
+límites Torch/BLAS/OpenMP y affinity CPU del árbol de procesos, nunca pools del controlador
+embebido. RAM/almacenamiento siguen residentes reales y el techo agregado duro impide overcommit;
+persiste lease y evidencia CPU/RSS process-tree. La reposición por capacidad y por finalización
+comparte la cola científica inicial/semillas y deduplicación exacta. Las métricas Work con paso
+publican `metric-progress.json` acotado; no recorrer su historial en cada sondeo de recursos ni
+confundir progreso escalar con checkpoint durable.
+Prefiere atribución NVML por proceso; el fallback agregado queda censurado. Una OOM
+restringe el packing exacto salvo que residencia propia más asignación solicitada demuestre cota
+intrínseca; nunca restaures backoff global de concurrencia. La historia compatible exacta o
+censurada permite después
+packing best-fit más denso. `RESOURCE_BLOCKED` es reversible y científicamente neutro;
+`RESOURCE_INFEASIBLE_ON_DEVICE_TYPE` requiere una cota dura superior al dispositivo. Nunca
+reintentes una OOM compatible con headroom igual o menor. El planner consume una frontera científica
+acotada, permite backfill seguro, protege trabajo pesado con ventanas de finalización predichas y
+puede rechazar co-location aunque quepa si no mejora throughput agregado. Si toda la frontera queda
+bloqueada, pide ampliaciones nuevas y acotadas a la misma política sin esperar Runs terminales. Las
+identidades exactas de acciones en cola/activas y la detección explícita de ausencia de alternativas
+deben cortar los bucles; nunca itera candidatos aleatorios por recursos. Cada Run GPU admitido usa un proceso spawn nuevo de un único worker y termina al
+recibir resultado/error; no restaures pools CUDA persistentes porque sus contextos ociosos retienen
+VRAM y pueden bloquear la cola. El probe de memoria GPU debe seguir siendo un hijo efímero: el
+controlador no debe retener un contexto CUDA por dispositivo ni consumir una plaza científica. Un
+fallo transitorio del probe pausa la admisión y conserva las Runs activas; no debe cancelar todo el
+Study ni admitir desde memoria obsoleta. Para early stopping registra la
+métrica repetida con `step=`; `LightningRunner` lo enlaza, y un loop propio retorna en un límite
+seguro al detectar `self.stop_requested`.
+
+Cada Run adaptativo CPU/GPU posee proceso nuevo de un worker. Una OOM exploratoria entra en
+`RESOURCE_RECOVERY` como Attempt nuevo del mismo Run y queda acotada por dominancia persistida del
+packing fallido, no por reintentos genéricos. Un worker perdido/matado o una OOM no exploratoria
+CUDA puede reintentarse como Attempt compatible con checkpoints hasta `failure_retries` (1 por
+defecto, máximo 3); si se repite queda terminal. OOM es evidencia censurada de recursos, no un
+objective: persiste asignación intentada/headroom/residencia/origen y replantea todo lo pendiente
+antes de reintentar. Prioriza best fit preservando una ventana predicha para trabajo pesado todavía relevante. No mates Runs
+hermanos sanos ni reintentes sin límite. No reintentes excepciones consumidoras arbitrarias.
+Un Run agotado deja el Work honestamente fallido, pero no cancela Runs ajenos activos/en cola. La
+telemetría guarda índice GPU lógico y token heredado exacto; nunca infieras ni amplíes dispositivos
+físicos desde el campo de visualización.
+
+Agrupa evidencia terminada por rung exacto `(candidato,target,maximum)`; nunca promedies fidelidades
+heterogéneas ni enfrentes rungs incompatibles. la Consola de investigación separa diagnósticos marginales/por pares del
+snapshot `.surrogate_belief` emitido por el sampler real.
+
+La telemetría de estudio es un modelo de lectura acotado, no otro almacén de resultados. Referencia
+logs y JSONL escalares por Run y nunca copia checkpoints/outputs. Las lecturas de colección son
+jerárquicas: `overview --json` solo expone contadores/objetivo/líder compactos; abrir un Study carga
+`study/interactive.json` v3 solo contiene celdas de Trials/estados agregados, nunca todas sus seeds
+o parámetros. Un Trial carga su proyección de seeds/parámetros; curvas/logs solo de la Run elegida.
+HPO/recursos usan ficheros precomputados propios; Analysis recibe agregados sin registros por Run
+y exportar HTML solicita el análisis completo. Post-hoc provisional cacheado bajo demanda en el
+host, fuera del heartbeat; nunca reajustarlo solo para abrir HPO. Todas las vistas de Study usan
+páginas de 512 KiB con generación/marcador sin cambios, no un límite agregado de 8 MiB. Vistas
+padre ocultas dejan de sondear. El historial completo se pagina solo al abrir Action history.
+Un resumen legacy rico se proyecta en su host, no
+se transfiere entero; y
+`lf show WORK --run CLAVE --json` devuelve parámetros,
+curvas reducidas, objective y época actual/óptima, tiempos/fallo/log y rutas/checksums/retención de
+artefactos finalizados; la pestaña Artifacts de la seed consume esos mismos metadatos sin copiar ni
+abrir contenido remoto. `lf logs WORK --run CLAVE`
+aísla la salida. HPO terminado usa la media del mejor checkpoint de cada seed; las curvas actuales
+al mismo step deciden pruning y un Run podado es evidencia terminal censurada, no fallo, y se
+excluye como valor exacto del ajuste/estadística de objetivos completos. Sus tasas de poda por
+región siguen visibles. Cualquier seed podada censura el candidato entero; nunca promedies sus seeds
+terminadas como evidencia solo de supervivientes. Un modelo conjunto de supervivencia por candidato con incertidumbre
+modifica suavemente adquisición; varias seeds no sobrecuentan y fallos operacionales/preemption son
+neutrales. Por defecto el pruning exige dos steps
+comunes desfavorables distintos mediante `early_stopping.confirmations`. `min_step` habilita
+evidencia, no fija horizonte: usa frontera de fidelidad authored o una ventana local observada y
+nunca podes por pendiente a un candidato aún competitivo en el step común exacto. Lightning publica
+automáticamente escalares de callback y tiempos de época/validación. Un trainer propio registra
+curvas con `self.metrics.log(nombre, valor, step=epoch)`; `progress.update` es progreso grueso y
+`self.log`/print solo narración humana.
+Dos curvas terminadas distintas identifican una comparación retrospectiva, pero no bastan para que
+la poda sea segura. La poda fuerte exige además resolución residual de muestra finita, cobertura
+retrospectiva de intervalos y discriminación probabilística compatibles con el umbral escrito. La
+disponibilidad operativa y la calibración fuerte se persisten por separado. Los anchors de startup,
+evidencia obligatoria, confirmación y continuaciones científicas nunca reciben poda competitiva.
+
+El controlador solo puede preemptar cooperativamente un Run de fidelidad puntuado, no de
+confirmación, con checkpoint propio verificado, al menos 30 segundos de ejecución y una alternativa
+que supere en 50 % las prioridades original y de continuación. Nunca mata por planificación.
+Conserva la evidencia `PREEMPT` → `PAUSE` → `RESUME_PREEMPTED`; startup sin score comparable queda
+protegido y una parada que llega tras alcanzar el target sigue siendo `completed`.
+
+La telemetría adaptativa incluye `hpo_analysis` acotado y las últimas 25 acciones estructuradas del
+`controller`. La pantalla Studies lo consume y automatización lee
+`work.items[].study.hpo_analysis/controller`. Trata cada panel por parámetro como asociación
+marginal con cobertura/confianza/advertencias, nunca causalidad ni sustituto del sampler conjunto
+multivariable. Enter/derecha abre la curva de respuesta y el panel acotado de ganancia predictiva
+conjunta; respuesta/cobertura descriptiva empiezan con dos observaciones comparables y la ganancia
+predictiva con tres, siempre con suelos conservadores de confianza. El JSON incluye puntos de
+respuesta, señal de poda y matriz acotada.
+La calidad retrospectiva del pruner vive en `hpo-control/state.json` → `pruner_calibration`: informa
+ahorro simulado, falsos prunes, regret y calibración probabilística/de curva sin inventar un
+objective completo para Runs censurados.
+
+Scheduling persiste una traza acotada versionada. `lf results replay EXECUTION --policy
+recorded|ari-v3.1|ari-v3-compat|ari-v2-compat --json` usa ResultStore; solo es factual hasta
+`counterfactual_divergence` y etiqueta el resto como simulación condicionada por la traza. Las
+políticas antiguas son aproximaciones solo de replay, nunca schedulers productivos. Si un Study
+antiguo carece de traza, falla explícitamente sin parsear logs humanos ni fabricar métricas.
+
+El runtime científico nunca depende del renderizado; el widget base `textual-plot` de la Consola
+solo visualiza telemetría acotada. Studies nombra objective, propuestos/planificados, GPU y época
+última/óptima mediante telemetría acotada.
+Lightning elige curvas visibles con `LightningTrainConfig(epoch_chart_include=[...],
+epoch_chart_exclude=[...])` sin perder las restantes. `gpu_mem_mb` es el pico vivo;
+`gpu_reserved_mb`/`gpu_peak_reserved_mb` diagnostican la caché del allocator. Nunca conviertas esa
+caché reservada en petición del scheduler: el packing usa `resources.gpu_memory` explícito y memoria
+libre del driver para admisión dinámica por Run, y cada Run empaquetado termina su proceso y libera
+el contexto CUDA completo antes de reutilizar slot. La presión temporal espera y se sondea; no es fallo científico.
+
+La jerarquía conceptual es Work → Execution → Run → Attempt → Job. La identidad científica incluye
+clase, código consumidor, parámetros, hashes de ficheros, IDs de contenido de datasets, seed y
+variante; excluye clúster, rutas, IDs operacionales y tiempo. Retry crea otro Attempt; resume usa
+checkpoint compatible; rerun crea otra Execution.
+
+`gpu_access.mode` es `auto|scheduler|exclusive|shared|command`: auto elige scheduler en SLURM y
+leases exclusivos en hosts directos; shared admite ocupación externa solo por decisión explícita.
+Jobs shared registran acceso no exclusivo: permiten otros Studies shared y bloquean nuevos grants
+exclusive. La admisión de Runs usa locks del host por token físico, nueva comprobación de VRAM y
+arranques separados entre Studies. Prefiere GPUs permitidas sin cómputo observado; conserva best-fit
+si todas están ocupadas/desconocidas. No omitas límites CPU/RAM para aprovechar VRAM libre.
+El paralelismo fijo/repetido cuenta Runs obligatorias, no solo candidatos distintos. La contención
+del build espera durante el aprovisionamiento; limpieza opcional se pospone con leases de caché
+sin debilitar la protección por referencias.
+command exige `command_prefix` argv del centro, nunca shell; prefiere wrappers autocontenidos como
+`gpu exec`. `claim_command`/`release_command` son una pareja atómica, solo expanden `{gpu_count}` y
+no son válidos con SLURM. En command/scheduler, `CUDA_VISIBLE_DEVICES` heredado son grants opacos:
+nunca se sustituyen ni amplían. Una asignación ausente/duplicada falla cerrada; scheduler es exacto,
+mientras un Study adaptativo tras un launcher command puede reducirse a menos tokens heredados.
+`visibility_command` informa el grant opaco actual separado por comas; `[gpu, exec]` deriva
+`[gpu, env]`. Se cruza siempre con el grant inicial: al revocar un token termina solo su worker
+verificado y reencola esa Run desde checkpoint, sin tocar siblings; si falla el probe no admite
+nuevas Runs y jamás acepta un token físico nuevo.
+La Consola edita el mismo catálogo y servicio de credenciales que los comandos nativos y nunca
+invoca `lf` por subprocess. Direct frente a SLURM decide cómo se lanza el proceso; wrappers/claims
+GPU son la política `gpu_access` separada, por lo que `gpu exec` normalmente usa
+Direct. Los entornos gestionados obsoletos se podan tras activar reemplazo verificado y proteger
+Jobs vivos.
+La modal Add/Edit debe conservar el `ClusterProfile` durable completo: campos guiados para identidad,
+runtime, almacenamiento, SSH y GPU habituales, más YAML Advanced validado para mapas OpenSSH/SLURM
+menos comunes. Antes de persistir atómicamente se revalida con `ClusterProfile.from_mapping`. Nunca
+entra una contraseña en editor/perfil; solo su referencia segura, dejando el secreto al servicio de
+credenciales.
+
+Cancelar un Work debe intentar todos sus Jobs activos. La cancelación directa termina y verifica el
+conjunto completo de procesos propios, incluidos workers reparentados/con sesión nueva identificados
+por el marcador exacto heredado; la salida normal del proceso principal aplica la misma limpieza.
+Cancelar Job/Attempt conserva alcance estrecho. Nunca permitas que overrides del consumidor
+sustituyan marcadores de ownership del framework.
+
+Antes de añadir un modelo consulta `lambdaforge.nn.models` y la sección 14 del manual. Ya existen
+familias MLP/CNN, grafos/equivariantes, secuencias/Transformer/Conformer, conjuntos, tabular, visión,
+composición, generativos, científicos/implícitos y árboles diferenciables. No añadas un `GNN`
+genérico, alias/factory redundante ni policy de dominio: solo un primitivo reutilizable con contrato
+tensorial preciso y pruebas focalizadas.
+
+## Análisis de estudios y consola
+
+Pestañas HTML propias: `outputs.html_section(name, title=..., section=...)` es un fichero gestionado,
+no otro runner/plugin. Solo generar informe lee HTML finalizado propio con fingerprint exacto;
+contenido remoto paginado/cacheado, nunca en overview/HPO. Agrupa documentos por sección e incrusta
+HTML codificado bajo demanda en iframes offline de origen opaco. Nunca insertes scripts del consumidor
+en el DOM padre ni relajes red/ownership. Datos/recursos deben ir incrustados; límites 16 MiB/documento
+y 64 MiB/informe. Ejes identifican sus métricas; histogramas/CDF son presentación, no evidencia HPO nueva.
+
+El HTML empieza en Overview, con estados exactos e importancia contextual. Excluye parámetros
+condicionales del gráfico global; conserva rama/soporte/score modelado aparte, nunca como
+responsabilidad causal. Interpretaciones/preguntas usan carruseles, hallazgos completos se paginan
+y diagnóstico común va en ayuda. El idioma inglés/español no traduce identidades declaradas ni
+modifica evidencia. Los controles usan un desplegable buscable junto al botón, no una modal;
+solo búsqueda global/inspección explícita usa diálogos. Parameters marca/desmarca curvas en un
+gráfico con ejes independientes para unidades distintas/desconocidas. Explore
+infiere vistas observadas desde Analyze/By/Compare; ejes/tipo/paleta/normalización van a Advanced.
+Parameters usa chips de comparación. Tarjetas de preguntas y categorías jerárquicas presentan
+semántica persistida. Research conserva los hallazgos; Evidence las conclusiones/diagnóstico/JSON.
+No confundas interacciones observadas de otras métricas con el modelo HPO. Conserva saved views
+antiguas, current/final/censura y el dashboard de Run individual.
+
+`study/controller.json.initialization` es autoridad científica inmutable y durable; `recent` solo
+es una cola visual. Conserva objetivo, margen, geometría/condiciones, política y streams al
+refrescar/exportar/releer. La migración antigua lee el historial durable una vez. Los insights vivos
+reutilizan el snapshot del controlador. Seed noise v2 distingue unresolved/provisional/calibrated
+y conserva incertidumbre de varianza y soporte contextual: una arquitectura repetida es provisional.
+La replicación valora su efecto sobre preguntas pendientes, además de comparaciones con incumbent.
+Las continuaciones `PRUNER_CALIBRATION_EVIDENCE` siguen protegidas. Los intervalos NVML muestreados
+completos son historial útil sin ser picos vitales exactos; conserva censura e informa
+`sampled_history_count`. Tasas genéricas de step/progreso alimentan throughput; optimiza evidencia
+agregada por tiempo, no número de procesos. El análisis humano puede remuestrear con mayor precisión
+fuera del heartbeat; muestra acuerdo entre realizaciones, resolución y diagnóstico de seeds.
+
+`lambdaforge.analysis.StudyAnalysis` analiza evidencia a posteriori; nunca es otro controlador HPO.
+Los estudios terminales persisten `analysis.json` versionado y atómico; `lf results analyze SELECTOR
+[--recompute] [--json]` usa el mismo núcleo y `results report` solo añade Plotly offline opcional.
+Mantén separados `current_observed_objective`, `best_observed_objective`, `final_objective` y
+`selection_objective`. Una Run podada es evidencia parcial censurada y no recibe score final
+inventado; los componentes ausentes son estructurados.
+
+Con el mismo fingerprint, el análisis es determinista y separa screening/confirmación. Una seed
+líder no basta para estabilidad empírica; la incertidumbre modelada va aparte. Usa un único orden
+min/max, metadata del CV realmente calculado, predicados `when` exactos y validación de todo punto.
+La fiabilidad combina soporte, calidad CV, cobertura y extrapolación. Indica si la región superior
+es observada/predicha y no atribuyas resolución a un pool no persistido. Confirmación usa el margen
+de equivalencia. Separa coste intrínseco por Run de gasto total del controlador y Pareto científico
+de Pareto de recursos. Todo sigue siendo predictivo/descriptivo, no causal.
+
+En sweeps sin INITIALIZE adaptativo, StudyDesign.space persistido define la geometría de Analysis;
+no infieras claves obligatorias incondicionales de ramas incompletas. El lector del host pasa esa
+geometría explícitamente a runtimes antiguos e inmutables. Contextos de respuesta válidos ausentes
+significan evidencia insuficiente. Errores remotos acotados conservan la excepción final, no solo
+la cabecera del traceback.
+Valores finitos JSON lista/mapping son categorías: cobertura/efectos usan claves JSON canónicas
+y conservan los valores originales; nunca hashees elecciones crudas ni dividas límites del modelo
+en dimensiones independientes.
+
+Un screening estable detiene optimización ordinaria, no trabajo científico: confirmation y deuda
+material/factible de soporte e interacciones continúan hasta agotarse o alcanzar un presupuesto
+duro. Calcula `scientific_status` con parámetros e interacciones materiales. Los
+`diagnostic_metrics` de un objective escalar son evidencia terminal solo visual y nunca afectan al
+HPO ni a la selección.
+
+`lf export SELECTOR --output PADRE` y **Export Study…** en la Consola usan un único servicio de
+dominio para exportar el Attempt más reciente en su estado actual. Una Execution exitosa final usa
+`NOMBRE--EXECUTION_ID`; cualquier otro estado crea un snapshot atómico con timestamp y registra
+`status`, `export_kind` y `finalized` en el manifest SHA-256. Incluye solo evidencia persistida al
+capturar: Execution/Runs cuando existen, registros del Study/controlador y Job, análisis/replay
+aplicable, checkpoints/pesos y artefactos publicados finalizados. Antes de existir una Execution,
+el snapshot solo contiene configuración y control plane, sin inventar Runs ni conclusiones. No
+copies datasets compartidos, entornos, caché ni el árbol staged del proyecto: conserva sus
+referencias de provenance. Rechaza symlinks, ficheros especiales y traversal del archive, elimina
+siempre temporales del proveedor y nunca publiques una exportación local parcial. `--profile
+default` conserva evidencia científica/decisiones completas, curvas métricas reducidas de forma
+determinista y telemetría de recursos de alta frecuencia resumida; `--profile full` conserva los
+streams crudos. Cada fuente transformada u omitida queda en el manifest con motivo, bytes y
+SHA-256. La transferencia usa ZIP64 comprimido; temporales/extracción del controlador van junto al destino, no a `/tmp`, y
+solo se reutilizan bytes de evidencia temporal propia. El callback publica fases reales. La Consola
+mantiene el export en background y muestra su estado fuera del workspace inicial sin spam.
+
+Sin `seeds` se usa el stream `replicate` versionado del proyecto; candidatos comparten ordinal y el
+mínimo por defecto es uno. `seeds` es finito/autoritativo y `replicates` elige un prefijo. La
+confirmación automática usa el stream `confirmation` separado. Sin `trials`, la convergencia
+científica versionada decide; cobertura escasa o confianza baja no equivalen a convergencia. La
+racha legacy requiere override explícito y FINISH persiste el motivo exacto. Cada especificación Run
+contiene únicamente sus valores candidato/seed y una definición compacta; nunca copies el pool
+completo en cada una, porque un Study grande válido debe usar memoria lineal.
+Un sweep sin réplicas explícitas abre bloques completos compartidos y usa la secuencia de confianza
+empirical-Bernstein plug-in predecible y adaptativa a varianza `paired-pm-eb-cs-v2` sobre diferencias
+pareadas acotadas. Controla una familia primaria authored (tratamientos frente a
+`sweep.reference`, o la familia pairwise necesaria para el top set), expresa preferencias,
+`PRACTICAL_TOP_SET` y relaciones frente a referencia, y permite un solo bloque completo de
+lookahead para no crear una barrera GPU sin usar evidencia parcial al parar. No hay pruning/carrera
+por celda; una celda ausente deja el bloque incompleto y la equivalencia exige margen. El alpha de
+familia predeterminado es `0.05`; solo el sweep automático permite el ajuste avanzado
+`sweep.sequential_alpha`, rechazado con réplicas fijas. Persiste por
+separado líder puntual, conclusión/estabilidad descriptiva exacta y evidencia secuencial formal;
+`UNRESOLVED` nunca equivale a convergencia.
+Pasa explícitamente el orden persistido de adquisición, nunca orden numérico de seeds o llegada de
+workers. Inferencia formal solo consume un prefijo comprometido completo y continuo. Recovery
+restaura el único compromiso anticipado de `sweep-blocks.json`; coordenadas ausentes/contradictorias
+fallan antes de escribir. Separa estabilidad predictiva si falta soporte descriptivo; estabilidad
+no resuelta es su propia masa de realizaciones, no el complemento de otra hipótesis. Ausencia de
+estado secuencial no es aprobación formal. Decisiones/manifests históricos v1 no se reescriben.
+Auditoría actual y aceptación pendiente: `docs/SCIENTIFIC_AUDIT.es.md` y su versión inglesa.
+Los Studies terminales reconcilian toda identidad en cola y exponen `status`, `design_status`,
+`scientific_status` y `finish_reason`. Un diseño fijo puede estar completo y científicamente no
+resuelto; agotar tiempo/Runs con deuda obligatoria implica incompleto. Distingue candidatos
+observados de completos. El análisis de sweep se empareja por seed exacta y remuestrea bloques de
+seed; nunca sustituye una celda ausente con otra seed. Texto humano y confianza derivan del mismo
+`ExactScientificConclusion`, mientras el líder puntual permanece separado. Sin
+`objective.practical_margin`, ganadores inestables son `NO_CLEAR_PREFERENCE`/`UNRESOLVED`, no
+equivalencia práctica.
+
+`lf` sin argumentos abre la Consola Textual solo en un TTY; sin TTY o con `--json` imprime ayuda.
+Overview separa Cluster, Work ordinario y Study, conserva historial acotado de recursos y no vuelca
+JSON crudo. Las gráficas de recursos y curvas de aprendizaje usan el widget nativo declarado
+`textual-plot`: no añadas otro renderer ni persistas las muestras acotadas de la TUI. El historial
+de recursos usa una ventana fija de cinco minutos y una clave de color externa. Un refresh debe
+conservar panel y clave estable. Clusters
+y Datasets usan tarjetas/secciones semánticas, no JSON de proveedor. Un Work terminal con
+`study_expected` sigue en Studies y usa `study_job_id` para leer el
+Attempt más reciente con telemetría. Las seis pantallas son Overview, Work, Studies, Clusters,
+Datasets y Results. La navegación real es
+`Study -> Trial -> Seed -> Epoch`: Enter/derecha apila y Esc/izquierda o Back desapila. Las migas
+anteriores actúan sobre la misma pila; una lectura remota de Study/Seed muestra carga/error y no
+tablas vacías como evidencia. Seeds conserva
+current/best/final/selection, pruning censurado, páginas de cuatro gráficas seleccionables por ratón
+o `n`/`p`, tabla horizontal con todos los escalares por step, GPU/recursos y
+logs aislados; Analysis consume el JSON persistido. `Ctrl+P` solo anuncia handlers reales: un nombre
+no equivale a paridad. Los widgets llaman servicios Python, el I/O lento sale del event loop y los
+refresh conservan selección/época/scroll. Las acciones destructivas mantienen preview/apply. `lf top`,
+`lf clusters setup` y `lf clusters modify` están retirados; no restaures otra UI.
+Trata `study: null` como evidencia no disponible: abre Study/logs e intenta una recarga acotada, sin
+convertirlo directamente ni degradarlo a Work ordinario.
+Cancelar un Study es una operación sobre el Work semántico y sigue disponible antes de existir
+telemetría. Los fallos recurrentes de refresh/proveedor se muestran inline como estado
+obsoleto/error; nunca producen un aviso emergente en cada intervalo de sondeo.
+Borrar un Study reutiliza el borrado preview-first del Work semántico exacto, con progreso visible;
+rechaza Studies activos hasta cancelarlos y nunca selecciona el objetivo por su nombre visible.
+HPO consume ese mismo análisis: dominios declarados/observados/prometedores, fiabilidad, respuesta
+con incertidumbre/soporte, dispersión, interacciones e historial completo Acción/Trial/Motivo. No
+ajusta otro modelo ni afirma causalidad. Antes de existir un resultado de Execution usa
+`study.hpo_analysis` vivo y acotado mediante el servicio compartido; no ocultes evidencia por faltar
+Results finales. Cambiar de página de métricas restablece límites automáticos; el zoom manual solo
+afecta a la página visible. Las categorías conservan sus etiquetas reales y pulsar un punto/barra
+muestra su valor exacto. La terminal mantiene la incertidumbre numérica sin pseudobandas engañosas;
+exportaciones Plotly opcionales explícitas pueden mostrar intervalos reales, hover, mapas de calor
+y superficies 3D. Las métricas de seed se exportan en un dashboard offline con selector
+agrupado/buscable, máximo de cuatro valores iniciales de objetivo/validación, curvas originales y
+normalizadas por métrica, barras de último valor/cambio, correlaciones al mismo step, relaciones X/Y
+por steps compartidos y estadística descriptiva exacta; las categorías se pliegan y seleccionar
+todas es deliberado. El HTML de Study navega comparación persistida de candidatos, respuestas,
+interacciones, cobertura, recursos y findings sin ajustar otro surrogate. Los heatmaps ofrecen
+paletas con centro neutral explícito. Las preferencias usan una clave local única por fichero:
+reabrir conserva y regenerar reinicia. Paneles redimensionables, categorías de métricas propias y
+especificaciones de gráficas guardadas son solo presentación: conservan las claves y consumen la
+evidencia persistida embebida sin recalcularla. **Explore** de Study admite métricas frente a
+parámetros en 2D con superposición y puntos 3D/mapas de calor/superficies numéricas con X/Y
+parámetros y Z métrica. Conserva categorías y huecos del dominio finito: ausente es null, nunca
+cero/predicción. Datos parciales/podados son visuales opcionales, no sustituyen selección final;
+SD por valor describe Trials, no incertidumbre de seeds. Incluye el renderer offline
+`analysis/assets/study-charts.js` en las wheels. Los controles previsualizan inmediatamente:
+guardar solo persiste. Series Y adicionales usan casillas buscables; Parameters comparte el
+renderer observado con selector Y. Mantén separada la respuesta modelada del objetivo, sin
+renombrarla como otra métrica. Vistas vacías explican datos/filtros/selección ausentes sin inventarlos.
+
+Study Analysis v8 añade el read model determinista `research`. `MetricCatalog` es la autoridad
+semántica; `AnalysisProfile` valida declaraciones de clase/YAML; `ResearchAnalysis` y
+`ResearchDiagnostics` producen perfiles/hallazgos acotados. Los assets offline solo representan:
+nunca ejecutan estos diagnósticos en el heartbeat del HPO ni ajustan ciencia en JavaScript.
+Congela declaraciones y defaults conocidos en `analysis-semantics.json` antes de ejecutar; los
+hijos referencian ese fichero sin copiar el catálogo por Run. Identidad semántica y científica son
+independientes. Métricas test/derivadas de test no gobiernan objetivo ni restricciones y no entran
+en discovery provisional. Candidatos censurados no son evidencia final exacta. Permutaciones
+exploratorias ajustadas BY no son inferencia formal adaptativa ni confianza científica.
+Conserva constantes, datos ausentes, dimensiones/linaje y unidades desconocidas. Métricas Y con
+unidades diferentes/desconocidas usan ejes separados salvo normalización visual explícita.
+Inbox, búsqueda, catálogo y vistas guardadas validadas consumen datos persistidos. Rutas y límites:
+`docs/RESEARCH_ANALYSIS.es.md` (con equivalente inglés).
+
+La cobertura usa tarjetas/gráficas/tablas
+acotadas, no JSON crudo, y la ayuda
+contextual explica términos estadísticos. Las decisiones se añaden a
+`study/controller-history.jsonl`: conserva `controller.json.recent` acotado, carga el historial
+completo solo bajo demanda y mantiene el tail disponible en Studies antiguos sin ese fichero. Las
+claves de métrica siguen estables; las etiquetas pueden
+configurarse con `LightningTrainConfig.epoch_metric_display_names`, y la UI nunca expone
+`__lambdaforge_utility__` en vez de «Composite selection score». Las marcas de trial van en columna
+separada.
+
+## Identidad y aislamiento por proyecto
+
+La ruta pública `lf run CONFIG --on-fleet NAME` admite Studies adaptativos nuevos/fixed/repetidos/pareados
+automáticos, coordinador local y miembros managed. Run Work ofrece los mismos destinos.
+Continuación de checkpoints/fidelity, co-location, recovery/adopción, expansión y export distribuido siguen bloqueados:
+`docs/COORDINATED_STUDIES.es.md`. No llamar Study coordinado a JobGroups independientes ni crear
+otro optimizer. Dry-run no adquiere grants; pruebas loopback no acreditan SSH/command/SLURM.
+
+`WorkRunner(dispatcher=...)`, `PreparedShardExecutor` y `CoordinatedDispatcher` conservan un único
+punto nativo. Jobs miembros persistentes ejecutan oleadas concretas con procesos Run/ARI nativos
+aislados. Los offers exigen heartbeat fresco del propietario y código/entorno/inputs/numerics/
+hardware exactos acreditados; placeholders no pasan a GlobalRun. Tokens GPU heredados opacos,
+sin ampliarlos. Una oleada baseline ocupada ofrece cero slots. El coordinador nunca compacta ni
+lee streams resolviendo rutas remotas localmente. Retención en el worker tras persistir el envelope.
+Show/logs vivos/terminales usan el miembro verificado y curvas remotas lazy. Los resúmenes escalares
+activos acotados son metadata visual, no evidencia terminal aceptada. Cancelación semántica detiene
+primero el padre y enumera hijos exactos. Borrado protege dependencias y previsualiza la familia;
+retry no reinicia Fleet como Work de un clúster y export no omite miembros silenciosamente.
+Streams escalares nativos ordenados usan registros completos acotados, cursores por bytes y leases
+exactas. El planner nativo recibe resultados terminales solo tras completar el stream; recupera
+appends no confirmados, nunca corrupción confirmada. Adquisición pending-aware y poda nativas
+siguen centrales. Órdenes de parada inmutables/idempotentes no inventan evidencia terminal ni podan
+evidencia protegida. Repriorizar Runs sin lease audita invocaciones previas y conserva la ciencia.
+Espejos escalares verificados, no rutas remotas, alimentan la calibración histórica.
+
+Los callbacks fixed/automático reemplazan cola no iniciada sin retirar leases/resultados aceptados.
+Conservar leases/fences v2, reloj/presupuestos originales, cuarentena y propiedad unknown.
+Observación física/heartbeat ausente no prueban grant ni pérdida del Attempt. Lifecycle/catálogo
+internos no son soporte público de pausa/expansión. Conservar backfill y semántica de bloques/evidencia.
+
+El `pyproject.toml` más cercano, no el entorno virtual activo, selecciona `ProjectContext`.
+`[tool.lambdaforge].project_id` es un ID estable opcional de 1–80 caracteres; si falta se deriva de
+la raíz resuelta. Los perfiles/referencias de credenciales de usuario y leases GPU/proceso por host
+se comparten. Jobs/grupos/recientes del controlador, resultados/índices dataset/caché locales y
+estado/caché/jobs/datasets/entornos remotos se aíslan por proyecto. Las rutas remotas por defecto
+quedan bajo `<workspace>/.lambdaforge/projects/<project-id>`; las personalizadas añaden
+`projects/<project-id>` y la raíz de leases queda sin aislar. El catálogo del proyecto se superpone
+recursivamente al perfil de usuario, permitiendo cambiar el mirror sin copiar credenciales o
+política del centro. Nunca persistas rutas efectivas derivadas en el perfil escrito. Un Job legado
+solo es visible si su source pertenece al proyecto más cercano y se reconecta mediante rutas de
+proveedor/Work registradas; nunca muevas bytes remotos antiguos implícitamente.
+
+## Contrato de clustering
+
+Usa `lambdaforge.clustering`. `KMeans`, `MiniBatchKMeans`, `DBSCAN`, `HDBSCAN` y `Agglomerative`
+comparten `Clusterer.cluster(X) -> ClusteringResult`; sklearn es lazy y opcional mediante
+`lambdaforge[clustering]`. No añadas factory/registro, estimadores backend ni otro tipo Distance.
+Reutiliza `lambdaforge.nn.distances.Distance`, aplica la tabla de capacidades y comprueba memoria
+antes de una matriz O(N²). KMeans y Ward son euclídeos. Escalado, imputación, PCA, parámetros,
+thresholds e interpretación de estabilidad son ciencia explícita del proyecto.
+
+El productor llama a `outputs.dataset_preflight(...)` antes del cálculo; `datasets preflight` lee
+todos los índices sin modificarlos. `intent="rebuild"` sella un candidato fijado y no registrado.
+`scientific_identity` declara fuentes/selección/labels/configuración/algoritmo; no infieras exclusiones
+operativas. `DatasetComparison.compare`/`datasets compare` verifica bytes antes del verificador
+confiado con política explícita por variable; IDs/targets/particiones/fuentes siguen exactos.
+Equivalencia conserva content IDs distintos, no sustituye versión. Publicación fallida protege
+artifacts/checkpoints y candidato; `datasets publish-candidate` recupera solo publicación con
+preview/apply, sin recalcular ni reescribir historial. Inventario read-only fusiona solo
+(nombre, versión, content ID), descubre todas las ubicaciones y señala conflictos sin acciones
+ambiguas. Contrato y WISDOM: `docs/DATASET_RECONSTRUCTION.es.md`.
+
+Filas conflictivas mantienen Manage copies: `datasets adopt --on ORIGEN --content-id ID` verifica
+bytes y archiva/elige solo la referencia futura del controlador. `datasets delete/remove --on
+DESTINO --content-id ID` previsualiza antes de apply, usa autoridad del destino aunque el controlador
+tenga otro ID, bloquea consumidores activos, archiva bajo CAS/lock y retira entradas vacías.
+Remove solo retira índice; delete exige rutas gestionadas/manifiestos exactos. Nunca cambia identidad
+de bytes, reescribe Runs previas ni presenta adoptar como equivalencia científica.
+
+Los datasets publicados son objetos durables independientes. Los resultados y checkpoints son
+estado científico; bundles, entornos compartidos y caché son reconstruibles. Todo borrado debe ser
+exacto, seguro frente a symlinks, idempotente y con vista previa. Nunca contactes un clúster real ni
+modifiques datos científicos reales al probar el repositorio.
+
+Admission comparte leases por filesystem: espacio físico libre menos compromisos actuales/nuevos
+conserva el mayor margen absoluto/porcentual e inodes disponibles. Reserva no es uso. No sumes
+volúmenes ni deduzcas muerte de un propietario remoto por PID local. GC automático/manual comparte
+`StorageService/StorageOperations`; los markers de entorno/runtime se adquieren atómicamente con GC,
+también al verificar reuse. No reemplaces prefijos completos inválidos bajo Jobs que los referencien.
+Las copias de publicación reservan en el volumen destino y GC solo limpia raíces de caché propias,
+nunca carpetas externas. `lf storage status/reconcile` consulta/mide; reconcile `--apply` solo actualiza
+el inventario diagnóstico, no estado científico ni contabilidad de cada escritura. Protege
+referencias de recuperación y leases independientes de caches Work.
+**Clear storage…** confirma limpieza nativa; **Clear output** solo limpia texto. Checkpoints correctos
+sin pin tienen gracia configurable; recuperación fallida/interrumpida se conserva.
+`checkpoints.pin/unpin`, `outputs.from_checkpoint` y dataset `source_checkpoint` declaran publicación/
+retención independientes, nunca hardlinks mutables. `docs/STORAGE.es.md` detalla alcance y garantías
+pendientes de provisioning/capas de código; no las afirmes implementadas.
+
+Las raíces de dataset con scope de proyecto solo afectan a publicaciones nuevas. Conserva una
+colocación absoluta heredada ya registrada para el proyecto si verifica exactamente. Las
+subcarpetas hash son identidad inmutable, no rutas aleatorias: cambiar bytes exige una versión
+lógica nueva. La publicación debe comprobar compatibilidad antes del commit y revertir un
+directorio recién comprometido si falla el registro final. Un registro remoto conflictivo solo es
+reconciliable si se demuestra que su directorio exacto ya no existe; bytes existentes o
+inaccesibles mantienen el conflicto duro.
+
+Antes de finalizar: actualiza ambos manuales, READMEs y AGENTS, esquema/ejemplos si aplica y
+changelog; ejecuta pruebas
+focalizadas, `ruff`, `mypy`, una suite local razonable, build de wheel y smoke instalado. Declara de
+forma explícita cualquier test CUDA no ejecutado.
+
+Los logs de Attempts en la Consola de investigación se actualizan automáticamente. Un Work fallido añade tras cualquier
+tail el tipo/mensaje/fase/ruta del resultado persistido; usa `--verbose` o `--debug` para traceback y
+`e` en la TUI, o `--json` para `failure`/`failures` estructurados. Un estudio terminal sin telemetría
+publicada cae a Attempts/logs numerados. Los modelos inmutables que cruzan procesos spawn deben ser
+pickle-safe; nunca expongas un `mappingproxy` crudo en esa frontera. `cache.fetch` reintenta cortes HTTP/chunked/gzip y
+estados transitorios desde temporales no publicados limpios; no añadas workarounds en el consumidor.
+El progreso humano de bootstrap solo usa stderr y no contamina JSON.
+La Consola usa los mismos servicios de dominio en workers, comparte un factory de proveedores,
+serializa operaciones de clúster y pausa probes de recursos durante bootstrap. Su panel de actividad
+muestra fases/tiempo y admite alturas predefinidas o arrastre; el viewport superior conserva altura
+mínima y scroll. Las confirmaciones de mutación y planes modales muestran secciones semánticas
+acotadas, nunca JSON crudo. Las pantallas raíz ocultas no cargan.
+El indicador de carga raíz solo aparece hasta el primer snapshot correcto. Los refresh posteriores
+conservan el último read model, muestran su antigüedad y lo marcan obsoleto si fallan; filas y logs
+acotados de Work se actualizan en vivo con una sola petición activa por vista. Overview debe hacer
+una lectura de inventario por proveedor directo —o solo estados de Jobs activos si el scheduler no
+tiene inventario—, usar contadores del registro local de datasets y
+proyecciones compactas de Job/Study. Las pantallas raíz Work/Studies no deben sondear recursos ni
+datasets. Un Work UNKNOWN no verificable solo puede olvidarse mediante borrado preview/apply del
+historial local; nunca elimina su proceso/workspace remoto no verificado ni lo llama terminal.
+El selector de Run Work filtra YAML; recientes combina el historial local de Jobs con un MRU acotado
+que solo persiste ruta/nombre/fecha locales. Explorar/elegir reciente solo rellena un selector. La
+única acción Submit debe volver a validar, explicar y solo después enviar asíncronamente al clúster
+visible capturado; bloquea repeticiones y muestra cada fase. Nunca trates la presencia en MRU como
+validación; representar el preview es solo diagnóstico y nunca puede impedir un envío ya validado.
+No copies la configuración al estado de consola. Los nombres visibles de Work no son
+claves: usa identidades `work_id` exactas para filas y mutaciones, de forma que ejecuciones
+homónimas simultáneas sean independientes.
+Los fallos sintácticos YAML deben ser acotados y ligados a la fuente: ruta, línea/columna, fragmento,
+cursor e indicación una sola vez.
+Summary de Dataset puede leer el índice lógico pero nunca recorrer assets; Stats/Integrity son
+explícitos. El borrado de versión previsualiza todas las ubicaciones, confirma una vez y trata
+`registered_but_missing` como convergencia segura antes de olvidar registros vacíos. El control
+permanece visible y debe mostrar inmediatamente espera/éxito/fallo evitando activaciones duplicadas.
+
+La salud operativa usa JobStore nativo y propiedad exacta, separada de ciencia. Leer caché o escribir
+metadata no actualiza confirmación del proveedor. Aísla registros corruptos por Job para conservar
+observación de los demás; sus entradas de error no crean Jobs ni autorizan pérdida/recovery.
+Fallos de raíz/transporte siguen siendo globales. Inventario fallido no es host vacío saludable;
+UNKNOWN no permite duplicar salvo pérdida de procesos confirmada y reciente. Monitor y consola
+comparten servicios; SMTP es TLS opcional, referencias de credenciales y entrega persistida acotada.
+`lf health [JOB] [--refresh] --json`, `lf incidents --json` y `lf monitor` inspeccionan/controlan
+observación independiente, nunca otro runner. Retry single-host acepta `--config` para YAML
+trasladado: compara identidad semántica/namespace original y fija hash entre preview/apply.
+IDs de recuperación enlazan eventos Job; admisión, heartbeat y progreso son fases distintas.
+`lf jobs recovery JOB` / Recovery history leen eventos nativos paginados offline, nunca payloads.
+Apply rechazado/inspección explícita de consola se auditan antes de enqueue; CLI dry-run no muta.
+Cargar evidencia reutilizada es referencia, no progreso: solo avance posterior con runtime positivo
+puede resolver el incidente original. Errores persistentes conservan petición/fase/historial.
+CheckpointCollection ofrece configure/should_save optativos e inventory paginado con verificación
+explícita en host. Registro, integridad y compatibilidad del consumidor son cuestiones distintas;
+metadata interna no es payload. Las sondas concurrentes del mismo proyecto/cluster conservan los
+relojes originales, nunca fabrican frescura. Un incidente de origen solo se resuelve tras progreso
+reciente del Job de recuperación auditado, no al aceptar el retry. No deduzcas recovery Fleet,
+rotación en vivo ni continuación de epochs de la disponibilidad de un checkpoint.
+Consulta `docs/OPERATIONAL_RELIABILITY.es.md` y el registro de aceptación para requisitos pendientes.

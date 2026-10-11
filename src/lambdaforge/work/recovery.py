@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -50,6 +51,31 @@ def restore_seed_context(config: WorkConfig, manifest: Mapping[str, Any]) -> Wor
             "The authored seeds/replicates or persisted seed coordinates differ."
         )
     return restored
+
+
+def validate_recovery_configuration(config: WorkConfig, manifest: Mapping[str, Any]) -> str:
+    """One semantic recovery check for previews and the actual native worker.
+
+    Paths/comments/order are not identity. Exact typed input identities, seed coordinates,
+    normalized design/objective/budgets and product contracts remain authoritative. The origin
+    code identity deliberately holds code constant here; acknowledging code is a separate check.
+    """
+    from lambdaforge.work.runner import WorkRunner
+
+    origin = manifest.get("code_identity")
+    if not isinstance(origin, Mapping) or not manifest.get("scientific_fingerprint"):
+        raise ValueError(
+            "Original scientific configuration identity is missing; cannot verify recovery."
+        )
+    identity = WorkRunner._study_identity(config, code_identity=origin)
+    if identity != manifest["scientific_fingerprint"]:
+        raise ValueError(
+            "Study recovery requires unchanged configuration, inputs and seed policy. "
+            "The selected YAML changes scientific identity or its exact inputs cannot be matched."
+        )
+    if config.raw.get("products") != manifest.get("expected_products"):
+        raise ValueError("Study recovery requires unchanged product publication contracts.")
+    return identity
 
 
 def validate_execution(path: Path, *, seed_stream: Any = None) -> dict[str, Any]:
@@ -369,6 +395,9 @@ def fixed_recovery_preview(path: Path, *, seed_stream: Any = None) -> dict[str, 
                 else "pending",
                 "run_id": result.get("run_id") if result else None,
                 "attempt": result.get("attempt_number") if result else None,
+                "checkpoint": checkpoint_recovery_preview(path, str(result["run_id"]))
+                if result
+                else None,
             }
         )
     return {
@@ -377,6 +406,7 @@ def fixed_recovery_preview(path: Path, *, seed_stream: Any = None) -> dict[str, 
         "execution_dir": str(path),
         "execution_id": path.name,
         "reuse_runs": sum(row["action"] == "reuse" for row in rows),
+        "preserved_completed_runs": sum(row["action"] == "reuse" for row in rows),
         "retry_runs": sum(row["action"] == "retry" for row in rows),
         "pending_runs": sum(row["action"] == "pending" for row in rows),
         "spent_attempts": inventory["spent_runs"],
@@ -387,6 +417,84 @@ def fixed_recovery_preview(path: Path, *, seed_stream: Any = None) -> dict[str, 
             "epoch continuation requires Work support."
         ),
     }
+
+
+def checkpoint_recovery_preview(execution: Path, run_id: str) -> dict[str, Any]:
+    """Inspect the last committed checkpoint descriptor, without reading payload bytes.
+
+    Registration/size agreement is not hash verification or application compatibility. Old
+    advanced path-written state remains visible as unregistered, never guessed as resumable.
+    Kept stdlib-only because native recovery probes execute it on older immutable hosts.
+    """
+    if not re.fullmatch(r"run-[0-9a-f]{20}", run_id):
+        raise ValueError("Unsafe recovery checkpoint Run identity.")
+    root = execution / "runs" / run_id / "checkpoints"
+    if root.is_symlink() or root.resolve() != root:
+        raise ValueError("Unsafe recovery checkpoint root.")
+    result: dict[str, Any] = {
+        "registered": 0,
+        "verified": 0,
+        "last": None,
+        "continuation": "application_support_and_validation_required",
+        "storage_durability": "unspecified",
+        "unregistered_payloads_possible": False,
+    }
+    if not root.exists():
+        return result
+    if not root.is_dir():
+        raise ValueError("Recovery checkpoint root is not a directory.")
+    metadata = root / ".managed" / "records"
+    if metadata.resolve() != metadata:
+        raise ValueError("Unsafe recovery checkpoint metadata root.")
+    result["registered"] = sum(1 for _ in metadata.glob("*.json"))
+    result["unregistered_payloads_possible"] = (
+        any(not item.name.startswith(".") for item in root.iterdir()) and result["registered"] == 0
+    )
+    policy_path = root / ".storage-policy.json"
+    if not policy_path.exists() and not policy_path.is_symlink():
+        return result
+    policy = read_owned_json(policy_path)
+    if policy.get("storage_policy_version") != 1:
+        raise ValueError("Invalid checkpoint policy identity.")
+    configured = policy.get("checkpoint_policy", {})
+    if not isinstance(configured, Mapping):
+        raise ValueError("Invalid checkpoint durability policy.")
+    result["storage_durability"] = configured.get("storage_durability", "unspecified")
+    last = policy.get("last_checkpoint")
+    if last is None:
+        return result
+    if not isinstance(last, Mapping):
+        raise ValueError("Invalid last checkpoint descriptor.")
+    key = last.get("key")
+    if not isinstance(key, str) or not key or Path(key).is_absolute() or ".." in Path(key).parts:
+        raise ValueError("Unsafe checkpoint key in recovery descriptor.")
+    target = root / key
+    if target.resolve() != target or not target.is_relative_to(root):
+        raise ValueError("Checkpoint descriptor escapes its owned Run.")
+    record_path = metadata / (hashlib.sha256(key.encode()).hexdigest() + ".json")
+    record = read_owned_json(record_path)
+    if record.get("scope") != "checkpoint" or record.get("key") != key:
+        raise ValueError("Checkpoint descriptor conflicts with managed identity.")
+    owner = record.get("owner")
+    compatible_owner = (
+        isinstance(owner, Mapping)
+        and owner.get("execution_id") == execution.name
+        and owner.get("run_id") == run_id
+    )
+    size_matches = target.is_file() and target.stat().st_size == record.get("size_bytes")
+    result["last"] = {
+        "key": key,
+        "path": str(target),
+        "owner": owner,
+        "written_at_utc": record.get("written_at_utc"),
+        "step": record.get("step"),
+        "sha256": record.get("sha256"),
+        "size_bytes": record.get("size_bytes"),
+        "integrity": "not_checked" if size_matches else "invalid",
+        "ownership": "recorded" if compatible_owner else "unverified",
+        "compatibility": "application_validation_required",
+    }
+    return result
 
 
 def latest_outcomes(outcomes: Sequence[WorkResult]) -> tuple[WorkResult, ...]:

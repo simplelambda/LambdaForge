@@ -24,11 +24,22 @@ class SlurmProfile:
         )
     )
     queue: SchedulerCommand = field(
-        default_factory=lambda: SchedulerCommand("squeue", ("-h", "-j", "{job_id}", "-o", "%T"))
+        default_factory=lambda: SchedulerCommand(
+            "squeue", ("-h", "-j", "{job_id}", "-o", "%T|%R|%N")
+        )
     )
     accounting: SchedulerCommand = field(
         default_factory=lambda: SchedulerCommand(
-            "sacct", ("-n", "-X", "-j", "{job_id}", "-o", "State", "--parsable2")
+            "sacct",
+            (
+                "-n",
+                "-X",
+                "-j",
+                "{job_id}",
+                "-o",
+                "State,Reason,ExitCode,NodeList,Start,End",
+                "--parsable2",
+            ),
         )
     )
     cancel: SchedulerCommand = field(

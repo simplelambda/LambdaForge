@@ -10,6 +10,78 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-11
+
+Agent-native foundations and operational reliability on the existing execution model.
+This release includes the available integration layers, not the complete agent reform:
+approved scientific mutations, semantic retrieval, external vault binding and remaining
+end-to-end acceptance are still pending; see `docs/ai/IMPLEMENTATION.md`.
+
+### Added
+
+- Agent-native foundations: project-pinned typed facade, bounded capability discovery, optional
+  official MCP SDK stdio and read/plan toolsets; scientific mutations remain disabled.
+- Signed expiring human approvals for exact knowledge edits, CLI/Console review, locked single-use
+  apply and audit; no agent self-approval. Explicit optional-extra installation preserves project files.
+- Opt-in paired loopback MCP HTTP with per-request token/project/host/origin checks and bounded
+  official SDK transport. Real Codex discovery/tool-call acceptance uses isolated client settings.
+- Installed static model contracts/recipes and lazy native Run, product-evidence, resource and
+  related-note queries; no automatic artifact or model downloads.
+- Portable Markdown knowledge with exact evidence references, disposable incremental FTS,
+  revision conflicts, optional headless Obsidian and Console status/setup/search.
+- Exact compressed note snapshots with preview/approved apply, before/after revision audit and
+  byte-cursor paging; no scientific evidence duplication. Thirteen bounded MCP prompts and
+  toolset-scoped installed-contract/result/product/note resources guide evidence-first clients.
+- Optional Obsidian diagnosis is passive; only explicit local probe/open actions may launch the
+  desktop application. Headless Markdown remains independent of CLI/app availability and settings.
+- 24 packaged specialized Skills, consumer-only instructions and preview/apply asset sync that
+  protects personalized files. Legacy init stays unchanged without agent/memory flags.
+- Compact canonical contributor guide; all detailed contracts retained in a task-specific
+  reference. Full reform acceptance remains tracked explicitly, not claimed complete.
+
+- Saved paged recovery audit through `lf jobs recovery` and Console **Recovery history**; explicit
+  inspection/rejected apply retain request IDs and causes before a new Job exists. Persistent
+  Console failure dialogs link logs, history and the exact recovery plan, without polling spam.
+- Project operational health/freshness, durable deduplicated incidents and an independent native
+  monitor with preview-first systemd-user installation and optional TLS SMTP credential references.
+- CLI health/incidents/monitor routes and Console operational workbench; health remains separate
+  from logical/scientific state and imported historical evidence.
+- Native single-host Study recovery with relocated YAML (`retry --config`), semantic origin checks,
+  preview/apply hash pinning and recovery request IDs linked to Job phases/events. Fleet recovery
+  remains pending, not silently replayed.
+- Opt-in managed checkpoint cadence/terminal retention, owner/step/time descriptors, paged host
+  integrity inventory and metadata-only recovery preview/Console table without claiming epoch
+  continuation. Shared native diagnostics distinguish scheduler facts from unknown causes.
+
+### Fixed
+
+- A corrupt historical direct Job no longer makes every Work/Study on its host UNKNOWN/degraded.
+  Inventory preserves healthy siblings and reports bounded per-Job failures; unverified error rows
+  are never adopted or used as recovery permission. A valid later probe clears prior query errors.
+- Direct probes collect named methods and their helper closure from a single source snapshot,
+  avoiding missing `_required_mapping` after source updates in a long-lived Console/monitor.
+- Reused completed Runs, obligation-count changes and failure/loss observations no longer count
+  as recovery progress. SLURM falls back to bounded accounting after queue transport failure,
+  without exposing stale query details or inventing evidence from empty accounting.
+- Repeated unclassified query failures no longer falsely certify a network outage; typed
+  connection/authentication failures retain their distinct native diagnostics.
+- Managed checkpoint loading/replacement rejects foreign Execution/Run bindings and corrupt
+  registration before touching payloads, while preserving older Attempts of the same logical Run.
+- Concurrent monitor/Console probes share project/provider observation gates without advancing
+  cached confirmation clocks; independent SLURM Jobs remain independently observable. Slow SMTP
+  delivery no longer holds the incident lock or acknowledges a newer incident transition.
+- A freshly confirmed lost UNKNOWN Job no longer blocks its own native recovery as an active
+  execution. Other active Jobs and apply-time ownership checks remain protected. Audited recovery
+  resolves origin incidents only after fresh scientific progress, preserving prior failure history.
+- Provider failures no longer appear as empty healthy inventory or refreshed cached running.
+  Direct host observation verifies process lifetimes/markers; SLURM preserves terminal reasons,
+  accounting uncertainty and failures. Ordered locked observations retain last confirmation and
+  cannot overwrite a newer probe or concurrent terminal cancellation.
+- Failed preparation and SMTP attempts expose durable bounded outcomes without changing science.
+  Operational guides, emergency procedure and acceptance ledger are packaged in English/Spanish.
+- Direct read probes do not require LF installed in their interpreter. Internal checkpoint metadata
+  is not application payload; changed retention is rechecked before cleanup.
+
 ## [0.18.0] - 2026-10-09
 
 First-class Work results, exact historical dependencies and independent scientific products,

@@ -32,10 +32,51 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true")
     commands = parser.add_subparsers(dest="command")
+    from lambdaforge.cli.ai import add_ai_parser
+
+    add_ai_parser(commands)
     project = commands.add_parser(
         "project", help="Show the current project identity and discovered root."
     )
     project.add_argument("--json", action="store_true")
+
+    health = commands.add_parser(
+        "health", help="Inspect operational evidence, freshness and ownership."
+    )
+    health.add_argument("selector", nargs="?")
+    health.add_argument("--refresh", action="store_true")
+    health.add_argument("--clusters", type=Path)
+    health.add_argument("--json", action="store_true")
+
+    incidents = commands.add_parser("incidents", help="Read durable local operational incidents.")
+    incidents.add_argument("--job")
+    incidents.add_argument("--clusters", type=Path)
+    incidents.add_argument("--json", action="store_true")
+
+    monitor = commands.add_parser(
+        "monitor", help="Manage the independent project operational observer."
+    )
+    monitor.add_argument("--clusters", type=Path)
+    monitor_actions = monitor.add_subparsers(dest="monitor_command", required=True)
+    for name in (
+        "start",
+        "stop",
+        "status",
+        "diagnose",
+        "run",
+        "once",
+        "install",
+        "config",
+        "test-alert",
+    ):
+        action = monitor_actions.add_parser(name)
+        action.add_argument("--json", action="store_true")
+        if name == "install":
+            action.add_argument("--apply", action="store_true")
+        if name == "config":
+            action.add_argument(
+                "--file", type=Path, help="Validated JSON; only secret references are accepted."
+            )
 
     seeds = commands.add_parser("seeds", help="Inspect deterministic project seed streams.")
     seeds.add_argument("--count", type=int, default=10)
@@ -78,6 +119,16 @@ def build_parser() -> argparse.ArgumentParser:
     init = commands.add_parser("init", help="Create an installable Work project.")
     init.add_argument("directory", type=Path)
     init.add_argument("--force", action="store_true")
+    init.add_argument("--agents", choices=("none", "portable", "codex"), default="none")
+    init.add_argument("--knowledge", choices=("none", "markdown", "obsidian"), default="none")
+    init.add_argument(
+        "--install-deps",
+        action="store_true",
+        help="Consent to declared optional agent Python dependencies, never external software.",
+    )
+    init.add_argument(
+        "--interactive", action="store_true", help="Ask about agent and memory setup."
+    )
     init.add_argument(
         "--template", choices=("minimal", "preprocessing", "training", "full"), default="minimal"
     )
@@ -319,10 +370,18 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--tail", type=int)
     logs.add_argument("--follow", action="store_true")
     logs.add_argument("--json", action="store_true")
+    recovery = job_commands.add_parser(
+        "recovery", help="Saved recovery links and paged audit, without provider access."
+    )
+    recovery.add_argument("job_id")
+    recovery.add_argument("--offset", type=int, default=0)
+    recovery.add_argument("--limit", type=int, default=100)
+    recovery.add_argument("--json", action="store_true")
     retry = job_commands.add_parser("retry")
     retry.add_argument("job_id")
     retry.add_argument("--dry-run", action="store_true")
     retry.add_argument("--accept-code-change", action="store_true")
+    retry.add_argument("--config", type=Path, help="Verify and use a relocated recovery YAML.")
     reconcile = job_commands.add_parser("reconcile")
     reconcile.add_argument("--cluster")
     reconcile.add_argument("--all", action="store_true")
@@ -340,6 +399,9 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--dry-run", action="store_true")
         item.add_argument("--json", action="store_true")
         if operation == "retry":
+            item.add_argument(
+                "--config", type=Path, help="Verify and use a relocated recovery YAML."
+            )
             item.add_argument(
                 "--accept-code-change",
                 action="store_true",

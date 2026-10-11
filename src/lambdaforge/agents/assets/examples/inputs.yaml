@@ -1,0 +1,7 @@
+# Binding syntax only: replace exact IDs with owned registered evidence before validation.
+# A dataset is a versioned scientific dependency:
+dataset: {dataset: example@1}
+# A result is exact Execution evidence, not a guessed artifact path:
+history: {result: {execution: execution-REPLACE, run: run-REPLACE, attempt: 1}}
+# A product has a declared contract and expectations:
+model: {product: {name: example-model, contract: example/model:v1}}

@@ -81,15 +81,18 @@ class OverviewService:
             return records
         refreshed: dict[str, Any] = {}
         with ThreadPoolExecutor(max_workers=min(8, len(refreshable))) as executor:
-            futures = {
-                executor.submit(service.get, value.job_id, include_study=False): value
-                for value in refreshable
-            }
-            for future, original in futures.items():
+            futures = {}
+            for value in refreshable:
+                dispatched_at = datetime.now(timezone.utc).isoformat()
+                future = executor.submit(service.get, value.job_id, include_study=False)
+                futures[future] = (value, dispatched_at)
+            for future, (original, dispatched_at) in futures.items():
                 try:
                     refreshed[original.job_id] = future.result()
-                except Exception:
-                    refreshed[original.job_id] = original
+                except Exception as error:
+                    refreshed[original.job_id] = service.observation_failed(
+                        original.job_id, error, started=dispatched_at
+                    )
         return tuple(refreshed.get(value.job_id, value) for value in records)
 
     def research_snapshot(self) -> dict[str, Any]:

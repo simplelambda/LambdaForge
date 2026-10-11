@@ -93,7 +93,7 @@ from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 from lambdaforge.runtime.SharedGPUAdmission import shared_gpu_launch
 from lambdaforge.work.atomic import atomic_write_text
 from lambdaforge.work.cache import WorkCache
-from lambdaforge.work.checkpoints import CheckpointCollection
+from lambdaforge.work.checkpoints import CheckpointCollection, checkpoint_payloads
 from lambdaforge.work.config import RunDefinition, WorkConfig, import_work_class
 from lambdaforge.work.design import ExecutionPolicy, StudyConvergenceState
 from lambdaforge.work.dispatcher import StudyDispatcher
@@ -120,6 +120,7 @@ from lambdaforge.work.recovery import (
     read_owned_json,
     restore_seed_context,
     validate_execution,
+    validate_recovery_configuration,
 )
 from lambdaforge.work.retention import compact_attempt
 from lambdaforge.work.runtime import WorkRuntime
@@ -368,13 +369,7 @@ class WorkRunner:
                 _validate_fixed_recovery(
                     config.levels[0].runs[0], plan.source, execution_dir, manifest
                 )
-            origin_code = manifest.get("code_identity")
-            if not isinstance(origin_code, Mapping) or self._study_identity(
-                config, code_identity=origin_code
-            ) != manifest.get("scientific_fingerprint"):
-                raise ValueError(
-                    "Study recovery requires unchanged configuration, inputs and seed policy."
-                )
+            validate_recovery_configuration(config, manifest)
             previous_identity = manifest.get("scientific_fingerprint")
             current_revision = execution_dir / "current-code.json"
             if current_revision.exists() or current_revision.is_symlink():
@@ -1991,7 +1986,15 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
     run_dir.mkdir(parents=True, exist_ok=False)
     temp_dir = run_dir / "tmp"
     temp_dir.mkdir()
-    checkpoints = CheckpointCollection(checkpoint_root)
+    checkpoints = CheckpointCollection(
+        checkpoint_root,
+        owner={
+            "execution_id": str(specification["execution_id"]),
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "scientific_identity": identity,
+        },
+    )
     # Publish the scientific request before user code starts. A killed first Attempt has
     # no result yet, but recovery must still identify its exact logical evidence cell.
     atomic_json(
@@ -2035,7 +2038,7 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
                 "gpu_index": specification.get("gpu_index"),
             },
         )
-    resuming = any(path.is_file() for path in checkpoint_root.rglob("*"))
+    resuming = next(checkpoint_payloads(checkpoint_root), None) is not None
     resources = _work_resources(definition.resources.to_dict())
     config_view = WorkConfiguration(
         definition.name,
@@ -5369,9 +5372,7 @@ def _execute_adaptive_dispatch(
             continuing = False
             if specification.get("recovery_checkpoint_root"):
                 root = Path(str(specification["recovery_checkpoint_root"]))
-                continuing = any(
-                    path.is_file() and not path.is_symlink() for path in root.rglob("*")
-                )
+                continuing = next(checkpoint_payloads(root), None) is not None
         if not continuing:
             metrics.unlink(missing_ok=True)
             checkpoint_manifest.unlink(missing_ok=True)
@@ -7262,7 +7263,7 @@ def _read_live_resource_snapshot(specification: Mapping[str, Any]) -> dict[str, 
     if isinstance(checkpoint_root, str):
         root = Path(checkpoint_root)
         try:
-            files = [path for path in root.rglob("*") if path.is_file() and not path.is_symlink()]
+            files = list(checkpoint_payloads(root))
         except OSError:
             files = []
         if files:
@@ -8972,12 +8973,7 @@ def _active_checkpoint_available(specification: Mapping[str, Any]) -> bool:
         owned = (Path(str(raw_execution)).resolve() / "runs").resolve()
         if not root.is_relative_to(owned) or not root.is_dir():
             return False
-        for path in root.rglob("*"):
-            if path.is_symlink():
-                continue
-            if path.is_file():
-                return True
-        return False
+        return next(checkpoint_payloads(root), None) is not None
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
 
@@ -8993,7 +8989,7 @@ def _result_checkpoint_available(result: WorkResult) -> bool:
         checkpoint_root = run_root / "checkpoints"
         if checkpoint_root.is_symlink() or not checkpoint_root.is_dir():
             return False
-        return any(path.is_file() and not path.is_symlink() for path in checkpoint_root.rglob("*"))
+        return next(checkpoint_payloads(checkpoint_root), None) is not None
     except OSError:
         return False
 

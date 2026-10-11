@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import tempfile
 from collections.abc import Sequence
@@ -176,18 +178,21 @@ class ProcessScheduler(Scheduler):
         command = (
             *self.profile.command_prefix,
             self._active_python(),
-            "-m",
-            "lambdaforge.controlplane.ProcessSupervisor",
-            "inventory",
+            "-c",
+            self._observation_code("inventory"),
             self.storage.job_root,
         )
         result = self.transport.run(command, timeout=30.0)
         if result.returncode:
             raise RuntimeError(f"Could not read remote process inventory: {result.stderr.strip()}")
-        value = json.loads(result.stdout or "[]")
+        value = json.loads(result.stdout)
         if not isinstance(value, list):
             raise TypeError("Process inventory response must be a list.")
-        return tuple(item for item in value if isinstance(item, dict))
+        if any(not isinstance(item, dict) for item in value):
+            raise TypeError(
+                "Process inventory contains a malformed record; inventory is incomplete."
+            )
+        return tuple(value)
 
     def _control(self, scheduler_id: str, operation: str) -> None:
         job_dir = PurePosixPath(self.storage.job_root) / scheduler_id
@@ -207,8 +212,19 @@ class ProcessScheduler(Scheduler):
             )
 
     def _state_payload(self, scheduler_id: str) -> dict[str, object]:
-        path = PurePosixPath(self.storage.job_root) / scheduler_id / "state.json"
-        result = self.transport.run(("cat", str(path)), timeout=15.0)
+        if not scheduler_id.startswith("job-") or PurePosixPath(scheduler_id).name != scheduler_id:
+            raise ValueError("Unsafe process scheduler id.")
+        path = PurePosixPath(self.storage.job_root) / scheduler_id
+        result = self.transport.run(
+            (
+                *self.profile.command_prefix,
+                self._active_python(),
+                "-c",
+                self._observation_code("observe"),
+                str(path),
+            ),
+            timeout=15.0,
+        )
         if result.returncode:
             raise RuntimeError(
                 f"Could not read durable state for {scheduler_id}: {result.stderr.strip()}"
@@ -217,6 +233,73 @@ class ProcessScheduler(Scheduler):
         if not isinstance(value, dict) or value.get("job_id") != scheduler_id:
             raise RuntimeError("Remote process state does not match the requested job id.")
         return value
+
+    @staticmethod
+    def _observation_code(operation: str) -> str:
+        """Ship a bounded read-only probe to old immutable runtimes, never install into them.
+
+        The implementation is the same host authority used by the native supervisor. Only
+        process metadata is read, no consumer code, CUDA initialization or scientific bytes.
+        """
+        from lambdaforge.controlplane.ProcessIdentity import ProcessIdentity
+        from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor
+        from lambdaforge.controlplane.ResearchWork import study_overview
+
+        # inspect.getsource(function) trusts the loaded code's line offsets. An editable
+        # installation can change those offsets while a Console/monitor is still open,
+        # accidentally shipping another method (and losing _required_mapping). Select
+        # definitions and their complete helper closure from one current file snapshot.
+        source = Path(inspect.getfile(ProcessSupervisor)).read_text(encoding="utf-8")
+        supervisor = next(
+            node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.ClassDef) and node.name == "ProcessSupervisor"
+        )
+        definitions = {
+            node.name: node for node in supervisor.body if isinstance(node, ast.FunctionDef)
+        }
+        required = {"observe", "inventory"}
+        pending = list(required)
+        while pending:
+            name = pending.pop()
+            for node in ast.walk(definitions[name]):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "cls"
+                    and node.attr in definitions
+                    and node.attr not in required
+                ):
+                    required.add(node.attr)
+                    pending.append(node.attr)
+        lines = source.splitlines(keepends=True)
+        methods = []
+        for name, node in definitions.items():
+            if name in required:
+                start = min([node.lineno, *(item.lineno for item in node.decorator_list)])
+                methods.append("".join(lines[start - 1 : node.end_lineno]))
+        overview_source = Path(inspect.getfile(study_overview)).read_text(encoding="utf-8")
+        overview = next(
+            node
+            for node in ast.parse(overview_source).body
+            if isinstance(node, ast.FunctionDef) and node.name == "study_overview"
+        )
+        overview_code = "".join(
+            overview_source.splitlines(keepends=True)[overview.lineno - 1 : overview.end_lineno]
+        )
+        return (
+            "from __future__ import annotations\n"
+            "import os,json,sys,copy\nfrom pathlib import Path\nfrom enum import Enum\n"
+            "from typing import Any\nfrom collections.abc import Mapping,Sequence\n"
+            + inspect.getsource(JobState)
+            + "\n"
+            + overview_code
+            + "\n"
+            + f"exec({Path(inspect.getfile(ProcessIdentity)).read_text(encoding='utf-8')!r})\n"
+            "class _Observer:\n"
+            + "\n".join(methods)
+            + f"\nprint(json.dumps(_Observer.{operation}(sys.argv[1])))\n"
+        )
 
     def _active_python(self) -> str:
         if self.profile.environment != "managed":

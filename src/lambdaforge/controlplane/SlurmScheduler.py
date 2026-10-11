@@ -6,11 +6,13 @@ import re
 import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from lambdaforge.controlplane.jobs import JobState
 from lambdaforge.controlplane.Scheduler import Scheduler
 from lambdaforge.controlplane.SchedulerCapabilities import SchedulerCapabilities
 from lambdaforge.controlplane.SchedulerSubmission import SchedulerSubmission
+from lambdaforge.controlplane.SecretRedactor import SecretRedactor
 from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.controlplane.Transport import Transport
 from lambdaforge.execution.ResourceRequest import ResourceRequest
@@ -28,6 +30,7 @@ class SlurmScheduler(Scheduler):
     ) -> None:
         self.transport = transport
         self.profile = profile or SlurmProfile.from_mapping(None, legacy_options=options)
+        self._observations: dict[str, dict[str, Any]] = {}
 
     @property
     def capabilities(self) -> SchedulerCapabilities:
@@ -130,16 +133,75 @@ class SlurmScheduler(Scheduler):
     def state(self, scheduler_id: str) -> JobState:
         """Query configured queue then accounting commands."""
         self._validate_id(scheduler_id)
+        # A failed new query must not leave ``details`` advertising the old queue fact.
+        self._observations.pop(scheduler_id, None)
         values = {"job_id": scheduler_id}
         queued_command = self.profile.queue.render(values, allowed={"job_id"})
-        queued = self.transport.run(queued_command)
-        raw = queued.stdout.strip().splitlines()
-        if queued.returncode == 0 and raw:
+        queue_error: Exception | None = None
+        try:
+            queued = self.transport.run(queued_command, timeout=15.0)
+        except Exception as error:
+            queue_error, queued = error, None
+        raw = queued.stdout.strip().splitlines() if queued is not None else []
+        if queued is not None and queued.returncode == 0 and raw:
+            self._observations[scheduler_id] = self._evidence("squeue", raw[0])
             return self._state(raw[0])
         accounting_command = self.profile.accounting.render(values, allowed={"job_id"})
-        accounting = self.transport.run(accounting_command)
+        try:
+            accounting = self.transport.run(accounting_command, timeout=15.0)
+        except Exception as accounting_error:
+            if queue_error is not None:
+                raise queue_error from accounting_error
+            raise
         rows = accounting.stdout.strip().splitlines()
-        return self._state(rows[0]) if accounting.returncode == 0 and rows else JobState.UNKNOWN
+        if accounting.returncode == 0 and rows:
+            self._observations[scheduler_id] = self._evidence("sacct", rows[0])
+            if queue_error is not None or (queued is not None and queued.returncode):
+                self._observations[scheduler_id]["queue_error"] = SecretRedactor.redact(
+                    queue_error
+                    if queue_error is not None
+                    else queued.stderr.strip()
+                    if queued is not None
+                    else ""
+                )[:1000]
+            return self._state(rows[0])
+        if queue_error is not None:
+            # Positive accounting can confirm a terminal. Empty accounting after a queue
+            # timeout cannot. Preserve the transport exception's native classification.
+            raise queue_error
+        failures = [
+            f"{name}: {result.stderr.strip()[:1000]}"
+            for name, result in (("squeue", queued), ("sacct", accounting))
+            if result is not None and result.returncode
+        ]
+        if failures:
+            raise RuntimeError("SLURM observation failed: " + "; ".join(failures))
+        self._observations[scheduler_id] = {
+            "source": "sacct",
+            "provider_observation": "unknown",
+            "observation_reason": "ACCOUNTING_PENDING_OR_JOB_UNKNOWN",
+        }
+        return JobState.UNKNOWN
+
+    def details(self, scheduler_id: str) -> dict[str, Any]:
+        """Return facts from the same queue/accounting observation, not a second poll."""
+        if scheduler_id not in self._observations:
+            self.state(scheduler_id)
+        return dict(self._observations[scheduler_id])
+
+    @staticmethod
+    def _evidence(source: str, row: str) -> dict[str, Any]:
+        fields = [field.strip() for field in row.split("|")]
+        keys = (
+            ("raw_state", "reason", "node")
+            if source == "squeue"
+            else ("raw_state", "reason", "exit_code", "node", "started_at_utc", "finished_at_utc")
+        )
+        return {
+            "source": source,
+            "provider_observation": "scheduler",
+            **dict(zip(keys, fields, strict=False)),
+        }
 
     def logs(self, scheduler_id: str, *, tail: int | None = None) -> str:
         """Read the conventional output file through the transport."""

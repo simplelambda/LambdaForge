@@ -1,4 +1,4 @@
-# Manual de LambdaForge 0.18
+# Manual de LambdaForge 0.19
 
 Resultados e informes de Work, dependencias históricas exactas y materialización comprimida explícita:
 [Guía de resultados](WORK_RESULTS.es.md). Reutilizan runner, ResultStore, registro de productos e
@@ -2054,7 +2054,11 @@ remotos de datasets ni incluye índices de candidatos/Runs. Las colecciones Work
 sondean recursos ni datasets. Abrir un Study carga su índice acotado; análisis, historial completo
 del controlador y logs externos son lazy por pestaña, y curvas/artefactos/logs de seed solo se leen
 para la Run seleccionada. La progresión máquina equivalente es `overview --json`, `show WORK` y
-`show WORK --run CLAVE --json`. El mismo dashboard aparece en el navegador Clusters y en el
+`show WORK --run CLAVE --json`. El inventario directo aísla registros individuales malformados,
+ausentes o inseguros: los Jobs válidos siguen observables y sólo el conocido afectado muestra
+degradación, conservando resultados terminales guardados. Las entradas de error no acreditan
+propiedad, no crean Jobs ni autorizan recovery. Fallos de raíz/transporte siguen siendo globales;
+observar no repara archivos persistidos. El mismo dashboard aparece en el navegador Clusters y en el
 workspace del clúster. Los
 Studies terminales siguen siendo Studies y conservan el Attempt que produjo su última telemetría;
 un read model terminal con `study: null` es válido, abre una vista degradada de Study/logs e intenta
@@ -2233,3 +2237,25 @@ registró pertenece al proyecto actual, y se reconecta usando sus rutas de prove
 persistidas. No se copia entre proyectos ni se trasladan directorios remotos automáticamente. Los
 nuevos envíos usan el layout con namespace; perfiles, credenciales y leases compartidos no requieren
 migración.
+
+## 19. Fiabilidad operativa
+
+`lf health [JOB] [--refresh] --json` y `lf incidents --json` inspeccionan evidencia operativa aparte
+del resultado científico. `lf monitor start/stop/status/config/diagnose/once/install` controla el
+observador independiente del proyecto; SMTP opcional usa referencias y deduplicación persistida.
+Bare `lf` ofrece **Operational health…** con los mismos servicios.
+
+`lf retry STUDY --config NUEVO_YAML --dry-run --json` compara el YAML trasladado con identidad
+original sin iniciar cómputo. Apply verifica de nuevo propiedad y fija el archivo elegido. Eventos
+Job conservan ID de petición y distinguen admisión, runtime y progreso científico. Consulta la
+[guía operativa y de emergencia](OPERATIONAL_RELIABILITY.es.md) para configuración, plataformas,
+correo, semántica de recovery y requisitos Fleet/checkpoints en vivo que siguen pendientes.
+Checkpoints gestionados ofrecen cadencia/retención optativas `configure/should_save` e inventario
+paginado `inventory(verify=True)` en host. Disponibilidad no prueba restauración del consumidor.
+Sondas concurrentes conservan última observación y antigüedad real; un recovery auditado resuelve
+incidentes del origen tras progreso científico fresco, nunca solo al aceptarse.
+Cargar Runs válidos reutilizados es una referencia, no progreso nuevo. `lf jobs recovery JOB
+--json [--offset N --limit N]` y Study → **Recovery history** consultan eventos nativos paginados,
+Jobs enlazados y peticiones rechazadas incluso sin conexión. Validar en consola registra inspección
+operativa; CLI dry-run sigue sin mutaciones. El diálogo persistente conserva petición/fase y
+accesos a logs, historial y el mismo plan, sin avisos repetidos de sondeo.

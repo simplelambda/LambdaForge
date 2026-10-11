@@ -8,6 +8,53 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
+def operational_label(item: Mapping[str, Any]) -> str:
+    """Operational health is not the logical/scientific Work state."""
+    if item.get("imported"):
+        return "Read-only snapshot"
+    value = item.get("operational")
+    value = value if isinstance(value, Mapping) else {}
+    return {
+        "healthy": "Verified",
+        "degraded": "Degraded",
+        "unreachable": "Unreachable",
+        "stale": "Stale",
+        "lost_confirmed": "Process lost",
+    }.get(str(value.get("health")), "Unverified")
+
+
+def operational_detail(item: Mapping[str, Any]) -> str:
+    """Show observation clocks and actionable uncertainty without inventing confirmation."""
+    if item.get("imported"):
+        return "Historical read-only evidence · no live provider expected."
+    value = item.get("operational")
+    value = value if isinstance(value, Mapping) else {}
+    if not value:
+        return "Operational health  Unverified · no provider observation"
+    age = value.get("observation_age_seconds")
+    age_text = f"{age:.0f}s ago" if isinstance(age, int | float) else "never verified"
+    error = value.get("last_error")
+    diagnosis = value.get("diagnostic")
+    reason = str(value.get("reason") or "NO_PROVIDER_OBSERVATION").replace("_", " ").lower()
+    return (
+        f"Operational health  {operational_label(item)} · {reason}\n"
+        f"Last confirmed  {value.get('last_confirmed_state') or 'unknown'} · "
+        f"{value.get('last_confirmed_at_utc') or 'no confirmation'}\n"
+        f"Provider observation  {age_text} · {value.get('source') or 'unknown provider'}"
+        + (
+            f"\nObservation error  {error.get('type')}: {error.get('message')}"
+            if isinstance(error, Mapping)
+            else ""
+        )
+        + (
+            f"\nDiagnosis  {diagnosis.get('category')} · {diagnosis.get('title')}\n"
+            + " ".join(str(fix) for fix in diagnosis.get("fixes", ()))
+            if isinstance(diagnosis, Mapping)
+            else ""
+        )
+    )
+
+
 def epoch_rows(curves: Mapping[str, Any]) -> list[tuple[int, dict[str, float]]]:
     """Pivot scalar curves into one deterministic row per observed epoch."""
     rows: dict[int, dict[str, float]] = {}

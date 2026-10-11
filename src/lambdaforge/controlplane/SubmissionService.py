@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -46,6 +47,10 @@ class SubmissionService:
     ) -> JobHandle:
         """Persist and launch preparation without blocking on the selected execution target."""
         source = Path(config).expanduser().resolve()
+        recovery_config = (metadata or {}).get("recovery_configuration")
+        pin = recovery_config.get("sha256") if isinstance(recovery_config, Mapping) else None
+        if pin is not None and hashlib.sha256(source.read_bytes()).hexdigest() != pin:
+            raise ValueError("Recovery YAML changed after preview; no Job was enqueued.")
         if self.catalog.project is not None and not self.catalog.project.owns_source(str(source)):
             raise ValueError(
                 "The YAML belongs to another project. Run lf from that project's directory."
@@ -134,6 +139,7 @@ class SubmissionService:
             "cluster": cluster,
             "profile": profile_descriptor,
             "config": str(source),
+            **({"config_sha256": pin} if pin is not None else {}),
             "resources": request_resources.to_dict(),
             "run_arguments": list(run_arguments),
             **({"input_bindings": dict(input_bindings)} if input_bindings else {}),

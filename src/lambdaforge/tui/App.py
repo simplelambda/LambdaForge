@@ -1168,6 +1168,12 @@ class LambdaForgeApp(App[None]):
                 yield Label("LambdaForge", id="brand")
                 yield Label("ACTION", classes="sidebar-section-label")
                 yield Button(
+                    "Operational health…", id="nav-health", classes="nav-button", flat=True
+                )
+                yield Button(
+                    "Agents / knowledge…", id="nav-agents", classes="nav-button", flat=True
+                )
+                yield Button(
                     "Run Work…",
                     id="nav-run",
                     classes="nav-button sidebar-action",
@@ -1209,6 +1215,18 @@ class LambdaForgeApp(App[None]):
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "nav-agents":
+            from lambdaforge.ProjectContext import ProjectContext
+            from lambdaforge.tui.screens.AgentWorkspace import AgentWorkspace
+
+            project = getattr(self.services.catalog, "project", None) or ProjectContext.discover()
+            self.push_screen(AgentWorkspace(project.root))
+            return
+        if event.button.id == "nav-health":
+            from lambdaforge.tui.screens.OperationalWorkspace import OperationalWorkspace
+
+            self.push_screen(OperationalWorkspace(self.services))
+            return
         if event.button.id in {"products-import", "studies-import"}:
             self.push_screen(StudyImportWorkspace(self.services))
             return
@@ -1345,6 +1363,11 @@ class LambdaForgeApp(App[None]):
             return
         self.show_screen(action.screen)
         if action.handler == "navigate":
+            return
+        if action.handler == "operational_health":
+            from lambdaforge.tui.screens.OperationalWorkspace import OperationalWorkspace
+
+            self.push_screen(OperationalWorkspace(self.services))
             return
         if action.handler == "study_import":
             self.push_screen(StudyImportWorkspace(self.services))

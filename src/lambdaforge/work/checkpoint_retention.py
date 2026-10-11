@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import time
@@ -31,7 +32,6 @@ def checkpoint_plan(execution: Path, *, grace_seconds: float) -> list[dict[str, 
         return []
     if not isinstance(result, dict) or result.get("status") != "succeeded":
         return []
-    expired = time.time() - result_path.stat().st_mtime >= grace_seconds
     candidates: list[dict[str, Any]] = []
     for run in (execution / "runs").glob("run-*"):
         if run.is_symlink() or not run.is_dir():
@@ -57,6 +57,14 @@ def checkpoint_plan(execution: Path, *, grace_seconds: float) -> list[dict[str, 
         publications = policy.get("publications", {})
         if not isinstance(publications, dict):
             continue
+        configured = policy.get("checkpoint_policy", {})
+        if not isinstance(configured, Mapping):
+            continue
+        retention = configured.get("retention_seconds")
+        retention = grace_seconds if retention is None else retention
+        if type(retention) not in {int, float} or not math.isfinite(retention) or retention < 0:
+            continue
+        expired = time.time() - result_path.stat().st_mtime >= retention
         for child in root.iterdir():
             if child.name.startswith(".") or child.is_symlink():
                 continue
@@ -90,6 +98,7 @@ def checkpoint_plan(execution: Path, *, grace_seconds: float) -> list[dict[str, 
                     "reason": reason,
                     "execution": str(execution),
                     "run_id": run.name,
+                    "retention_seconds": retention,
                 }
             )
     return candidates
@@ -122,6 +131,8 @@ def compact_checkpoints(execution: Path, candidates: list[dict[str, Any]]) -> in
         atomic_json(receipt_path, prior)
     removed: list[dict[str, Any]] = []
     for item in candidates:
+        if str(item.get("execution")) != str(execution):
+            raise ValueError("Checkpoint retention candidate belongs to another Execution.")
         path = owned_path(execution, str(item["path"]))
         with CrossProcessFileLock(
             path.parent / ".storage-policy.lock",
@@ -183,7 +194,20 @@ def _still_eligible(path: Path, item: Mapping[str, Any]) -> bool:
             return _publication_valid(
                 policy.get("publications", {}).get(path.name, {}).get("durable")
             )
-        return item["reason"] == "terminal-unreferenced-checkpoint"
+        if item["reason"] != "terminal-unreferenced-checkpoint":
+            return False
+        # A researcher can increase retention after preview, just like adding a pin.
+        retention = policy.get("checkpoint_policy", {}).get("retention_seconds")
+        retention = item.get("retention_seconds", 0) if retention is None else retention
+        result_path = Path(item["execution"]) / "result.json"
+        result = json.loads(result_path.read_text())
+        return (
+            result.get("status") == "succeeded"
+            and type(retention) in {int, float}
+            and math.isfinite(retention)
+            and retention >= 0
+            and time.time() - result_path.stat().st_mtime >= retention
+        )
     except (OSError, TypeError, ValueError, AttributeError):
         return False
 

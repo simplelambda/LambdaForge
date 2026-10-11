@@ -60,6 +60,45 @@ class ConsoleServices:
     def cluster_names(self) -> tuple[str, ...]:
         return self.catalog.names()
 
+    def operational_snapshot(self, *, refresh: bool = False) -> dict[str, Any]:
+        """Native compact health/incident facts; no artifacts, epochs or HPO fitting."""
+        from lambdaforge.controlplane.MonitorService import MonitorService
+        from lambdaforge.controlplane.OperationalHealth import OperationalHealth
+        from lambdaforge.controlplane.OperationalIncidents import OperationalIncidents
+        from lambdaforge.controlplane.OverviewService import OverviewService
+
+        monitor = MonitorService(self.jobs)
+        records = OverviewService._jobs(self.jobs) if refresh else self.jobs.list(refresh=False)
+        return {
+            "monitor": monitor.status(),
+            "settings": monitor.config(),
+            "jobs": [
+                {
+                    "job_id": record.job_id,
+                    "cluster": record.cluster,
+                    "state": record.state.value,
+                    "operational": OperationalHealth.describe(record),
+                }
+                for record in records
+            ],
+            "incidents": list(OperationalIncidents(self.jobs.store).list()),
+        }
+
+    def monitor_action(self, operation: str, settings: Mapping[str, Any] | None = None) -> Any:
+        """Same MonitorService authority as lf monitor, never a scientific runner."""
+        from lambdaforge.controlplane.MonitorService import MonitorService
+
+        monitor = MonitorService(self.jobs)
+        if operation == "start":
+            return monitor.start()
+        if operation == "stop":
+            return monitor.stop()
+        if operation == "config":
+            return monitor.config(settings)
+        if operation == "test-alert":
+            return monitor.test_alert()
+        raise ValueError("Unknown monitor action.")
+
     def dependency_choices(self, *, offset: int = 0) -> list[dict[str, Any]]:
         """Metadata-only local/imported catalog and independent published product choices."""
         if type(offset) is not int or offset < 0:
@@ -512,11 +551,26 @@ class ConsoleServices:
     def delete_work(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
         return self.works.delete(selector, apply=apply)
 
-    def retry_preview(self, job_id: str) -> dict[str, Any]:
-        return self.jobs.retry_preview(job_id)
+    def retry_preview(self, job_id: str, *, config: str | Path | None = None) -> dict[str, Any]:
+        return self.jobs.inspect_recovery(job_id, config=config)
 
-    def retry_job(self, job_id: str, *, accept_code_change: bool = False) -> dict[str, Any]:
-        return self.jobs.retry(job_id, accept_code_change=accept_code_change).to_dict()
+    def recovery_history(self, job_id: str, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+        return self.jobs.recovery_history(job_id, offset=offset, limit=limit)
+
+    def retry_job(
+        self,
+        job_id: str,
+        *,
+        accept_code_change: bool = False,
+        config: str | Path | None = None,
+        config_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        return self.jobs.retry(
+            job_id,
+            accept_code_change=accept_code_change,
+            config=config,
+            config_sha256=config_sha256,
+        ).to_dict()
 
     def dataset_describe(self, selector: str) -> dict[str, Any]:
         return self.datasets.describe(selector)

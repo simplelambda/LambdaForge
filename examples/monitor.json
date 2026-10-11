@@ -1,0 +1,13 @@
+{
+  "interval_seconds": 60,
+  "observation": {
+    "freshness_seconds": 180,
+    "heartbeat_seconds": 45,
+    "grace_seconds": 120,
+    "progress_seconds": null,
+    "unreachable_failures": 2
+  },
+  "smtp": {
+    "enabled": false
+  }
+}

@@ -88,6 +88,27 @@ jobs:
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.1"
           python -m pip install -e ".[dev]"
 
+      - name: Gate operational ownership and recovery reliability
+        run: >-
+          python -m pytest -q
+          tests/controlplane/test_operational_health.py
+          tests/controlplane/test_operational_monitor.py
+          tests/controlplane/test_operational_providers.py
+          tests/controlplane/test_inventory_fault_isolation.py
+          tests/controlplane/test_relocated_recovery_config.py
+          tests/controlplane/test_recovery_observation.py
+          tests/controlplane/test_recovery_incidents.py
+          tests/controlplane/test_recovery_audit.py
+          tests/controlplane/test_observation_gate.py
+          tests/controlplane/test_operational_diagnostics.py
+          tests/tui/test_operational_console.py
+          tests/tui/test_operational_recovery_e2e.py
+          tests/tui/test_recovery_history_console.py
+          tests/work/test_checkpoint_evidence.py
+          tests/controlplane/test_study_retry.py
+          tests/work/test_fixed_study_recovery.py
+          tests/work/test_study_recovery.py
+
       - name: Run full test suite
         run: python -m pytest -q --durations=20 --junitxml=cpu-junit.xml
 
@@ -99,6 +120,50 @@ jobs:
           path: cpu-junit.xml
           if-no-files-found: warn
           retention-days: 14
+
+  agent-protocol:
+    name: Agent protocol / CPython 3.10
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - name: Install optional official protocol SDK
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.1"
+          python -m pip install -e ".[dev,agents]"
+      - name: Gate project isolation, assets and actual protocol
+        run: python -m pytest -q tests/agents
+
+  agent-skills:
+    name: Official Skill format / CPython 3.11
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install pinned reference validator
+        run: >-
+          python -m pip install
+          "git+https://github.com/agentskills/agentskills.git@69ef37e9424c0a7ea9dd2293b559e43ec8176379#subdirectory=skills-ref"
+      - name: Validate official Skills
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from skills_ref import validate
+          paths = sorted(Path("src/lambdaforge/agents/assets/skills").iterdir())
+          assert len(paths) == 24
+          failures = {p.name: errors for p in paths if (errors := validate(p))}
+          assert not failures, failures
+          PY
 
   legacy-lightning:
     name: Legacy pytorch_lightning / 2.2 / CPython 3.10

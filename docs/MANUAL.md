@@ -1,4 +1,4 @@
-# LambdaForge 0.18 manual
+# LambdaForge 0.19 manual
 
 [Work results guide](WORK_RESULTS.md) covers ordinary Work evidence,
 reports, exact historical dependencies and explicit compressed materialization. These reuse the runner,
@@ -2312,6 +2312,10 @@ do not probe resources or Datasets. Opening a Study loads its bounded candidate/
 the complete controller history and outer logs remain lazy per tab, and seed curves/artifacts/logs
 are read only for the selected Run. Machine clients follow the same progression: `overview --json`,
 then `show WORK`, then `show WORK --run KEY --json`.
+Direct inventory isolates per-Job malformed/missing/unsafe records. Healthy siblings remain
+observable, while the affected known Job retains an explicit degraded diagnostic and any saved
+terminal outcome. Error entries are not ownership evidence and cannot create Jobs or authorize
+recovery. Transport/root failures remain host-wide; observation never repairs persisted files.
 The same dashboard appears in the Clusters browser and cluster workspace. Terminal Studies remain
 Studies and retain their last telemetry-producing Attempt; a terminal `study: null` read model is
 valid and opens a degraded Study/log view while the service attempts one bounded telemetry reload.
@@ -2502,3 +2506,26 @@ recorded source YAML belongs to the current nearest project, and their recorded 
 are used to reconnect. They are not copied between projects and existing remote directories are not
 moved automatically. New submissions use the namespaced layout. Profiles, credentials and shared
 hardware leases require no migration.
+
+## 19. Operational reliability
+
+Use `lf health [JOB] [--refresh] --json` and `lf incidents --json` to inspect operational evidence
+separately from scientific results. `lf monitor start/stop/status/config/diagnose/once/install`
+controls an independent project observer; optional SMTP uses credential references and durable
+deduplication. Bare `lf` exposes **Operational health…** with the same services.
+
+Native `lf retry STUDY --config NEW_YAML --dry-run --json` verifies relocated configuration against
+original scientific identity, without creating computation; apply revalidates process ownership
+and pins the chosen file. Recovery request ID and admission/runtime/scientific progress are
+auditable through native Job records/events. See the [operating and emergency guide](
+OPERATIONAL_RELIABILITY.md) for policy, platform boundaries, optional email, recovery semantics and
+the broader Fleet/live-checkpoint requirements that are still pending. Managed checkpoints offer
+opt-in `configure/should_save` cadence and terminal retention, plus paged `inventory(verify=True)`
+host-side checks. Availability is not proof of application restoration. Concurrent provider probes
+retain last-good facts and their real ages; an audited recovery resolves origin incidents only
+after fresh scientific progress, never merely on acceptance.
+Loading reused completed Runs is a baseline, not new recovery progress. Use `lf jobs recovery JOB
+--json [--offset N --limit N]` or Study → **Recovery history** for paged saved native events, linked
+Jobs and rejected requests even offline. Console validation records an operational inspection;
+CLI dry-run remains entirely read-only. A persistent failure dialog retains the request/phase and
+links logs, history and the same plan, without repeated polling notifications.

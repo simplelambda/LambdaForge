@@ -168,6 +168,30 @@ def test_missing_state_is_not_silently_restarted(
         jobs.retry_preview(previous.job_id)
 
 
+@pytest.mark.parametrize(
+    "fleet_metadata", [{"fleet": {"name": "research"}}, {"fleet_role": "member"}]
+)
+def test_fleet_preview_and_apply_refuse_single_host_replay_before_reading_science(
+    recovery_jobs: tuple[JobService, JobRecord, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    fleet_metadata: dict[str, Any],
+) -> None:
+    jobs, previous, execution = recovery_jobs
+    jobs.store.write(previous.with_updates(metadata={**previous.metadata, **fleet_metadata}))
+    original = {p: p.read_bytes() for p in execution.rglob("*") if p.is_file()}
+
+    def refuse_probe(*args: Any) -> Any:
+        raise AssertionError("Fleet recovery must not enter single-host provider/science reads")
+
+    monkeypatch.setattr(jobs, "_provider", refuse_probe)
+    with pytest.raises(ValueError, match="Fleet recovery.*single-host"):
+        jobs.retry_preview(previous.job_id)
+    with pytest.raises(ValueError, match="Fleet recovery.*single-cluster"):
+        jobs.retry(previous.job_id)
+    assert len(jobs.store.records()) == 1
+    assert original == {p: p.read_bytes() for p in execution.rglob("*") if p.is_file()}
+
+
 def test_automatic_sweep_preview_works_without_an_installed_remote_runtime(
     recovery_jobs: tuple[JobService, JobRecord, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -251,8 +275,12 @@ def test_detected_code_change_refuses_submission_but_not_inspection(
     before = {p: p.read_bytes() for p in jobs.store.root.rglob("*") if p.is_file()}
     with pytest.raises(ValueError, match="--accept-code-change.*No recovery Job"):
         jobs.retry(previous.job_id)
+    assert all(path.read_bytes() == data for path, data in before.items())
+    assert len(jobs.store.records()) == 1
+    assert jobs.store.events(previous.job_id)[-1]["phase"] == "RECOVERY_BLOCKED"
+    after_rejection = {p: p.read_bytes() for p in jobs.store.root.rglob("*") if p.is_file()}
     assert jobs.retry(previous.job_id, dry_run=True).recovery_plan["code_change_detected"]
-    assert before == {p: p.read_bytes() for p in jobs.store.root.rglob("*") if p.is_file()}
+    assert after_rejection == {p: p.read_bytes() for p in jobs.store.root.rglob("*") if p.is_file()}
 
 
 @pytest.mark.parametrize("changed", [False, True])

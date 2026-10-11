@@ -12,7 +12,22 @@ The [scientific correctness audit](docs/SCIENTIFIC_AUDIT.md) documents acquisiti
 sweep inference, recovery of committed lookahead blocks and separate predictive/descriptive/formal
 conclusions, including compatibility and explicit unfinished engineering boundaries.
 
+[Operational health and recovery](docs/OPERATIONAL_RELIABILITY.md): `lf health`, durable incidents,
+an independent `lf monitor`, optional SMTP and native retry with relocated YAML (`--config`).
+The Console's **Operational health…** panel uses the same services; cached running is not proof
+of current liveness. The guide includes emergency steps and explicit pending Fleet boundaries.
+Managed checkpoint policy is opt-in; recovery previews distinguish registered bytes from
+application continuation. Concurrent provider probes retain last-good views without faking freshness.
+`lf jobs recovery JOB --json` and **Recovery history** in a Study inspect paged saved request/event
+history even offline. Rejected recovery requests remain auditable without creating a new Job.
+
 ## Contents
+
+The [agent integration](docs/ai/INTEGRATION.md) provides a project-pinned Python facade, optional
+MCP stdio, 24 packaged Skills and portable Markdown knowledge. `lf init --agents portable
+--knowledge markdown` prepares consumers; **Agents / knowledge…** exposes the same local services.
+Local human-approved note edits, optional dependency management and paired loopback HTTP are
+implemented; scientific agent mutations and several full-reform gates remain explicitly unfinished.
 
 1. [Install](#install)
 2. [First Work](#first-work)
@@ -33,7 +48,7 @@ projects, or an editable checkout while developing LambdaForge:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install lambdaforge==0.18.0
+python -m pip install lambdaforge==0.19.0
 python -m pip install -e .
 python -m pip check
 lf --version
@@ -356,7 +371,7 @@ version probes live once in `environment.json`.
 Install the optional mature backend and use the uniform Python contract:
 
 ```bash
-python -m pip install "lambdaforge[clustering]==0.18.0"
+python -m pip install "lambdaforge[clustering]==0.19.0"
 ```
 
 ```python
@@ -1204,7 +1219,7 @@ can be run or refreshed explicitly:
 lf results analyze EXECUTION
 lf results analyze EXECUTION --recompute
 lf results analyze EXECUTION --json
-python -m pip install "lambdaforge[analysis-report]==0.18.0"
+python -m pip install "lambdaforge[analysis-report]==0.19.0"
 lf results report EXECUTION --output study-report.html
 lf results replay EXECUTION --policy ari-v3.1
 lf results replay EXECUTION --policy ari-v2-compat --json
@@ -1370,6 +1385,9 @@ HPO, aggregate Analysis, resources, complete controller history and logs load on
 Epoch curves, artifacts and isolated logs are requested only after opening
 one seed. `lf overview --json` follows the same compact contract; use `lf show WORK` and
 `lf show WORK --run KEY --json` for successive detail levels.
+Direct inventories isolate corrupt individual Job records instead of marking every sibling
+UNKNOWN/degraded; healthy Jobs regain fresh state on the next valid refresh. Observation never
+repairs scientific files or adopts unverified error entries.
 The worker writes a compact `study/interactive.json` separately from its authoritative rich
 summary. View-specific HPO/resource/Trial files avoid reading the whole summary; provisional
 post-hoc analysis is cached in a separate read process on its execution host, never in the HPO

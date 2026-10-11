@@ -87,6 +87,14 @@ class CommandLineInterface:
         arguments = parser.parse_args(argv)
         arguments.json = bool(getattr(arguments, "json", False) or json_output)
         arguments.verbose = bool(getattr(arguments, "verbose", False))
+        if arguments.command == "ai":
+            from lambdaforge.cli.ai import run_ai_command
+
+            return run_ai_command(arguments)
+        if arguments.command in {"health", "incidents", "monitor"}:
+            from lambdaforge.cli.operations import run_operational_command
+
+            return run_operational_command(arguments)
         if arguments.command is None:
             if not arguments.json and sys.stdin.isatty() and sys.stdout.isatty():
                 from lambdaforge.tui.App import run_console
@@ -96,7 +104,13 @@ class CommandLineInterface:
             return 0
         if arguments.command == "init":
             return initialize(
-                arguments.directory, force=arguments.force, template=arguments.template
+                arguments.directory,
+                force=arguments.force,
+                template=arguments.template,
+                agents=arguments.agents,
+                knowledge=arguments.knowledge,
+                interactive=arguments.interactive,
+                install_deps=arguments.install_deps,
             )
         if arguments.command == "project":
             project = ProjectContext.discover()
@@ -516,12 +530,17 @@ class CommandLineInterface:
                             managed.primary_job_id,
                             dry_run=arguments.dry_run,
                             accept_code_change=arguments.accept_code_change,
+                            config=getattr(arguments, "config", None),
                         )
                         .to_dict()
                     )
                     print(json.dumps(payload, indent=2))
                     return 0
-                configuration = local.configuration(arguments.selector)
+                configuration = (
+                    WorkConfig.from_yaml(arguments.config)
+                    if getattr(arguments, "config", None) is not None
+                    else local.configuration(arguments.selector)
+                )
                 is_study = any(
                     definition.study_expected
                     for level in configuration.levels
@@ -586,6 +605,7 @@ class CommandLineInterface:
                     job_id,
                     dry_run=arguments.dry_run,
                     accept_code_change=arguments.accept_code_change,
+                    config=getattr(arguments, "config", None),
                 ).to_dict()
         else:
             payload = works.cancel(arguments.selector)

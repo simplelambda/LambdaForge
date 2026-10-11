@@ -432,24 +432,171 @@ class ProcessSupervisor:
         return cls._read_json(directory / "state.json") or {}
 
     @classmethod
+    def observe(
+        cls, job_dir: str | Path, *, markers: tuple[dict[str, list[int]], bool] | None = None
+    ) -> dict[str, Any]:
+        """Verify owned process lifetimes on the execution host, without writes/signals.
+
+        A reachable state file is not proof of a running process. Inaccessible same-user
+        processes prevent a loss conclusion; different-user processes are never inspected.
+        """
+        directory = Path(job_dir).absolute()
+        if directory.resolve() != directory or not directory.name.startswith("job-"):
+            raise ValueError("Unsafe process observation directory.")
+        records: list[Mapping[str, Any]] = []
+        legacy_terminal = not (directory / "request.json").exists()
+        for name in ("request.json", "state.json"):
+            path = directory / name
+            if path.is_symlink():
+                raise ValueError(f"Unsafe process observation record: {name}.")
+            if name == "request.json" and legacy_terminal:
+                # Old native terminal records can be shown, not adopted as an owned execution.
+                records.append({"job_id": directory.name})
+                continue
+            value = cls._required_mapping(cls._read_json(path), name)
+            if value.get("job_id") != directory.name:
+                raise ValueError(f"Process observation ownership mismatch: {name}.")
+            records.append(value)
+        state = dict(records[1])
+        recorded = JobState(str(state.get("state", "unknown")))
+        state.update(source="process-host", raw_state=recorded.value)
+        if legacy_terminal:
+            if not recorded.terminal:
+                raise ValueError("Nonterminal process ownership request is missing.")
+            return {
+                **state,
+                "provider_observation": "unknown",
+                "observation_reason": "LEGACY_TERMINAL_OWNERSHIP_UNVERIFIED",
+            }
+        lifetimes = {}
+        for role in ("supervisor_identity", "process_identity"):
+            raw = state.get(role)
+            if raw is None:
+                lifetimes[role] = "missing"
+                continue
+            identity = ProcessIdentity.from_mapping(cls._required_mapping(raw, role))
+            if identity.job_id != directory.name:
+                raise ValueError(f"Process identity ownership mismatch: {role}.")
+            lifetimes[role] = identity.storage_status()
+        state["process_lifetimes"] = lifetimes
+        supervisor, child = lifetimes["supervisor_identity"], lifetimes["process_identity"]
+        if recorded.terminal:
+            owned, complete = markers if markers is not None else cls._process_markers()
+            live = child == "alive" or bool(owned.get(directory.name))
+            return {
+                **state,
+                "provider_observation": "degraded"
+                if live
+                else "terminal"
+                if complete
+                else "unknown",
+                "observation_reason": "TERMINAL_WITH_LIVE_PROCESSES"
+                if live
+                else "TERMINAL_RECORDED"
+                if complete
+                else "PROCESS_OWNERSHIP_UNRESOLVED",
+            }
+        if supervisor == "alive" and recorded is JobState.RUNNING and child != "alive":
+            return {
+                **state,
+                "provider_observation": "degraded",
+                "observation_reason": "SCIENTIFIC_CHILD_UNVERIFIED",
+            }
+        if supervisor == "alive":
+            return {**state, "provider_observation": "alive"}
+        if child == "alive":
+            return {
+                **state,
+                "provider_observation": "degraded",
+                "observation_reason": "SUPERVISOR_LOST_CHILD_ALIVE",
+            }
+        owned, complete = markers if markers is not None else cls._process_markers()
+        state["owned_process_count"] = len(owned.get(directory.name, ()))
+        # A legacy identity-less state cannot certify death, even on an otherwise empty host.
+        proven = supervisor in {"dead", "reused"} and child in {"dead", "reused", "missing"}
+        if proven and complete and not state["owned_process_count"]:
+            return {
+                **state,
+                "state": JobState.UNKNOWN.value,
+                "provider_observation": "lost_confirmed",
+                "observation_reason": "OWNED_PROCESSES_ABSENT",
+            }
+        return {
+            **state,
+            "provider_observation": "unknown",
+            "observation_reason": "PROCESS_OWNERSHIP_UNRESOLVED",
+        }
+
+    @staticmethod
+    def _process_markers() -> tuple[dict[str, list[int]], bool]:
+        """Bounded host inventory; access denial is uncertainty, never an empty success."""
+        import psutil
+
+        markers: dict[str, list[int]] = {}
+        complete = True
+        user = psutil.Process().username()
+        for process in psutil.process_iter(("pid", "status", "username")):
+            if process.pid == os.getpid():
+                continue
+            try:
+                if process.username() != user or process.status() in {
+                    psutil.STATUS_ZOMBIE,
+                    psutil.STATUS_DEAD,
+                }:
+                    continue
+                job_id = process.environ().get("LAMBDAFORGE_JOB_ID")
+                if job_id:
+                    markers.setdefault(job_id, []).append(process.pid)
+            except psutil.NoSuchProcess:
+                continue
+            except (psutil.AccessDenied, OSError):
+                complete = False
+        return markers, complete
+
+    @classmethod
     def inventory(cls, root: str | Path) -> tuple[dict[str, Any], ...]:
-        """Read only LambdaForge-owned job state directories under one exact root."""
+        """Read owned Jobs, retaining per-Job errors without hiding healthy siblings.
+
+        An error row identifies only the directory inspected, not verified ownership or
+        scientific state. Consumers must not adopt it as a newly discovered Job.
+        Root/transport/process-scan failures still invalidate the whole observation.
+        """
         directory = Path(root).resolve()
         if not directory.is_dir():
             return ()
         states = []
+        markers = cls._process_markers()
         for child in sorted(directory.iterdir()):
             if child.is_symlink() or not child.is_dir() or not child.name.startswith("job-"):
                 continue
-            state = cls._read_json(child / "state.json")
-            request = cls._read_json(child / "request.json")
-            if state and request and state.get("job_id") == child.name:
+            if any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in child.name
+            ):
+                continue  # Not a native JobStore identity; never adopt arbitrary directories.
+            if not (child / "state.json").exists() and not (child / "request.json").exists():
+                continue
+            try:
+                state = cls.observe(child, markers=markers)
+                request = cls._read_json(child / "request.json")
+                if not request:
+                    raise ValueError(f"Missing/corrupt process request for {child.name}.")
                 study = cls._read_json(child / "study" / "overview.json")
                 if study is None:
                     study = cls._read_json(child / "study" / "summary.json")
                 if study is not None:
                     state = {**state, "study": study_overview(study)}
                 states.append({"state": state, "request": request})
+            except (ValueError, TypeError, KeyError, OSError, OverflowError) as error:
+                states.append(
+                    {
+                        "request": {"job_id": child.name},
+                        "state": {"job_id": child.name, "state": JobState.UNKNOWN.value},
+                        "observation_error": {
+                            "type": type(error).__name__,
+                            "message": str(error)[:1500],
+                        },
+                    }
+                )
         return tuple(states)
 
     @classmethod
@@ -1023,7 +1170,7 @@ class ProcessSupervisor:
     def main(cls, argv: Sequence[str] | None = None) -> int:
         values = tuple(argv if argv is not None else sys.argv[1:])
         if len(values) < 2:
-            raise SystemExit("Usage: ProcessSupervisor launch|serve|control|inventory PATH")
+            raise SystemExit("Usage: ProcessSupervisor launch|serve|control|inventory|observe PATH")
         operation, path, *rest = values
         if operation == "launch":
             print(json.dumps(cls.launch(path), sort_keys=True))
@@ -1037,6 +1184,9 @@ class ProcessSupervisor:
             return 0
         if operation == "inventory":
             print(json.dumps(cls.inventory(path), sort_keys=True))
+            return 0
+        if operation == "observe":
+            print(json.dumps(cls.observe(path), sort_keys=True))
             return 0
         raise SystemExit(f"Unknown ProcessSupervisor operation: {operation}")
 

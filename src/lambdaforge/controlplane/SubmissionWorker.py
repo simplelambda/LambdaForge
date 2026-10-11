@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import traceback
@@ -43,6 +44,14 @@ def serve(request_path: str | Path) -> int:
         catalog = ClusterCatalog({cluster: profile})
         jobs = JobService(catalog, store=store)
         jobs.update_preparation(job_id, "validation")
+        pin = value.get("config_sha256")
+        if (
+            pin is not None
+            and hashlib.sha256(Path(str(value["config"])).read_bytes()).hexdigest() != pin
+        ):
+            raise ValueError(
+                "Recovery YAML changed after submission; re-preview before recovering."
+            )
         arguments = value.get("run_arguments", ())
         if not isinstance(arguments, Sequence) or isinstance(arguments, (str, bytes, bytearray)):
             raise TypeError("Submission run_arguments must be a sequence.")

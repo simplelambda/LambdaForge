@@ -1,0 +1,10 @@
+name: agent-example
+run: agent_examples.work.Example
+with: {value: 1.0}
+resources: {cpu: 1, memory: 128MiB}
+products:
+  example-report:
+    kind: ScientificReport
+    contract: example/agent-report:v1
+    scientific_meaning: {protocol: deterministic-score-v1}
+    outputs: [report, summary]

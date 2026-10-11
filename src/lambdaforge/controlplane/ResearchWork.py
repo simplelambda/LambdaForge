@@ -6,10 +6,11 @@ import copy
 import hashlib
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from lambdaforge.controlplane.jobs import JobRecord
+from lambdaforge.controlplane.OperationalHealth import OperationalHealth
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,7 @@ class ResearchWork:
     study: Mapping[str, Any] | None = None
     study_expected: bool = False
     study_job_id: str | None = None
+    operational: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self, *, study_detail: str = "full") -> dict[str, Any]:
         """Return the stable read model at the requested Study detail level.
@@ -90,6 +92,7 @@ class ResearchWork:
             "kind": self.kind,
             "cluster": self.cluster,
             "state": self.state,
+            "operational": copy.deepcopy(dict(self.operational)),
             "scientific_identity": self.scientific_identity,
             "scientific_revision": self.scientific_revision,
             "progress": {
@@ -316,6 +319,7 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
                 study,
                 study_expected,
                 study_job_id,
+                OperationalHealth.describe(primary),
             )
         )
     return tuple(sorted(output, key=lambda value: value.updated_at_utc, reverse=True))
