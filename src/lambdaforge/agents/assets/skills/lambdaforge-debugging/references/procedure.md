@@ -1,30 +1,31 @@
-# lambdaforge-debugging procedure reference
-
-## Native entry point
+# Diagnostic procedure
 
 ```bash
-lf logs EXACT_JOB --tail 80 --json
+lf jobs show EXACT_JOB --json
+lf jobs logs EXACT_JOB --tail 80
+lf health EXACT_JOB --json
+lf health EXACT_JOB --refresh --json
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+The last read deliberately contacts the selected provider. Logs must retain the terminal
+cause even when stdout lacks a traceback. Request detailed traceback only when needed;
+never copy credentials, arbitrary record bodies or entire artifact directories.
 
-## Acceptance
+| Evidence | Interpretation / next step |
+|---|---|
+| Typed torch OOM or scheduler OUT_OF_MEMORY | Resource failure; inspect exact Attempt and occupancy. Not success or objective. |
+| Consumer bf16/float32 mismatch | Application contract error unless native code proves transformation; not OOM retry. |
+| Provider unreachable / UNKNOWN | Observation uncertainty, not lost processes; fresh ownership evidence required. |
+| No telemetry with failed Job | Read native logs/failure; do not automatically call it preparing. |
+| Recovery identity mismatch | Compare normalized science and seed policy; code acknowledgement is insufficient. |
+| MCP isError / INTERNAL_ERROR | Protocol/adapter failure; scientific completion is not established. |
+| PLAN_STALE / OPERATION_CONFLICT | Re-preview or inspect claimed outcome; never replay from retryability alone. |
 
-Inspect health and tail logs; request structured failure; trace native classifier before recommending deliberate recovery.
-Do not label unknown as dead, swallow consumer exceptions or expose secrets.
+Facade reads include `get_job`, `get_execution_health`, `get_work_logs`, `get_study_run` and
+selected `get_study_panel`; check installed signatures. Metadata discovery must not import
+consumer code or allocate GPUs. Use native diagnostics, not another exception classifier.
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
-
-## Recovery of uncertainty
-
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+If LambdaForge is responsible, add a small native behavioral regression. If the consumer is
+responsible, report its location/contract without modifying it under a framework-only task.
+Preserve scientific identity, healthy siblings and immutable failure history.
 

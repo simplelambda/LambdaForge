@@ -5,10 +5,12 @@ from __future__ import annotations
 import inspect
 import types
 from dataclasses import fields, is_dataclass
-from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints, is_typeddict
 
 from lambdaforge._version import VERSION
 from lambdaforge.agents.contracts import AgentResponse, Operation
+from lambdaforge.agents.discovery import operation_semantics
+from lambdaforge.agents.response_models import response_type
 
 
 def type_schema(annotation: Any) -> dict[str, Any]:
@@ -24,6 +26,15 @@ def type_schema(annotation: Any) -> dict[str, Any]:
         return {"type": "array", "items": type_schema(arguments[0])}
     if origin is dict:
         return {"type": "object", "additionalProperties": type_schema(arguments[1])}
+    if is_typeddict(annotation):
+        return {
+            "type": "object",
+            "properties": {
+                name: type_schema(value) for name, value in get_type_hints(annotation).items()
+            },
+            "required": sorted(annotation.__required_keys__),
+            "additionalProperties": True,
+        }
     if is_dataclass(annotation):
         hints = get_type_hints(annotation)
         return {
@@ -41,6 +52,18 @@ def type_schema(annotation: Any) -> dict[str, Any]:
             type(None): "null",
         }[annotation]
     }
+
+
+def response_schema(identifier: str) -> dict[str, Any]:
+    """The common v1 envelope remains compatible; constrain data only for successful replies."""
+    schema = type_schema(AgentResponse)
+    schema["allOf"] = [
+        {
+            "if": {"properties": {"status": {"const": "ok"}}, "required": ["status"]},
+            "then": {"properties": {"data": type_schema(response_type(identifier))}},
+        }
+    ]
+    return schema
 
 
 def capabilities(services: Any) -> list[dict[str, Any]]:
@@ -62,25 +85,36 @@ def capabilities(services: Any) -> list[dict[str, Any]]:
                 required.append(key)
             else:
                 parameters[key]["default"] = parameter.default
+        session_enabled = (
+            spec.permission in services.permissions
+            and (not spec.project_code or services.allow_project_code)
+            and (
+                services.toolsets is None
+                or spec.toolset == "core"
+                or spec.toolset in services.toolsets
+            )
+        )
         rows.append(
             {
+                **operation_semantics(spec, name, inspect.getdoc(function) or ""),
                 "schema_version": 1,
                 "identifier": spec.identifier,
                 "name": name,
                 "category": spec.toolset,
                 "description": inspect.getdoc(function) or "",
-                "introduced": VERSION,
+                "introduced": spec.introduced_version,
                 "installed_version": VERSION,
                 "status": "available",
-                "session_enabled": (
-                    spec.permission in services.permissions
-                    and (not spec.project_code or services.allow_project_code)
-                    and (
-                        services.toolsets is None
-                        or spec.toolset == "core"
-                        or spec.toolset in services.toolsets
-                    )
-                ),
+                "session_enabled": session_enabled,
+                "availability": {
+                    "installed": True,
+                    "session_enabled": session_enabled,
+                    "requires_project_code_consent": spec.project_code
+                    and not services.allow_project_code,
+                    "requires_operator_permission": spec.permission not in services.permissions,
+                    "requires_provider_access": spec.external,
+                    "configuration_verified": False,
+                },
                 "permission": spec.permission,
                 "service": spec.service,
                 "documentation": spec.documentation,
@@ -109,20 +143,13 @@ def capabilities(services: Any) -> list[dict[str, Any]]:
                     "required": required,
                     "additionalProperties": False,
                 },
-                "output_schema": type_schema(AgentResponse),
+                "output_schema": response_schema(spec.identifier),
                 "risk_annotations": {
                     "read_only": not spec.side_effects and spec.permission in {"READ", "PLAN"},
-                    "destructive": False,
+                    "destructive": spec.destructive,
                     "idempotent": spec.idempotent,
                     "external": spec.external,
                 },
-                "errors": [
-                    "NOT_FOUND",
-                    "INVALID_ARGUMENT",
-                    "PERMISSION_DENIED",
-                    "EVIDENCE_UNAVAILABLE",
-                    "RESPONSE_TOO_LARGE",
-                ],
             }
         )
     for identifier, description in (
@@ -132,8 +159,9 @@ def capabilities(services: Any) -> list[dict[str, Any]]:
         ),
         (
             "agent.scientific_mutation",
-            "Submission, operation and destructive agent actions remain disabled; "
-            "approved knowledge edits do not authorize science.",
+            "Submission, recovery and destructive agent actions remain disabled; "
+            "exact Job cancellation alone supports OPERATE plus local human approval. "
+            "Approved knowledge edits do not authorize science.",
         ),
         (
             "agent.http.network",
@@ -154,6 +182,7 @@ def capabilities(services: Any) -> list[dict[str, Any]]:
                 "description": description,
                 "status": "unsupported",
                 "session_enabled": False,
+                "availability": {"installed": False, "session_enabled": False},
                 "installed_version": VERSION,
                 "introduced": None,
                 "permission": "READ",

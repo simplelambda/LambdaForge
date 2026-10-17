@@ -108,6 +108,8 @@ class ControlPlane:
         )
         request = resources or ConfigurationResourceResolver.resolve(config_path)
         gpu_mode = profile.gpu_access.effective_mode(profile.scheduler)
+        if request.gpu_count > 0 and gpu_mode == "command":
+            profile.gpu_access.require_owned_reservation_contract()
         resolution_profile = profile
         if request.gpu_count > 0:
             if profile.pytorch.channel == "cpu" or profile.pytorch.require_cuda is False:
@@ -132,6 +134,11 @@ class ControlPlane:
                 except (KeyError, FileNotFoundError):
                     pass  # Internal prepared callers may reserve only their provider identity.
                 else:
+                    pinned = reserved.metadata.get("pinned_scientific_identity")
+                    if pinned is not None and pinned != descriptor.scientific_identity:
+                        raise ValueError(
+                            "Pinned submission configuration/code/inputs changed after review."
+                        )
                     if (
                         input_bindings
                         and reserved.metadata.get("scientific_identity")
@@ -399,6 +406,7 @@ class ControlPlane:
                     "LAMBDAFORGE_STORAGE_POLICY=" + json.dumps(storage.to_dict()),
                     f"LAMBDAFORGE_CLUSTER={cluster}",
                     f"LAMBDAFORGE_GPU_ACCESS_MODE={gpu_mode}",
+                    "LAMBDAFORGE_RESOURCE_SAFETY=" + json.dumps(profile.resource_safety.to_dict()),
                     f"LAMBDAFORGE_REQUESTED_GPUS={request.gpu_count}",
                     "LAMBDAFORGE_BUNDLE=1",
                     "LAMBDAFORGE_EXECUTION_MODE=worker",
@@ -460,23 +468,22 @@ class ControlPlane:
             ):
                 raise ValueError("Prepared entrypoints require a nonempty module argv.")
             command = (*execution_prefix, executable, "-m", *module_argv)
-        external_claimed = False
         if request.gpu_count > 0 and gpu_mode == "command":
-            claim = profile.gpu_access.claim(request.gpu_count)
-            if claim and not dry_run:
-                if transport is None:
-                    raise RuntimeError(
-                        "A configured GPU claim command requires a remote transport."
-                    )
-                notify("gpu-claim")
-                claimed = transport.run(claim)
-                if claimed.returncode:
-                    raise RuntimeError(
-                        "GPU claim command failed before scientific submission: "
-                        f"{claimed.stderr.strip() or claimed.stdout.strip()}"
-                    )
-                external_claimed = True
             command = profile.gpu_access.wrap(command)
+        environment_id = bundle.environment_id or "existing"
+        if reserved_job_id is not None:
+            try:
+                reservation = self.jobs.get(reserved_job_id, refresh=False)
+            except (KeyError, FileNotFoundError):
+                pass  # Existing internal prepared callers may reserve only at provider submit.
+            else:
+                retained = (reservation.metadata.get("study_extension", {}).get(
+                    "retained_runtime"
+                ) or {})
+                if retained:
+                    if entrypoint_builder is None or executable != retained.get("python"):
+                        raise ValueError("Retained extension runtime was not prepared/verified.")
+                    environment_id = str(retained["environment_id"])
         notify("scheduler")
         try:
             handle = self.jobs.submit(
@@ -489,7 +496,7 @@ class ControlPlane:
                 config_path=config,
                 metadata={
                     "bundle_size_bytes": bundle.size_bytes,
-                    "environment_id": bundle.environment_id or "existing",
+                    "environment_id": environment_id,
                     **descriptor.metadata(),
                     "execution_identity": f"{cluster}:{bundle.bundle_id}",
                     "remote_config_path": config,
@@ -505,14 +512,7 @@ class ControlPlane:
                 group_id=group_id,
                 job_type=descriptor.job_type,
             )
-        except Exception as submission_error:
-            release = profile.gpu_access.release() if external_claimed else ()
-            released = transport.run(release) if release and transport is not None else None
-            if released is not None and released.returncode:
-                raise RuntimeError(
-                    "Scientific submission failed and the paired GPU release command also "
-                    f"failed: {released.stderr.strip() or released.stdout.strip()}"
-                ) from submission_error
+        except Exception:
             raise
         return handle, bundle
 

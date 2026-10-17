@@ -35,9 +35,7 @@ def sweep_block_inventory(record: Mapping[str, Any]) -> tuple[tuple[int, ...], i
         raise ValueError("Persisted sweep lookahead policy is missing or corrupt.")
     committed = lookahead.get("committed_ordinal")
     if committed is not None and (
-        isinstance(committed, bool)
-        or not isinstance(committed, int)
-        or committed != max(ordinals)
+        isinstance(committed, bool) or not isinstance(committed, int) or committed != max(ordinals)
     ):
         raise ValueError("Persisted sweep commitment must identify the final created block.")
     if committed_flags != ([] if committed is None else [committed]):

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LambdaForge managed presentation bundle v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["report_bundle_version", "entry", "assets"],
+  "properties": {
+    "report_bundle_version": {"const": 1},
+    "entry": {"allOf": [{"$ref": "#/$defs/file"}, {"properties": {
+      "id": {"const": "entry"}, "size_bytes": {"maximum": 16777216}, "media_type": {"const": "text/html"}
+    }}]},
+    "assets": {"type": "array", "items": {"$ref": "#/$defs/file"}}
+  },
+  "$defs": {"file": {
+    "type": "object", "additionalProperties": false,
+    "required": ["id", "name", "size_bytes", "sha256", "content_sha256", "media_type", "metadata"],
+    "properties": {
+      "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$"},
+      "name": {"type": "string", "minLength": 1, "description": "Relative NFC filename; native validation also rejects traversal, symlinks and ambiguous names."},
+      "size_bytes": {"type": "integer", "minimum": 0},
+      "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Native file identity including basename and delimiter."},
+      "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of exact raw bytes for browser verification."},
+      "media_type": {"type": "string", "minLength": 1, "maxLength": 160},
+      "metadata": {"type": "object", "description": "Opaque finite consumer JSON; not LF selection."}
+    }
+  }}
+}

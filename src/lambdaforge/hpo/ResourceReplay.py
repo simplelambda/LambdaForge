@@ -115,8 +115,8 @@ class ResourceSchedulerReplay:
                     for index, candidate in enumerate(candidates)
                     if candidate not in suppressed
                 )
-                active = len(active_indices) if candidates else int(
-                    device.get("active_runs", 0) or 0
+                active = (
+                    len(active_indices) if candidates else int(device.get("active_runs", 0) or 0)
                 )
                 total = int(device.get("total_bytes", 0) or 0)
                 free = min(
@@ -130,9 +130,7 @@ class ResourceSchedulerReplay:
                 )
                 active_area += elapsed * int(active > 0)
                 idle_vram_time += elapsed * free / max(1, total)
-                throughput_area += elapsed * _active_throughput(
-                    device, active_indices, candidates
-                )
+                throughput_area += elapsed * _active_throughput(device, active_indices, candidates)
                 if active == 0:
                     reason = _idle_reason(prior_frontier, prior_decisions)
                     idle_reason_gpu_seconds[reason] = (
@@ -163,9 +161,7 @@ class ResourceSchedulerReplay:
                     checkpoint_costs[signature] = float(
                         item.get("checkpoint_cost_seconds", 0.0) or 0.0
                     )
-                device = next(
-                    (item for item in event.devices if str(item.get("gpu")) == gpu), {}
-                )
+                device = next((item for item in event.devices if str(item.get("gpu")) == gpu), {})
                 device_candidates = tuple(map(str, device.get("active_candidates", ())))
                 active = (
                     sum(value not in suppressed for value in device_candidates)
@@ -203,9 +199,7 @@ class ResourceSchedulerReplay:
         exploratory_ooms = [
             item for item in ooms if item.get("admission_mode") == "EXPLORATORY_ADMISSION"
         ]
-        exploratory_candidates = [
-            str(item.get("candidate_key", "")) for item in exploratory_ooms
-        ]
+        exploratory_candidates = [str(item.get("candidate_key", "")) for item in exploratory_ooms]
         informative_ooms = len(set(exploratory_candidates))
         hours = duration / 3600.0
         peak_errors = [
@@ -224,8 +218,7 @@ class ResourceSchedulerReplay:
             and isinstance(item.get("time_to_peak_seconds"), int | float)
         ]
         normalized_value = sum(
-            _frontier_value(item, rank)
-            for rank, item in enumerate(admitted_candidates.values(), 1)
+            _frontier_value(item, rank) for rank, item in enumerate(admitted_candidates.values(), 1)
         )
         host = _host_efficiency(self.host_samples)
         return {
@@ -380,17 +373,13 @@ def _host_efficiency(samples: Sequence[Mapping[str, Any]]) -> dict[str, int | fl
             ram_fractions.append(max(0.0, float(rss) / float(ram_capacity)))
     return {
         "samples": len(samples),
-        "cpu_utilization_fraction": (
-            statistics.fmean(cpu_fractions) if cpu_fractions else None
-        ),
+        "cpu_utilization_fraction": (statistics.fmean(cpu_fractions) if cpu_fractions else None),
         "cpu_starvation_estimate": statistics.fmean(starvation) if starvation else None,
         "ram_pressure_fraction": max(ram_fractions) if ram_fractions else None,
     }
 
 
-def _policy_admissions(
-    event: ResourceTraceEvent, policy: ReplayPolicyName
-) -> set[tuple[str, str]]:
+def _policy_admissions(event: ResourceTraceEvent, policy: ReplayPolicyName) -> set[tuple[str, str]]:
     recorded = _recorded_admissions(event)
     if policy in {"recorded", "ari-v3.1"}:
         return recorded
@@ -398,9 +387,7 @@ def _policy_admissions(
         # Approximate pre-v3.1 behaviour: safe admissions remain identical, while an
         # exploratory admission loses the accumulated WaitRegret contribution that v3.1
         # now carries exactly across frontier/signature changes.
-        exploration_by_candidate = {
-            str(item.get("candidate")): item for item in event.exploration
-        }
+        exploration_by_candidate = {str(item.get("candidate")): item for item in event.exploration}
         return {
             value
             for value in recorded
@@ -414,9 +401,7 @@ def _policy_admissions(
                     exploration_by_candidate.get(value[0], {}).get("final_delta_value"),
                     int | float,
                 )
-                and float(
-                    exploration_by_candidate[value[0]].get("final_delta_value", 0.0)
-                )
+                and float(exploration_by_candidate[value[0]].get("final_delta_value", 0.0))
                 - float(exploration_by_candidate[value[0]].get("wait_regret", 0.0) or 0.0)
                 > 0
             )
@@ -438,9 +423,7 @@ def _policy_admissions(
     }
 
 
-def _suppressed_resident_bytes(
-    device: Mapping[str, Any], suppressed: set[str]
-) -> int:
+def _suppressed_resident_bytes(device: Mapping[str, Any], suppressed: set[str]) -> int:
     candidates = tuple(map(str, device.get("active_candidates", ())))
     current = tuple(device.get("active_current_bytes", ()))
     if len(candidates) != len(current):
@@ -491,8 +474,7 @@ def _frontier_value(value: Mapping[str, Any], rank: int) -> float:
 
 def _false_safe_count(observations: Sequence[Mapping[str, Any]]) -> int:
     return sum(
-        item.get("state") == "oom"
-        and item.get("admission_mode") == "SAFE_ADMISSION"
+        item.get("state") == "oom" and item.get("admission_mode") == "SAFE_ADMISSION"
         for item in observations
     )
 
@@ -505,8 +487,7 @@ def _false_safe_rate(observations: Sequence[Mapping[str, Any]]) -> float | None:
 def _avoidable_oom_count(observations: Sequence[Mapping[str, Any]]) -> int:
     """Count OOMs admitted as safe rather than bounded information experiments."""
     return sum(
-        item.get("state") == "oom"
-        and item.get("admission_mode") == "SAFE_ADMISSION"
+        item.get("state") == "oom" and item.get("admission_mode") == "SAFE_ADMISSION"
         for item in observations
     )
 

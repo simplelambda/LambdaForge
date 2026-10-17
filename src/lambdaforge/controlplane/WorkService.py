@@ -137,6 +137,8 @@ class WorkService:
             raise ValueError(f"Cannot delete active work; cancel it first: {active}.")
         deleting_jobs = tuple(record.job_id for record in records)
         for record in records:
+            if self.jobs.series_dependents(record.job_id):
+                raise ValueError("A Study series retains this Work's native Job history.")
             if set(self.jobs.recovery_dependents(record.job_id)) - set(deleting_jobs):
                 raise ValueError("Another Study still references this history's recovery state.")
         workspace_plans = [
@@ -208,7 +210,7 @@ class WorkService:
         """Delete one terminal Job's exact workspace and local history record."""
         job_id = self.jobs.resolve_selector(selector)
         record = self.jobs.get(job_id)
-        if self.jobs.recovery_dependents(job_id):
+        if self.jobs.recovery_dependents(job_id) or self.jobs.series_dependents(job_id):
             raise ValueError(
                 "Another Study/Fleet owner references this Job; delete the semantic family "
                 "instead. No workspace was removed."

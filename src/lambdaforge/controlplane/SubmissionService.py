@@ -44,11 +44,15 @@ class SubmissionService:
         metadata: Mapping[str, Any] | None = None,
         fleet: str | None = None,
         input_bindings: Mapping[str, Any] | None = None,
+        job_id: str | None = None,
+        config_sha256: str | None = None,
     ) -> JobHandle:
         """Persist and launch preparation without blocking on the selected execution target."""
         source = Path(config).expanduser().resolve()
         recovery_config = (metadata or {}).get("recovery_configuration")
-        pin = recovery_config.get("sha256") if isinstance(recovery_config, Mapping) else None
+        pin = config_sha256 or (
+            recovery_config.get("sha256") if isinstance(recovery_config, Mapping) else None
+        )
         if pin is not None and hashlib.sha256(source.read_bytes()).hexdigest() != pin:
             raise ValueError("Recovery YAML changed after preview; no Job was enqueued.")
         if self.catalog.project is not None and not self.catalog.project.owns_source(str(source)):
@@ -119,6 +123,11 @@ class SubmissionService:
                 **({"input_bindings": dict(input_bindings)} if input_bindings else {}),
                 **dict(metadata or {}),
                 **(
+                    {"pinned_scientific_identity": descriptor.scientific_identity}
+                    if config_sha256 is not None
+                    else {}
+                ),
+                **(
                     {"fleet": fleet, "execution_target": "fleet:" + fleet}
                     if fleet is not None
                     else {}
@@ -126,6 +135,7 @@ class SubmissionService:
             },
             job_type=descriptor.job_type,
             group_id=group_id,
+            job_id=job_id,
         )
         directory = self.jobs.store.root / "submissions" / handle.job_id
         directory.mkdir(parents=True, mode=0o700, exist_ok=False)

@@ -65,7 +65,26 @@ def main() -> None:
     installed = distribution("lambdaforge")
     assert lambdaforge.__version__ == installed.version
     assert files("lambdaforge").joinpath("schemas/work.schema.json").is_file()
+    for relative in (
+        "schemas/report-bundle-v1.json",
+        "analysis/assets/report_bundle_bridge.js",
+        "analysis/assets/report_project_tabs.js",
+    ):
+        assert files("lambdaforge").joinpath(relative).is_file()
+    from lambdaforge.analysis.ReportViewer import ReportViewer
+    from lambdaforge.work.report_bundle import ManagedReportBundle
+
+    assert ReportViewer is not None and ManagedReportBundle is not None
     installed_files = tuple(installed.files or ())
+    public_docs = {
+        item.name
+        for item in installed_files
+        if "/share/lambdaforge/docs/" in "/" + item.as_posix()
+        and "/ai/" not in item.as_posix()
+        and item.suffix == ".md"
+    }
+    assert public_docs == {"MANUAL.md", "MANUAL.es.md"}, public_docs
+    assert not any(item.as_posix().endswith("clustering/algorithms.py") for item in installed_files)
     for relative in (
         "share/lambdaforge/AGENTS.md",
         "share/lambdaforge/AGENTS.es.md",
@@ -77,24 +96,13 @@ def main() -> None:
         "share/lambdaforge/SECURITY.es.md",
         "share/lambdaforge/examples/work.yaml",
         "share/lambdaforge/examples/sequence.yaml",
+        "share/lambdaforge/examples/fgw.py",
         "share/lambdaforge/docs/MANUAL.md",
         "share/lambdaforge/docs/MANUAL.es.md",
-        "share/lambdaforge/docs/STORAGE.md",
-        "share/lambdaforge/docs/STORAGE.es.md",
-        "share/lambdaforge/docs/DATASET_RECONSTRUCTION.md",
-        "share/lambdaforge/docs/DATASET_RECONSTRUCTION.es.md",
-        "share/lambdaforge/docs/ARCHITECTURAL_REFORM.md",
-        "share/lambdaforge/docs/ARCHITECTURAL_REFORM.es.md",
-        "share/lambdaforge/docs/SCIENTIFIC_AUDIT.md",
-        "share/lambdaforge/docs/SCIENTIFIC_AUDIT.es.md",
-        "share/lambdaforge/docs/PRODUCTS.md",
-        "share/lambdaforge/docs/PRODUCTS.es.md",
-        "share/lambdaforge/docs/OPERATIONAL_RELIABILITY.md",
-        "share/lambdaforge/docs/OPERATIONAL_RELIABILITY.es.md",
-        "share/lambdaforge/docs/ai/INTEGRATION.md",
-        "share/lambdaforge/docs/ai/INTEGRATION.es.md",
         "share/lambdaforge/docs/ai/IMPLEMENTATION.md",
         "share/lambdaforge/docs/ai/IMPLEMENTATION.es.md",
+        "share/lambdaforge/docs/ai/FRAMEWORK_CONTRACTS.md",
+        "share/lambdaforge/docs/ai/AGENT_GUIDE.es.md",
         "share/lambdaforge/examples/monitor.json",
     ):
         matches = tuple(
@@ -110,6 +118,12 @@ def main() -> None:
     }
     assert scripts["lf"] == scripts["lambdaforge"]
     assert lambdaforge.__all__ == ["Work", "__version__", "clustering"]
+    from lambdaforge.distances import FusedGromovWassersteinDistance, StructuredMeasure
+
+    assert files("lambdaforge").joinpath("clustering/algorithms/KMeans.py").is_file()
+    assert FusedGromovWassersteinDistance is not None and StructuredMeasure is not None
+    requirements = installed.requires or ()
+    assert any("pot" in item.lower() and "optimal-transport" in item for item in requirements)
     assert Work.__module__ == "lambdaforge.work.Work"
     assert "mcp" not in sys.modules
     from lambdaforge.agents import AgentServices, IntegrationService
@@ -118,17 +132,50 @@ def main() -> None:
     assert "mcp" not in sys.modules
     assert len(skill_names()) == 24 and "work.py" in example_assets()
     assert callable(AgentServices.framework_capabilities)
+    assert callable(AgentServices.get_resource_report)
     assert callable(IntegrationService.preview)
+    from lambdaforge.runtime.GPUObservation import GPUObservationCache
+    from lambdaforge.runtime.HostLeaseStore import gpu_lease_name
+    from lambdaforge.runtime.ResourceSafetyPolicy import ResourceSafetyPolicy
+
+    assert "torch" not in sys.modules and "pynvml" not in sys.modules
+    assert ResourceSafetyPolicy.from_value("shared-host").telemetry_ttl == 10
+    assert gpu_lease_name("MIG-wheel-smoke").startswith("gpu-")
+    with TemporaryDirectory(prefix="lf-wheel-resource-") as temporary:
+        calls: list[bool] = []
+
+        def probe() -> dict[str, object]:
+            calls.append(True)
+            return {"quality": "measured", "observed_at": 100.0, "devices": []}
+
+        cache = GPUObservationCache(Path(temporary) / "cache", clock=lambda: 100.0, probe=probe)
+        assert cache.read()["quality"] == "measured"
+        assert cache.read()["statistics"]["real_queries"] == 1 and len(calls) == 1
     with TemporaryDirectory() as directory:
         project = Path(directory)
         (project / "pyproject.toml").write_text(
             '[project]\nname = "installed-agents"\nversion = "0.0.0"\n', encoding="utf-8"
         )
         agent = AgentServices(project)
+        resource_report = agent.get_resource_report()
+        assert resource_report.status == "ok", resource_report.error
+        assert resource_report.data["job_count"] == 0
         contract = agent.get_model_contract("MLP")
         assert contract.status == "ok", contract.error
         assert contract.data["backend_imported"] is False
         assert agent.get_recipe("work.yaml").status == "ok"
+        contract = agent.capability_describe("framework.version").data
+        assert (
+            contract["output_schema"]["allOf"][0]["then"]["properties"]["data"]["properties"][
+                "version"
+            ]["type"]
+            == "string"
+        )
+        assert agent.capability_search("Quiero recuperar un estudio Fleet").status == "ok"
+        cancel = agent.capability_describe("jobs.cancel.apply").data
+        assert cancel["risk_annotations"]["destructive"] is True
+        assert cancel["session_enabled"] is False
+        assert agent.request_job_cancellation("job-not-launched").error.code == "PERMISSION_DENIED"
         assert agent.project_info().data["permissions"] == ["READ", "PLAN"]
         assert "mcp" not in sys.modules
     from lambdaforge.products import (

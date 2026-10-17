@@ -52,7 +52,11 @@ class CommandLineInterface:
                 debug=context.debug or parent.debug,
                 verbose=context.verbose or parent.verbose,
             )
-        parsed = [item for item in supplied if item not in {"--debug", "--verbose", "--json"}]
+        parsed = (
+            supplied
+            if supplied[:1] == ["_complete"]
+            else [item for item in supplied if item not in {"--debug", "--verbose", "--json"}]
+        )
         with diagnostic_context(context):
             try:
                 return cls._dispatch(parsed, json_output=context.json_output)
@@ -77,6 +81,10 @@ class CommandLineInterface:
     def _normalize_help(argv: Sequence[str]) -> list[str]:
         """Accept ``help`` in the natural command positions supported by users."""
         values = list(argv)
+        if values[:1] == ["_complete"]:
+            return values
+        if values and values[0] == "help" and "--search" in values:
+            return values
         if "help" not in values:
             return values
         return [value for value in values if value != "help"] + ["--help"]
@@ -87,6 +95,42 @@ class CommandLineInterface:
         arguments = parser.parse_args(argv)
         arguments.json = bool(getattr(arguments, "json", False) or json_output)
         arguments.verbose = bool(getattr(arguments, "verbose", False))
+        if arguments.command in {"help", "completion", "_complete"}:
+            from lambdaforge.cli.discovery import run_discovery_command
+
+            return run_discovery_command(arguments, parser)
+        if arguments.command in {"inspect", "diagnose", "watch"}:
+            from lambdaforge.cli.inspection import run_inspection_command
+
+            return run_inspection_command(arguments)
+        if arguments.command == "studies":
+            from lambdaforge.cli.study_extensions import run_study_extension_command
+
+            return run_study_extension_command(arguments)
+        if arguments.command == "reports":
+            import webbrowser
+
+            from lambdaforge.analysis.ReportViewer import ReportViewer
+
+            viewer = ReportViewer(
+                arguments.path,
+                jobs=JobService(ClusterCatalog.load(arguments.clusters)),
+                max_asset_bytes=arguments.max_asset_mib * 1024 * 1024,
+                idle_seconds=arguments.idle_seconds,
+            )
+            print(viewer.url, flush=True)
+            print(
+                "Read-only report viewer · Ctrl-C to close · no scientific computation", flush=True
+            )
+            if arguments.open:
+                webbrowser.open_new_tab(viewer.url)
+            try:
+                viewer.serve()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                viewer.close()
+            return 0
         if arguments.command == "ai":
             from lambdaforge.cli.ai import run_ai_command
 
@@ -139,6 +183,10 @@ class CommandLineInterface:
             cls._render(payload, human, arguments.json)
             return 0
         if arguments.command == "config":
+            if arguments.config_command != "resolve":
+                from lambdaforge.cli.config_authoring import run_config_authoring
+
+                return run_config_authoring(arguments)
             config = WorkConfig.from_yaml(arguments.config)
             payload = config.resolved_configuration()
             selected_format = "json" if arguments.json else arguments.format
@@ -219,6 +267,26 @@ class CommandLineInterface:
             return cls._overview(arguments)
         if arguments.command == "resources":
             service = ResourceService(ClusterCatalog.load(arguments.clusters))
+            if arguments.report:
+                if arguments.processes or arguments.all:
+                    raise ValueError(
+                        "Resource report cannot combine --processes/--all; "
+                        "it reads saved evidence only."
+                    )
+                from lambdaforge.controlplane.ResourceDiagnosticReport import (
+                    ResourceDiagnosticReport,
+                )
+
+                report = service.diagnostic_report(
+                    cluster=arguments.on,
+                    since=arguments.since,
+                    until=arguments.until,
+                    limit=arguments.limit,
+                )
+                cls._render(report, ResourceDiagnosticReport.summary(report), arguments.json)
+                return 0
+            if arguments.since or arguments.until:
+                raise ValueError("Resource --since/--until require --report.")
             if arguments.processes:
                 resource_payload: Any = service.processes(arguments.on or "local")
             elif arguments.all:
@@ -661,6 +729,10 @@ class CommandLineInterface:
         from lambdaforge.work.ResultStore import ResultStore
 
         store = ResultStore(arguments.root)
+        if arguments.result_command == "table":
+            from lambdaforge.cli.result_tables import run_result_table
+
+            return run_result_table(arguments, store)
         if arguments.result_command == "materialize":
             from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
             from lambdaforge.controlplane.DependencyMaterialization import DependencyMaterialization
@@ -840,6 +912,18 @@ class CommandLineInterface:
                     f"    Shared seeds: {facts.get('shared_seeds')}; "
                     f"replication: {facts.get('replication')}; "
                     f"maximum parallelism: {facts.get('max_parallel') or 'auto'}."
+                )
+                resources = run.get("resources", {})
+                execution = run.get("execution", {})
+                lines.append(
+                    f"    Per-Work allocation: CPU={resources.get('cpu_cores')}, "
+                    f"RAM={resources.get('ram_bytes')} bytes, GPU={resources.get('gpu_count')}, "
+                    f"VRAM admission floor={resources.get('gpu_memory_bytes')} bytes."
+                )
+                lines.append(
+                    f"    Admission ceilings: {execution.get('max_parallel', 'auto')} total, "
+                    f"{execution.get('runs_per_gpu', 'auto')} per granted GPU; "
+                    "not guaranteed simultaneous capacity."
                 )
                 if facts.get("reference") is not None:
                     lines.append(f"    Reference candidate: {facts['reference']}.")

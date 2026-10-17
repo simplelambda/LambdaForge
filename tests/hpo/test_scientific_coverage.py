@@ -370,18 +370,24 @@ def test_auto_concurrency_has_finite_host_ceiling_and_round_trips() -> None:
 
 
 def test_confirmation_leaves_third_lane_for_scientific_backfill() -> None:
-    assert _confirmation_backfill_room(
-        parallelism=3,
-        remaining_run_allowance=20,
-        pending_runs=2,
-        queued_confirmation_runs=0,
-    ) == 1
-    assert _confirmation_backfill_room(
-        parallelism=3,
-        remaining_run_allowance=20,
-        pending_runs=2,
-        queued_confirmation_runs=1,
-    ) == 0
+    assert (
+        _confirmation_backfill_room(
+            parallelism=3,
+            remaining_run_allowance=20,
+            pending_runs=2,
+            queued_confirmation_runs=0,
+        )
+        == 1
+    )
+    assert (
+        _confirmation_backfill_room(
+            parallelism=3,
+            remaining_run_allowance=20,
+            pending_runs=2,
+            queued_confirmation_runs=1,
+        )
+        == 0
+    )
 
 
 def test_survival_uses_log_and_conditional_parameter_space_geometry() -> None:

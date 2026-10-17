@@ -267,4 +267,5 @@ class BayesianSampler:
             "ExactMarginalLogLikelihood": mlls.ExactMarginalLogLikelihood,
         }
 
+
 __all__ = ["BayesianSampler"]

@@ -17,6 +17,7 @@ from lambdaforge.data.DatasetRegistry import DatasetRegistry
 from lambdaforge.work.atomic import atomic_build_file
 from lambdaforge.work.managed import ManagedOutput, fingerprint, owned_path
 from lambdaforge.work.models import WorkArtifact
+from lambdaforge.work.report_bundle import ManagedReportBundle
 
 if TYPE_CHECKING:
     from lambdaforge.work.runtime import WorkRuntime
@@ -42,6 +43,7 @@ class OutputCollection:
         self._artifacts: dict[str, WorkArtifact] = {}
         self._datasets: dict[str, Mapping[str, Any]] = {}
         self._pending: dict[str, _PendingOutput] = {}
+        self._report_bundles: dict[str, ManagedReportBundle] = {}
 
     def value(self, name: str, value: Any) -> None:
         """Register one immutable JSON-compatible named value."""
@@ -198,8 +200,55 @@ class OutputCollection:
         )
         return output
 
+    def html_bundle(
+        self,
+        name: str,
+        *,
+        title: str | None = None,
+        section: str | None = None,
+        entry: str = "index.html",
+    ) -> ManagedReportBundle:
+        """Declare an isolated report tab with full-resolution, lazily loaded owned assets.
+
+        Write ``bundle.entry`` and declare each ``bundle.asset(...)``. Finalization seals
+        their manifest. Viewing does not load all assets, choose seeds or execute Python.
+        Presentation finalization failures are reported as named output diagnostics, not
+        failed scientific Runs. Existing self-contained ``html_section`` is unchanged.
+        """
+        selected_section, selected_title = section or name, title or section or name
+        if not isinstance(selected_section, str) or not 1 <= len(selected_section.strip()) <= 80:
+            raise ValueError("HTML bundle section must contain 1–80 characters.")
+        if not isinstance(selected_title, str) or not 1 <= len(selected_title.strip()) <= 120:
+            raise ValueError("HTML bundle title must contain 1–120 characters.")
+        output = self.directory(
+            name,
+            role="html-bundle",
+            media_type="application/vnd.lambdaforge.report",
+            metadata={"html_section": {"name": selected_section, "title": selected_title}},
+        )
+        bundle = ManagedReportBundle(output, entry=entry)
+        self._report_bundles[str(name).strip()] = bundle
+        return bundle
+
     def finalize(self) -> None:
         """Verify all declared managed outputs and register them as one atomic set."""
+        from dataclasses import replace
+
+        for name, bundle in self._report_bundles.items():
+            pending = self._pending[name]
+            try:
+                attestation = bundle.seal()
+            except (OSError, ValueError) as error:
+                self._values[name] = {
+                    "presentation_error": {"type": type(error).__name__, "message": str(error)},
+                    "html_section": dict(pending.metadata["html_section"]),
+                }
+                del self._pending[name]
+            else:
+                self._pending[name] = replace(
+                    pending, metadata={**pending.metadata, "report_bundle": attestation}
+                )
+        self._report_bundles.clear()
         verified: dict[str, tuple[_PendingOutput, Path, str, int]] = {}
         for name, pending in self._pending.items():
             path = owned_path(self._runtime.run_dir, pending.output.path, must_exist=True)

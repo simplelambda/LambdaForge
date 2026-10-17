@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import shutil
+import stat
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -232,6 +234,68 @@ class JobStore:
                 except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
                     continue
         return tuple(sorted(records, key=lambda item: item.created_at_utc, reverse=True))
+
+    def bounded_metadata(
+        self, *, limit: int = 500, record_bytes: int = 2 * 1024 * 1024
+    ) -> dict[str, Any]:
+        """Read a bounded project-owned metadata window, never Run/artifact/checkpoint bytes.
+
+        A truncated/corrupt window is explicit. Native visibility and record validation remain
+        authoritative; this is a diagnostic projection, not another Job catalog or status store.
+        """
+        if (
+            type(limit) is not int
+            or type(record_bytes) is not int
+            or not 1 <= limit <= 1000
+            or not 1 <= record_bytes <= 2 * 1024 * 1024
+        ):
+            raise ValueError("Bounded Job metadata requires <=1000 records of <=2 MiB each.")
+        records: dict[str, JobRecord] = {}
+        skipped = truncated = 0
+        for root in self._roots():
+            if not root.is_dir():
+                continue
+            candidates: list[Path] = []
+            count = 0
+            for path in root.glob("job-*.json"):
+                count += 1
+                if count > 10000:
+                    truncated += 1
+                    break
+                candidates.append(path)
+            selected = heapq.nlargest(limit, candidates, key=lambda path: path.name)
+            truncated += max(0, len(candidates) - len(selected))
+            for path in selected:
+                try:
+                    fd = os.open(
+                        path,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                    )
+                    with os.fdopen(fd, "rb") as stream:
+                        info = os.fstat(stream.fileno())
+                        if (
+                            not stat.S_ISREG(info.st_mode)
+                            or info.st_nlink != 1
+                            or info.st_size > record_bytes
+                            or os.name == "posix"
+                            and info.st_uid != os.getuid()
+                        ):
+                            skipped += 1
+                            continue
+                        raw = stream.read(record_bytes + 1)
+                    if len(raw) > record_bytes:
+                        skipped += 1
+                        continue
+                    record = JobRecord.from_mapping(json.loads(raw))
+                    if path.stem != record.job_id:
+                        raise ValueError("Job metadata filename/identity mismatch.")
+                    if record.job_id not in records and self._visible(record):
+                        records[record.job_id] = record
+                except (OSError, ValueError, KeyError, TypeError):
+                    skipped += 1
+        values = sorted(records.values(), key=lambda row: row.created_at_utc, reverse=True)
+        truncated += max(0, len(values) - limit)
+        return {"records": tuple(values[:limit]), "skipped": skipped, "truncated": truncated}
 
     def delete(self, job_id: str) -> None:
         """Delete only local metadata for one validated job id."""

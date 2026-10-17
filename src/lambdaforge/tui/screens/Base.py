@@ -10,7 +10,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import DataTable, Label, LoadingIndicator, Static
+from textual.widgets import DataTable, Input, Label, LoadingIndicator, Static
 
 
 class EntitySelected(Message):
@@ -26,6 +26,7 @@ class DataScreen(Vertical):
     """Load one table in a worker and retain stale data after transient failure."""
 
     TITLE = "LambdaForge"
+    FILTERABLE = False
     BINDINGS = [("right", "open_selected", "Open")]
 
     def __init__(self, loader: Callable[[], Any], *args: Any, **kwargs: Any) -> None:
@@ -36,12 +37,18 @@ class DataScreen(Vertical):
         self._loading = False
         self._last_updated_at: float | None = None
         self._last_refresh_error: str | None = None
+        self._filter_text = ""
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             Label(self.TITLE, classes="screen-title"),
             Static("Loading…", id="screen-status", classes="status-line"),
             LoadingIndicator(id="screen-loading"),
+            Input(
+                placeholder="Filter name, state, cluster or exact identity…",
+                id="screen-filter",
+                disabled=not self.FILTERABLE,
+            ),
             DataTable(id="screen-table", cursor_type="row", zebra_stripes=True),
             Static(
                 "Select a row for details. Press ? for contextual help.",
@@ -62,6 +69,34 @@ class DataScreen(Vertical):
         # and could contend with an immediately requested bootstrap. ``show_screen`` is
         # the single activation boundary and calls ``reload`` for the visible browser.
         self.set_interval(1.0, self._update_freshness)
+        for widget in self.query("#screen-filter"):
+            widget.display = self.FILTERABLE
+
+    def on_unmount(self) -> None:
+        # Discard a late presentation result. This never cancels a Job or scientific worker.
+        self._load_generation += 1
+        self._loading = False
+
+    def filter_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        query = self._filter_text.casefold().strip()
+        if not query:
+            return items
+        return [
+            item
+            for item in items
+            if query
+            in " ".join(
+                str(item.get(key, ""))
+                for key in ("name", "state", "cluster", "work_id", "execution_id", "primary_job_id")
+            ).casefold()
+        ]
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "screen-filter" or not self.FILTERABLE:
+            return
+        self._filter_text = event.value
+        if self.last_success is not None:
+            self.populate(self.query_one("#screen-table", DataTable), self.last_success)
 
     def reload(self) -> None:
         if self._loading:
@@ -100,8 +135,13 @@ class DataScreen(Vertical):
             self._failed(message.error)
 
     def _loaded(self, value: Any) -> None:
+        changed = self._last_updated_at is None or value != self.last_success
+        table = self.query_one("#screen-table", DataTable)
+        scroll = table.scroll_offset
         self._accept_snapshot(value)
-        self.populate(self.query_one("#screen-table", DataTable), value)
+        if changed:
+            self.populate(table, value)
+            table.scroll_to(x=scroll.x, y=scroll.y, animate=False, immediate=True)
 
     def _accept_snapshot(self, value: Any, *, status: str = "Up to date") -> None:
         """Record one successful snapshot without blanking an existing view."""

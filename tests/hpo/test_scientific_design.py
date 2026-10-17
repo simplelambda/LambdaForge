@@ -145,9 +145,10 @@ def test_incomplete_discrete_support_keeps_full_domain_conclusion_unresolved() -
     assert question["conclusion_kind"] == "UNRESOLVED"
     assert question["exact_conclusion"]["kind"] == "UNRESOLVED"
     assert question["confidence"] == question["descriptive_stability"] == 0.0
-    assert question["predictive_stability"] == question["predictive_conclusion"][
-        "descriptive_stability"
-    ]
+    assert (
+        question["predictive_stability"]
+        == question["predictive_conclusion"]["descriptive_stability"]
+    )
     assert question["unresolved_reason"] == "missing-terminal-response-support"
     assert question["predictive_conclusion"]["kind"] in {
         "PREFERRED",
@@ -205,20 +206,26 @@ def test_scientific_status_includes_only_material_unresolved_interactions() -> N
         "feasible": True,
     }
 
-    assert scientific_status(
-        {
-            "scientific_action_resolution": 0.1,
-            "parameter_questions": [resolved_parameter],
-            "interaction_questions": [material_interaction],
-        }
-    ) == "partially_resolved"
-    assert scientific_status(
-        {
-            "scientific_action_resolution": 0.1,
-            "parameter_questions": [resolved_parameter],
-            "interaction_questions": [immaterial_interaction],
-        }
-    ) == "resolved"
+    assert (
+        scientific_status(
+            {
+                "scientific_action_resolution": 0.1,
+                "parameter_questions": [resolved_parameter],
+                "interaction_questions": [material_interaction],
+            }
+        )
+        == "partially_resolved"
+    )
+    assert (
+        scientific_status(
+            {
+                "scientific_action_resolution": 0.1,
+                "parameter_questions": [resolved_parameter],
+                "interaction_questions": [immaterial_interaction],
+            }
+        )
+        == "resolved"
+    )
 
 
 def test_sparse_discrete_support_still_separates_censored_and_predictive_values() -> None:

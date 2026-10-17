@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import keyword
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 from packaging.version import Version
@@ -18,6 +20,28 @@ def _framework_requirement() -> str:
     major = release[0]
     minor = release[1] if len(release) > 1 else 0
     return f"lambdaforge>={major}.{minor},<{major}.{minor + 1}"
+
+
+def project_names(name: str) -> tuple[str, str]:
+    """Derive safe distribution/import names, avoiding keywords and framework/stdlib shadows."""
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    distribution = re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")[:64] or "project"
+    package = distribution.replace("-", "_")
+    if package[0].isdigit():
+        package = "project_" + package
+    reserved = set(sys.stdlib_module_names) | {
+        "lambdaforge",
+        "torch",
+        "numpy",
+        "scipy",
+        "sklearn",
+        "lightning",
+        "pytest",
+        "packaging",
+    }
+    if keyword.iskeyword(package) or package in reserved:
+        package += "_project"
+    return distribution, package
 
 
 def initialize(
@@ -51,6 +75,7 @@ def initialize(
         raise ValueError("--install-deps requires --agents portable/codex; no project was written.")
     slug = re.sub(r"[^a-zA-Z0-9_-]", "-", resolved.name).strip("-")[:40] or "project"
     project_id = f"{slug}-{hashlib.sha256(str(resolved).encode()).hexdigest()[:16]}"
+    distribution, package = project_names(resolved.name)
     files = {
         "pyproject.toml": f"""[build-system]
 requires = ["setuptools>=75"]
@@ -185,21 +210,48 @@ resources:
         "training": "experiments/training.yaml",
         "full": "experiments/preprocessing.yaml",
     }[template]
-    files["README.md"] = f"""# My AI project
+    # Render the existing templates, not another execution model. Existing projects are
+    # unchanged unless the operator explicitly requests --force.
+    files = {
+        relative.replace("src/my_project/", f"src/{package}/"): content.replace(
+            "my-ai-project", distribution
+        ).replace("my_project", package)
+        for relative, content in files.items()
+    }
+    module, target = {
+        "minimal": ("work", "Example"),
+        "preprocessing": ("preprocessing", "Preprocess"),
+        "training": ("training", "Train"),
+        "full": ("preprocessing", "Preprocess"),
+    }[template]
+    files["tests/test_work_signature.py"] = (
+        "from lambdaforge import Work\n"
+        f"from {package}.{module} import {target}\n\n\n"
+        "def test_native_work_contract():\n"
+        f"    assert issubclass({target}, Work)\n"
+        f"    assert callable({target}.run)\n"
+    )
+    files["README.md"] = f"""# {distribution}
 
 Create an environment and install both packages:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e /absolute/path/to/LambdaForge
 python -m pip install -e .
-lambdaforge doctor
-lambdaforge validate {entry}
-lambdaforge explain {entry}
-lambdaforge run {entry} --dry-run
-lambdaforge run {entry}
+lf doctor
+lf validate {entry}
+lf explain {entry}
+lf run {entry} --dry-run
+lf run {entry}
+lf
 ```
+
+Package: `{package}`. Scientific entry point: `{package}.{module}.{target}.run`.
+The dry-run validates/plans; only the subsequent `lf run` executes science.
+Optional: `lf clusters add --help` for remote profiles, `lf ai doctor` for agent setup.
+Tests are in `tests/` (run with pytest when installed).
+No cluster or agent is configured automatically.
 """
     collisions = [directory / relative for relative in files if (directory / relative).exists()]
     if collisions and not force:
@@ -213,6 +265,9 @@ lambdaforge run {entry}
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     print(f"Initialized LambdaForge consumer project: {directory.resolve()}")
+    print(f"Package: {package} · distribution: {distribution} · template: {template}")
+    print(f"Next: cd {resolved}\n  python -m pip install -e .\n  lf validate {entry}")
+    print(f"  lf explain {entry}\n  lf run {entry} --dry-run\n  lf")
     if agents != "none" or knowledge != "none":
         from lambdaforge.agents.integration import IntegrationService
 

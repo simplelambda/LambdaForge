@@ -118,6 +118,22 @@ class GpuAccessPolicy:
         values = {"gpu_count": str(gpu_count)}
         return tuple(argument.format_map(values) for argument in self.claim_command)
 
+    def require_owned_reservation_contract(self) -> None:
+        """Bare claim/release argv is not proof of a Job-owned provider reservation.
+
+        A wrapper may own and release its own temporary claim. A manually preexisting grant
+        remains user-owned. There is no generic receipt/targeted-release contract for arbitrary
+        site commands today, so refuse unsafe automatic claiming before any external mutation.
+        """
+        if self.claim_command:
+            raise ValueError(
+                "Automatic GPU claim/release argv has no verified per-reservation ownership "
+                "contract. No reservation command was executed. Use the provider's owned "
+                "execution wrapper (for example command_prefix: [gpu, exec]) or manually "
+                "claim before submission, without claim_command/release_command in the "
+                "profile. LambdaForge must not release a manual or sibling Job's reservation."
+            )
+
     def release(self) -> tuple[str, ...]:
         """Return cleanup argv paired with an explicit claim."""
         return self.release_command
@@ -133,8 +149,8 @@ class GpuAccessPolicy:
         if self.visibility_command:
             return self.visibility_command
         if self.mode == "command" and len(self.command_prefix) >= 2:
-            if self.command_prefix[-1] == "exec":
-                return (*self.command_prefix[:-1], "env")
+            if self.command_prefix == ("gpu", "exec"):
+                return ("gpu", "env", "--shell")
         return ()
 
     def to_dict(self) -> dict[str, Any]:

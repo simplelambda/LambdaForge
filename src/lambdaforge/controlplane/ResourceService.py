@@ -83,11 +83,7 @@ class ResourceService:
                 scheduler_view=previous.get("scheduler_view", {}) if previous else {},
                 requested=tuple(previous.get("requested", ())) if previous else (),
                 personal=previous.get("personal", {}) if previous else {},
-                observed_at_utc=(
-                    str(previous.get("observed_at_utc") or "")
-                    if previous
-                    else ""
-                ),
+                observed_at_utc=(str(previous.get("observed_at_utc") or "") if previous else ""),
                 error=f"{error.__class__.__name__}: {error}",
             )
 
@@ -135,32 +131,49 @@ class ResourceService:
         return tuple(values[name] for name in sorted(values))
 
     def processes(self, cluster: str) -> tuple[dict[str, Any], ...]:
-        """Observe GPU processes without granting control over external PIDs."""
+        """Reuse the host snapshot; disclose only same-UID attributed process metadata."""
         profile = self.catalog.get(cluster)
+        code = (
+            "import json,os\n"
+            f"os.environ['LAMBDAFORGE_RESOURCE_SAFETY']={json.dumps(profile.resource_safety.to_dict())!r}\n"
+            "from lambdaforge.runtime.GPUObservation import GPUObservationCache\n"
+            "snapshot=GPUObservationCache().read()\n"
+            "print(json.dumps([{'gpu_uuid':row['uuid'],'pid':item['pid'],"
+            "'memory_bytes':item.get('used_bytes'),'create_time':item['create_time'],"
+            "'observation_quality':snapshot['quality'],'controllable':False} "
+            "for row in snapshot.get('devices',[]) for item in row.get('processes',[])]))\n"
+        )
         result = self.factory.transport(profile).run(
-            (
-                "nvidia-smi",
-                "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
-                "--format=csv,noheader,nounits",
-            ),
+            (*profile.command_prefix, profile.python, "-c", code),
             timeout=20.0,
         )
         if result.returncode:
             return ()
-        values = []
-        for line in result.stdout.splitlines():
-            row = [item.strip() for item in line.split(",")]
-            if len(row) == 4 and row[1].isdigit():
-                values.append(
-                    {
-                        "gpu_uuid": row[0],
-                        "pid": int(row[1]),
-                        "name": row[2],
-                        "memory_bytes": int(float(row[3]) * 1024**2),
-                        "controllable": False,
-                    }
-                )
-        return tuple(values)
+        values = json.loads(result.stdout)
+        if not isinstance(values, list) or len(values) > 4096:
+            raise ValueError("GPU process metadata is invalid/oversized.")
+        return tuple(dict(item) for item in values)
+
+    def diagnostic_report(
+        self,
+        *,
+        cluster: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """Bounded saved-evidence report, available offline/after reboot without driver probes."""
+        from lambdaforge.controlplane.ResourceDiagnosticReport import ResourceDiagnosticReport
+
+        if cluster is not None:
+            self.catalog.get(cluster)
+        return ResourceDiagnosticReport.build(
+            JobService(self.catalog, factory=self.factory).store,
+            cluster=cluster,
+            since=since,
+            until=until,
+            limit=limit,
+        )
 
     def _cache(self, snapshot: ResourceSnapshot) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)

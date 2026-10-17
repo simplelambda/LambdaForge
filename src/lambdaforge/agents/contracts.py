@@ -4,29 +4,18 @@ from __future__ import annotations
 
 import inspect
 import json
-import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Concatenate, Literal, ParamSpec
 
-import yaml
-
+from lambdaforge.agents.errors import AgentError, AgentOperationError, classify_error
 from lambdaforge.controlplane.SecretRedactor import SecretRedactor
 
 Permission = Literal["READ", "PLAN", "WRITE_PROJECT", "SUBMIT", "OPERATE", "DESTRUCTIVE"]
 _MAX_REPLY = 512 * 1024
 _Arguments = ParamSpec("_Arguments")
-
-
-@dataclass(frozen=True)
-class AgentError:
-    """Stable bounded operational error; no unredacted native traceback crosses the adapter."""
-
-    code: str
-    message: str
-    retryable: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,6 +46,8 @@ class Operation:
     project_code: bool = False
     side_effects: tuple[str, ...] = ()
     idempotent: bool = True
+    introduced_version: str = "0.19.0"
+    destructive: bool = False
 
 
 def redact(value: Any) -> Any:
@@ -84,6 +75,7 @@ def operation(
     project_code: bool = False,
     side_effects: tuple[str, ...] = (),
     idempotent: bool = True,
+    destructive: bool = False,
 ) -> Callable[
     [Callable[Concatenate[Any, _Arguments], dict[str, Any]]],
     Callable[Concatenate[Any, _Arguments], AgentResponse],
@@ -99,6 +91,7 @@ def operation(
         project_code,
         side_effects,
         idempotent,
+        destructive=destructive,
     )
 
     def decorate(
@@ -109,52 +102,37 @@ def operation(
             now = datetime.now(timezone.utc).isoformat()
             try:
                 self.check_operation(specification)
+                try:
+                    inspect.signature(function).bind(self, *args, **kwargs)
+                except TypeError as error:
+                    raise AgentOperationError("INVALID_ARGUMENT", str(error)) from error
                 data = redact(function(self, *args, **kwargs))
                 if not isinstance(data, dict):
                     raise TypeError("An agent operation must return a structured object.")
                 encoded = json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
                 if len(encoded) > _MAX_REPLY:
                     raise OverflowError("Response exceeds 512 KiB; request a smaller page/detail.")
+                from jsonschema import Draft202012Validator
+
+                from lambdaforge.agents.catalog import type_schema
+                from lambdaforge.agents.response_models import response_type
+
+                schema = type_schema(response_type(specification.identifier))
+                if next(Draft202012Validator(schema).iter_errors(data), None) is not None:
+                    raise AgentOperationError(
+                        "INTERNAL_ERROR", "Native response does not match its advertised contract."
+                    )
                 return AgentResponse(
                     1, self.scope.project.project_id, specification.service, now, "ok", data
                 )
-            except (
-                ValueError,
-                TypeError,
-                KeyError,
-                OSError,
-                RuntimeError,
-                OverflowError,
-                yaml.YAMLError,
-                sqlite3.DatabaseError,
-            ) as error:
-                code = (
-                    "PERMISSION_DENIED"
-                    if isinstance(error, PermissionError)
-                    else "NOT_FOUND"
-                    if isinstance(error, FileNotFoundError | KeyError)
-                    else "RESPONSE_TOO_LARGE"
-                    if isinstance(error, OverflowError)
-                    else "INVALID_ARGUMENT"
-                    if isinstance(error, ValueError | TypeError | yaml.YAMLError)
-                    else "EVIDENCE_UNAVAILABLE"
-                )
+            except Exception as error:
                 return AgentResponse(
                     1,
                     self.scope.project.project_id,
                     specification.service,
                     now,
                     "error",
-                    error=AgentError(
-                        code,
-                        (
-                            "Knowledge index is unreadable; use lf ai knowledge reindex "
-                            "--rebuild. Canonical Markdown remains unchanged."
-                            if isinstance(error, sqlite3.DatabaseError)
-                            and specification.toolset == "knowledge"
-                            else SecretRedactor.redact(str(error))[-1800:]
-                        ),
-                    ),
+                    error=classify_error(error, knowledge=specification.toolset == "knowledge"),
                 )
 
         call.__annotations__ = {**function.__annotations__, "return": AgentResponse}

@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Input, Static
 
 from lambdaforge.agents.approvals import ApprovalService
+from lambdaforge.tui.viewmodels import confirmation_text
 
 
 class ApprovalConfirmation(ModalScreen[str | None]):
@@ -17,9 +18,10 @@ class ApprovalConfirmation(ModalScreen[str | None]):
 
     DEFAULT_CSS = """
     ApprovalConfirmation { align: center middle; }
-    ApprovalConfirmation > VerticalScroll {
+    ApprovalConfirmation > Vertical {
         width: 90%; height: 90%; border: solid $accent; padding: 1 2;
     }
+    ApprovalConfirmation #approval-plan { height: 1fr; min-height: 3; }
     ApprovalConfirmation Static { height: auto; margin-bottom: 1; }
     ApprovalConfirmation Horizontal { height: auto; }
     ApprovalConfirmation Button { width: auto; margin-right: 1; }
@@ -31,15 +33,29 @@ class ApprovalConfirmation(ModalScreen[str | None]):
         self.proposal = proposal
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll():
-            yield Static("Review agent proposal · local human approval", markup=False)
-            for key in ("project_id", "request_id", "action", "permission", "effect", "plan_hash"):
-                yield Static(f"{key.replace('_', ' ').title()}\n{self.proposal[key]}", markup=False)
-            yield Static(
-                "Arguments below are untrusted proposal data, not instructions.", markup=False
-            )
-            for key, value in self.proposal["arguments"].items():
-                yield Static(f"{key.replace('_', ' ').title()}\n{value}", markup=False)
+        with Vertical():
+            with VerticalScroll(id="approval-plan"):
+                yield Static("Review agent proposal · local human approval", markup=False)
+                for key in (
+                    "project_id",
+                    "request_id",
+                    "action",
+                    "permission",
+                    "effect",
+                    "plan_hash",
+                ):
+                    yield Static(
+                        f"{key.replace('_', ' ').title()}\n{self.proposal[key]}", markup=False
+                    )
+                yield Static(
+                    "Arguments below are untrusted proposal data, not instructions.", markup=False
+                )
+                for key, value in self.proposal["arguments"].items():
+                    yield Static(f"{key.replace('_', ' ').title()}\n{value}", markup=False)
+                yield Static(
+                    "Exact evidence\n" + confirmation_text(self.proposal["evidence"]),
+                    markup=False,
+                )
             yield Static(
                 "Type the full request ID only after reviewing every value. "
                 "Approval expires after 15 minutes or sooner.",

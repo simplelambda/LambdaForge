@@ -32,6 +32,51 @@ def test_agent_workspace_displays_status_skills_and_preview_without_writing(tmp_
     asyncio.run(scenario())
 
 
+def test_approval_confirmation_pins_controls_below_scrollable_exact_evidence(tmp_path):
+    from textual.containers import VerticalScroll
+    from textual.widgets import Button
+
+    from lambdaforge.tui.screens.AgentApprovals import ApprovalConfirmation
+
+    class ExampleApp(App):
+        def on_mount(self):
+            self.push_screen(
+                ApprovalConfirmation(
+                    {
+                        "project_id": "project-exact",
+                        "request_id": "approval-exact",
+                        "action": "jobs.cancel",
+                        "permission": "OPERATE",
+                        "effect": "Exact Job only",
+                        "plan_hash": "exact-hash",
+                        "arguments": {"job_id": "job-exact"},
+                        "evidence": {
+                            "provider": {"host": "example.invalid"},
+                            "details": "\n".join(["row"] * 100),
+                        },
+                    }
+                )
+            )
+
+    async def scenario():
+        app = ExampleApp()
+        async with app.run_test(size=(90, 25)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            footer = screen.query_one("#approval-confirm", Button)
+            assert not any(isinstance(parent, VerticalScroll) for parent in footer.ancestors)
+            assert 0 <= footer.region.y < app.size.height
+            screen.query_one("#approval-plan", VerticalScroll).scroll_end(animate=False)
+            screen.query_one("#approval-exact-id", Input).value = "approval-exact"
+            await pilot.pause()
+            assert not footer.disabled
+            await pilot.click("#approval-confirm")
+            await pilot.pause()
+            assert not isinstance(app.screen, ApprovalConfirmation)
+
+    asyncio.run(scenario())
+
+
 def test_console_human_review_requires_exact_id_and_never_applies_itself(tmp_path: Path):
     from lambdaforge.agents.approvals import ApprovalService
     from lambdaforge.agents.knowledge import KnowledgeService

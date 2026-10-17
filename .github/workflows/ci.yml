@@ -134,8 +134,10 @@ jobs:
           python-version: "3.10"
       - name: Install optional official protocol SDK
         run: |
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.1"
-          python -m pip install -e ".[dev,agents]"
+          python -m venv .venv-agent-ci
+          echo "$PWD/.venv-agent-ci/bin" >> "$GITHUB_PATH"
+          .venv-agent-ci/bin/python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.1"
+          .venv-agent-ci/bin/python -m pip install -e ".[dev,agents]"
       - name: Gate project isolation, assets and actual protocol
         run: python -m pytest -q tests/agents
 
@@ -215,7 +217,6 @@ jobs:
           tests/test_lightning_compatibility.py
           tests/test_training_smoke.py
           tests/test_customization.py
-          tests/experiments/test_post_run_actions.py
           --durations=20 --junitxml=legacy-lightning-junit.xml
 
       - name: Upload legacy compatibility report
@@ -226,6 +227,28 @@ jobs:
           path: legacy-lightning-junit.xml
           if-no-files-found: warn
           retention-days: 14
+
+  optimal-transport:
+    name: Optional POT FGW / CPython 3.11
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install the optional transport solver
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.3"
+          python -m pip install -e ".[dev,optimal-transport]"
+      - name: Check numerical transport invariants and the documented example
+        run: |
+          python -m pytest -q tests/test_fused_gromov_wasserstein.py tests/test_clustering.py
+          python examples/fgw.py
 
   adaptive-hpo-provider:
     name: Optional BoTorch adaptive HPO / CPython 3.11

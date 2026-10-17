@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,7 +14,20 @@ from lambdaforge.agents.scope import ProjectScope
 
 
 @pytest.fixture
-def dependencies(tmp_path: Path):
+def dependencies(tmp_path: Path, monkeypatch):
+    import lambdaforge.agents.dependencies as module
+
+    # Unit installers are mocked. Explicitly model an isolated interpreter instead of
+    # accidentally relying on pytest running inside a venv (CI may use setup-python).
+    monkeypatch.setattr(
+        module,
+        "sys",
+        SimpleNamespace(
+            executable=sys.executable,
+            prefix=str(tmp_path / "virtualenv"),
+            base_prefix=str(tmp_path / "system-python"),
+        ),
+    )
     (tmp_path / "pyproject.toml").write_text('[project]\nname="deps"\nversion="0.1"\n')
     return DependencyService(ProjectScope(tmp_path))
 
@@ -175,7 +189,9 @@ def test_real_offline_installer_failure_is_isolated_and_preserves_project(tmp_pa
         [
             str(environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
             "-c",
-            "import json,sys; from lambdaforge.agents.dependencies import DependencyService; "
+            "import json,sys; "
+            "from lambdaforge.agents.dependencies import DependencyService,EXTRAS; "
+            "EXTRAS['agents']=('lambdaforge-offline-fixture-missing==0',); "
             "from lambdaforge.agents.scope import ProjectScope; "
             "d=DependencyService(ProjectScope(sys.argv[1])); p=d.preview(wheelhouse='wheels'); "
             "print(json.dumps(d.install(plan_hash=p['plan_hash'], "

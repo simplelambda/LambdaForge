@@ -1,30 +1,30 @@
-# lambdaforge-workflow-design procedure reference
+# Compose native steps and one parallel level · procedure
 
-## Native entry point
+## Native discovery/example
 
 ```bash
 lf validate experiments/sequence.yaml
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Run in the intended project. Uppercase selectors/paths are placeholders, not a Work-name guess.
+Inspect installed help first. These commands are metadata/planning; parsing them does not execute science.
 
-## Acceptance
+Inspect the native sequence/parallel recipes in the installed catalog and resolve the authored YAML before running a disposable fixture.
 
-Use native steps and one parallel level; validate step.output references; reject ambiguous multiple-seed producer outputs.
-Do not create arbitrary DAG edges or a second workflow runner.
+## Decision cases
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+| Situation | Native interpretation / next step |
+|---|---|
+| Step consumes prior output | Use a declared typed dependency, not a guessed file path. |
+| Parallel sibling fails | Preserve healthy sibling evidence under native failure semantics. |
+| Need an arbitrary DAG | Report unsupported; do not add another runner. |
+| Required constructor object graph | Reject; each executable target is a Work.run class. |
 
-## Recovery of uncertainty
+## Verification and handoff
 
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+Dependencies bind declared outputs and compatible contracts; unsupported arbitrary DAGs or nested parallelism fail explicitly rather than being flattened.
+Composition remains the existing execution model, not an alternate Task engine.
+
+If a capability is missing, stale or unsupported, retain evidence and explain the exact blocker.
+Do not create a CLI subprocess adapter, a second runner/result store or an application-specific workaround.
 

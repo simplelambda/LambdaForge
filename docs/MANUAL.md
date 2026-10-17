@@ -1,29 +1,155 @@
 # LambdaForge 0.19 manual
 
-[Work results guide](WORK_RESULTS.md) covers ordinary Work evidence,
-reports, exact historical dependencies and explicit compressed materialization. These reuse the runner,
-result store, product registry and portable import/export without inventing Study inference.
+This is the single public framework manual; detailed guides are chapters here. Internal contributor contracts and historical acceptance remain separate in `ai/`.
+
+[Español](MANUAL.es.md) · [Contributor contracts](ai/FRAMEWORK_CONTRACTS.md)
 
 ## Contents
 
-1. [Mental model](#1-mental-model)
-2. [Installation and project layout](#2-installation-and-project-layout)
-3. [Work API](#3-work-api)
-4. [Managed files, cache, map, outputs and tools](#4-managed-files-cache-map-outputs-and-tools)
-5. [YAML reference](#5-yaml-reference)
-6. [Files and datasets](#6-files-and-datasets)
-7. [Sequence, parallelism, seeds and search](#7-sequence-parallelism-seeds-and-search)
-8. [Execution, identity and reuse](#8-execution-identity-and-reuse)
-9. [Results and metadata](#9-results-and-metadata)
-10. [Clusters and jobs](#10-clusters-and-jobs)
-11. [Cleanup and safety](#11-cleanup-and-safety)
-12. [CLI reference](#12-cli-reference)
-13. [Clustering](#13-clustering)
-14. [Reusable neural components](#14-reusable-neural-components)
-15. [Architecture and extension boundaries](#15-architecture-and-extension-boundaries)
-16. [Study Analysis](#16-study-analysis)
-17. [Research Console](#17-research-console)
-18. [Project isolation](#18-project-isolation)
+- [1. Mental model](#1-mental-model)
+- [2. Installation and project layout](#2-installation-and-project-layout)
+- [3. Work API](#3-work-api)
+- [4. Managed files, cache, map, outputs and tools](#4-managed-files-cache-map-outputs-and-tools)
+  - [4.1 Storage meanings](#41-storage-meanings)
+  - [4.2 ManagedFile and cache](#42-managedfile-and-cache)
+  - [4.3 Plain and resumable map](#43-plain-and-resumable-map)
+  - [4.4 Outputs and checkpoints](#44-outputs-and-checkpoints)
+  - [4.5 External tools](#45-external-tools)
+- [5. YAML reference](#5-yaml-reference)
+- [6. Files and datasets](#6-files-and-datasets)
+  - [6.1 Reuse, reconstruction and publication recovery](#61-reuse-reconstruction-and-publication-recovery)
+  - [6.2 Native compressed replication](#62-native-compressed-replication)
+  - [6.3 Explicit conflict management](#63-explicit-conflict-management)
+- [7. Sequence, parallelism, seeds and search](#7-sequence-parallelism-seeds-and-search)
+  - [7.1 Intent-first defaults and resolved authority](#71-intent-first-defaults-and-resolved-authority)
+  - [Scientific questions, confidence and practical regions](#scientific-questions-confidence-and-practical-regions)
+  - [7.1 Exact sweeps without HPO](#71-exact-sweeps-without-hpo)
+  - [7.2 Independent trainings per GPU](#72-independent-trainings-per-gpu)
+  - [7.3 Multi-fidelity continuation](#73-multi-fidelity-continuation)
+  - [7.4 Early stopping contract](#74-early-stopping-contract)
+  - [7.5 Live study observability](#75-live-study-observability)
+- [8. Execution, identity and reuse](#8-execution-identity-and-reuse)
+  - [Recover an interrupted Study](#recover-an-interrupted-study)
+- [9. Results and metadata](#9-results-and-metadata)
+- [10. Clusters and jobs](#10-clusters-and-jobs)
+  - [Project-declared native packages](#project-declared-native-packages)
+- [11. Cleanup and safety](#11-cleanup-and-safety)
+- [12. CLI reference](#12-cli-reference)
+- [13. Clustering](#13-clustering)
+- [14. Reusable neural components](#14-reusable-neural-components)
+- [15. Architecture and extension boundaries](#15-architecture-and-extension-boundaries)
+- [16. Study Analysis](#16-study-analysis)
+  - [16.1 Evidence semantics](#161-evidence-semantics)
+  - [16.2 Effects, coverage and reliability](#162-effects-coverage-and-reliability)
+  - [16.3 Admission evidence](#163-admission-evidence)
+  - [16.4 Research workspace and declarations](#164-research-workspace-and-declarations)
+- [17. Research Console](#17-research-console)
+- [18. Project isolation](#18-project-isolation)
+- [19. Operational reliability](#19-operational-reliability)
+- [20. Fused Gromov–Wasserstein distance (FGW)](#20-fused-gromovwasserstein-distance-fgw)
+  - [Inputs and quick start](#inputs-and-quick-start)
+  - [Arbitrary features, precomputed costs and geometry](#arbitrary-features-precomputed-costs-and-geometry)
+  - [Objective, coupling and interpretation](#objective-coupling-and-interpretation)
+  - [Resource bounds and multiple objects](#resource-bounds-and-multiple-objects)
+- [21. Work results, historical evidence and independent products](#guide-work-results)
+  - [Inspect and report](#guide-work-results-inspect-and-report)
+  - [Choose an exact historical dependency](#guide-work-results-choose-an-exact-historical-dependency)
+  - [Explicit promotion from an ordinary Work](#guide-work-results-explicit-promotion-from-an-ordinary-work)
+  - [Portable evidence and remote availability](#guide-work-results-portable-evidence-and-remote-availability)
+  - [Evidence across fixed Study extensions](#guide-work-results-evidence-across-fixed-study-extensions)
+- [22. Durable scientific products: implemented foundation](#guide-products)
+  - [Identities and contracts](#guide-products-identities-and-contracts)
+  - [Explicit publication API](#guide-products-explicit-publication-api)
+  - [Native CLI](#guide-products-native-cli)
+  - [Post-Study ModelSet selection](#guide-products-post-study-modelset-selection)
+  - [Native StudyDecision](#guide-products-native-studydecision)
+  - [Declared post-Study publication and publication-only retry](#guide-products-declared-post-study-publication-and-publication-only-retry)
+  - [Typed Work dependencies](#guide-products-typed-work-dependencies)
+  - [Portable product export/import](#guide-products-portable-product-exportimport)
+  - [Import a portable Study without executing it](#guide-products-import-a-portable-study-without-executing-it)
+- [23. Conditional scientific Studies](#guide-conditional-studies)
+  - [1. One question, one Study](#guide-conditional-studies-1-one-question-one-study)
+  - [2. Activation grammar](#guide-conditional-studies-2-activation-grammar)
+  - [3. Validate and understand the plan](#guide-conditional-studies-3-validate-and-understand-the-plan)
+  - [4. Time and target capacity](#guide-conditional-studies-4-time-and-target-capacity)
+  - [5. Identity and existing evidence](#guide-conditional-studies-5-identity-and-existing-evidence)
+- [24. Incremental fixed Study extensions](#guide-study-extensions)
+  - [CLI](#guide-study-extensions-cli)
+  - [Regularization example](#guide-study-extensions-regularization-example)
+  - [Conditional and selective additions](#guide-study-extensions-conditional-and-selective-additions)
+  - [Identities, compatibility and evidence](#guide-study-extensions-identities-compatibility-and-evidence)
+  - [Supported execution contracts](#guide-study-extensions-supported-execution-contracts)
+  - [Cumulative analysis and Console](#guide-study-extensions-cumulative-analysis-and-console)
+  - [Budgets, failures and durability](#guide-study-extensions-budgets-failures-and-durability)
+  - [Verification boundary](#guide-study-extensions-verification-boundary)
+- [25. Published datasets and scientific reconstruction](#guide-dataset-reconstruction)
+  - [Choose the intent before computing](#guide-dataset-reconstruction-choose-the-intent-before-computing)
+  - [Publish once, replicate exact content](#guide-dataset-reconstruction-publish-once-replicate-exact-content)
+  - [Three separate identities](#guide-dataset-reconstruction-three-separate-identities)
+  - [Compare entire sealed reconstructions](#guide-dataset-reconstruction-compare-entire-sealed-reconstructions)
+  - [Publication failure without recomputation](#guide-dataset-reconstruction-publication-failure-without-recomputation)
+  - [Conflicting local and remote registries](#guide-dataset-reconstruction-conflicting-local-and-remote-registries)
+  - [Durable equivalence certificates](#guide-dataset-reconstruction-durable-equivalence-certificates)
+  - [Required WISDOM changes (not performed by LambdaForge)](#guide-dataset-reconstruction-required-wisdom-changes-not-performed-by-lambdaforge)
+- [26. Storage admission and safe cleanup](#guide-storage)
+  - [Inspect and clear](#guide-storage-inspect-and-clear)
+  - [Admission](#guide-storage-admission)
+  - [What collection can remove](#guide-storage-what-collection-can-remove)
+  - [Checkpoints and publication](#guide-storage-checkpoints-and-publication)
+  - [Current boundaries](#guide-storage-current-boundaries)
+- [27. Full-resolution managed project report tabs](#guide-managed-reports)
+  - [Browser API and lifecycle](#guide-managed-reports-browser-api-and-lifecycle)
+  - [Native remote and offline viewing](#guide-managed-reports-native-remote-and-offline-viewing)
+  - [Rebuilding presentation from retained inference only](#guide-managed-reports-rebuilding-presentation-from-retained-inference-only)
+- [28. Study research workspace](#guide-research-analysis)
+  - [1. Open a workspace](#guide-research-analysis-1-open-a-workspace)
+  - [2. Declare meaning, not execution policy](#guide-research-analysis-2-declare-meaning-not-execution-policy)
+  - [3. Families and questions](#guide-research-analysis-3-families-and-questions)
+  - [4. How discovery works](#guide-research-analysis-4-how-discovery-works)
+  - [5. Explore and save](#guide-research-analysis-5-explore-and-save)
+  - [6. Architecture, safety and limitations](#guide-research-analysis-6-architecture-safety-and-limitations)
+  - [7. Implementation report](#guide-research-analysis-7-implementation-report)
+  - [8. Second-round simplification report](#guide-research-analysis-8-second-round-simplification-report)
+- [29. Coordinated Studies: implementation status and contracts](#guide-coordinated-studies)
+  - [Status: fresh adaptive and fixed Fleet launch; recovery/transfer integration pending](#guide-coordinated-studies-status-fresh-adaptive-and-fixed-fleet-launch-recoverytransfer-integration-pending)
+  - [Fleet catalog](#guide-coordinated-studies-fleet-catalog)
+  - [Ownership and persistence](#guide-coordinated-studies-ownership-and-persistence)
+  - [Reproducible foundation acceptance tests](#guide-coordinated-studies-reproducible-foundation-acceptance-tests)
+- [30. Operational health, monitoring and deliberate recovery](#guide-operational-reliability)
+  - [Inspect without starting computation](#guide-operational-reliability-inspect-without-starting-computation)
+  - [Independent project monitor](#guide-operational-reliability-independent-project-monitor)
+  - [Optional email, durable incidents and no polling spam](#guide-operational-reliability-optional-email-durable-incidents-and-no-polling-spam)
+  - [Research Console](#guide-operational-reliability-research-console)
+  - [Recovery and relocated YAML](#guide-operational-reliability-recovery-and-relocated-yaml)
+  - [Managed checkpoint policy and evidence](#guide-operational-reliability-managed-checkpoint-policy-and-evidence)
+  - [Emergency procedure](#guide-operational-reliability-emergency-procedure)
+  - [Deliberate extension versus recovery](#guide-operational-reliability-deliberate-extension-versus-recovery)
+- [31. Shared-host resource safety — implementation in progress](#guide-resource-safety)
+  - [Observation is not a grant](#guide-resource-safety-observation-is-not-a-grant)
+  - [Cross-Study startup](#guide-resource-safety-cross-study-startup)
+  - [RAM and CPU](#guide-resource-safety-ram-and-cpu)
+  - [Profiles, device circuits and diagnostic reports](#guide-resource-safety-profiles-device-circuits-and-diagnostic-reports)
+  - [Site reservations and visibility](#guide-resource-safety-site-reservations-and-visibility)
+  - [Remaining acceptance](#guide-resource-safety-remaining-acceptance)
+- [32. Developer experience — incremental implementation](#guide-developer-experience)
+  - [Start and discover](#guide-developer-experience-start-and-discover)
+  - [Understand YAML before running](#guide-developer-experience-understand-yaml-before-running)
+  - [Inspect, diagnose and observe](#guide-developer-experience-inspect-diagnose-and-observe)
+  - [Small result tables without a full experiment export](#guide-developer-experience-small-result-tables-without-a-full-experiment-export)
+  - [Agent setup without pretending a connection exists](#guide-developer-experience-agent-setup-without-pretending-a-connection-exists)
+  - [Console and Skills](#guide-developer-experience-console-and-skills)
+  - [Remaining scope](#guide-developer-experience-remaining-scope)
+- [33. Project-pinned agent integration](#guide-integration)
+  - [Quick start](#guide-integration-quick-start)
+  - [MCP and clients](#guide-integration-mcp-and-clients)
+  - [Local human approvals](#guide-integration-local-human-approvals)
+  - [Optional dependencies and paired HTTP](#guide-integration-optional-dependencies-and-paired-http)
+  - [Portable knowledge](#guide-integration-portable-knowledge)
+  - [Python, GUI and sync](#guide-integration-python-gui-and-sync)
+
+[Work results guide](#guide-work-results) covers ordinary Work evidence,
+reports, exact historical dependencies and explicit compressed materialization. These reuse the runner,
+result store, product registry and portable import/export without inventing Study inference.
 
 ## 1. Mental model
 
@@ -148,7 +274,7 @@ Checkpoints are recovery state, not permanent model outputs. `checkpoints.pin(na
 protects owned named state; `unpin(name)` only changes metadata. Publish models with
 `outputs.from_checkpoint(name, checkpoint, release=True)` or datasets from `source_checkpoint`.
 Release requires independent verified publication and successful Execution finalization.
-See [Storage admission and safe cleanup](STORAGE.md) for examples and retention.
+See [Storage admission and safe cleanup](#guide-storage) for examples and retention.
 
 ### 4.2 ManagedFile and cache
 
@@ -442,7 +568,7 @@ scientific_identity=...)` seals a pinned unregistered candidate; exact checksums
 --policy policy.json --output report.json` verifies all bytes before project scientific comparison.
 `lf datasets publish-candidate ROOT --version NEW --on CLUSTER` previews bytes-only recovery;
 `--apply` publishes without repeating calculation. The Console discovers all configured locations
-and marks conflicting identities. [Dataset reconstruction](DATASET_RECONSTRUCTION.md) documents
+and marks conflicting identities. [Dataset reconstruction](#guide-dataset-reconstruction) documents
 the complete public contracts, safety, retention and required WISDOM changes.
 
 ROOT may also be a saved pre-copy publication request (0.17.1): exact member/source checksums and
@@ -460,7 +586,7 @@ Site SSH never forwards controller credentials; relay uses no local disk staging
 progress. Keep the session open until completion. The target needs `storage.dataset_root` and
 an available LambdaForge runtime, not a scientific Work/GPU claim. Checksums, safe staging,
 destination-volume admission and immutable identity remain mandatory. Conflicts fail closed;
-identical destinations are reused. See [replication](DATASET_RECONSTRUCTION.md#publish-once-replicate-exact-content).
+identical destinations are reused. See [replication](#guide-dataset-reconstruction-publish-once-replicate-exact-content).
 
 ### 6.3 Explicit conflict management
 
@@ -470,7 +596,7 @@ NAME@VERSION --on TARGET --content-id ID` selects one exact target identity even
 Delete removes owned bytes, remove keeps them; both block active consumers and archive old indexes.
 Console **Datasets → exact identity → Manage copies…** exposes the same confirmed actions.
 Other copies/old Runs are unchanged; unpinned operations remain fail-closed.
-See [details](DATASET_RECONSTRUCTION.md#conflicting-local-and-remote-registries).
+See [details](#guide-dataset-reconstruction-conflicting-local-and-remote-registries).
 
 ## 7. Sequence, parallelism, seeds and search
 
@@ -479,7 +605,7 @@ Conditional branches belong to one Study when they answer one joint experimental
 are omitted, dependencies are order-independent, and the same geometry governs generation and
 analysis. Root `resources` inherits into steps; root `with`, seeds/replicates, search/sweep,
 execution, objective and analysis are rejected rather than ignored. The numbered
-[conditional Study guide](CONDITIONAL_STUDIES.md) covers exact counts, references, canonical
+[conditional Study guide](#guide-conditional-studies) covers exact counts, references, canonical
 identity, capacity checks and scheduler wall-time versus logical Study budgets.
 
 ### 7.1 Intent-first defaults and resolved authority
@@ -532,7 +658,7 @@ an incomplete earlier block. Recovery restores the existing one-block commitment
 alter it. Historical v1 manifests/decisions remain inspectable and unchanged. Predictive hypotheses,
 descriptive support/stability and formal resolution are separate: missing response support must not
 inherit a model's stability, and stopping on an incomplete block is not a formal conclusion.
-See the [correctness audit and remaining acceptance boundaries](SCIENTIFIC_AUDIT.md).
+See the [correctness audit and remaining acceptance boundaries](ai/IMPLEMENTATION.md#history-scientific-audit).
 
 Long Studies retain their immutable scientific initialization in `study/controller.json` →
 `initialization`. This includes the complete objective, practical margin, authored parameter space
@@ -969,6 +1095,21 @@ affinity are rebalanced when residents enter or leave, so three actual Runs can 
 of each receiving `total_cpu / theoretical_max_parallel`. RAM/storage are current-resident
 commitments checked against live process-tree RSS, not cold-start reservations for every possible
 future Run. The persisted lease explains the exact share and provenance used by each dispatch.
+
+The final launch reconciles a native elastic RAM share with a **fresh whole-process-tree**
+measurement, including controller helpers and existing workers. A slightly stale share may shrink
+to the aggregate allocation's remaining headroom; an independent explicit Run requirement is not
+silently reduced. Physical/cgroup availability and the aggregate Job ceiling still block unsafe
+starts. Resource telemetry exposes `launch_waits` and the actual idle-device reason when a proposed
+placement fails its last launch check; a planner proposal is not proof that a worker started.
+
+Startup allocation growth is not a permanent ramp: only real advancing progress/phase boundaries
+with no further growth close that streak; repeated identical polls do not establish stability.
+A stable resident may use its compatible terminal learned envelope as its commitment while its
+rare full-device tail remains explicit in joint-fit risk. Cold-start/unconfirmed history cannot
+invent such a bound. A fresh GPU launch revalidates the same approved safe/exploratory decision,
+retaining sibling protections and its original WAIT comparison rather than resetting a single-GPU
+planner and losing accumulated evidence. None of this guarantees all configured slots can fit.
 
 A custom Work's stepped
 scalar metrics publish `metric-progress.json`, a bounded per-Attempt progress projection updated
@@ -1520,14 +1661,14 @@ scientific failure. `stopped / complete / degraded` retains prior physical failu
 Waiting retries are queued, not occupied process slots. Physical display history stays bounded while
 cumulative counters remain available; legacy truncated history is explicitly incomplete. Older
 Execution envelopes can be projected in memory without creating files or guessing missing Attempts.
-See [the reform ledger](ARCHITECTURAL_REFORM.md) for implemented boundaries and remaining migrations.
+See [the reform ledger](ai/IMPLEMENTATION.md#history-architectural-reform) for implemented boundaries and remaining migrations.
 This does not change objective fitting, censored pruning evidence, exact identity or budget rules.
 Native finalization resolves latest Attempts of each logical evidence cell before projecting the
 legacy terminal label; failed physical history is not itself a failed recovered Run. Phases and
 fidelities remain separate. Storage/clean previews do not create cache or lock metadata; apply
 revalidates ownership and targets under locks instead of trusting an earlier preview.
 
-[Durable products](PRODUCTS.md) documents native `lf products` publication, ModelSet selection,
+[Durable products](#guide-products) documents native `lf products` publication, ModelSet selection,
 StudyDecision, verified portable product bundles and typed `with` product dependencies. Metadata
 resolution is read-only; actual Attempts record consumers and model bytes are verified only on
 explicit access. Product catalogs are project-owned, not disposable Job or cache content. This
@@ -1622,7 +1763,7 @@ paths locally. Curves/logs remain lazy; cancel/delete operate on the whole owned
 Native ordered scalar streams and exact central pruning support fresh adaptive HPO.
 GPU offers are baseline only; checkpoint/fidelity continuation, co-location, recovery/adoption, live expansion
 and distributed export remain pending and fail closed.
-See [implementation status and contracts](COORDINATED_STUDIES.md) before using fleets.
+See [implementation status and contracts](#guide-coordinated-studies) before using fleets.
 The common internal prepared executor delegates to ControlPlane/JobService and verifies immutable
 environment/code identities and canonical input relocation. Host-side result observation is batched;
 physical observations never authorize unallocated GPUs.
@@ -1922,7 +2063,7 @@ unpublished successful artifacts and lightweight evidence, rejects unsafe roots/
 idempotent. This also lets upgraded installations reclaim safe bulk left by older Jobs.
 
 Cluster **Clear storage…** uses the same preview/apply authority, confirms categories and shows
-background feedback. **Clear output** is not disk cleanup. The [storage guide](STORAGE.md) documents
+background feedback. **Clear output** is not disk cleanup. The [storage guide](#guide-storage) documents
 physical-volume reservations, safety pressure, quotas/LRU, checkpoint grace/pins/publication proofs,
 Fleet/SLURM fit and current boundaries. Normal probes read only filesystem/lease metadata.
 `lf storage status --on CLUSTER` explicitly inventories usage. `lf storage reconcile --on CLUSTER`
@@ -1954,6 +2095,9 @@ Attempt environment provenance remains after reconstructible environment bytes a
 | `project` | show the current project root and storage identity |
 | `seeds` | inspect deterministic project replicate/confirmation streams |
 | `config resolve` | render the exact versioned configuration without execution |
+| `config schema/explain/diff` | installed static authoring guidance and descriptive native differences |
+| `help --search`, `completion` | task discovery and opt-in native-parser shell completions |
+| `inspect`, `diagnose`, `watch` | compact exact-identity read-only inspection and change-only observation |
 | `validate` | complete local configuration/class/input validation |
 | `explain` | signature/doc/default/resource explanation |
 | `run` | the only scientific execution command |
@@ -1962,7 +2106,7 @@ Attempt environment provenance remains after reconstructible environment bytes a
 | `jobs ...` | low-level Job control; `clear [--apply]` cleans terminal history |
 | `clusters ...`, `doctor`, `resources` | scriptable target setup and diagnosis; bootstrap accepts `--project` and read-only `--dry-run` |
 | `datasets ...` | inspect/verify/place/delete published dataset versions |
-| `results list/show/compare/analyze/report` | query, analyze and export Work Execution evidence |
+| `results list/show/compare/analyze/report/table` | query/analyze evidence; bounded derived JSON/CSV tables |
 | `clean` | preview/apply safe cache and terminal-artifact compaction |
 | `storage status/reconcile` | explicit usage/drift inspection; reconcile `--apply` updates diagnostic ledger only |
 
@@ -1971,7 +2115,15 @@ All command failures go through stable diagnostic categories/exit codes; add `--
 and `--debug` for tracebacks. Unsupported authoring commands and dataset build do not exist because
 all computation is `lf run`.
 
+See [Developer experience](#guide-developer-experience) for tested authoring, shell, agent setup,
+Console filtering and paged result-table examples, including the explicit unfinished boundaries.
+
 ## 13. Clustering
+
+Strategies live in individual class modules under `clustering/algorithms/`; shared contracts
+have their own class modules. Public `lambdaforge.clustering` imports remain unchanged.
+Whole-object [FGW distance](#20-fused-gromovwasserstein-distance-fgw) is a separate API, not
+an additional clustering strategy.
 
 Install with `python -m pip install "lambdaforge[clustering]"`. Importing `lambdaforge` and
 `lambdaforge.clustering` remains valid without scikit-learn; invoking a clusterer without the extra
@@ -2011,7 +2163,8 @@ implements `cluster(X) -> ClusteringResult`. The immutable result has `labels`, 
 | `Agglomerative` | `n_clusters`, `linkage`, threshold | Ward: Euclidean only; other linkages use declared native/precomputed | labels |
 
 String aliases are case-insensitive and canonical (`l1/cityblock`, `l2`, `sqeuclidean`). There is
-exactly one custom distance contract: `lambdaforge.nn.distances.Distance`. Existing implementations
+exactly one pointwise custom distance contract for these clusterers:
+`lambdaforge.nn.distances.Distance`. Existing implementations
 are `EuclideanDistance`, `SquaredEuclideanDistance`, `ManhattanDistance`, `MinkowskiDistance`,
 `ChebyshevDistance`, `CosineDistance`, `AngularDistance` and `MahalanobisDistance`. Compatible known
 Euclidean objects use the native route. Other objects explicitly materialize an `[N, N]` matrix
@@ -2106,12 +2259,23 @@ decision, not by an internal object that can stay in Python.
 
 ## 16. Study Analysis
 
+Completed explicit-seed fixed sweeps can be deliberately enlarged using the original edited YAML:
+`lf studies extend JOB --config experiments/sweep.yaml --dry-run`, then the reviewed
+`--apply --plan-hash HASH`. The Console **Extend Study…** uses the same service. Only new cells
+execute, with immutable revisions and cumulative Runs/analysis/history under a Series ID.
+Local CPU and same-placement managed CPU/GPU contracts are supported. By default, changed or
+unverifiable code creates an explicitly reviewed new code/runtime revision: old evidence is kept,
+but statistical inference is separated by revision. `--code-policy strict` instead requires
+proven equivalence. This is not retry, adaptive-optimizer recovery, migration or Fleet expansion. See
+[incremental Study extensions](#guide-study-extensions) for compatibility, budget, crash, export and
+checkpoint-continuation boundaries.
+
 Charts include individual Trial points, step/area curves, violins, horizontal bars, histograms and
 empirical CDFs, with metric-labelled shared axes. Projects can add self-contained HTML tabs via
 `self.outputs.html_section("proteins", title="Proteins").write_text(html_text)`; report generation
 collects verified finalized artifacts, not during scheduling. Multiple Runs share a document selector.
 Sandboxed offline frames isolate project JavaScript; embed assets/data (16 MiB/document, 64 MiB/report).
-See [project HTML tabs](RESEARCH_ANALYSIS.md#project-html-tabs) for the contract and standalone API.
+See [project HTML tabs](#guide-research-analysis-project-html-tabs) for the contract and standalone API.
 
 Study HTML starts in **Overview**, with candidate states, contextual predictive importance and
 suggested charts. Conditional scores stay in their branch/support table, never global responsibility.
@@ -2131,7 +2295,7 @@ Explore view and removable metric chips. All explicit axis/chart settings remain
 visualization options**. Configured questions are first-class inspectable cards; Metrics & health
 has collapsible category paths. **Evidence** replaces the duplicated findings tab and retains
 conclusions, diagnostics, seeds, pruning and raw JSON. Observed arbitrary-metric interactions
-remain separate from persisted HPO model surfaces. See [Research HTML](RESEARCH_ANALYSIS.md).
+remain separate from persisted HPO model surfaces. See [Research HTML](#guide-research-analysis).
 
 Study Analysis is a deterministic post-hoc layer over persisted study evidence. It does not propose
 Runs and never changes the controller. A terminal study automatically writes
@@ -2284,7 +2448,7 @@ semantics remain explicit; discovery is not causal inference or new HPO confiden
 units use small multiples in Explore and distinct Y axes in Parameters; unknown units may share a
 visual scale when observed ranges substantially overlap, without claiming unit equivalence. Visual
 normalization is opt-in. Saved views support notes and validated
-JSON import/export. [The full research guide](RESEARCH_ANALYSIS.md) contains numbered instructions,
+JSON import/export. [The full research guide](#guide-research-analysis) contains numbered instructions,
 YAML examples, algorithm limits, statistical caveats and legacy behavior.
 
 ## 17. Research Console
@@ -2529,3 +2693,3476 @@ Loading reused completed Runs is a baseline, not new recovery progress. Use `lf 
 Jobs and rejected requests even offline. Console validation records an operational inspection;
 CLI dry-run remains entirely read-only. A persistent failure dialog retains the request/phase and
 links logs, history and the same plan, without repeated polling notifications.
+
+## 20. Fused Gromov–Wasserstein distance (FGW)
+
+FGW compares **two complete weighted attributed objects**, not individual nodes and not clusters.
+Install the optional solver explicitly: `python -m pip install 'lambdaforge[optimal-transport]'`.
+Ordinary LambdaForge imports do not load or install POT, SciPy, sklearn or Torch for this API.
+The implementation delegates conditional gradient and line search to Python Optimal Transport
+(POT), rather than maintaining a second numerical optimizer.
+
+### Inputs and quick start
+
+`lambdaforge.distances.StructuredMeasure(structure, features=None, weights=None)` represents one
+object. `structure` is a finite, symmetric, nonnegative N×N intrinsic dissimilarity matrix with
+zero diagonal. Triangle inequalities are not checked. It may describe Euclidean point geometry,
+graph shortest paths or another explicitly chosen undirected relationship. Disconnected infinities
+must be handled scientifically by the caller, not silently replaced by large constants.
+
+Relative weights must be finite, nonnegative and have positive total mass. They are normalized
+to probabilities; `total_mass` retains their original sum. This is **balanced probability OT**,
+not a comparison of absolute masses. Zero-weight points are permitted. Objects may contain
+different numbers of points and their geometry may have different coordinate dimensions.
+
+```python
+from lambdaforge.distances import FusedGromovWassersteinDistance, StructuredMeasure
+
+a = StructuredMeasure.from_points(
+    [[0, 0], [1, 0]], features=[[0, 1], [1, 0]], weights=[1, 3],
+)
+b = StructuredMeasure.from_points(
+    [[0], [1.5], [3]], features=[[0, 1], [0.5, 0.5], [1, 0]], weights=[1, 1, 2],
+)
+solver = FusedGromovWassersteinDistance(alpha=0.5)
+result = solver.solve(a, b)
+value = solver(a, b)  # Scalar only; solve() additionally exposes diagnostics.
+```
+
+`from_points` constructs intrinsic SciPy distances (Euclidean by default); coordinates are **not**
+implicitly copied into features. Supply features explicitly. Each feature is a numeric vector
+in a shared feature space, or an arbitrary project-defined object using a custom metric below.
+The executable [FGW example](../examples/fgw.py) also checks transport marginals.
+
+### Arbitrary features, precomputed costs and geometry
+
+For structured attributes, pass a scalar distance function through
+`FusedGromovWassersteinDistance(feature_metric=lambda a, b: ...)`. The function receives one
+source and one target feature, which may be dictionaries, sequences or domain objects. LambdaForge
+does not interpret proteins, graphs inside attributes or application-specific scientific meaning.
+Alternatively, `solver.solve(a, b, feature_distances=D)` accepts a finite nonnegative N×M matrix.
+These are **unsquared distances**, squared exactly once for q=2. SciPy metric names use the same
+contract; `sqeuclidean` would therefore produce fourth powers and is usually inappropriate.
+For structure-only comparison (`alpha=1`), features are optional. `alpha=0` is feature-only OT.
+Numeric features must be finite N×F/M×F with the same F. No automatic scaling or imputation occurs.
+
+### Objective, coupling and interpretation
+
+The implemented q=2 objective is:
+
+```text
+min_T (1-alpha) Σ_ij d_feature(i,j)² T_ij
+    + alpha Σ_ijkl (C_source(i,k)-C_target(j,l))² T_ij T_kl
+subject to T >= 0, T 1 = source.weights, Tᵀ 1 = target.weights.
+```
+
+`FGWResult.value` is this **unrooted** objective; `feature_cost` and `structure_cost` are its
+unweighted components, and `transport` is the N×M node coupling, not cluster labels. `alpha` is
+between zero and one. Relative units directly change the balance: any normalization belongs
+explicitly in the project. `iterations`, `objective_history`, `marginal_error`, `converged` and
+`backend` make numerical status inspectable. Backend transport failure or invalid marginals raise
+an error; reaching `max_iter` may return `converged=False`, never a false optimality certificate.
+Inspect this flag rather than treating every numerical value as a converged result.
+
+This dense NumPy/CPU computation is non-differentiable. It is not a neural pointwise
+`lambdaforge.nn.distances.Distance`, a clustering strategy, an unbalanced solver or a barycenter API.
+For intermediate alpha the problem is non-convex: local convergence does **not** certify the
+global minimum or a mathematical metric for arbitrary dissimilarities. Different starts can
+yield different local minima. An explicit feasible N×M `initial_coupling` permits warm starts;
+the default follows POT's deterministic product coupling (self-comparison uses a diagonal coupling).
+
+### Resource bounds and multiple objects
+
+`StructuredMeasure.from_points(..., max_structure_bytes=256*1024**2)` checks dense N² storage
+before construction. `FusedGromovWassersteinDistance(max_memory_bytes=512*1024**2)` bounds a
+conservative workspace estimate before cross-distance allocation, not the third-party process's
+hard memory ceiling. Structural loss is contracted without an N×M×N×M tensor. Large objects still
+require project-side scientifically justified reduction; no hidden subsampling changes evidence.
+`solver.pairwise(objects)` returns an object×object discrepancy matrix. Both directions are solved
+independently by default because local minima can differ; `symmetric=True` explicitly assumes
+symmetric feature distances and mirrors the upper triangle. It does not execute clustering.
+
+Reference: [Vayer et al., ICML 2019](https://proceedings.mlr.press/v97/titouan19a.html),
+[POT FGW API](https://pythonot.github.io/gen_modules/ot.gromov.html).
+
+
+<a id="guide-work-results"></a>
+
+## 21. Work results, historical evidence and independent products
+
+[Español](MANUAL.es.md#guide-work-results) · [Manual](MANUAL.md) · [Products](#guide-products)
+
+A Work is a scientific execution, not necessarily a training experiment. A Study adds an authored
+parameter/seed design and scientific coordination. Both use the same runner, Execution/Run/Attempt
+records, managed outputs and export/import transaction. Ordinary Work reports never fit a surrogate,
+invent an objective or aggregate different Attempts as if they were one observation.
+
+<a id="guide-work-results-inspect-and-report"></a>
+
+### Inspect and report
+
+Open a Work in the Research Console and select **Results**. The Run/Attempt selector keeps failures,
+retries and their evidence separate. Overview, Metrics, Outputs, Visualizations, Products, Logs, Resources and
+Provenance load only the selected panel. Root Results lists use compact indexes; they do not fetch
+scalar history, models or project HTML. Opening Metrics reads bounded curves of the selected Attempt;
+opening Outputs reads descriptors, structured values and checkpoint names, not model bytes. Checkpoints
+are explicitly labelled as current shared logical Run state, not archived snapshots of an old Attempt. Missing
+retained files are shown as such. An in-progress Job needs its persisted Execution attestation before
+deep evidence is available; Job logs and controls remain available during preparation.
+
+Provenance includes a selectable table of exact historical-result/product inputs. Enter opens the
+recorded source when available in the local catalog, never another execution with the same name.
+A missing source gives an explicit export/import instruction rather than launching its producer.
+
+```bash
+lf results list --json
+lf results show EXECUTION --view overview --json
+lf results show EXECUTION --view metrics --run RUN_ID --attempt 1 --json
+lf results show EXECUTION --view outputs --run RUN_ID --json
+lf results preview-output EXECUTION OUTPUT_NAME --run RUN_ID --attempt 1 --json
+lf results report EXECUTION --output work-results.html
+```
+
+In Outputs, Enter explicitly previews a selected retained regular file only when it is at most
+64 KiB. The preview verifies its exact size and managed checksum; UTF-8 is shown as inert text,
+including HTML. Larger files, directories and unavailable artifacts show metadata and an explanation,
+without downloading their bytes. Use the report's isolated viewer to run a registered HTML visualization.
+
+**Open HTML report** explicitly builds an offline report from saved records. It includes bounded log
+tails, downsampled scalar curves, exact Attempt metadata, outputs, failure, configuration and provenance.
+The metric library is embedded once, with separate Run/Attempt groups and step/observation axes. Different
+Attempts are never silently combined, and cross-Attempt correlations are not presented as measured evidence.
+Exports also retain the complete original logs/scalar files and retained checkpoints/artifacts. No old
+scientific package is imported to display evidence. A Work without metrics or HTML still has a report.
+Failed reports label partial evidence honestly; compacted failed artifacts are not reconstructed.
+
+Register project visualizations with the existing API:
+
+```python
+viewer = self.outputs.html_section("predictions", title="Predictions")
+viewer.write_text("<html><body><h1>Saved scientific view</h1></body></html>")
+```
+
+The project owns its visualization logic. LambdaForge verifies the registered file and embeds it in
+an opaque-origin sandbox using the same security policy as Study reports. HTML must be self-contained;
+use included/data-URL assets. External requests and privileged filesystem access remain blocked.
+Limits remain 16 MiB per project document and 64 MiB per report. Reading a list never opens these files.
+
+For full-resolution arrays beyond those HTML limits, use managed `html_bundle` and its scoped
+lazy browser loader. See [managed report tabs](#guide-managed-reports) for API, remote/offline viewing,
+export/import integrity and retained-inference-only regeneration.
+
+<a id="guide-work-results-choose-an-exact-historical-dependency"></a>
+
+### Choose an exact historical dependency
+
+Human names are selectors, never identities. Repeating a name is allowed. One match resolves directly;
+multiple matches require an exact Execution ID. The Console shows deterministic local `#n` labels with
+the original identity. These labels are not portable scientific selectors. Imports retain their original
+Execution and origin; they never become executable Jobs.
+
+```bash
+lf results reference previous-work --json
+lf results reference EXECUTION --run RUN_ID --attempt 1 --json
+lf results reference EXECUTION --product selected-models --json
+lf results reference EXECUTION --product selected-models --artifact model-1 --json
+```
+
+These metadata-only commands return a typed YAML/JSON marker with exact IDs fixed internally. A later
+same-name execution cannot change that marker. In **Run Work**, enter the consumer parameter name and
+choose **Choose historical input…**. Select an exact catalog row, then **Use exact reference**.
+The picker also exposes exact Run/Attempt selection and registered product-artifact selection.
+Submit validates, explains and prepares the bound configuration without editing the authored YAML. The same
+operation is available through `lf run CONFIG --input-ref 'PARAMETER=JSON_MARKER'`. Launch bindings apply
+to a single Work/Study, not a composed or Fleet configuration; those declare typed inputs in their YAML.
+An input changed between selection and preparation fails explicitly rather than selecting another source.
+
+<a id="guide-work-results-resultinput-evidence-of-one-execution"></a>
+
+#### ResultInput: evidence of one Execution
+
+```yaml
+with:
+  previous:
+    result:
+      execution: previous-work
+      # run: run-...        # required to read an individual Run of a multi-Run Execution
+      # attempt: 1          # optional exact Attempt; otherwise latest is pinned by the envelope
+```
+
+The resolver adds `evidence_id`, a canonical SHA-256 of the exact original result/configuration.
+The consumer receives `lambdaforge.work.ResultInput`: immutable `metadata`, `configuration`, `metrics`,
+`result`, `outputs`, bounded `metric_curves()` and explicit verified `artifact(NAME)`. It is pickle-safe
+for spawned workers. Its identity is part of the consumer fingerprint and recorded inputs. It accepts
+finalized native/imported snapshots (including failures), never a mutable live result. Multi-Run evidence
+requires explicit Run selection before reading individual metrics/results/artifacts. Deleting its owning
+evidence can invalidate this dependency: it is not an autonomous model contract.
+
+<a id="guide-work-results-productinput-durable-scientific-content"></a>
+
+#### ProductInput: durable scientific content
+
+Existing declarations remain supported:
+
+```yaml
+with:
+  model: {product: {name: selected-models, contract: example/models:v1}}
+```
+
+For an exact published output of a known Execution:
+
+```yaml
+with:
+  model:
+    product:
+      from: {execution: previous-study, output: selected-models}
+      artifact: model-1  # optional exact registered member; not a filesystem path
+      expect: {dataset: example-data@1}
+```
+
+The contract can be omitted only when the exact publication receipt declares it unambiguously. It is
+still validated; expectations remain explicit. Native preparation replaces the source selector with the
+sealed content ID. Direct product references work independently even after deleting the producer.
+Unpublished temporary outputs are not products. Dataset inputs and same-execution `from` references
+keep their existing semantics.
+
+With `artifact` declared, `ProductInput.selected_artifact` exposes the choice and `artifact()` verifies
+and opens that exact member. Requesting another member fails instead of substituting it. Without it,
+the existing explicit `artifact(NAME)` API is unchanged. This is a selection within the same sealed
+product and contract, not a fabricated sub-product. Its logical member name participates in the
+consumer identity and survives pinning, remote/Fleet preparation and export/import.
+
+<a id="guide-work-results-explicit-promotion-from-an-ordinary-work"></a>
+
+### Explicit promotion from an ordinary Work
+
+```yaml
+products:
+  evaluation-report:
+    kind: ScientificReport
+    contract: example/evaluation:v1
+    scientific_meaning: {protocol: evaluated-on-fixed-test-v1}
+    outputs: [report, counts]
+```
+
+Supported ordinary kinds are ScientificReport, AnalysisResult, ModelArtifact and Selection. Meaning is
+a publisher declaration, not an independently proven equivalence. List registered structured values
+and retained regular files explicitly. Directory members must be registered individually; a directory
+is not implicitly guessed as a model. Promotion currently requires one logical Run with a successful
+latest Attempt; multi-Run model selection continues using the existing ModelSet declaration.
+
+Finalization seals immutable independent bytes with the native registry and locks. Scientific results
+are persisted first. A storage/publication failure leaves successful scientific evidence unchanged and
+preserves the outputs needed by `lf products finalize EXECUTION --apply`; that retries only publication.
+Concurrent retries reuse the exact publication. Retiring the producer does not remove sealed products.
+
+<a id="guide-work-results-portable-evidence-and-remote-availability"></a>
+
+### Portable evidence and remote availability
+
+```bash
+lf export WORK_OR_EXECUTION --output ./exports
+lf import ./exports/EXPORTED_PACKAGE --json
+lf import ./exports/EXPORTED_PACKAGE --apply
+```
+
+Works use the existing native version-2 export/import format, with additive `execution_kind` metadata.
+Older Study packages remain readable. Original records stay in `portable/`; local placement/indexes
+stay separate. **Results** and imported **Work** entries open the same explorer without contacting the
+original cluster. Re-export of an import verifies and preserves its original package/provenance.
+
+Resolving an ID does not materialize its bytes elsewhere:
+
+```bash
+lf products materialize EXACT_CONTENT_ID --on cluster
+lf products materialize EXACT_CONTENT_ID --on cluster --apply
+lf results materialize EXECUTION --on cluster
+lf results materialize EXECUTION --on cluster --apply
+```
+
+Console product/result explorers provide **Materialize…**, destination selection, preview and explicit
+confirmation. Preview reads source metadata only. Apply uses a compressed ZIP64 package and native
+safe extraction/import, verifies original content/evidence identity and reuses an exact existing copy.
+No producer is launched. Dependencies must already be available on every supported target, including
+Fleet members. Fleet preparation includes pinned historical dependencies in its native input stratum;
+each member rechecks them before executing its concrete Runs. Existing distributed dataset/continuation
+gates remain unchanged. Preparation/worker checks fail closed if absent. A remote-only source should first be
+explicitly exported/imported into the controller catalog; this operation is not an implicit inter-cluster
+orchestration service. Destination Python must provide the current LambdaForge runtime and sufficient
+staging/durable space. Source scratch is project-owned, not the system temporary partition. SSH credentials,
+reachability and site permissions remain external requirements.
+
+See [the executable example](../examples/work_results/README.md) for Study → selected ModelSet →
+independent visualization Work → custom HTML → export/import, without repeating training.
+
+<a id="guide-work-results-evidence-across-fixed-study-extensions"></a>
+
+### Evidence across fixed Study extensions
+
+An opt-in Study series references exact native Execution/Run/Attempt records across immutable
+design revisions; it never clones old results into a delta. `studies show/analyze/report` and the
+Console series workspace provide cumulative evidence with exploratory post-hoc interpretation.
+Native Job/result deletion and GC protect these references. A series export contains independent
+native Execution packages plus cumulative JSON/HTML and its journal; individual package imports
+remain read-only evidence, not executable series adoption. See [Study extensions](#guide-study-extensions).
+
+
+<a id="guide-products"></a>
+
+## 22. Durable scientific products: implemented foundation
+
+Ordinary Work output promotion, exact historical source references, ResultInput versus ProductInput,
+Console selection and compressed explicit materialization are described in [Work results](#guide-work-results).
+
+[Español](MANUAL.es.md#guide-products)
+
+This is the working **product model/catalog/transport and explicit Work-input layer**, not the
+completed Study orchestration system. Native Study decisions, local model selection, typed Work
+dependencies and actual consumer records are available. A single native Study may declare automatic
+post-Study decision/model publication. Native single-host Study export/import includes published
+products. The Console includes a metadata/audit browser and confirmed Study import.
+Dependency waiting/replanning and complete Fleet export remain pending.
+See the [reform ledger](ai/IMPLEMENTATION.md#history-architectural-reform). Existing Work execution/recovery and exact Dataset
+publication remain unchanged.
+
+<a id="guide-products-identities-and-contracts"></a>
+
+### Identities and contracts
+
+`lambdaforge.products` exports `ProductContract`, `ProductArtifact`, `StudyProduct`,
+`ProductRegistry`, `ProductBundle`, `SelectionPolicy`, `ModelSelection`, `select_models`,
+`build_study_decision`, `ProductRequirement`, `ProductInput`, `ProductPublication` and
+`publish_declared_products`. A product has:
+
+- an explicit versioned contract, such as `project/report:v1`, and an exact set of scientific fields;
+- `scientific_id`, computed from kind, contract declaration and those declared meanings;
+- `content_id`, computed from the canonical payload/meaning and exact artifact manifests;
+- immutable original producer provenance, with separately appended attestations for later producers;
+- a physical catalog placement that does not alter either identity.
+
+The producer's full configuration may be provenance; it is **not** the consumer compatibility key.
+Names are immutable aliases. The same contract identifier cannot acquire another field declaration;
+use a new contract version. Changing scientific objective, input/label semantics, design or selection
+rule must change the declared meaning. Nothing automatically guesses exclusions inside NPZ, model
+checkpoints or arbitrary formats. Equal declared scientific meaning does not certify equivalence of
+different bytes.
+
+Every artifact is an independent regular file with a raw SHA-256 and size. Publication copies and
+verifies it before committing. It never links to a disposable Attempt, removes the source, or scans
+unselected files. Metadata reads are bounded at 512 KiB each. Listing/showing does not open large
+artifacts; `verify` is explicit. Missing reads and previews do not create directories or locks.
+
+<a id="guide-products-explicit-publication-api"></a>
+
+### Explicit publication API
+
+Use this API from a postprocessing/operator script, not as a hidden replacement runner. Native
+post-Study declaration and explicit post-Study model selection are available below.
+
+```python
+from lambdaforge.products import ProductContract, ProductRegistry, StudyProduct
+
+contract = ProductContract("my_project/count-report:v1", ("sources", "labels", "method"))
+report = StudyProduct(
+    name="benchmark-counts-v1",
+    kind="ScientificReport",
+    contract=contract,
+    payload={"train": 317, "validation": 272},
+    scientific_meaning={
+        "sources": {"dataset": "sha256:<exact-published-content>"},
+        "labels": {"positive": "binding", "partitions": "audited-v1"},
+        "method": "count-audited-members-v1",
+    },
+    producer={
+        "execution_id": "<actual-original-execution>",
+        "evidence_fingerprint": "<actual-persisted-evidence-fingerprint>",
+    },
+)
+registry = ProductRegistry()  # Current pyproject project/.lambdaforge/products
+plan = registry.publish(report)  # Read-only; does not publish.
+registry.publish(report, apply=True)
+resolved = registry.resolve(
+    "benchmark-counts-v1", contract=contract,
+    scientific_expectations={"method": "count-audited-members-v1"},
+)
+```
+
+Placeholders in the example must be replaced by actual evidence; the generic envelope does not
+derive or certify that evidence. Kind labels such as `StudyDecision`/`ModelSet` do not automatically
+select models or prove their payload semantics. The project owns its explicit declaration.
+
+For artifacts, pass `ProductArtifact(name, relative_path, raw_sha256, size_bytes, role)` descriptors
+and `files={artifact_name: source_path}` to `publish`. `artifact_path(selector, name)` verifies the
+selected promoted bytes by default before returning their path. Do not substitute the framework's
+historical filename-aware managed-file fingerprint for the artifact's raw byte SHA-256.
+
+<a id="guide-products-native-cli"></a>
+
+### Native CLI
+
+```bash
+lf products list --json
+lf products show benchmark-counts-v1 --json
+lf products provenance benchmark-counts-v1 --json
+lf products consumers benchmark-counts-v1 --json
+lf products verify benchmark-counts-v1 --json
+```
+
+All operations accept an explicit `--root DIR`; otherwise use the current project's catalog or
+`LAMBDAFORGE_PRODUCT_ROOT`. Metadata list/provenance support `--offset`/`--limit` pages. Scientific
+code should not guess remote Job paths. Workers receive a project-owned product root from the
+existing control plane, separate from disposable Jobs and caches. The remote default is
+`STATE_ROOT/products` for the scoped project; local execution uses `PROJECT/.lambdaforge/products`.
+Unsafe remote roots nested in the Job or cache root are rejected.
+
+An operator may serialize `product.to_dict()` and publish it through
+`lf products publish MANIFEST.json --file ARTIFACT=SOURCE [--apply]`. This is an advanced explicit
+declaration, not automatic selection and not an application-specific workaround. Preview checks
+source shape/size; apply checks exact bytes. A corrupt source never becomes a valid published
+product. A conflicting immutable name requires another name/version, never an overwrite flag.
+
+<a id="guide-products-post-study-modelset-selection"></a>
+
+### Post-Study ModelSet selection
+
+Register a scored model snapshot from the ordinary Work lifecycle:
+
+```python
+self.outputs.from_checkpoint(
+    "model", "best.ckpt", role="model",
+    metadata={"metrics": {"auprc": measured_auprc, "accuracy": measured_accuracy}, "step": epoch},
+)
+```
+
+The project must supply values evaluated for **those exact weights**, not an unrelated last epoch.
+This keeps an ordinary independent Attempt artifact. Promotion to a durable catalog is deliberate.
+Alternatively use `outputs.file` with model role and the same explicit metadata. Directory models
+and externally published artifacts are not yet supported by the local selector.
+
+Create an ordinary selection YAML, for example `selection.yaml`:
+
+```yaml
+artifact: model
+rank_by: auprc
+mode: max
+group_by: [hidden_dim]  # Omit for a global top_k.
+top_k: 1
+constraints:
+  accuracy: {min: 0.6}  # Same registered snapshot, never latest Run metrics.
+tie_policy: stable
+```
+
+```bash
+lf products select EXECUTION_ID --name best-per-width --contract my_project/models:v1 \
+  --policy selection.yaml
+# After reviewing, repeat with --apply.
+```
+
+Use `--results-root DIR` for an explicit local ResultStore and `--root DIR` for the product catalog.
+The same operation is exposed by `select_models(source, execution_dir, policy, name=..., contract=...)`.
+It selects latest valid Attempts, excludes failed/pruned/partial-fidelity outcomes, applies explicit
+same-snapshot constraints and deterministically ranks each exact conditional group. Inactive and
+explicit null parameter values are distinct. `tie_policy: include_equivalent` optionally includes
+models within an authored `practical_margin` of the top-k boundary; it is not a confidence claim.
+
+Selection reads/hashes **selected model files only**, so even preview may perform substantial
+local I/O for large selected weights; it creates no files/locks. Apply promotes exact independent
+copies. Source evidence/failure history stays unchanged. The ModelSet records chosen logical Runs,
+Attempts, seeds, parameters, snapshot metrics/steps, grouping, rationale, content checksums and
+producer evidence. A failed unrelated Run does not invalidate completed eligible snapshots.
+The ranking is explicitly **among eligible observed snapshots**, not proof of a global optimum,
+fresh-seed confirmation or a redecision by HPO. Missing snapshot-bound metrics fail with guidance;
+the selector never guesses that Run best/last metrics refer to arbitrary checkpoint bytes.
+
+Remote/Fleet selection and publication inside composed `steps` remain pending. The local selector
+never reaches outside its verified owned Execution to guess model paths.
+
+<a id="guide-products-native-studydecision"></a>
+
+### Native StudyDecision
+
+```bash
+lf products decide EXECUTION_ID --name pooling-decision --contract my_project/pooling:v1
+# Review the native decision, then repeat with --apply.
+```
+
+This seals the native finalized Study selection, objective/design/input meanings, selected
+Run/Attempt identities and evidence fingerprint. It does not rank candidates again or fit HPO.
+Selection and scientific resolution remain distinct: missing final Analysis leaves explicit
+unresolved questions, and incomplete fresh-seed confirmation cannot become a survivor-only
+selection. A failed auxiliary Run does not invalidate an otherwise complete eligible selection.
+
+If `analysis.json` exists, it must match the exact finalized Execution/evidence identity; stale,
+provisional or mismatched conclusions are rejected with guidance to recompute Analysis explicitly.
+No scalar histories, checkpoints or model bytes are read for this metadata operation. The Python
+routes are `ResultStore.decision(...)` and `build_study_decision(...)`.
+
+<a id="guide-products-declared-post-study-publication-and-publication-only-retry"></a>
+
+### Declared post-Study publication and publication-only retry
+
+A single Study (`search`, `sweep` or repeated `seeds`) may declare native products alongside its
+ordinary Work fields:
+
+```yaml
+products:
+  pooling-decision:
+    kind: StudyDecision
+    contract: my_project/pooling:v1
+  best-per-width:
+    kind: ModelSet
+    contract: my_project/models:v1
+    select:
+      artifact: model
+      rank_by: auprc
+      mode: max
+      group_by: [hidden_dim]
+      top_k: 1
+```
+
+Validation checks this closed declaration before computation. `lf explain` includes it, and the
+Execution records its expected products before Runs start. Finalization persists training evidence
+first, then uses the same decision/selection/catalog services to publish independent products
+before compaction. `StudyDecision` requires an objective; a ModelSet requires explicitly scored
+artifacts. These are not arbitrary constructors, executable callbacks or a second runner.
+
+Publication failure preserves every native result/checkpoint. `products.json` records pending,
+published or failed products with the exception/phase; `product-publication-history.jsonl` retains
+performed publication attempts. Run status/objective evidence is not rewritten as a training
+failure. Inspect publication separately:
+
+```bash
+lf products status EXECUTION_ID --json       # Bounded metadata; no weight reads.
+lf products finalize EXECUTION_ID --json     # Read-only preview.
+lf products finalize EXECUTION_ID --apply    # Publication only; no Runs launched.
+```
+
+Publication-only apply acquires the native Execution ownership lock, then the publication/catalog
+locks. Successful receipts are reused without requiring original Attempt artifacts; promoted bytes
+are reverified on apply. Concurrent repetition is idempotent; corrupt receipts/evidence and changed
+declarations fail closed. Immutable-name conflicts require a deliberate new product name/version,
+not overwriting an existing model set. `--results-root` and `--root` select local evidence/catalog.
+The CLI does not currently dispatch publication-only recovery to a remote host; execute it on the
+host owning that Execution/catalog. Automatic Fleet promotion is not implemented.
+
+<a id="guide-products-typed-work-dependencies"></a>
+
+### Typed Work dependencies
+
+Declare the product as an ordinary Work argument, not a producer-status condition:
+
+```yaml
+name: model-visualization
+run: my_project.Visualize
+with:
+  models:
+    product:
+      name: best-per-width
+      contract: my_project/models:v1
+```
+
+The project may add `expect: {FIELD: EXACT_VALUE}` to require explicit scientific meanings.
+The resolver checks the declared contract/expectations and supplies a pickle-safe `ProductInput`:
+
+```python
+import lambdaforge as lf
+from lambdaforge.products import ProductInput
+
+class Visualize(lf.Work):
+    def run(self, models: ProductInput) -> dict[str, int]:
+        for model in models.payload["models"]:
+            weights = models.artifact(model["artifact"])
+            # Read these verified weights and register ordinary managed visualization outputs.
+        return {"models": len(models.payload["models"])}
+```
+
+Metadata access does not hash/download model bytes. `artifact(name)` verifies that exact promoted
+file before returning its read-only input path. Compatibility and the consumer's input identity
+use sealed contract/science/content, not the full producer YAML hash or current producer status.
+Validation/preview create nothing; actual Run Attempts append immutable consumer records, exposed
+by `lf products consumers`. Cached Execution reuse does not fabricate a new consumption event.
+
+Remote bundles pin aliases to exact content IDs and verify materialization in the destination
+project catalog before staging. Import the explicit product bundle there first; LambdaForge does
+not implicitly transfer large weights, expand a name to another representation or fall back to a
+Job-local catalog. Missing/incompatible products fail with a diagnostic; automatic dependency
+waiting or producer replanning is not yet implemented.
+
+<a id="guide-products-portable-product-exportimport"></a>
+
+### Portable product export/import
+
+```bash
+lf products export benchmark-counts-v1 --output ./report-export
+lf products export benchmark-counts-v1 --output ./report-export --apply
+lf products import ./report-export --root ./independent-products
+lf products import ./report-export --root ./independent-products --apply
+```
+
+These operations transport **one product**, not the whole producer Study. Export writes a verified
+directory containing `bundle.json`, `product.json`, selected file bytes and complete producer
+attestations (not downstream consumer audit records). Existing destinations are protected. Import checks manifest SHA/identity, exact
+artifact bytes and the complete provenance inventory; it preserves the original producer and
+never launches computation. Repeated/concurrent imports of the same product are idempotent. Even
+when the destination already contains the product, a corrupted import source is rejected.
+
+Publication/import are serialized with the existing native cross-process lock. Interrupted copies
+remove only their exact unpublished transaction directory; original files stay untouched. A crash
+after object commit but before catalog binding may leave an unbound immutable object: repeating
+the same operation verifies and completes its binding, not a silent new execution.
+
+An exported/imported product survives deletion of its original Study. This does **not** implement
+a dependency DAG, signed producer authenticity, certificate-based Dataset equivalence or complete
+Fleet export.
+
+<a id="guide-products-import-a-portable-study-without-executing-it"></a>
+
+### Import a portable Study without executing it
+
+```bash
+lf import ./portable-study--execution-ID --json
+lf import ./portable-study--execution-ID --apply --json
+lf results list --json
+lf products show models --json
+```
+
+The default verifies/previews; `--apply` registers evidence in the current project's ResultStore
+and sealed products in its native ProductRegistry. `--results-root`/`--products-root` optionally
+override placement, never scientific identity. Native version-2 exports are accepted: final,
+failed/cancelled and running snapshots retain captured status. A snapshot never becomes completed
+evidence. Pre-execution Job-only packages without an owned Execution are not Study imports.
+
+Verification covers all listed files, SHA-256/size/count, absence of extra files, metadata versions,
+Execution/Run/Attempt identity/ownership and product/producer attestations. Traversal, symbolic,
+special or hard-linked content, duplicate inventory and corrupt incoming/existing evidence fail
+closed. Concurrent imports are serialized/idempotent. A native Execution or another snapshot with
+the same Execution ID is never overwritten: use a separate results root to retain multiple captures.
+Checksums do not establish cryptographic authenticity of an untrusted author's scientific claims.
+
+Original files/provenance remain intact in `portable/`; `import.json` records the new placement.
+ResultStore lists the entry, relocates logical Run paths only in its log read model and reads included
+Analysis without refitting. No application imports, computation, checkpoint continuation or automatic
+HTML opening occur. Imported configuration cannot become native recovery state. An imported
+archive's `portable/` directory is already the reusable package; it needs no new producer export.
+
+In the Research Console, **Studies → Import Study…** (also accessible from Products and Ctrl+P)
+selects a package directory, verifies it in a worker, previews its exact identity and asks for
+confirmation. Registration adds a labelled read-only snapshot to Studies/Overview in the current
+project. Trials/seeds use local hierarchical projections and the shared selected-Run dashboard;
+retained metrics/logs/artifacts are read locally, not from the original cluster. Captured running
+snapshots are not live controllers. Cancel, retry, history deletion and producer export controls
+are hidden; imported archive deletion remains an explicit Results operation. HTMLs included in the
+package remain accessible in its `portable/reports/` directory.
+
+The native aggregate `execution/result.json` may exceed 64 MiB in a large valid Study. Import first
+verifies its exact declared size and SHA-256 along with every file, then strictly parses/validates
+that aggregate without applying the individual-metadata size ceiling. Checksums, path/ownership,
+duplicate-field and non-finite-value checks are unchanged. Root-screen refresh only reads small
+`import-study.json` indexes, not the aggregate. Reapply an older verified import once to build its
+`import-view/` presentation files under the import lock; scientific records and the original receipt
+remain untouched. Import copies retained bytes and therefore needs local space for the package and
+its local index; it never downloads artifacts again.
+
+Export includes products published through the native declaration/receipt, their independent bytes
+and original producer history. Provider transfer fetches only those objects, never the whole catalog;
+telemetry sampling cannot alter product bytes. Missing published products fail explicitly. Undeclared
+operator publications use `products export`, not discovery by sweeping unrelated catalogs.
+
+Archive registration commits atomically before independently locked product bindings. A later
+product transaction failure leaves the verified archive available: retry the same import to finish
+binding. This is not a cross-store distributed transaction. Deleting imported Study evidence preserves
+its independently promoted products.
+
+
+<a id="guide-conditional-studies"></a>
+
+## 23. Conditional scientific Studies
+
+[Español](MANUAL.es.md#guide-conditional-studies) · [Research HTML](#guide-research-analysis)
+
+<a id="guide-conditional-studies-1-one-question-one-study"></a>
+
+### 1. One question, one Study
+
+Use one `sweep.space` when comparing alternatives with different applicable parameters. All cells
+belong to one Study and share the same authored seeds. Use `steps` for a real workflow, not to
+partition comparable experimental branches. Steps remain separate invocations, not merged Studies.
+
+```yaml
+name: optimizer-comparison
+run: my_project.Compare
+seeds: [4, 7, 32, 54]
+sweep:
+  reference: {optimizer: baseline}
+  space:
+    momentum:
+      values: [0.8, 0.9]
+      when: {optimizer: {in: [sgd, accelerated]}}
+    optimizer: [baseline, sgd, accelerated]
+resources: {gpu: 2, time: 24h}
+execution: {max_parallel: 4, max_time: 12h}
+```
+
+This creates five candidates and twenty required Runs, not twelve candidates or one Study per
+optimizer. `baseline` has no `momentum` argument; the Work signature's default applies. A reference
+must select exactly one active candidate. Zero matches or multiple matches are authoring errors.
+
+<a id="guide-conditional-studies-2-activation-grammar"></a>
+
+### 2. Activation grammar
+
+Each descriptor optionally has `when`. Multiple parents are combined with AND:
+
+```yaml
+when:
+  optimizer: {in: [sgd, accelerated]}
+  use_momentum: true
+```
+
+`{parent: value}` is the historical equality syntax; `{parent: {eq: value}}` means exactly the same
+thing. Membership is explicit: `{parent: {in: [value1, value2]}}`. Membership values must be
+non-empty, unique JSON scalars belonging to the parent's finite authored domain. Bare lists,
+unknown operators, missing parents, cycles and out-of-domain values fail validation. No expressions,
+`or`, `not` or recursive condition language are supported. Historical equality on numeric ranges
+remains supported; membership requires a finite domain.
+
+Parents may appear after children in YAML. One shared `ActivationCondition`/`ParameterSpace`
+authority validates and topologically orders dependencies for sweeps, random/Sobol/adaptive
+generation, encoding and analysis. Inactive keys are absent, never `null`, never multiplied and
+then deduplicated. Duplicate authored sweep values are rejected. Domain order remains authored;
+membership ordering does not change scientific identity. Conditional coverage uses active observed
+values, not a fabricated inactive category.
+
+<a id="guide-conditional-studies-3-validate-and-understand-the-plan"></a>
+
+### 3. Validate and understand the plan
+
+```bash
+lf validate comparison.yaml
+lf explain comparison.yaml
+lf run comparison.yaml --on CLUSTER --dry-run --json
+```
+
+Validation/explanation include a bounded `preflight`: candidate count, shared seeds, required Runs,
+first independent categorical branch counts, reference, requested GPUs, parallel limit, Study time
+budget and scheduler wall-time. They do not print hundreds of individual identities in human
+output. `--json` retains the full planning model for automation. Local validation explicitly says
+target capacity has not been checked; a read-only target plan may also require an already prepared
+runtime/environment. A branch summary is descriptive, not a domain-specific family API.
+For adaptive searches these counts describe the current bounded proposal window (subject to the
+candidate ceiling), not a promise to execute every proposal. Required replication becomes an
+obligation only after a candidate is proposed. Fixed-sweep counts cover the complete authored design.
+
+For selective extra combinations, `sweep.include` adds complete active scalar points without
+expanding the base Cartesian domains. `sweep.candidates` instead selects only explicit points
+inside space. Both use the same activation authority and reject inactive/missing keys. An exact
+existing base point in include is reused, not duplicated. See the examples and incremental
+completed-Study workflow in [Study extensions](#guide-study-extensions). Editing YAML alone does not
+extend an existing Execution: review and explicitly apply **Extend Study…**, not Resume.
+
+Root `resources` are inherited by steps unless overridden. Root `with`, `seeds`, `replicates`,
+`search`, `sweep`, `execution`, `objective` and `analysis` are rejected for a steps composition:
+declare them on the relevant Work step. No root experimental policy is silently ignored.
+Preflight validates Work inheritance/signatures without constructing a Work or running scientific
+code; it cannot detect arbitrary semantic bugs inside a consumer's `run()` implementation.
+
+<a id="guide-conditional-studies-4-time-and-target-capacity"></a>
+
+### 4. Time and target capacity
+
+`resources.time` is the scheduler wall-time ceiling of a schedulable unit. Sequential levels add;
+members of one parallel level contribute their maximum. Six sequential steps of 168 h request
+1008 h (42 days); three sequential steps of 24 h request 72 h. This is a ceiling, not a prediction
+of training duration. `execution.max_time` is the logical Study's dispatch budget and is reported
+separately; it does not replace scheduler wall-time.
+
+For a direct host, a successful live GPU UUID inventory together with an unambiguous inherited
+visibility restriction can reject a request exceeding known capacity before bundle preparation,
+including dry-run. Occupancy is not capacity. A failed/ambiguous probe stays unknown, never an
+invented count. Scheduler login hosts are not allocation inventories. A site-command launcher's
+grants use the existing runtime check: adaptive Studies may scale down to fewer granted tokens,
+never broaden grants or claim additional devices during preflight. Local validation does not
+contact any execution target.
+
+<a id="guide-conditional-studies-5-identity-and-existing-evidence"></a>
+
+### 5. Identity and existing evidence
+
+Normalized scalar equality preserves historical serialization and identity. New membership syntax
+is additive to the current schema; it requires no new YAML version or compatibility runner.
+Predicates remain in Study initialization/design and therefore travel through analysis, export and
+retry. Existing persisted equality documents are read, not rewritten. A changed condition, domain,
+seed or objective remains a scientific change, not an automatic retry waiver. Fixed sweeps still
+execute every required cell/seed without adaptive pruning or scientific replanning.
+
+The generic acceptance fixture in `tests/work/test_conditional_membership.py` has branch counts
+1, 2, 10, 16, 9 and 18: exactly 56 candidates × four authored seeds = 224 required Runs. Its unified
+conditional design equals the intended union of independently described branches, without
+importing or modifying any consumer project.
+
+
+<a id="guide-study-extensions"></a>
+
+## 24. Incremental fixed Study extensions
+
+[Español](MANUAL.es.md#guide-study-extensions)
+
+Edit the **original YAML**, then choose **Extend Study… → Review changes → Extend Study**.
+The dialog lists retained Runs and new cells, target, revision and counts. Confirmation submits
+only the delta and opens the cumulative Study series. No second user-authored YAML is needed.
+
+The origin must be an owned, successful **fixed sweep with explicit seeds**, including a
+conditional sweep. Grow its candidate set **or** append seeds. For a rectangular design without
+explicit points, add values to one existing dimension at a time. Complete each revision before
+extending again. Conditional/selective extensions compare exact active candidate dictionaries.
+Reordering/inserting values is supported; removing candidates, changing science, or adding values
+and seeds simultaneously is rejected. A reorder-only plan is a no-op.
+
+<a id="guide-study-extensions-cli"></a>
+
+### CLI
+
+```bash
+# Remote: exact original Job; placement defaults to its cluster.
+lf studies extend job-EXACT_ID --config experiments/regularization.yaml --dry-run
+lf studies extend job-EXACT_ID --config experiments/regularization.yaml --dry-run --json
+lf studies extend job-EXACT_ID --config experiments/regularization.yaml --apply --plan-hash sha256:REVIEWED_PLAN
+
+# Optional: refuse any unproven code/runtime equivalence instead of creating a new cohort.
+lf studies extend job-EXACT_ID --config experiments/regularization.yaml --dry-run --code-policy strict
+
+# Direct local evidence also accepts its exact Execution ID.
+lf studies extend execution-EXACT_ID --config experiments/regularization.yaml --dry-run
+
+# The receipt supplies a stable Series ID for subsequent operations.
+lf studies show series-EXACT_ID --json
+lf studies refresh series-EXACT_ID
+lf studies history series-EXACT_ID
+lf studies analyze series-EXACT_ID --json
+lf studies report series-EXACT_ID --output regularization.html
+lf studies export series-EXACT_ID --destination ./exports
+lf studies extend series-EXACT_ID --config experiments/regularization.yaml --dry-run
+```
+
+Omitting `--dry-run` still previews only. Preview never writes revisions, reserves Jobs, consumes
+seeds or downloads model/checkpoint/artifact/epoch-history bytes. Explicit typed input verification
+may hash input content. Validation imports the actual Work; an agent READ/PLAN session does not
+automatically authorize that import. No unrestricted MCP apply operation is exposed.
+
+<a id="guide-study-extensions-regularization-example"></a>
+
+### Regularization example
+
+Use a Python-valid Work argument such as `lambda_` for scientific λ:
+
+```yaml
+name: regularization
+run: project.Training
+seeds: [11, 23, 47, 59, 71]
+sweep:
+  space:
+    lambda_: [0.0, 0.1, 0.2, 0.3]
+objective: {metric: score, mode: max}
+```
+
+After 20 successful Runs, change the same list to
+`[0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]`: **20 retained + 15 new = 35**.
+Then append three seeds: **35 retained + 21 new = 56**. Alternatively, adding three seeds directly
+to the original four-value design gives **20 retained + 12 new = 32**.
+
+SubmissionService executes an exact native delta, rectangular or sparse, not another runner/recovery.
+LF retains a read-only `.lf-extension-UUID.yaml` snapshot beside the authored YAML to preserve
+relative inputs/source context. Do not edit/remove it. Bytes and actual scientific identity are
+pinned through asynchronous preparation; recents still show the authored YAML.
+
+<a id="guide-study-extensions-conditional-and-selective-additions"></a>
+
+### Conditional and selective additions
+
+Adding to an existing conditional dimension expands only its active branches. To add a value
+only to a particular combination of branch settings, **keep the base space unchanged** and append
+complete points to `sweep.include` in the original YAML:
+
+```yaml
+sweep:
+  reference: {pooling: max}
+  space:
+    pooling: [max, mean, lse]
+    heat: {values: [false, true], when: {pooling: {in: [mean, lse]}}}
+    lambda_: {values: [0.0, 0.1], when: {pooling: {in: [mean, lse]}}}
+  include:
+    - {pooling: lse, heat: true, lambda_: 0.2}
+    - {pooling: mean, heat: false, lambda_: 0.3}
+```
+
+This adds exactly two candidates, not every combination with λ=0.2/0.3. With four unchanged
+seeds, it requests eight new Runs. Use your actual Work argument names. Every included point must
+provide **all active dimensions and no inactive ones**. The `max` control therefore has neither
+`heat` nor `lambda_`. Inclusion is a union: a point already in the base is not run twice;
+duplicate entries inside `include` are rejected. Values are finite JSON scalars, not lists of
+values or branch-domain shorthand. Existing include entries must remain in subsequent revisions.
+
+Advanced `sweep.candidates` instead executes **only** the listed complete points within the exact
+declared `space`; it does not enumerate that space. It is mutually exclusive with `include`.
+Native sparse deltas use this form to execute the exact set difference without adding controls,
+cross-products, fake dimensions, missing-key nulls or extra seeds. Space remains the authored
+conditional geometry; it does not imply every possible joint point was measured or required.
+Removing old candidates or changing activation rules is still rejected. Add seeds in a separate
+revision. Historical records and identities are never rewritten.
+
+For a remote sparse delta, a retained parser must support native sparse candidates. By default,
+an incompatible/missing retained runtime on a managed cluster selects normal native deployment
+of the current project/framework as a new runtime cohort. The old prefix is never patched.
+`--code-policy strict` instead rejects missing retained compatibility before submission.
+
+<a id="guide-study-extensions-identities-compatibility-and-evidence"></a>
+
+### Identities, compatibility and evidence
+
+A series, revision, Execution, Job, Run and Attempt have distinct identities. Historical evidence
+is referenced, never copied into another Execution or renumbered on disk. Candidate identity uses
+exact normalized parameters, not Trial ordinal or name; `true`, `1` and `1.0` stay distinct.
+References retain original Trial, Execution/Run/Attempt, seed, input identity and result checksum.
+Global CodeIdentity and Run-ID algorithms are unchanged.
+
+The default `--code-policy revisioned` no longer requires a clean original repository. Exact native
+code identity or a clean same-HEAD/YAML-only proof permits compatible cumulative inference as before.
+Otherwise the reviewed plan explicitly proposes **current code in a new code/runtime revision**.
+Dirty origins, changed source, documentation, dependencies or HEAD do not by themselves prevent
+adding new cells. The Console shows this warning and changes its confirmation to **Extend · current
+code**. Approval of that exact plan authorizes its new revision, never asserts code equivalence.
+
+Each old Run retains its exact code/Execution/Run/Attempt identity. New Runs obtain their own native
+scientific identities through the ordinary deployment pipeline; they are not labelled as if the
+old code executed them. Review pins current source and preparation inputs, rechecks after the
+generated configuration is written and again in the detached worker. An intervening edit requires
+a fresh review. Only owned checksum-attested generated YAML snapshots are excluded from that pin.
+After native remote preparation, LF validates the **actual staged** Work, input content, exact
+candidates/seeds, objective, metric semantics and design before provider dispatch. Its host-derived
+scientific identity is recorded separately from the controller submission pin; configuration and
+embedded code checksums are checked again inside the native worker. Completion/retry use that
+attested Execution identity, not the controller's filesystem path or seed namespace. Metadata
+readers use the recorded scientific interpreter, including native extension preflights.
+Only canonical SHA-256 commitments for each complete contract field travel in the SSH argv;
+the host recomputes them from native configuration. Large metric descriptions do not create
+oversized exec requests. No metadata, input identity, seed or design field is truncated/ignored,
+and a mismatch still names the affected fields. This does not change native scientific hashes.
+Unsafe source paths and missing/corrupt scientific evidence still fail closed. Work sources outside
+the project remain unsupported. `--code-policy strict` retains the earlier equivalence-only policy.
+
+Native configuration, input and per-Run checks preserve Work class, fixed parameters, exact
+file/dataset/product content, objective/direction, metric semantics, seeds and publication
+contracts. Aggregate and authoritative latest Attempts must agree. Failed/pruned/incomplete
+required cells must first be repaired with native retry; they are not completed evidence.
+
+Historical Trial ordering is reconstructed from the Execution-owned `authored.yaml` snapshot,
+not the edited original YAML. Its exact JSON values must equal frozen `configuration.json`;
+native scientific fingerprint and per-Attempt checks still apply. This avoids alphabetically
+sorted JSON mapping keys changing conditional/cartesian Trial ordinals. Metadata paging preserves
+that original order explicitly. Missing/corrupt/unsafe order evidence is not an identity waiver.
+Different code revisions do not become equivalent merely by fixing configuration order.
+
+<a id="guide-study-extensions-supported-execution-contracts"></a>
+
+### Supported execution contracts
+
+- Local CPU: the same existing interpreter and recorded Python/framework/package/platform
+  contract, without an environment or command-prefix switch.
+- Single-cluster managed CPU/GPU: the same placement and its **retained native immutable
+  environment**. The exact owned prefix, environment identity, readiness marker and recorded
+  Python/packages/platform are checked on the host. Dependencies are not re-solved. A tiny trusted
+  preflight calls the unchanged native CLI/WorkRunner inside the normal scheduler/site launcher.
+  Actual granted GPU model/capability/memory type and numerical runtime are checked before
+  science. GPU ordinals/counts are not hardware identity. Native grant/admission policies remain
+  authoritative; CUDA visibility is never broadened.
+- Changed/unverifiable code or incompatible retained runtime: the same **managed** cluster uses
+  its ordinary current-project bundle, native runtime resolution, environment, scheduler and GPU
+  grants. Preview does not build/install/launch it. The existing environment is not rewritten or
+  silently reused with new code. Remote existing/unmanaged environments cannot deploy changed code.
+
+This is not full filesystem attestation of arbitrary installed binaries. Strict retained execution
+rejects different frameworks/runtimes/GPU types. Remote unmanaged environments,
+local GPU extensions, migration, Fleet, adaptive HPO, automatic sequential replication,
+structured dimensions and composed Works remain outside this contract.
+They are never silently replayed as a full experiment or single-host substitute.
+
+<a id="guide-study-extensions-cumulative-analysis-and-console"></a>
+
+### Cumulative analysis and Console
+
+The research catalogue groups opt-in revisions under one series. Its workspace shows cumulative
+Runs/metrics/plots, revision and native Job links, and history. Linked Jobs retain normal logs,
+cancellation and Resume controls; physical Jobs remain in Advanced Jobs and `lf jobs`.
+Other Studies and native selectors keep their existing meaning.
+
+`StudyExtensionService.overview()` projects exact metadata; `.analysis()` uses StudyAnalysis,
+paired seeds and an independent accumulated evidence fingerprint. It does not overwrite an origin
+analysis cache. New candidates selected after seeing results are **exploratory post-hoc evidence**,
+not retroactive confirmation. Incomplete seed sets are not final survivor-only means.
+Native descriptive coverage/boundary findings do not prove an optimum beyond observed data or
+authorize automatic expansion. No second statistics engine is introduced.
+
+If any revision has unproven code/runtime equivalence, the series remains one navigable history
+but analysis is **separate per revision**. The default analysis is the latest cohort; JSON retains
+`code_cohort_analyses`, and offline HTML adds **Code · revision-N** tabs. Original metric semantics
+are retained. Cross-revision tests, intervals, parameter effects and shared-seed means are not
+pooled. A candidate completed across two code cohorts has no fabricated combined selection mean;
+its Runs still show their metrics and completed state. To evaluate the *whole design* under new
+code, submit a new native full Study: extension executes only additional cells. Native HTML byte
+limits still apply to embedded cohort reports.
+
+<a id="guide-study-extensions-budgets-failures-and-durability"></a>
+
+### Budgets, failures and durability
+
+Historical Attempts/time across all revisions, including repaired failures, are never refunded.
+A full-design cap leaves only its remainder for the delta; impossible obligations are rejected.
+Delta products are not automatically promoted when the cumulative winner changes.
+
+The owned checksummed journal `.lambdaforge/study-series/` has immutable revisions and chained
+operational events. The reviewed hash binds science, evidence, code, inputs, target and budgets.
+Apply revalidates it. Same accepted plan returns the same native Job; concurrent incompatible
+revisions are serialized while different series dispatch independently. No-op writes nothing.
+
+A Job ID is committed before handoff. A proven crash before native Job/request/provider creation
+can reconcile to **that same ID**. Existing preparation is never blindly relaunched; missing or
+corrupt authority fails closed. Refresh seals exact native completion, not scheduler success
+alone. The Console refreshes the selected series. Successive preview can read an unsealed
+successful Job without writing; apply reconciles that operational completion.
+
+For a failed delta, open its Job and use **Resume Study…**, or `lf retry JOB --dry-run` followed
+by native explicit retry. Only the delta's original Execution recovers. Series refresh follows
+exact retry lineage, retains cost/history and counts each cell once. Epoch-level checkpoint
+continuation still requires explicit consumer Work support; extension is neither retry nor rerun.
+
+If preparation failed **before any new Execution existed**, the same Resume/retry operation
+retries only the reviewed delta's preparation. The original series binding and submission pin
+remain attached to the new Job; previous successful revisions are not repeated. In this case
+`resumable: false` means there is no training Execution/checkpoint to resume, not that the original
+full Study must be restarted. Recovery discovery ignores unrelated local project Executions.
+
+Referenced Jobs/Executions and managed environments stay protected from deletion/GC. Series export
+is a read-only collection of native Execution packages plus journal and cumulative JSON/HTML;
+partial failures are preserved with a receipt. Native packages can be imported individually as
+read-only evidence. Executable series adoption/migration is unsupported. Exporting a single
+Execution never pretends to include its whole series.
+
+<a id="guide-study-extensions-verification-boundary"></a>
+
+### Verification boundary
+
+Disposable native CPU tests cover 20→35→56, 20→32, unchanged origins, compatibility rejection,
+concurrency/idempotence, missing/corrupt authority, pre-Job crash reconciliation, failed-delta
+native retry and cumulative analysis. A loopback provider test creates an isolated retained
+interpreter without installing dependencies, reads host-side evidence and executes only the
+delta through the native entrypoint/process isolation. GPU contracts use synthetic metadata.
+These are not claims of live SSH/SLURM/GPU or WISDOM acceptance.
+
+
+<a id="guide-dataset-reconstruction"></a>
+
+## 25. Published datasets and scientific reconstruction
+
+[Español](MANUAL.es.md#guide-dataset-reconstruction) · English
+
+A published `NAME@VERSION` identifies one immutable content ID. A scientific validation **PASS**
+does not mean that a reconstruction has identical bytes, or that all members are scientifically
+equivalent. LambdaForge never overwrites this version, relaxes transport checksums, rounds arrays,
+or guesses which fields inside an NPZ/other format are operational.
+
+<a id="guide-dataset-reconstruction-choose-the-intent-before-computing"></a>
+
+### Choose the intent before computing
+
+```bash
+lf datasets preflight corpus@6 --intent publish --on gpu12 --json
+lf datasets preflight corpus@6 --intent reuse --on local --json
+lf datasets preflight corpus@6 --intent rebuild --on gpu16 --json
+```
+
+Preflight reads the controller and all configured remote indexes, without changing them, downloading
+assets or starting a Work. It returns locations, exact content IDs, discovery failures and an
+`allowed` decision. A new publication is refused if the version exists; reuse/rebuild requires an
+unambiguous reference. Incomplete discovery cannot prove absence. Preflight is not a reservation:
+the final publisher still checks identity under the registry lock.
+
+1. **Reuse**: `lf datasets materialize corpus@6 --on TARGET` previews native exact placement;
+   review and add `--apply`. `replicate` explicitly selects source/destination. This copies/verifies
+   published content; it does not rebuild scientific arrays. Native compressed replication supports
+   local/remote placements, preferring direct site SSH; see below.
+2. **Rebuild**: compute an independently sealed, unregistered reconstruction and compare it.
+3. **Publish**: use a fresh version for changed bytes, even after an equivalence report.
+   Additional representations under the same version are not supported; there is no silent
+   alternative-content placement policy.
+
+<a id="guide-dataset-reconstruction-publish-once-replicate-exact-content"></a>
+
+### Publish once, replicate exact content
+
+```bash
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --json
+# Review the route, size and destination, then apply:
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --apply
+```
+
+In bare `lf`, open **Datasets → DatasetVersion → Replicate…**, choose endpoints, review the native
+preview and confirm. The Console stays responsive; inline phases/elapsed time and compressed byte
+counts (on the relay route) show progress. Keep the session open until completion. Locations updates
+after registration. The target needs `storage.dataset_root` and a usable LambdaForge runtime
+(existing or bootstrapped); no scientific Work or GPU claim runs. Effective roots remain project-scoped.
+
+`--route auto` probes site SSH from source to destination with trusted host-key checking, without
+prompts or agent/credential forwarding. If available, bytes travel directly between hosts.
+Configure site-authorized noninteractive authentication and trusted host keys on the source host
+to enable it; LambdaForge never installs keys or copies controller credentials. `--route direct`
+requires that connection. `--route relay` uses existing authenticated controller transports with
+a bounded **compressed in-memory stream**, not an archive staged on your computer or in `/tmp`.
+
+Streaming tar/gzip (level 3) verifies the complete source, rejects symbolic/special entries and
+unsafe archive paths, uses owned destination staging/storage admission, and checks exact content
+before locked atomic promotion/registration. Both indexes expose the same content ID to typed
+Dataset inputs. An identical destination is verified/reused; different existing content is refused.
+Interrupted copies never register partial content. Deliberate retry reuses an already committed
+exact placement or transfers again; it is not byte-offset resume. Legacy registered source paths
+remain usable. Replication never rebuilds/relabels/deletes source data or automatically reconciles
+conflicting versions; inspect existing divergence or publish a fresh version first.
+
+LambdaForge cannot infer an output name/version from arbitrary Python before calling `Work.run()`.
+The producing project must perform the public preflight as its first operation:
+
+```python
+def run(self, version: str, intent: str = "publish"):
+    self.outputs.dataset_preflight(name="corpus", version=version, intent=intent)
+    # Expensive computation only after preflight. Checkpoint results as usual.
+    rows = self.compute_members()
+    return self.outputs.dataset(
+        name="corpus", version=version, members=rows, intent=intent,
+        scientific_identity={
+            "sources": {"source-id": "sha256:<exact source checksum>"},
+            "selection": ["member-id"],
+            "labels": {"member-id": 1},
+            "configuration": {"modes": 64},
+            "algorithm": "my-project/spectral-contract-v1",
+        },
+    )
+```
+
+The Work preflight checks its execution host's registry. Use the native preflight above to also
+detect cross-host divergence before submission. `intent="rebuild"` stores the candidate in a pinned
+named checkpoint collection and returns its content ID and placement path as an ordinary output
+value (`publication_status="reconstructed-unregistered"`), never as a registered DatasetVersion.
+`reuse` is a preflight/materialization intent, not a `members` publication option.
+
+<a id="guide-dataset-reconstruction-three-separate-identities"></a>
+
+### Three separate identities
+
+- **Scientific**: explicit project `scientific_identity` with required sources, selection, labels,
+  configuration and algorithm contract. The manifest/record exposes `scientific_id`. It is a
+  declaration, not proof of reproducibility. Historical manifests have no scientific declaration;
+  they remain readable, but non-identical content is unresolved until explicitly declared.
+- **Content**: existing `dataset_id == content_id`, exact per-asset checksums, sizes and canonical
+  logical index. Nothing about transport or verification is weakened. Identical content cannot
+  silently acquire a different scientific declaration in an existing registry version.
+- **Operational**: manifest producer/build provenance, paths, Execution/Run/Attempt, hardware and
+  timestamps. These are not content identity. Putting them *inside* an asset still changes its bytes.
+
+<a id="guide-dataset-reconstruction-compare-entire-sealed-reconstructions"></a>
+
+### Compare entire sealed reconstructions
+
+```bash
+lf datasets compare /reference/root /candidate/root --on gpu16 \
+  --verifier my_project.dataset_checks:compare_member --policy comparison-policy.json \
+  --output comparison-report.json --json
+```
+
+Both roots must be on the selected host. Policy and output-report paths are on the controller;
+only policy/JSON reports cross the transport, not assets. A verifier is explicitly trusted project
+code imported on that host; LambdaForge does not load code specified by a dataset manifest.
+
+Python API: `from lambdaforge.data import DatasetComparison, DatasetComparisonContext`;
+`DatasetComparison.compare(left, right, verifier=callback, verifier_id="project/check-v1", policy=policy)`.
+The callback receives one `DatasetComparisonContext` with validated roots, both `DatasetMember`
+descriptors and the explicit policy. Return strict JSON with `equivalent: bool`,
+`checked_assets: [logical_asset_names]` and optional `details`. Every changed asset must be covered.
+Use each descriptor's relative asset path below its root; never infer paths from machine provenance.
+
+Historical reference without a contract: use `--contracts contracts.json` (Python:
+`scientific_contracts={exact_content_id: declaration, ...}`). Each declaration is explicitly supplied
+by the project and bound to the exact verified content ID; it must reflect independently checked
+source/selection/label/algorithm evidence, not an assertion that two datasets are equivalent.
+The report preserves the original absent `scientific_id`, records the assertions and separate
+`comparison_scientific_id`, and still requires the full member verifier. No historical manifest or
+registry is edited. An assertion cannot override a conflicting persisted declaration.
+
+Example policy (illustrative; choose tolerances from the actual scientific contract):
+
+```json
+{
+  "diffusion_eigenvectors": {"method": "spectral-projector", "atol": 1e-8, "rtol": 0.0},
+  "metadata_json": {"method": "exact-scientific-fields-operational-differences-reported"}
+}
+```
+
+LambdaForge validates policy shape/finite nonnegative tolerances, not numerical formats. Your
+verifier must implement every method and report operational differences explicitly. It must compare
+embedded identifiers, labels, partitions and source bytes **exactly**, never with tolerances. Sign
+flips or rotations of degenerate spectral spaces may require subspace projectors, residuals and
+appropriate eigenvalue grouping, not elementwise rounding or a global `allclose`.
+
+Before invoking the callback, LambdaForge verifies both complete datasets with their own exact IDs,
+then requires equal scientific contracts, member identifiers, partitions, targets/member metadata,
+asset names, target schema and global assets. Changed URI assets must be locally materialized first.
+Corruption yields `invalid`; a missing declaration/verifier yields `unresolved`; scientific changes
+yield `different`. A complete approved comparison yields `equivalent`, while retaining both distinct
+content IDs and `byte_equal=false`. It never registers/replaces content. Byte-identical content is
+`exact` unless declared scientific contracts conflict. No single-member comparison proves a dataset.
+
+<a id="guide-dataset-reconstruction-publication-failure-without-recomputation"></a>
+
+### Publication failure without recomputation
+
+`outputs.dataset` preserves a fully sealed rejected candidate and prints its exact path. Failed or
+interrupted publication also protects Attempt artifacts, metrics/logs/results and checkpoints from
+automatic compaction. If the recovery volume cannot accept a copy, the sealed tree is retained on
+its original volume and its path is reported. These retained bytes intentionally consume storage;
+inspect them before explicit lifecycle deletion.
+
+```bash
+lf datasets publish-candidate /preserved/candidate --on gpu16 --version 7 --json
+# Review exact source, content/scientific IDs, target and version, then:
+lf datasets publish-candidate /preserved/candidate --on gpu16 --version 7 --apply
+```
+
+This verifies saved bytes and atomically publishes/registers only that candidate. It does not run
+the Work or repeat calculation. Omit `--version` only when the original registration is absent or
+already has the exact content/declaration. Repeated apply is idempotent; corrupt/unsafe candidates
+are rejected. The original failed Attempt history remains failed: publication recovery is not a
+fabricated successful scientific execution. Candidate, original published version and checkpoints
+are not deleted by this command. Ordinary `lf retry` still invokes Work code; it is not this
+publication-only operation. Local publication uses configured `storage.dataset_root`, or the local
+registry's sibling `datasets/published`; remote publication requires a configured permanent root.
+
+<a id="guide-dataset-reconstruction-failures-before-sealing-0171"></a>
+
+#### Failures before sealing (0.17.1)
+
+Before the first copy, `outputs.dataset` now stores `publication-request.json` and a streaming
+`members.jsonl` with exact source checksums in its publication checkpoint collection. If that
+volume cannot accept the initial metadata, it uses an owned `.publication-requests` directory on
+the publication volume. A failure prints the exact request directory. The same
+`lf datasets publish-candidate REQUEST_DIRECTORY [--on CLUSTER] [--apply]` handles this request:
+preview checks every source byte and the declaration; apply only copies/seals/registers those
+bytes under existing locks. Source mutation, unsafe paths and immutable-version conflicts fail
+closed. It does not invoke a Work or rewrite the original failed Attempt as succeeded.
+
+Older failures may have retained validated source files and their member index, but no complete
+publication request. Do not invent missing scientific metadata. Explicitly restore the original
+member/asset declaration, schema, metadata and provenance, then use the public preparation API:
+
+```python
+from lambdaforge.data import DatasetIndex, DatasetPublisher
+
+# original_members must match the producer's declaration, including any extra design assets.
+# An existing validated index can provide the basic members, without recalculating geometry.
+original_members = (member.to_dict() for member in DatasetIndex(source / "members.jsonl"))
+request = DatasetPublisher().prepare_publication(
+    name, version, original_members,
+    source_root=source, request_root=recovery_directory,
+    build_provenance=original_provenance,
+    metadata=original_metadata, target_schema=original_target_schema,
+    scientific_identity=original_scientific_identity,
+)
+print(request)  # Use publish-candidate on this directory, preview first.
+```
+
+For WISDOM's older preprocessing failure, its retained `attempt-0001/dataset/members.jsonl`
+and `dna-validation/dna-validation-report.json` are the starting evidence. Preserve its original
+first-member `dataset_design` asset and publication declaration too; do not infer them from NPZ
+internals. This repeats only inventory verification/publication, not geometry or annotation.
+
+<a id="guide-dataset-reconstruction-conflicting-local-and-remote-registries"></a>
+
+### Conflicting local and remote registries
+
+`lf datasets list --all` and the Console Datasets screen discover every configured cluster's small
+registry. Equal name/version/content merges locations; distinct content stays in separate visible
+rows, marked **CONFLICT** in the Console. Listing never changes indexes and incomplete discovery is
+visible. Member reads and whole-version deletion never guess an identity in a conflict.
+**Datasets → exact identity row → Manage copies…** remains enabled: choose a target and
+**Keep as project reference**, **Remove registration · keep files**, or **Delete managed copy**.
+Every operation previews the exact hash/root and requires confirmation. REFERENCE marks the
+controller reference; other divergent rows remain CONFLICT until explicitly retired.
+
+The same native CLI operations are preview-only unless `--apply` is supplied:
+
+```bash
+lf datasets list --on gpu16 --json  # obtain the full exact content ID
+lf datasets adopt corpus@6 --on gpu16 --content-id sha256:FULL_ID_16
+lf datasets adopt corpus@6 --on gpu16 --content-id sha256:FULL_ID_16 --apply
+lf datasets delete corpus@6 --on gpu12 --content-id sha256:FULL_ID_12  # preview
+lf datasets delete corpus@6 --on gpu12 --content-id sha256:FULL_ID_12 --apply
+# Index-only alternative, including a broken/missing copy or legacy external root:
+lf datasets remove corpus@6 --on gpu12 --content-id sha256:FULL_ID_12 --apply
+```
+
+Replace the example IDs with complete observed hashes. Adoption verifies all source checksums
+on its host before archiving/replacing the controller declaration. It chooses **future resolution**,
+not a scientific equivalence certificate: it does not rewrite other registries, relabel bytes,
+overwrite immutable publications or change previous Runs, pinned input IDs, checkpoints or provenance.
+To retain a divergent representation as published evidence, use a distinct explicit version.
+
+Exact deletion independently selects the target registry identity, even if the controller points
+elsewhere. It requires a matching manifest, managed path and no active consumers. Index-only removal
+does not delete bytes or free disk space and can retire a corrupt/missing physical copy; the registry
+must still be readable and valid. Empty entries are retired so they do not reappear in inventory.
+Both operations reject a changed hash/root, lock the target registry, and archive the previous
+declaration in `dataset-registry-history/change-*.json` before mutation. Archive entries record
+before/requested state, not proof a subsequent write succeeded. Unreachable/corrupt registries cannot
+be treated as absent. If remote retirement succeeds but controller cleanup fails, inspect both
+inventories again; never retry against an assumed identity. Historical evidence is never deleted.
+Ordinary unpinned operations still fail closed; `reconcile` remains identity-preserving.
+
+<a id="guide-dataset-reconstruction-durable-equivalence-certificates"></a>
+
+### Durable equivalence certificates
+
+`DatasetEquivalenceCertificate` reuses the immutable ProductRegistry as a `ScientificReport` with
+the reserved `lambdaforge/dataset-equivalence:v1` contract. It runs the existing whole-dataset
+comparison before sealing approval; it does not accept an arbitrary approval JSON as proof.
+The certificate binds both exact content IDs, the complete scientific declaration, verifier ID,
+variable policy and comparison evidence. Operational roots, comparison timestamp and producing
+Execution/operation provenance are separate from scientific/content identity.
+
+```python
+from lambdaforge.data import DatasetEquivalenceCertificate
+from lambdaforge.products import ProductRegistry
+from my_project.dataset_checks import verify_member
+
+certificate = DatasetEquivalenceCertificate.build(
+    "/published/reference", "/sealed/reconstruction",
+    name="corpus-reconstruction-check-v1",
+    scientific_contract=science_declaration,  # The full explicit dataset contract.
+    verifier=verify_member,
+    verifier_id="my_project.verify_member:v1",
+    policy=variable_specific_policy,
+    producer={
+        "execution_id": "<recorded producing Execution or comparison operation>",
+        "evidence_fingerprint": "<recorded source/comparison identity>",
+    },
+)
+registry = ProductRegistry()
+preview = certificate.publish(registry)  # No locks/files/registry changes.
+certificate.publish(registry, apply=True)
+restored = DatasetEquivalenceCertificate.load(registry, certificate.product.name)
+```
+
+Unresolved, scientifically different or corrupt comparisons cannot be certified. Byte-identical
+copies still need an explicit scientific declaration for a scientific certificate. Historical
+manifests need the same explicit content-bound `scientific_contracts` assertions as `compare`.
+Reports above the catalog's 512 KiB metadata bound fail explicitly; no evidence is truncated.
+`lf products show/provenance/export/import` and Console Products inspect/transport these records.
+The recorded verifier is never executed on load/import.
+
+Certificates are trusted project assertions, not cryptographic authenticity or transitive equality.
+`accepts(reference_content_id=..., candidate_content_id=..., scientific_contract=...)` tests only
+that exact recorded pair and contract; it is not a current integrity check. Verify the materialized
+candidate separately with `DatasetOperations.verify(root, candidate_content_id)` before use.
+Never substitute the reference's content ID for the candidate's or overwrite an immutable version.
+Automatic contract-aware Work YAML resolution is **not implemented yet**: ordinary typed dataset
+inputs still require exact content. No certificate silently changes that behavior.
+
+<a id="guide-dataset-reconstruction-required-wisdom-changes-not-performed-by-lambdaforge"></a>
+
+### Required WISDOM changes (not performed by LambdaForge)
+
+For `wisdom-dna-reduced@6`, the three reported hashes are distinct exact representations. Matching
+45/47 NPZ entries and 27 tiny eigenvector differences for `10FI_Y` do not establish equivalence of
+589 proteins. WISDOM should call `dataset_preflight` before geometries/annotations, expose its
+publish/rebuild intent, checkpoint expensive results, declare exact sources/design/labels plus
+algorithm contract, and move absolute paths/framework runtime provenance out of NPZ scientific
+payloads into manifest provenance/sidecars. Relevant algorithm changes still belong in the contract.
+Provide a versioned member verifier that checks all variables, protects labels/splits/source bytes,
+and uses justified variable-specific tolerances and spectral invariants. Compare **all** members,
+save the report, and publish a new version if bytes differ. Do not modify historical registered NPZs
+in place, reuse a conflicting `@6`, or infer a universal tolerance from this one protein.
+
+
+<a id="guide-storage"></a>
+
+## 26. Storage admission and safe cleanup
+
+[Español](MANUAL.es.md#guide-storage) · English
+
+<a id="guide-storage-inspect-and-clear"></a>
+
+### Inspect and clear
+
+```bash
+lf clusters storage CLUSTER --json
+lf storage status --on CLUSTER --json
+lf storage reconcile --on CLUSTER --json         # measure; no metadata mutation
+lf storage reconcile --on CLUSTER --apply       # update diagnostic ledger only
+lf clean --on CLUSTER              # preview; no deletion
+lf clean --on CLUSTER --apply      # recheck and collect safe candidates
+```
+
+In the Research Console, open **Clusters → your cluster → Clear storage…**. The operation
+previews reclaimable categories and protected references, requires confirmation, runs outside
+the UI loop and reports pending/success/failure in the activity panel. **Clear output** only
+clears the visible terminal text. Neither operation forgets scientific history. Use native
+`lf delete` or `lf jobs clear` for deliberate history deletion.
+
+Explicit storage inspection inventories owned directories. Normal resource probes use filesystem
+capacity and small lease records, not recursive scans, checkpoints or dataset assets. Reports
+separate category sizes from physical filesystems; apparent bytes are not physical free space.
+`reconcile` compares deep measurements with `state/storage-ledger.json`, reports size/file-count
+drift and can atomically update that versioned ledger. It never removes files or changes scientific
+records. Overlapping categories are not additive. The ledger does not replace physical free-space
+checks or existing references; a corrupt ledger is reported rather than silently overwritten.
+
+<a id="guide-storage-admission"></a>
+
+### Admission
+
+```yaml
+resources:
+  storage: 100GiB
+```
+
+This declares a future storage commitment for the outer Job allocation, not a filesystem quota
+and not its current measured usage. It does not prevent arbitrary consumer code from writing
+more bytes. Cooperating LambdaForge Jobs on the same host use a shared, filesystem-specific
+lease authority. Submission never combines free capacity from different volumes.
+
+Admission requires `physical free - other active commitments - new commitment >= safety` and
+available inodes when the filesystem reports them. Usage does not shrink the declared commitment;
+it is released at supervisor completion or after positively verified owner death. Unreadable,
+corrupt or ambiguous ownership blocks new commitments rather than granting fictitious capacity.
+PID existence alone is not liveness. Storage checks the recorded birth time: a different birth
+proves that the original owner no longer holds that PID; a zombie/dead process cannot use its
+commitment. Those stale same-host records are reclaimed only during locked admission. Read-only
+status never deletes them. A matching living lifetime retains its commitment across argv changes
+(exec), while signal authorization still requires the stricter birth/command match. Inaccessible
+and foreign-host identities remain protected. An existing owned allocation is not reserved again
+by its workers or Fleet offer.
+
+Ownership refusals raise `StorageOwnershipError`, not ENOSPC. Diagnostics name the lease, host
+and owner; `lf storage status --json` exposes bounded ownership issues. Inspect the recorded host,
+restore process-inspection access or wait for verified owner exit, then retry the publication.
+Do not delete live/foreign leases or reset scientific history. Even a zero-byte reflink checks
+ownership, physical safety and inodes; nested transactions have independent exact release identities.
+
+When admission cannot proceed, direct Jobs wait before acquiring CPU/GPU leases. The state
+includes requested/free/reserved/safety bytes and the reason. The same authority is available
+inside scheduler-owned native workers. Safe automatic GC is attempted before continued waiting;
+healthy science is not killed to reclaim disk. No Run is restarted by cleanup.
+
+Configure the shared authored cluster profile (example):
+
+```yaml
+storage:
+  state_root: /durable/lambdaforge/state
+  cache_root: /scratch/lambdaforge/cache
+  run_root: /scratch/lambdaforge/jobs
+  dataset_root: /durable/lambdaforge/datasets
+  lease_root: /durable/lambdaforge/host-leases
+  cache_max_size: 500GiB
+  cache_max_age: 30d
+  safety:
+    min_free: 20GiB
+    min_free_percent: 5
+  terminal_jobs:
+    grace_period: 2d
+```
+
+The larger absolute/percentage floor wins. Default free-space safety is 5%; default successful
+checkpoint grace is two days. Project scoping changes operational roots, not the host-wide lease
+root. The console profile editor exposes these fields as well as native `clusters set/unset`.
+
+Pressure is reported as NORMAL, SOFT_PRESSURE, HARD_PRESSURE or CRITICAL using physical free
+space, safety, leases and inode exhaustion. Reservations are cooperative, not protection against
+another user's writes or an external disk quota.
+
+For SLURM, no portable scratch directive is assumed. Positive storage requests produce an
+omission warning unless `resource_mapping.storage` is configured for the site, for example
+`{option: tmp, value: "{storage_mib}"}`. Worker-side root admission does not imply SLURM has
+reserved that space. Fleet placement requires fresh known storage fit for a positive requirement;
+unknown capacity is not permission to dispatch.
+
+<a id="guide-storage-what-collection-can-remove"></a>
+
+### What collection can remove
+
+Collection respects active Job, exact environment, runtime, bundle and Work-cache references.
+Environment builds protect their own prefix and mutating package categories, not unrelated
+Work caches. Unknown ownership stays protected. Only positively identified dead, stale same-host
+build owners permit orphan temporary cleanup; foreign-host/legacy markers are retained.
+A dead local controller alone is insufficient if pip/Conda still references the exact temporary
+prefix. Unreadable process evidence also keeps it protected. Bootstrap uses an existing host
+interpreter for ownership metadata; that interpreter need not satisfy the scientific Work version.
+
+Automatic cache collection observes authored quota/age, pressure and proven orphan status; without
+an authored quota its ceiling is 10% of the cache filesystem capacity. Reconstructible lower-cost
+categories are selected before expensive environments, then by last use. Protected entries can
+prevent reaching a quota; the plan reports unresolved excess instead of deleting them.
+`lf clean` additionally includes inactive reconstructible Work caches. Categories include pip,
+Conda/native/runtime packages, managers, environments, runtimes, bundles and temporary content.
+
+Cache deletion records intent, renames an exact entry into owned trash, and resumes interrupted
+trash deletion idempotently. It never replays an uncommitted intent against newly referenced
+original content. `state/storage-gc.jsonl` records applied operational collection. Results, logs,
+metrics, provenance, published datasets, researcher-owned mirrors, successful unpublished
+artifacts and active/unknown Jobs are not cache candidates.
+
+<a id="guide-storage-checkpoints-and-publication"></a>
+
+### Checkpoints and publication
+
+Failed/interrupted Executions retain recovery checkpoints. Terminal artifact compaction continues
+to discard partial failed artifacts and verified redundant published output bytes. A **successful**
+Execution may release unpinned checkpoints after its grace period. Keep durable scientific models
+as registered outputs; explicitly pin resumable state that must outlive ordinary retention:
+
+```python
+self.checkpoints.pin("best/model.ckpt", reason="retain-for-follow-up")
+self.checkpoints.unpin("best/model.ckpt")  # metadata only; does not immediately delete
+model = self.outputs.from_checkpoint("model", "best/model.ckpt", release=True)
+```
+
+`from_checkpoint` seals an independent registered artifact and checks source/snapshot identity.
+Dataset publication can read an owned checkpoint directory directly, avoiding an intermediate
+Attempt copy:
+
+```python
+self.outputs.dataset(
+    name="example", version="1", members=members,
+    source_checkpoint="prepared-records",
+    release_checkpoints=["prepared-records"],
+)
+```
+
+Member asset paths are relative to that named checkpoint directory. Explicit release becomes
+eligible only after successful Execution finalization and a verified independent artifact or
+dataset publication; changed/missing destination bytes invalidate the proof. Copies use
+copy-on-write where supported, otherwise independent regular copies—never writable hard links.
+This is not a promise of zero-copy on every filesystem.
+Managed snapshot copies reserve their additional bytes on the **destination** filesystem, including
+external `publish_to` and dataset assets. An insufficient volume triggers one safe, same-volume cache
+collection attempt before a compact space diagnostic; GC never scans or deletes that external
+publication directory. Uncommitted copies retain their original checkpoints. These incremental
+copy commitments are released on success/error, do not silently lower the Job's declared commitment,
+and do not multiply physical payload bytes for a successful reflink. A clone checks safety/inodes;
+its full-copy fallback must first reserve the payload bytes.
+
+Cleanup takes the Execution writer lock, rechecks pins/identity and journals checkpoint deletion;
+it cannot race an active Study recovery writer. `checkpoint-retention.json` records removals while
+Attempt results, logs, metrics and history remain. Corrupt/missing retention evidence fails closed.
+
+<a id="guide-storage-current-boundaries"></a>
+
+### Current boundaries
+
+Run-root admission and managed publication-copy reservations are implemented. Bundle staging and
+dependency provisioning do not yet have separate byte reservations on their destination volumes.
+Dataset index/manifest generation is not a disk quota. Managed environments
+still use identity v2 with exact wheel hashes: dependency environments and independent code layers
+have **not** yet been separated. Build markers are conservatively protected, but cross-host orphan
+proof remains conservative. Both Python-runtime and managed-environment build markers now use
+the same atomic GC handshake and bounded heartbeat, including reuse verification. Invalid complete
+environment prefixes are preserved rather than replaced underneath referenced Jobs. Explicit
+`lf storage reconcile` provides a diagnostic measurement ledger, not a complete per-write allocation
+ledger. Do not treat cleanup as protection against every ENOSPC during preparation.
+
+
+<a id="guide-managed-reports"></a>
+
+## 27. Full-resolution managed project report tabs
+
+[Español](MANUAL.es.md#guide-managed-reports) · [Work results](#guide-work-results)
+
+`html_section` remains the self-contained HTML API (16 MiB/document, 64 MiB/report).
+For larger retained visualizations, use `self.outputs.html_bundle`. This is one ordinary
+managed directory artifact, not a new scientific store or runner. LambdaForge never selects
+proteins, seeds, checkpoints, winners, points or feature channels for a project.
+
+```python
+bundle = self.outputs.html_bundle("predictions", section="proteins", title="Proteins")
+bundle.entry.write_text(inspector_html)
+bundle.asset("catalogue", filename="catalogue.json", media_type="application/json").write_json(rows)
+bundle.asset("surface", filename="surface.f32", metadata={
+    "dtype": "float32", "byte_order": "little", "shape": [point_count, 3],
+}).build(write_full_surface)
+```
+
+The project declares every asset; serializers receive the managed output path. Assets are
+opaque bytes, not JSON arrays hidden in HTML. Float32, NaN/Inf and explicit validity masks can
+therefore remain exact. Give each file a unique stable ID and portable relative filename.
+Logical IDs are ASCII; filenames are NFC Unicode and must not collide ignoring case. Absolute
+paths, traversal, symlinks, special files, duplicate IDs and undeclared files are rejected.
+
+Finalization seals `lambdaforge-report.json`: version, entry HTML, asset IDs, relative filenames,
+byte sizes, native managed checksums, raw-content SHA-256, media types and project metadata.
+The manifest itself is attested in the original Run artifact. The public schema is packaged as
+[`report-bundle-v1.json`](../src/lambdaforge/schemas/report-bundle-v1.json).
+Entry HTML remains bounded to 16 MiB and the manifest to 8 MiB; these are not asset-data limits.
+The full directory is retained/exported with the ordinary artifact integrity contract.
+
+<a id="guide-managed-reports-browser-api-and-lifecycle"></a>
+
+### Browser API and lifecycle
+
+Inside the project entry HTML:
+
+```javascript
+await lambdaforgeReport.ready;
+const controller = new AbortController();
+const bytes = await lambdaforgeReport.load('surface', {signal: controller.signal});
+const positions = new Float32Array(bytes); // Consumer knows its own format/shape.
+// On selection change: controller.abort(); dispose renderer/GPU buffers/references.
+// On permanent shutdown: lambdaforgeReport.dispose();
+```
+
+`lambdaforgeReport.assets` exposes declared IDs, sizes, media types and metadata. The public
+version is `1`. `load` resolves to an ArrayBuffer or rejects with a visible error/code;
+aborts use `AbortError`. Two concurrent loads are allowed, not an unbounded queue. Parent
+transport transfers ownership of buffers instead of keeping a whole-array cache. Switching
+tabs/documents closes the scoped port, aborts requests and unloads the iframe. The consumer
+must also dispose its own renderer and avoid accumulating old arrays.
+
+The iframe retains its opaque origin and `connect-src 'none'`: no external URLs, parent DOM,
+filesystem paths or provider credentials. A MessagePort goes only to the exact selected iframe.
+The trusted parent requests only manifest IDs, verifies size/raw checksum and transfers bytes.
+The server rechecks the original Run artifact and attested manifest before opening that one file.
+Missing/corrupt assets are presentation errors, never invented model failure/success. A bundle
+sealing error is saved as a visible named `presentation_error`; other scientific outputs survive.
+An exception raised by consumer code *before* finalization remains a normal consumer exception.
+
+<a id="guide-managed-reports-native-remote-and-offline-viewing"></a>
+
+### Native remote and offline viewing
+
+The Console's **Open HTML report** starts LF's read-only loopback viewer automatically for
+managed bundles. Lists/HPO scheduling/heartbeat never download asset bytes. Opening the report
+reads entry HTML and manifest; choosing an asset retrieves only that asset through native
+provider transport, gzip-compressed and verified. No application HTTP server, CUDA launch or
+training process is started. Remote reads have cancellation/deadlines and one disposable spool
+per selected asset beside the generated report, not on the system `/tmp` volume.
+
+For a generated or exported report:
+
+```bash
+lf reports serve ./reports/study-analysis.html --open
+# Explicitly raise the active-view safety bound if a *single* asset exceeds 256 MiB:
+lf reports serve ./reports/work-results.html --max-asset-mib 1024 --open
+```
+
+This serves only declared evidence on `127.0.0.1` with a private capability URL, exact Host and
+same-origin checks. It is not a general file server. Defaults: two active binary reads, eight
+connection threads, 256 MiB per selected asset and 30-minute idle shutdown. Ctrl-C closes only
+the reader, never the scientific job. No points/proteins are silently truncated to meet limits.
+
+`file://` cannot lazily fetch sibling files safely: opening it gives the native-viewer instruction.
+Export/import retains the complete bundle, generates the native report and deployment sidecar,
+and relocates references to package-owned bytes. Keep the entire package, not only the HTML;
+moving it to another computer and running the command above needs no original cluster or model.
+The sidecar is disposable presentation deployment metadata, not authoritative scientific state.
+
+<a id="guide-managed-reports-rebuilding-presentation-from-retained-inference-only"></a>
+
+### Rebuilding presentation from retained inference only
+
+Use the existing public ResultInput/Work lifecycle, not hidden paths or a second evaluator.
+Select an exact historical Run/Attempt via `lf results reference`, bind it as a typed `result`
+input, and read an explicitly retained artifact with `previous.artifact(NAME)`. Rebuild the
+bundle from those saved predictions; do not load a model or perform forward passes. See
+[`managed_report.py`](../examples/managed_report.py). Missing saved predictions must fail clearly:
+LF does not regenerate lost inference, substitute another seed or choose a checkpoint.
+
+Large payload browser validation is covered with a 70 MiB selected asset and a catalogue of
+206 consumer records. Scientific provenance and selection reasons remain project-authored;
+native tabs do not imply those choices were made or endorsed by HPO.
+
+
+<a id="guide-research-analysis"></a>
+
+## 28. Study research workspace
+
+[Español](MANUAL.es.md#guide-research-analysis) · [Manual](MANUAL.md#16-study-analysis)
+
+Current application release: **0.19.0**. Analysis v8 and saved-view v1 remain compatible; the
+implementation reports below retain their historical release context.
+
+<a id="guide-research-analysis-1-open-a-workspace"></a>
+
+### 1. Open a workspace
+
+```bash
+lf results analyze EXECUTION --recompute --json
+lf results report EXECUTION --output research.html
+```
+
+Install `lambdaforge[analysis-report]` for HTML; numerical analysis needs no Plotly. Remote Studies
+can be exported through `lf export STUDY --output ./exports` or the console's Export action. The
+report is an offline snapshot, not a live connection to the cluster. Regenerate to include new Runs.
+
+**Overview** is the first tab and the default on a newly generated report. It shows candidate
+states with exact counts, selection/confirmation context, unconditional predictive associations
+and suggested views that open the exact chart. The optional score-by-trial plot is collapsed in
+**Trials**, not the main overview. Reopening a file restores your last tab.
+
+Conditional parameters are deliberately excluded from the global importance chart. Their table
+shows the activation rule, observed active/total candidates, completed support, persisted model
+score and reliability. That score may mix parent-branch activation with within-branch variation;
+it is not a causal percentage, an additive share of responsibility or a reason to choose the branch.
+Interpretation is a horizontal, keyboard/mouse-scrollable carousel. The **ⓘ** help contains shared
+stability/seed-noise explanations; individual details preserve the exact original conclusion.
+
+Use **Language / Idioma** in the header for English or Spanish. Interface labels, contextual help,
+status summaries and supported chart labels switch immediately and persist for that generated
+file. Authored names and saved scientific statements remain in their original language; no remote
+translation service changes your evidence.
+
+**Research** retains actionable health cards. Configured questions and the separate exploratory
+inbox use horizontal carousels; the complete exploratory list is paged six findings at a time.
+**Inspect** explains evidence, method, support, ranking and limits;
+**Explore these observations** opens the relevant recorded values. An exploratory association is
+not a new HPO conclusion or a causal effect.
+
+**Metrics & health** searches labels, stable names, descriptions, aliases and tags. Filter by
+category and sort by priority, coverage or spread. Constants, missing and hidden metrics are
+initially omitted, not deleted: enable **Show constants / missing / hidden**. The metric inspector
+keeps units, direction, aggregation and unavailable information explicit. Redundancy groups are
+descriptive; each recorded member remains accessible. **Ctrl/⌘ K** searches metrics, parameters,
+families, findings, Trials and saved views. Ordinary metric, parameter, axis, type, palette and
+filter controls open an anchored searchable dropdown, not a modal. Global **Ctrl/⌘ K** search
+remains a deliberate dialog with favourites and recents. **Categories** is a collapsible tree: selecting `validation` includes every descendant,
+such as `validation/global` and `validation/surface/quality`.
+
+<a id="guide-research-analysis-2-declare-meaning-not-execution-policy"></a>
+
+### 2. Declare meaning, not execution policy
+
+Everything works without declarations. Standard directions/ranges and simple split prefixes are
+known; other semantics remain unknown. Add an optional `analysis` section to one Work YAML, or a
+class-level `Work.analysis_profile` mapping with the same shape:
+
+```yaml
+analysis:
+  defaults:
+    - pattern: val_*
+      metadata: {category: validation, split: validation, unit: ratio}
+  metrics:
+    val_accuracy:
+      label: Accuracy
+      description: Fraction of correctly classified validation examples.
+      category: validation/quality
+      direction: max
+      range: [0, 1]
+      aggregation: latest
+      visibility: primary
+      aliases: [accuracy]
+      priority: 10
+    rejected_fraction:
+      category: integrity
+      expected_to_vary: true
+      unit: ratio
+      range: [0, 1]
+    transformed_accuracy:
+      derived_from: [val_accuracy]
+      transformation: Explicit project-defined transformation.
+```
+
+Labels never rename logged keys. Units are display semantics, not automatic conversions.
+`aggregation` documents the actual evidence: `latest`, `best`, `selected_epoch`, `terminal`, `mean`
+or `unspecified`. Declaring `best` does **not** calculate a missing per-metric optimum. Selection
+retains its existing checkpoint/seed semantics; diagnostic summaries retain their actual values.
+Unknown aggregation is warned about rather than guessed.
+
+Optional fields also include `tags`, `role`, `phase`, `scale`, `notes`, `discovery: false`,
+`practical_scale` and `visibility: normal|advanced|hidden`. A practical scale describes metric
+health; it is not the objective's scientific equivalence margin. Precedence is inferred defaults,
+matching pattern rules in order, class declarations, then YAML metric overrides. YAML questions
+and defaults replace the corresponding class collections. Families merge by family name, with
+the YAML definition replacing a same-named family; individual metric fields merge.
+For a `steps` composition, put `analysis` on each Work step or class, not the composition root.
+Custom `Metric` subclasses may pass `metadata=` to the base constructor and reuse their public
+`.metadata` mapping in the class profile. Transient metrics are not discovered by constructing a Work.
+
+Declarations are validated locally: unknown fields, invalid ranges/categories/directions,
+ambiguous aliases/family coordinates, missing lineage parents and lineage cycles fail explicitly.
+Test-split metrics and metrics derived from test evidence cannot be objective components or hard
+constraints, including composite utility. Test evidence remains available for terminal post-hoc
+inspection, but is excluded from provisional automatic discovery. Analysis never adds an inferred
+guardrail, objective weight or pruning rule.
+
+<a id="guide-research-analysis-3-families-and-questions"></a>
+
+### 3. Families and questions
+
+Group repeated measurements semantically rather than listing hundreds of unrelated names:
+
+```yaml
+analysis:
+  families:
+    efficiency:
+      label: Quality by data fraction and strategy
+      dimensions:
+        strategy: {kind: categorical, values: [uniform, balanced]}
+        fraction: {kind: ordered, values: [10, 25, 100]}
+      template: quality_{strategy}_{fraction}
+  questions:
+    - {id: efficiency-view, kind: metric_family, family: efficiency}
+    - id: capacity-quality
+      kind: parameter_screen
+      parameters: [width]
+      metrics: [val_accuracy]
+    - id: expected-agreement
+      label: Agreement with transformed accuracy
+      priority: 10
+      kind: relationship
+      x: val_accuracy
+      y: transformed_accuracy
+      expected: positive
+```
+
+Dimensions can be numeric, ordered or categorical. `members` may explicitly map each stable metric
+name to its dimension coordinates instead of a template. Templates resolve at most 4096 unique
+members and use bare `{dimension}` placeholders, not Python expressions or formatting commands.
+Family plots retain dimension labels/order, missing values and observed support. Their
+SD is dispersion across candidates, not seed confidence; incomplete family support is not a paired
+intervention. Family members are never automatically collapsed as redundant.
+
+Question kinds are `relationship`, `consistency`, `parameter_screen`, `metric_family`,
+`category_summary` and `tradeoff`. Relationships/consistency require metric `x` and `y` and may
+declare `expected: positive|negative|equal`; tradeoffs list at least two metrics; category summaries
+name a category. Unknown required metric/family references fail validation. `optional: true`
+allows a metric reference absent from this dataset and records an unavailable question, not a
+fabricated result. Optional `label` and non-negative `priority` name and order the question cards;
+they do not weight HPO. Questions focus exploration; they do not schedule Runs or formalize a hypothesis
+test protocol. Category/family summaries and existing resource Pareto views remain descriptive.
+
+<a id="guide-research-analysis-4-how-discovery-works"></a>
+
+### 4. How discovery works
+
+1. Build a candidate-level matrix from **comparable completed evidence**. Censored candidates do
+   not receive exact final scores. Keep screening separate from fresh-seed confirmation and avoid
+   mixing fidelity rungs. Recorded aliases map to canonical analysis names.
+2. Profile every metric: finite/missing support, unique values, range, mean, median, SD, robust
+   spread and logged Run/seed support. Exact constants require repeated equal observations.
+   Metrics observed in fewer than half the candidates carry a `low_coverage` display warning;
+   candidate/Run coverage and seed support remain numeric. Association ranking also penalizes
+   the actual paired coverage rather than treating a few observations as complete evidence.
+   Near-constant display filtering uses spread relative to declared range/practical scale or
+   observed magnitude (`1e-6`), never an absolute epsilon that erases small-unit measurements.
+3. Inspect a deterministic bounded metric set, prioritizing declared priority. Group near-identical
+   rank responses (absolute Spearman at least `.995`, at least six paired candidates), except
+   families. This is a navigation suggestion, not proof that two metrics are interchangeable.
+4. Screen bounded parameter/metric and metric/metric relationships, interleaving both types and
+   rotating parameters so the first parameter cannot monopolize the budget. Numeric parameters use the
+   existing authored `ParameterSpace`, including log coordinates and categorical/conditional
+   semantics. Numeric responses compare rank correlation with a leave-one-out quadratic rank
+   response; categorical responses report eta-squared. Neither is a multivariate causal model.
+5. Confirm at most 32 shortlisted relationships by deterministic candidate permutations and
+   bootstrap sign stability. Reuse small design matrices; never build a candidate-squared distance
+   matrix or enumerate the full metric Cartesian product. Unconfirmed screened tests count as
+   `p=1` in Benjamini–Yekutieli adjustment. The default screen is 64 metrics/128 relationships/
+   256 permutations; advanced `analysis.discovery` can adjust `max_metrics`, `max_pairs` and
+   `resamples` within validated bounds, or disable discovery. All effective limits are persisted.
+6. Rank findings by separate effect/support/stability components. Down-rank relationships explained
+   by direct/transitive/shared metric lineage. Also retain invariance warnings, descriptive
+   1.5-IQR outliers, bounded categorical-context sign reversals and existing Study findings.
+   Persist ranking components and redundancy penalties. The inbox shows at most eight distinct
+   evidence groups; equivalent findings remain accessible in the complete list.
+
+Effects, support, stability, adjusted p-values and scientific confidence are different quantities.
+**Supported exploration** requires enough observations and a small adjusted diagnostic p-value;
+**preliminary** is not confirmed. Adaptive selection, multiple comparisons, reused data and seed
+noise limit these diagnostics: BY adjustment does not make an adaptively collected Study a formal
+randomized experiment. Bootstrap sign agreement is not the probability that a conclusion is true.
+Outlier/context signals are explicitly inspection-only and have no fabricated confidence.
+The methodology follows [SciPy's permutation guidance](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.spearmanr.html)
+and [dependent-test FDR adjustment](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.false_discovery_control.html).
+
+<a id="guide-research-analysis-5-explore-and-save"></a>
+
+### 5. Explore and save
+
+In **Explore**, choose **Analyze** (metric), **By** (parameter chips), optional **Compare with**
+(metric chips), and the completed/partial subset. **Explore observations** uses the existing
+renderer: one parameter means scatter, two mean a heatmap, and more mean parallel coordinates.
+Remove any chip with ×. Ordinary metric and advanced-control changes still preview immediately.
+**Advanced visualization options** holds explicit type/X/Y/Z, grouping, palette/reverse and visual
+normalization. Type/palette/filter menus share the searchable dropdown. Naming, notes and saving stay visible.
+
+- Multiple Y metrics share one scale only when declared units agree. Different/unknown units use
+  small multiples; **Visual 0–1 normalization only** is opt-in and never changes scientific values.
+- In **Parameters**, open **Analyze metric**, search e.g. `mean`, check a metric, then search `auroc`
+  and check another without closing the dropdown. All selections stay checked across searches.
+  Uncheck a metric to remove its curve; zero selections shows an explicit empty state. Arrow keys
+  navigate and Space toggles a checkbox; Escape/Done/outside click closes the dropdown.
+  Choose **Chart style**: lines/points, grouped bars, distributions across Trials with the same X,
+  or a heatmap for many metrics. Pie charts are deliberately absent: unrelated metrics are not
+  additive parts of a whole. **Arrangement** provides one combined chart or separate metric panels.
+  Further native Plotly views include individual Trial points (no averaging), step and area curves,
+  violin distributions with recorded points, horizontal bars, histograms and empirical CDFs.
+  Histogram/CDF views pool all matching candidate summaries rather than grouping parameter values;
+  use boxes/violins for that comparison. Connecting points is descriptive, not a fitted response.
+  Every automatic axis is titled with its member metric names, not an anonymous scale number.
+  **Y scales → Automatic** groups ranges with at least 50% overlap of the narrower interval
+  (including containment); all metrics in a group must agree pairwise. Constants may share a range
+  that contains them. Known different units never group automatically. Unknown units can share
+  a visual scale, not a scientific meaning. Override with independent or explicitly shared scales;
+  separate panels retain the chosen range grouping. Do not compare heights across independent axes.
+  **Dispersion** selects hidden SD, whiskers or a shaded ±SD band on numeric lines. Other styles
+  fall back to whiskers; distributions already expose the observations. SD is empirical variation
+  across candidate summaries, not seed confidence, and remains absent for a single observation.
+  Heatmap colours use per-metric visual min–max normalization, including a neutral colour for
+  constant rows; hover shows original means and missing values stay blank. Settings persist in
+  this generated HTML's browser storage; regenerating the report resets them. Explore keeps
+  its unit-aware small-multiple default and optional visual normalization. Selection changes do not
+  change scientific aggregation, objective policy or the persisted model response.
+- Observed pair heatmaps and numeric 3D surfaces retain empty untested cells; persisted surrogate
+  surfaces stay in their separately labelled model panel. 3D scatter supports categories.
+- Parallel coordinates use the chosen parameters (or the existing eight-parameter default for old
+  views) and one metric; missing coordinates are excluded explicitly. They do not fit new effects.
+- Trials retain partial/pruned markers. Search the ledger and compare two candidates in a category-
+  ordered metric/difference table. A conditional-root branch filter is available when applicable.
+  The comparison starts with primary/priority metrics; search or **Show all recorded metrics**
+  expands it. Unknown direction is never labelled improvement.
+
+**Interactions** has a metric-agnostic observed panel with shared parameter/metric pickers and
+heatmap/3D/surface choices. The existing predictive objective panel stays separate. **Evidence**
+(formerly Findings & evidence) retains scientific conclusions, surrogate diagnostics, seed/pruning
+evidence, methodology and the structured snapshot in expandable sections. Exploratory finding cards appear only in Research;
+the Run metric dashboard is unchanged and continues to use epochs.
+The complete audit snapshot is formatted on expansion and reuses the single serialized metric
+catalog. All panels share the same parsed catalog rather than constructing independent selectors.
+
+Save a named view with optional notes. Export/import **research-views.json** to reuse chart
+specifications, not evidence. Imports validate version, fields, metric/parameter references and
+size/count limits. Same-file browser preferences retain views, palettes, panel sizes, favourites
+and searches; regenerating creates a new preference scope. No cloud or LLM service is required.
+
+<a id="guide-research-analysis-project-html-tabs"></a>
+
+#### Project HTML tabs
+
+Domain visualizations belong to the consumer. Inside `Work.run`, declare a finalized managed
+HTML output and write your application's complete document:
+
+```python
+viewer = self.outputs.html_section("predictions", section="proteins", title="Proteins")
+viewer.write_text(render_predictions_html())
+```
+
+The Study's interactive HTML action, `lf results report SELECTOR --output report.html` and portable
+export collect these files only when explicitly requested. A named section creates one navigation
+tab next to Explore/Evidence/Resources. Multiple outputs or Runs in that section get a searchable
+document selector labelled by Trial/seed/output. Shared section titles must agree. No HTML content
+is fetched by overview, HPO, Analysis panels or ordinary polling; remote report reads are paged and
+cached on their owning host, outside the scheduling heartbeat.
+
+Documents are self-contained UTF-8 HTML: embed JavaScript/CSS, visualizations and data (including
+prediction data) in the file; relative asset paths and external requests do not work. LambdaForge
+does not generate domain logic, load NPZ files or expose Python callbacks to the browser. Each
+document uses an opaque-origin `sandbox="allow-scripts allow-downloads"` iframe and a restrictive
+CSP; project scripts cannot access the parent dashboard, local files, other sites or credentials.
+This is presentation isolation, not a sandbox for the trusted Work's Python code. The HTML remains
+interactive inside the frame. Parent preferences/navigation stay independent of project code.
+Managed artifact ownership, exact size and the persisted content fingerprint are verified before
+embedding. Symlinks, missing/changed content and documents exceeding 16 MiB (64 MiB total) fail
+explicitly rather than silently producing empty tabs. Declaration uses the same ordinary output
+lifecycle/retention; no second registry, runner or report plugin system exists.
+
+Standalone integrations can pass documents directly without executing a Work:
+
+```python
+from lambdaforge.analysis.Report import write_html
+
+write_html(analysis, "report.html", sections=[
+    {"name": "proteins", "title": "Proteins", "label": "Trial 3 · seed 7", "html": html_text},
+])
+```
+
+<a id="guide-research-analysis-6-architecture-safety-and-limitations"></a>
+
+### 6. Architecture, safety and limitations
+
+`MetricCatalog` owns meanings; `AnalysisProfile` validates immutable declarations;
+`ResearchAnalysis`/`ResearchDiagnostics` produce deterministic read models; modular offline assets
+render them. `StudyAnalysis` still owns effects, coverage, seed uncertainty, winner/confirmation and
+resource evidence. Analysis document version **8** adds `research` without removing existing fields.
+The obsolete, unused linear Study renderer was removed rather than maintained as a second path.
+
+Before execution, `analysis-semantics.json` records resolved declarations, known registry defaults,
+identity and versions. Child specifications reference this owned file instead of repeating its
+catalog per Run. Final analysis, reload, recovery and export use frozen evidence; changing labels
+does not alter the existing scientific evidence fingerprint or HPO decisions. The analysis cache
+also checks the separate semantics identity. Legacy Studies without declarations receive inferred
+metadata; old HTML-input documents gain a name browser but no invented retrospective findings.
+
+Limitations are intentional: discovery is bounded rather than exhaustive; unknown semantics stay
+unknown; nonlinear/context signals are coarse inspection tools, not a universal interaction model;
+no automatic causal claims or recommendation to modify objective weights; no new shared-seed
+confidence calculation; no generated data or imputation; no browser-side scientific fitting. The
+existing multivariate HPO/Study Analysis remains the authority. Import/export covers presentation
+views, not a portable live workspace or automatic HTML refresh. Exact coupled resource/performance
+claims still require adequate comparable resource and seed evidence.
+
+<a id="guide-research-analysis-7-implementation-report"></a>
+
+### 7. Implementation report
+
+This report records the implementation and local verification on 2026-10-03.
+
+1. **Previous architecture:** Study Analysis already owned normalization, winner/seed evidence,
+   coverage, multivariate effects and resources. HTML was chiefly a collection of independent plots.
+2. **Usability causes:** flat names/selectors, weak metric semantics, unavailable/constant values
+   competing for attention, single-metric navigation and missing research-level prioritization.
+3. **New structures:** `MetricCatalog`, immutable `AnalysisProfile`, bounded `ResearchAnalysis`,
+   inspection/ranking helpers and modular offline research presentation, integrated into that analysis.
+4. **Catalog declarations:** optional `analysis.metrics/defaults`, or `Work.analysis_profile`;
+   custom `Metric.metadata` is reusable without constructing scientific Work objects.
+5. **Profiles:** metric/family declarations plus validated questions/discovery rules, merged from
+   class and YAML and frozen independently of objective/execution policy.
+6. **Families:** explicit coordinates or bounded bare-placeholder templates; ordered/categorical
+   dimensions and incomplete member support remain visible in one grouped chart.
+7. **Metric health:** repeated equality, relative near-constancy, missingness, candidate/Run/seed
+   coverage, out-of-range and expected-variation warnings; no deletion or imputation.
+8. **Redundancy:** deterministic rank-similarity groups, expandable members and representative;
+   family members are protected. Ranking/inbox suppress repetitive evidence, not raw values.
+9. **Discovery:** interleaved parameter/metric and metric/metric screening, numeric rank/quadratic
+   response, categorical association, configured relationships and cheap inspection signals.
+10. **Multiplicity:** bounded deterministic permutations plus BY adjustment across the screened
+    hypotheses, including unconfirmed tests as `p=1`; limited resolution remains conservative.
+11. **Reliability:** support, effect, coverage, sign stability, adjusted diagnostic p-value and
+    novelty are separate recorded components. None is a probability that a finding is true.
+12. **Derived metrics:** validated acyclic lineage; direct/transitive/shared structural relationships
+    lose novelty. Direction and practical equivalence are not inferred from a derived formula.
+13. **Test evidence:** objective/components/constraints reject test-derived evidence locally;
+    provisional discovery excludes it, while terminal inspection retains recorded test values.
+14. **Persistence:** `analysis-semantics.json`, separate semantic identity, reference-only child
+    specifications and frozen defaults across finalization, reload, recovery and export.
+15. **HTML:** Research inbox, health/browser, semantic inspectors, diverse findings and progressive
+    Explore controls; removed the unused old linear Study renderer.
+16. **Search:** shared word/subsequence search over names, labels, aliases, descriptions/categories,
+    parameters, families, findings, Trials and saved views; keyboard, favourites and recents.
+17. **Multi-metric Parameters:** shared observed renderer; add comparison metrics, separate unknown/
+    different-unit scales, optionally normalize only the visual presentation.
+18. **Pair/3D:** observed scatter/heatmap/surface with categorical labels and untested gaps;
+    existing modelled objective surfaces remain separately labelled. Parallel coordinates are bounded.
+19. **Explore:** immediate preview, X/Y/Z, multiple Y, plot type, grouping, palette, partial evidence
+    and explicit normalization; advanced controls are not the opening experience.
+20. **Research Views:** named saved chart specifications, notes and same-file preferences;
+    bounded validated JSON import/export transports presentation, not scientific data.
+21. **Added regressions:** metadata precedence/validation, leakage/lineage, immutable reload,
+    namespaces, missing/censored evidence, metric health, families, deterministic/nonlinear discovery,
+    large catalogs, browser search/drill-down, units, comparisons and view persistence/import.
+22. **Verification:** Ruff and mypy passed; full pytest: **1118 passed**, four non-fatal Lightning
+    CPU-loader warnings. Focused analysis/CUDA/documentation tests, installed-wheel CLI/scaffold/
+    validation/HTML smoke and Chromium interaction/screenshots passed. A synthetic 500-candidate,
+    300-metric, 15-parameter, 15-seed matrix took **9.424 s**, produced **4,809,115 bytes** and used
+    only 32 expensive relationship resamples with default policy. Timing is machine-specific.
+23. **Versions/schema at implementation:** application release was **0.16.0**; analysis became **8**;
+    research/semantic documents start at **1**. YAML schema adds optional explicit analysis shapes.
+24. **Older evidence:** no declaration is required; missing semantics are explicitly inferred.
+    Existing scientific fields remain. Legacy HTML inputs get navigation but no fabricated findings.
+25. **Real limits:** discovery is bounded/observational and may remain preliminary; generic
+    saturation, subgroup/fairness and high-order causal models are not claimed. Existing objective
+    top-region/resource/seed analyses are reused, not generalized to every metric. External-baseline
+    ingestion and arbitrary point colour/size/candidate faceting are not added; the baseline is the
+    selected reference Trial in a two-Trial comparison. Saved views do not form a live workspace.
+
+No WISDOM files were changed and no real cluster was contacted during this verification.
+
+<a id="guide-research-analysis-8-second-round-simplification-report"></a>
+
+### 8. Second-round simplification report
+
+This section records the focused follow-up on 2026-10-03; section 7 describes the earlier foundation.
+The [conditional Study guide](#guide-conditional-studies) includes grammar and planning examples.
+
+1. **Removed controls:** long static metric/parameter selects for ranking, Parameters and X/Y/Z,
+   the second checkbox/search catalog for extra metrics, and the flat category select. Hidden values
+   are renderer adapters only; there are no hidden long option lists.
+2. **Preserved features:** ranking, multi-metric/unit-aware plots, observed heatmaps/3D/surfaces,
+   parallel coordinates, partial/pruned markers, families, candidate comparison, persisted models,
+   saved views/import/export, notes, favourites/recents and the individual Run dashboard.
+3. **Tabs:** Findings & evidence becomes Evidence. Scientific conclusions/seed/pruning/surrogate
+   audit stay there; exploratory cards stay in Research. Other scientific tabs retain their purpose.
+4. **Picker:** one catalog/dynamic dialog, bounded results, semantic/fuzzy search, keyboard selection,
+   favourites/recents; parameters show kind/domain/activation rather than bare names.
+5. **Explore:** Analyze / By / Compare with / subset, removable chips and smart plot inference.
+   Explicit X/Y/Z, type, grouping, palette and normalization remain optional Advanced controls.
+6. **Questions:** labelled, priority-ordered cards show human status, support/reason and Inspect,
+   before exploratory findings. Optional label/priority affects display, not scientific policy.
+7. **Hierarchy:** collapsible category paths; selecting a parent includes all descendants.
+   Metric-family dimensions remain distinct from category paths and parameter conditions.
+8. **Grammar:** `when: {parent: scalar}`, `{parent: {eq: scalar}}` or
+   `{parent: {in: [scalar, ...]}}`; multiple parents mean AND. Bare lists/unknown operators fail.
+9. **Representation:** immutable ActivationCondition predicates inside ParameterDescriptor;
+   canonical parent/membership ordering, historical scalar equality serialization, JSON persistence.
+10. **Authority:** Work normalization, exhaustive sweeps, RandomSearch, ParameterSpace/Sobol/
+    adaptive geometry, encode/decode/validity and analysis activation all reuse the same predicates.
+11. **Membership:** finite, nonempty, unique values checked against the parent domain; no implicit
+    OR, recursive expressions, domain expansion or consumer-specific branch API.
+12. **Equality:** explicit eq normalizes to the old scalar form. Numeric-range equality and
+    independent authored domain order retain their behavior; regressions protect old identity.
+13. **Inactive keys:** absent from candidates/arguments; signature defaults still apply. No null
+    placeholders, invented inactive category or serialization of irrelevant child values.
+14. **Duplicates:** active topological enumeration avoids inactive Cartesian multiplication;
+    repeated sweep choices fail instead of silently duplicating evidence identities.
+15. **Fixture:** six generic branches yield 1+2+10+16+9+18 = **56 unique candidates** × four shared
+    seeds = **224 required Runs**, equal to the intended union of independently described branches.
+16. **Reference:** the existing selector must match exactly one generated candidate; zero/multiple
+    matches fail. No fabricated inactive-value reference is introduced.
+17. **Preflight:** validate/explain/dry-run expose design/seeds/required Runs/branches/reference,
+    parallelism, GPUs and budgets. Human dry-run does not dump hundreds of Runs; JSON keeps the
+    complete planning data plus target-capacity observation.
+18. **Time:** scheduler wall-time and logical Study dispatch budget remain separate. Sequential
+    levels sum; parallel members use their maximum. Tests cover 1008 h/42 days and mixed compositions.
+19. **Capacity:** a bounded direct UUID/visibility probe rejects known impossible GPU requests before
+    bundling/submission. Failed/ambiguous probes stay unknown; occupancy is not capacity. Scheduler/
+    site-command grants retain their existing boundary; preflight never claims or broadens GPUs.
+20. **Steps:** root with/seeds/replicates/search/sweep/execution/objective/analysis fail explicitly
+    instead of being ignored. Root resources retain documented inheritance.
+21. **Consumer hook:** none added. Existing class/signature/type/marker validation is reused without
+    constructing Work. Arbitrary consumer semantics need consumer validation; a new callback contract
+    was not necessary for these focused changes.
+22. **Schema/version:** additive activation definitions and question label/priority, and rejection of
+    unused composition-root policy. Implemented against 0.16.0; analysis v8 and saved-view v1 remain compatible.
+    No new YAML version, runner, scientific policy or parallel condition DSL.
+23. **Compatibility:** frozen historical evidence is not rewritten; scalar identity, shared seeds,
+    objective/HPO/resource policies, retry/export and old HTML/saved views remain intact. Conditions
+    persist through the existing StudyDesign, initialization and recovery identities.
+24. **Tests:** grammar/AND/domain/cycles/order, immutable pickle/schema/identity round trips, finite
+    sweeps/reference, Sobol/random/analysis geometry, steps/root/time and synthetic pre-submit capacity.
+    Chromium covers 300 metrics/15 parameters, hierarchy, questions, pickers/chips, smart and previous
+    chart types, comparison and saved-view reload. Ruff/mypy pass; full pytest: **1136 passed**,
+    four nonfatal Lightning warnings. Final focused analysis/browser/config/docs checks: **63 passed**;
+    GPU-policy/config/docs/training smoke: **34 passed**. Wheel build, isolated installation and
+    scaffold/validate/dry-run smoke also pass, reusing the local environment's installed dependencies.
+    Explicit local CUDA integration: **1 passed**. Numeric-parent regression ensures observations
+    never redefine an authored range as a finite domain.
+25. **Limits:** no expression DSL, new fitting, automatic step merging, heuristic partition lint or
+    consumer-specific validation. Unreliable capacity stays unknown; membership needs a finite parent
+    domain. Adaptive counts describe a bounded window, not an execution guarantee. HTML is offline;
+    controls never schedule/prune Runs or mutate evidence.
+
+Verification is local/synthetic. No consumer project was edited and no remote Work was submitted.
+
+
+<a id="guide-coordinated-studies"></a>
+
+## 29. Coordinated Studies: implementation status and contracts
+
+[Español](MANUAL.es.md#guide-coordinated-studies)
+
+<a id="guide-coordinated-studies-status-fresh-adaptive-and-fixed-fleet-launch-recoverytransfer-integration-pending"></a>
+
+### Status: fresh adaptive and fixed Fleet launch; recovery/transfer integration pending
+
+`lf run CONFIG --on-fleet FLEET` now queues one durable local coordinator for repeated Runs,
+fixed sweeps, automatic paired sweeps and fresh adaptive HPO without fidelity continuation.
+The Research Console's Run Work target selector exposes
+the same `fleet:NAME` route. Scientific Work YAML remains unchanged. This is a **limited public
+capability**, not completion of the full coordinated adaptive-HPO request.
+
+The existing single-cluster route and independent `MultiClusterSubmissionService` remain unchanged.
+Independent submissions are not coordinated HPO.
+
+<a id="guide-coordinated-studies-implemented"></a>
+
+#### Implemented
+
+- One native `WorkRunner` and the original adaptive/fixed/`PairedSweepSequentialAnalyzer` planners. The
+  dispatcher executes exact proposals and invokes the existing result/frontier callbacks; it
+  never creates candidates, seeds or an optimizer on a worker. One Execution and final analysis.
+- One persistent provider Job per member, prepared by ordinary `ControlPlane` and `JobService`.
+  Its owned member runtime receives finite leased waves, reuses native isolated Run processes
+  and ARI, and drains accepted work before releasing its allocation. Waves do not create new
+  GPU claims or another scheduler Job.
+- Fresh member heartbeats under the exact owned Job attest immutable code/environment/file-input/
+  numerical identities plus actual homogeneous hardware. All five identities must match across
+  members before any scientific Run is leased. Preparation placeholders are never placement evidence.
+- Baseline GPU admission uses only inherited opaque tokens, native short-lived hardware/memory
+  probes, per-member caps and physical headroom. No broadening of device grants. A busy wave offers
+  zero spare slots: **GPU co-location and incremental ARI refill inside a Fleet member are pending**.
+  Offers expire; physical `lf fleets offers` observations alone never grant dispatch capacity.
+- The common prepared-provider path retains direct/site-command/SLURM policy, TLS, bundles and
+  immutable managed environments. Loopback CPU and tiny real CUDA acceptance exist; this is not
+  yet end-to-end SSH, site-command or SLURM acceptance.
+- Typed file markers retain authored scientific parameters and verify canonical bytes/size on
+  preparation and worker binding. Large inputs still require the existing project mirror.
+  Distributed dataset attestation remains rejected; matching NAME@VERSION is not enough.
+- Existing atomic coordinator v2 leases, submission fences, unknown ownership, quarantine,
+  caps, original clock/budgets and reconciliation remain authoritative. The global placement wave
+  additionally respects the native global parallelism ceiling. No lease is retried from a lost
+  connection alone.
+- Member Jobs remain in `lf jobs` but do not become independent semantic Works. The parent is
+  shown as `fleet:NAME`; active and terminal per-Run metadata includes exact
+  cluster/Job/shard/lease/Attempt. Native worker Run records project bounded latest/best scalars
+  into the coordinator's existing Study view. `lf show STUDY --run KEY --json` and
+  `lf logs STUDY --run KEY` read live or terminal curves/logs on the verified member owner, lazily.
+  The coordinator never opens a remote path locally. Display summaries do not substitute for
+  the durable scientific scalar stream below.
+- Native `metrics.jsonl` and `training-metrics.jsonl` are transported incrementally in complete,
+  SHA-256-verified records, at most 32 KiB per channel/Run/read, with optional lossless compression.
+  Exact Study/Run/Attempt/lease/member/shard identities fence every read; byte offsets preserve
+  order and deduplicate retransmission. Durable receiver cursors recover unacknowledged appends
+  after interruption; missing/corrupt acknowledged data, gaps and contradictory replay fail closed.
+  Workers retain their native evidence through disconnection. Logs and bulk artifacts are not
+  part of this stream. A terminal result reaches the planner only after its full scalar stream.
+- The same central adaptive planner consumes completed evidence and all leased/queued/running
+  proposals across members. Its existing pending-aware acquisition (BoTorch qLogNEI when available,
+  deterministic mixed-kNN fallback otherwise) is retained. Spare admissible capacity invokes the
+  native bounded scientific frontier, not worker-side/random proposal generation. Unleased
+  reprioritization preserves scientific identity and records the prior invocation/priority.
+- Central pruning reuses native utility/history/calibration rules and sends durable idempotent
+  exact-lease stop requests. Required/startup/confirmation evidence stays protected. Requests
+  stop cooperatively; an unavailable connection is not pruning acknowledgement or terminal evidence.
+  Verified local scalar mirrors feed historical calibration without opening execution-host paths.
+  Checkpoint continuation/recovery is still gated, not inferred from similarly named local paths.
+- `lf cancel STUDY` stops the coordinator before enumerating and cancelling exact member owners.
+  Semantic deletion previews the whole owned Job family and refuses active members. Individual
+  cleanup cannot remove evidence referenced by the family. Remote bulk compaction stays on its
+  execution host; coordinator paths are independently owned.
+
+<a id="guide-coordinated-studies-commands-available-now"></a>
+
+#### Commands available now
+
+```bash
+lf run study.yaml --on-fleet research --dry-run --json  # No grant, upload or Job.
+lf run study.yaml --on-fleet research                  # Durable asynchronous hand-off.
+lf show STUDY --json
+lf show STUDY --run trial-00001-seed-4 --json
+lf logs STUDY --run trial-00001-seed-4
+lf cancel STUDY --dry-run
+lf cancel STUDY --apply
+lf delete STUDY                                       # Preview terminal family.
+lf delete STUDY --apply
+```
+
+The coordinator is currently `local`; members must be managed cluster profiles, not the built-in
+local target. Dry-run validates source/signature/design, member roles and credentials, reports caps
+and deferred environment/equivalence checks, and does not probe or acquire GPUs. The durable hand-off
+captures operational profiles and credential references, never credential values. Ordinary
+`--on` and `--on-fleet` are mutually exclusive. `--rerun`, `--restart`, hidden recovery options and
+`--wait-for-submit` are rejected for this route.
+
+<a id="guide-coordinated-studies-not-implemented-yet"></a>
+
+#### Not implemented yet
+
+Checkpoint stream/continuation and distributed recovery; predictive/lookahead
+policy; member co-location; public pause/resume/reconcile and adoption; coordinator restart recovery;
+live membership expansion/drain; dataset-placement equivalence; checkpoint/artifact transfer,
+compression/resumption and distributed export; full placement/utilization TUI/HTML; StudyDecision
+and dependency gating. Internal coordinator lifecycle/catalog controls are not substitutes for those
+public operations. Fleet retry refuses single-cluster replay; export refuses a coordinator-only
+package that would silently omit member evidence.
+
+The request is therefore **not complete**. Do not describe this limited route as production-ready
+full distributed production readiness or claim provider acceptance from loopback/fake tests.
+
+<a id="guide-coordinated-studies-incremental-validation-2026-10-05"></a>
+
+#### Incremental validation (2026-10-05)
+
+Ordered stream regressions cover bounded multi-chunk reads, compression, replay, incomplete records,
+receiver interruption, foreign leases and symlinks. Member regressions cover directed pruning,
+idempotence, immutable commands and protected evidence. Public loopback CPU integration runs the
+native adaptive planner across two prepared allocations and retains one HPO state/final analysis.
+Historical pruning is also exercised using verified mirrors with deliberately absent owner paths.
+These tests do not establish real remote/GPU adaptive acceptance or coordinator restart recovery.
+
+<a id="guide-coordinated-studies-validation-of-this-implementation-pass-2026-10-04"></a>
+
+#### Validation of this implementation pass (2026-10-04)
+
+- `ruff check .`: passed.
+- `mypy src/lambdaforge`: passed, 558 source files.
+- Complete `pytest`: 1,246 passed; four Lightning warnings in CPU tests.
+- A freshly built, installed wheel passed packaging smoke checks, installed-import verification,
+  `run --help`, scaffolding, validation and read-only dry-run.
+- Public Fleet integration exercised two loopback CPU members, including live Run metrics/logs;
+  separate prepared-provider tests exercised tiny real local CUDA workloads. These are not
+  real SSH/site-command/SLURM acceptance tests. WISDOM and real clusters were not modified or run.
+- GitHub CI was not executed. Passing local checks does not establish the pending capabilities
+  listed above.
+
+<a id="guide-coordinated-studies-fleet-catalog"></a>
+
+### Fleet catalog
+
+Fleet configuration belongs in `lambdaforge.clusters.yaml`, never the scientific Work YAML:
+
+```yaml
+clusters:
+  a: {transport: ssh, host: a-login, user: USER, scheduler: local}
+  b: {transport: ssh, host: b-login, user: USER, scheduler: local}
+  queue: {transport: ssh, host: queue-login, user: USER, scheduler: slurm}
+fleets:
+  research:
+    coordinator: local
+    members:
+      - {cluster: a, max_gpus: 2, max_runs: 4}
+      - {cluster: b, max_gpus: 4}
+      - {cluster: queue, max_inflight_jobs: 2, required: false}
+```
+
+Cluster profiles keep their own GPU launch/claim policy, project mirror and data environment. All
+references must resolve locally before any probe. User < project < explicit precedence is shared
+with the existing catalog. A fleet override replaces its whole membership list; it does not merge
+lists accidentally. Cluster definitions, credential references and execution profiles are retained.
+Caps accept positive integers or null; online/draining/disabled are operator controls, not probes.
+
+```bash
+lf fleets list --json
+lf fleets show research --json
+lf fleets offers research --json         # Explicit read-only probes; not an allocation.
+lf fleets drain research b               # Preview catalog change.
+lf fleets drain research b --apply
+lf fleets disable research b --apply     # Never signals active Jobs.
+lf fleets enable research b --apply
+```
+
+Use `lf fleets --catalog PATH ...` to select an explicit catalog. Otherwise mutations go to the
+project catalog. Saving a fleet does not save secrets or change Work scientific identity.
+
+<a id="guide-coordinated-studies-ownership-and-persistence"></a>
+
+### Ownership and persistence
+
+The current local driver owns a project-scoped coordinator below the durable JobStore's
+`fleets/PARENT_JOB/coordinator`, with independently owned native Execution metadata beside it. `coordinator.json`
+is schema version 2 (with a v1 reader) and is atomically fsynced with the existing JSON publisher under the existing
+cross-process file lock. `leadership()` fences the planning loop. Short state transactions never
+hold a lock over network I/O. The state contains immutable initialization/budgets, Run definitions,
+all leases/Attempt history, placement reasons, shard identities, member controls and quarantine
+references. Separate immutable digest-named `results/` files hold accepted envelopes; `quarantine/`
+holds contradictions. Missing/corrupt/version-incompatible state fails closed, never silently resets.
+Restart cannot silently change coordinator authority. Readiness attestations must be explicit
+booleans and proposed scientific payloads must be strict finite JSON before they are persisted.
+
+The global Run key hashes `(study_identity, candidate, seed, phase, fidelity)` using the existing
+scientific identity primitive. A lease adds Attempt number, opaque lease ID and assigned cluster.
+Two drivers cannot reserve the same logical Attempt. Offers exclude locally acknowledged resident
+leases; the coordinator subtracts additional unacknowledged leases to prevent repeated stale
+observations from overbooking during the prepare/submit gap.
+
+A submission-intent fence is persisted **before** the provider call. An ambiguous acknowledgement
+therefore requires observation by immutable shard ID, not another submit or a new Attempt. The
+executor protocol is independently idempotent by shard ID. No credentials belong in a shard.
+Late submission acknowledgements attach to their exact Attempt: they cannot overwrite a completed
+result, move a running Run back to queued, or attach an old Job ID to a replacement Attempt.
+
+Fresh/healthy executor offers can permit new work, but expired offers cannot. Transport failure
+marks active leases `unknown_remote`, with exponential reconnection backoff capped at five minutes.
+It does not cancel workers, create failures or release scientific identity. Missing observations
+also remain unknown. Lost-attempt retry requires a local scheduler/owned-process/shard authority
+proof naming the exact lease and confirming no live owner, and remains bounded. Arbitrary consumer
+exceptions are not retry triggers. Old shard records do not consume the replacement Attempt's Job cap.
+
+Result envelopes must match Study, Run, Attempt, lease, target, parameters and execution equivalence.
+Exact duplicated bytes are harmless; contradictory or late released-Attempt results are quarantined
+with a compact diagnostic, never overwrite valid evidence. A crash between immutable result write
+and atomic index write is repaired by repeated delivery. Per-Run result reads verify the digest.
+Root/evidence symlinks are rejected. Overview snapshots expose compact counts, not every result.
+
+Reservation currently conservatively consumes the `max_runs` dispatch allowance; an operator
+withdrawal before the submission-intent fence refunds its unspent reservation, preserving the
+Attempt audit. Wall-time is
+measured from immutable coordinator creation across restart. Physical resource accounting and
+reversible unstarted reservation accounting still need the production dispatcher integration.
+
+<a id="guide-coordinated-studies-reproducible-foundation-acceptance-tests"></a>
+
+### Reproducible foundation acceptance tests
+
+No real cluster or WISDOM execution is needed:
+
+```bash
+python -m pytest -q tests/controlplane/test_coordinated_study.py tests/controlplane/test_fleets.py
+python -m pytest -q tests/work/test_concrete_shard.py
+python -m pytest -q tests/work/test_study_dispatch_boundary.py tests/controlplane/test_coordinator_pause.py
+python -m pytest -q tests/work/test_coordinated_cpu_dispatch.py tests/controlplane/test_prepared_cpu_executor.py
+python -m pytest -q tests/controlplane/test_shard_preparation.py tests/controlplane/test_prepared_provider_dispatch.py
+python -m pytest -q tests/controlplane/test_fleet_study_service.py tests/controlplane/test_member_allocation.py
+```
+
+The fixed design test supplies 56 candidates × 4 seeds = 224 unique required Runs and fake targets
+with capacities A=2, B=3, C=1. All are centrally ingested once; the exact synthetic final objectives
+match a serial reference. The partition test disconnects B, loads a fresh coordinator instance,
+redirects new work to A/C and reconciles one resident, one completed and one positively lost B
+Attempt; only the lost Run becomes Attempt 2. Other tests cover competing drivers, ambiguous
+acceptance, stale offers, caps, checkpoint locality, environment/hardware mismatch, provenance,
+budgets, operator drain and immutable global identities. These validate the operational contract,
+not yet end-to-end distributed Work execution or predictive optimizer quality.
+The CPU shard test invokes four real spawned Work processes at concurrency two, keeps successful
+and failed scientific evidence and native paths, and proves repeated delivery does not create
+another Attempt. It does not submit a provider Job, grant a GPU or start an optimizer.
+
+Prepared-provider acceptance also exercises actual bundle staging, JobService, a detached direct
+supervisor, CPU children and a minimal CUDA tensor child with native ARI. Installation/runtime
+resolution are fixtures; the transport is loopback, not SSH. The GPU test uses explicitly shared
+local access and inherits the supervisor's grant; it skips when CUDA is unavailable. This does not
+establish SLURM/site-command acceptance or managed package installation. Persistent-allocation
+cases verify fresh baseline offers, exact Job reuse and drain without releasing the grant between
+waves. Input identity/mutation and opaque-grant regressions are separate.
+
+The prepared-provider tests run four fixed identities or three complete two-candidate paired
+blocks over two detached direct CPU targets, ingest native outcomes centrally and produce one
+final analysis. This is real
+local ProcessScheduler execution, not a fake provider, but it is still an internal prepared-CPU
+test. `tests/controlplane/test_fleet_study_service.py` additionally tests the product service's
+real two-member allocations, single final analysis, terminal Run-owner reads, semantic cancellation,
+captured asynchronous request and read-only CLI grammar/preflight. Installation remains a fixture;
+the test does not pretend to be real SSH or complete adaptive Fleet acceptance. The live-read
+fixture holds scientific Runs open until the coordinator has actually read their isolated log
+and step-7 metric through the exact member owner. Foreign seeds/Trials/Attempts/paths are rejected;
+remote display scalars cannot become completed response evidence or trigger local path reads.
+Dispatcher-injection tests also exercise the
+existing native adaptive planner without creating a worker-side optimizer. Pause tests cover
+network partitions, completed-result ingestion, pre-submit races, restart and immutable budgets.
+
+Fixed authored sweeps will keep performance pruning disabled. Automatic sweeps will retain complete
+paired blocks; adaptive searches may prune under their existing scientific contract. Future
+predictive work belongs to the current Study and its ordinary budgets: spare capacity is not
+permission to launch scientifically dependent downstream work or uninformative random proposals.
+
+
+<a id="guide-operational-reliability"></a>
+
+## 30. Operational health, monitoring and deliberate recovery
+
+[Español](MANUAL.es.md#guide-operational-reliability) · English
+
+Logical execution state, scientific evidence and operational health are different facts.
+An old `running` record is not a current process observation. `UNKNOWN` means ownership or
+observation is unresolved, not that science failed or that starting a duplicate is safe.
+These capabilities use the existing project JobStore, providers and Work runner.
+The [acceptance ledger](ai/IMPLEMENTATION.md#history-operational-reliability-progress) lists the broader reform still pending.
+The unreleased [resource safety guide](#guide-resource-safety) covers shared observation, GPU/MIG
+startup coordination, cgroup RAM evidence and conservative external-reservation boundaries.
+
+<a id="guide-operational-reliability-inspect-without-starting-computation"></a>
+
+### Inspect without starting computation
+
+```sh
+lf health --json
+lf health JOB --refresh --json
+lf incidents --json
+lf jobs show JOB --json
+lf jobs logs JOB --tail 100
+lf monitor diagnose --json
+```
+
+`health` without `--refresh` reads saved observations only. `--refresh` queries the provider;
+the observer's attempt/success times remain separate from the host's heartbeat clock and from
+scientific progress. A failed query preserves the last confirmed state/time and increments its
+failure count. Reading the cache or rewriting a local record does not advance confirmation.
+Health commands return exit code 2 when observations are unknown, stale, degraded, unreachable
+or confirm lost processes; that exit code is not a scientific outcome.
+
+Health may be `healthy`, `degraded`, `unreachable`, `stale`, `lost_confirmed` or `unknown`.
+Provider errors do not become a successful empty inventory. A missing inventory entry stays
+unknown until exact ownership can be verified. Direct observation checks process lifetimes and
+same-user inherited Job markers, including reparented children. Inaccessible ownership evidence
+fails closed. Observation itself never kills processes or edits host `state.json`.
+
+A corrupt or unreadable individual Job record is isolated within direct-host inventory: healthy
+siblings still receive fresh state/health observations. Only that known Job becomes degraded
+(a saved terminal outcome remains terminal). Error rows never create new Jobs or certify loss or
+recovery eligibility. Root/transport failures still invalidate the host query. A later valid
+observation clears the prior query error; no manual history editing or scientific restart is needed.
+Shipped read probes select definitions and helper dependencies by name from one source snapshot,
+not loaded function line offsets that can become stale after an editable source update. Restart
+an already-open Console/monitor after upgrading LF to load the corrected probe implementation;
+this does not restart scientific Jobs or require modifying their immutable worker environments.
+
+SLURM retains queue/accounting source, raw state, reason, exit code, node and available times.
+An accounting delay is unknown; a query error remains an error unless another query supplies
+positive evidence. See the official [sacct reference](https://slurm.schedmd.com/sacct.html) and
+[state codes](https://slurm.schedmd.com/job_state_codes.html). `NODE_FAIL` is infrastructure evidence,
+`OUT_OF_MEMORY` is resource evidence, not an objective score. Polling remains bounded.
+If `squeue` times out, a bounded accounting query may still supply positive evidence. Empty or
+failed accounting never legitimizes a cached RUNNING response; previous query details are cleared.
+
+Each health read includes a native `diagnostic` with category, source, confirmation, event time,
+impact and recommendation. Scheduler OOM does not by itself identify CUDA OOM; exit 137 does not
+prove host OOM. Generic CUDA kernel/dtype errors remain consumer failures, not OOM retry grants.
+Malformed data is degraded observation, not proof of an offline host.
+An unclassified query exception likewise keeps connectivity unknown even after repeated failures;
+typed connection/authentication errors remain distinct in the shared diagnostic authority.
+Legacy terminal files without ownership requests remain readable but do not certify ownership
+or safe recovery.
+
+<a id="guide-operational-reliability-independent-project-monitor"></a>
+
+### Independent project monitor
+
+```sh
+lf monitor config --file monitor.json
+lf monitor start
+lf monitor status --json
+lf monitor once --json
+lf monitor stop
+```
+
+`start` launches a detached observer of the native project catalog, not a scientific runner.
+One cross-process owner lock prevents duplicate monitors. `stop` requests only that exact monitor
+to exit; it never cancels Works. Status checks process lifetime and heartbeat separately and
+reports repeated observation failures as degraded. Restart preserves observations, incident IDs
+and notification delivery records. The monitor does not read epochs/artifact bytes, fit HPO models,
+allocate GPUs or change scientific YAML. Config/state/logs are project-owned below the JobStore's
+`.operational/monitor/`; incidents are compact records below `.operational/incidents/`.
+
+Example: [monitor.json](../examples/monitor.json). Operational deadlines are seconds:
+
+```json
+{
+  "interval_seconds": 60,
+  "observation": {
+    "freshness_seconds": 180,
+    "heartbeat_seconds": 45,
+    "grace_seconds": 120,
+    "progress_seconds": null,
+    "unreachable_failures": 2
+  },
+  "smtp": {"enabled": false}
+}
+```
+
+Progress expectations default to disabled. Some valid Works emit no metrics for hours; silence
+alone must not prove death. Heartbeat grace, provider freshness and scientific-progress expectations
+are independent configurable checks. Failed observations immediately show connectivity loss;
+repeated failures escalate health without repeated Console toasts.
+
+Closing Textual does not stop the detached monitor. Reboot/logout persistence is a separate OS
+service concern. Linux provides a preview-first systemd-user installer:
+
+```sh
+lf monitor install --json
+lf monitor install --apply
+```
+
+The installer refuses unrelated units, enables only the project observer and does not enable user
+lingering or change administrative policy. Inspect the unit and `loginctl show-user "$USER"`.
+systemd's [user manager lifecycle](https://github.com/systemd/systemd/blob/main/man/org.freedesktop.login1.xml)
+depends on session/lingering configuration; a detached process alone does not guarantee survival
+of a site's logout cleanup. On macOS/Windows, use `lf monitor run` with launchd/Task Scheduler or
+another managed service. These platform integrations and real-site logout/reboot have not been
+certified by the local CPU regression tests.
+
+<a id="guide-operational-reliability-optional-email-durable-incidents-and-no-polling-spam"></a>
+
+### Optional email, durable incidents and no polling spam
+
+SMTP is off by default. Configure a host, sender, recipient list and TLS mode `starttls` or `ssl`.
+Credentials must be `env:NAME` or `keyring:KEY` references; never store a password in configuration.
+Authenticated monitoring is noninteractive: the referenced credential must be available to the
+service process. A site may use an authenticated relay or an explicitly configured unauthenticated
+TLS relay. Verify access and policy with the operator.
+
+```json
+{
+  "interval_seconds": 60,
+  "smtp": {
+    "enabled": true,
+    "host": "smtp.example.org",
+    "port": 587,
+    "tls": "starttls",
+    "sender": "research@example.org",
+    "recipients": ["research@example.org"],
+    "username": "research@example.org",
+    "credential": "env:LF_SMTP_PASSWORD",
+    "cooldown_seconds": 900
+  }
+}
+```
+
+```sh
+lf monitor test-alert --json
+lf incidents --json
+```
+
+A delivery is marked sent only after SMTP accepts it. Transport failure never changes a Job.
+Automatic attempts are bounded at three per incident transition, with a persisted cooldown.
+Stable incident IDs deduplicate repeated probes; escalation, reopening and resolution remain
+auditable in native Job events. Resolution requires positive healthy evidence, not disappearance.
+For an audited retry, origin incidents resolve only after fresh scientific progress in the exact
+accepted recovery Job, after its request timestamp. Enqueue, preparation, scheduler acknowledgement
+and heartbeat alone do not resolve them. The origin outcome stays unchanged; `recovered_by` links
+the new Job/request and the observed progress. A failed recovery cannot resolve the origin.
+Loading reused Runs establishes a baseline, not fresh progress. Changes to obligation totals,
+counter resets and duplicate polls likewise do not resolve an incident; a shared completion/step/
+epoch counter must advance beyond its persisted/native or positively observed runtime baseline.
+Native previews retain the number of successful logical Runs, so a first observation may certify
+a genuinely new completion beyond that count; rereading the same count never refreshes progression.
+SMTP runs outside the incident lock; a slow relay cannot block provider commits. If escalation or
+resolution occurs during delivery, the earlier acknowledgement never marks that newer transition sent.
+SMTP acceptance is not an inbox receipt. Exactly-once delivery cannot be guaranteed across an
+interrupted send; stable Message-ID supports receiver deduplication. No blanket mail-all policy
+or implicit external messaging is enabled.
+
+<a id="guide-operational-reliability-research-console"></a>
+
+### Research Console
+
+Bare `lf` → **Operational health…** (or Ctrl+P → Operational Health System) opens saved health,
+incident details and monitor settings. Refresh providers is explicit; Start/Stop affect the
+independent observer only. Save settings uses the same validator as `lf monitor config`.
+Send test email exposes acceptance or failure inline. While an operation is pending, duplicate
+activation is disabled; closing a panel does not cancel scientific work.
+
+Monitor and Console share nonblocking project/provider observation gates. While a same-cluster probe
+is in flight, readers retain native last-good records and their original clocks; receipt files are
+coalescing metadata, never proof of provider freshness. Separate SLURM Jobs retain separate lanes.
+An abruptly terminated observer releases its OS lock; it cannot leave a permanent probe barrier.
+
+Overview/Work/Studies display health separately from scientific state and last confirmation.
+Imported snapshots remain historical read-only evidence, with no expectation of a live host.
+Do not interpret a previously completed scientific result as invalid merely because its host
+cannot now be contacted.
+
+<a id="guide-operational-reliability-recovery-and-relocated-yaml"></a>
+
+### Recovery and relocated YAML
+
+```sh
+lf retry STUDY --dry-run --json
+lf retry STUDY --config experiments/moved.yaml --dry-run --json
+lf retry STUDY --config experiments/moved.yaml
+# Only after explicitly reviewing whether earlier evidence/checkpoints remain valid:
+lf retry STUDY --config experiments/moved.yaml --accept-code-change
+```
+
+The Console's **Resume Study…** offers the historical path, a YAML picker and Validate recovery
+plan. Missing historical YAML is not a reason to replay the full experiment. A selected YAML is
+compared against original persisted scientific identity after restoring the original seed namespace.
+Formatting/comments/key order do not define scientific identity. Parameters, input bytes, dataset
+identity, seeds, objectives, design and publication contracts must still match. Relative inputs
+are resolved from the selected YAML: move it only with correct exact bindings. Code-change
+acknowledgement is not an identity-check waiver.
+
+For single-host Studies launched through a provider command such as `gpu exec`, recovery
+uses the **new** inherited `CUDA_VISIBLE_DEVICES` grant, not the previous Job's GPU list.
+If the unchanged YAML requests three GPUs and the provider grants only one, adaptive, repeated
+and fixed-sweep Studies dispatch only onto that GPU; `runs_per_gpu` is applied to the current
+device count and `max_parallel` remains a ceiling. Historical completed Runs, checkpoints,
+controller decisions, costs and the original requested-resource record are retained. No YAML
+change is needed merely because the grant became smaller. An explicit empty/disabled CUDA
+visibility never falls back to physical indices; a GPU Study fails closed with an actionable
+grant diagnostic. This is not a promise to rewrite an application's own multi-GPU/DDP topology.
+SLURM/exclusive scheduler allocations retain their exact request contract: an insufficient
+allocation is queued or rejected safely, never supplemented with ungranted GPUs.
+
+Recovery dialogs keep the compatibility checkbox, current blocking reason and confirmation
+controls outside the scrollable plan. Clicking Resume without a required acknowledgement or
+validated YAML explains why nothing was submitted; it never implies approval. Validation
+disables submission until its result arrives, including when the checkbox is toggled meanwhile.
+Once explicitly confirmed, recovery is submitted at most once and its outcome appears in the
+workspace or a persistent failure dialog.
+
+The selected file hash is pinned from preview to preparation; editing it invalidates the plan.
+Preview creates no Job, consumes no seed/budget, reserves no GPUs and downloads no checkpoint bytes.
+CLI `--dry-run` also leaves the saved operational audit unchanged. Explicit Console **Validate
+recovery plan** records an operational inspection request/outcome, but never changes scientific
+evidence or launches computation.
+Apply rechecks provider ownership under the native recovery lock; unreachable/ambiguous live
+ownership blocks duplication. A fresh, positively verified lost process can be recovered without
+falsely rewriting its scientific outcome to `failed`.
+
+Direct process verification scopes unreadable processes to the exact Job, rather than treating
+every same-user access denial as host-wide uncertainty. Positive creation-time evidence excludes
+processes that predate the native Job; POSIX session/UID/lifetime evidence may also prove an
+independent foreign-owned login session. Process names alone are never sufficient. A live
+supervisor, scientific child or marked orphan still blocks recovery, as do inaccessible owners
+and unreadable processes whose independence cannot be proved. Inventory scans processes once
+and evaluates that snapshot separately for each Job; observation never signals processes or
+rewrites persisted scientific records. Restart an already-open Console after updating the local
+framework. The read-only probe also applies to older immutable remote environments without
+installing into them.
+
+After a host reboot, the direct probe compares authoritative process creation times with
+OS boot time. Verified pre-boot owners cannot survive the reboot; positively dated new
+access processes are not their descendants. This does not rewrite cancellation/failure or
+grant permission based on an empty `htop`: a matching live Job marker, unknown birth/boot
+evidence, or an unresolved post-boot owner still blocks recovery. The same native probe is
+used by CLI and Console. Restart an already-open Console to load the updated probe.
+
+Accepted recovery receives a `recovery_request_id`, linked from the origin's append-only events
+and new Job metadata/events. `lf jobs show NEW_JOB --json` exposes `recovery.phase`: accepted,
+preparing, scheduler acknowledged, runtime observed, scientific progress observed or terminal
+outcome. Admission is not progress; epoch zero is not training progress. Preparation failures retain
+their phase/category and controller logs. The Console shows the request ID and observed phase.
+
+<a id="guide-operational-reliability-saved-recovery-history-including-rejected-requests"></a>
+
+#### Saved recovery history, including rejected requests
+
+```sh
+lf jobs recovery JOB --json
+lf jobs recovery JOB --offset 100 --limit 100 --json
+```
+
+This read-only view uses native saved Jobs and append-only events, without contacting the execution
+host or reading checkpoint/artifact bytes. It remains available during an outage. It links exact
+retry/dependency/scientific identities, never display names, and shows missing dependencies rather
+than fabricating history. Events are paged newest-first; `next_offset` selects older events.
+
+Study workspace → **Recovery history** opens the same paged view, with linked Jobs, request IDs,
+phases and event details. Apply and explicit Console inspection allocate a request ID before
+validation: rejected ownership, missing state or incompatible configuration remains auditable even
+when no new Job exists. Rejection leaves scientific records and completed Runs untouched.
+An audit-write failure is reported rather than falsely claiming the request was durably recorded.
+
+On recovery failure the Console keeps a persistent dialog with the phase, request ID, bounded
+diagnostic and Logs / Saved history / Back to plan controls. It does not repeatedly notify on polls,
+and closing the dialog is not another retry. A successful preview is not admission; only apply may
+launch preparation, and it revalidates the exact plan under the existing ownership lock.
+
+Fixed/repeated designs use owned design/Run/Attempt records; adaptive Studies require their genuine
+controller state. Valid Runs remain valid, failed/interrupted Runs create new Attempts, spent
+budgets remain spent, and original Execution/Attempts are never silently overwritten. Recovery of
+a Study is not proof of epoch continuation: the Work must implement compatible checkpoint loading.
+Managed checkpoint helpers, explicit retention pins and exact recovery transport remain the native
+checkpoint authority. Native Fleet recovery remains pending and rejects single-host replay.
+
+<a id="guide-operational-reliability-managed-checkpoint-policy-and-evidence"></a>
+
+### Managed checkpoint policy and evidence
+
+At an application-safe boundary, a Work may configure advisory cadence and terminal retention:
+
+```python
+self.checkpoints.configure(
+    interval_steps=5,
+    interval_seconds=1800,
+    retention_seconds=7 * 86400,
+    storage_durability="shared",
+)
+if self.checkpoints.should_save(step=epoch):
+    self.checkpoints.save_json("state.json", algorithm_state, step=epoch)
+```
+
+No default write interval is imposed and arbitrary algorithms are never automatically serialized.
+Either interval may make a save due. Only a committed write advances cadence, not reads/polling.
+JSON saves preserve exact checksums. Named `checkpoints.file(..., build=..., step=...)` files also
+register native evidence; version binary names or supply semantic validation when rebuilding,
+because `file` still reuses valid existing content. Advanced `path()` writes remain unregistered.
+
+New records include execution/Run/Attempt/scientific owner, write time and optional generic step.
+`inventory()` pages metadata; `inventory(verify=True)` verifies bytes on the owning host, not
+application compatibility. Corrupt registered JSON refuses loading; legacy unregistered JSON
+remains readable without a fabricated certificate.
+Registered Execution/Run bindings are checked before managed state is loaded or replaced; a foreign
+owner or corrupt registration is rejected without changing payloads. Older Attempts of the same
+logical Run remain usable. Code/scientific compatibility still requires native recovery validation
+and explicit acknowledgement where applicable; this owner check does not waive it.
+Recovery preview/Console show the last registered descriptor with **not checked** integrity,
+without downloading payload or promising
+epoch continuation. Historical `resumed_from_checkpoint` indicates availability at Attempt start,
+not proof of application restoration; subsequent progress is separate.
+
+Durability (`unspecified`, `ephemeral`, `persistent`, `shared`) is an operator/project declaration,
+not a filesystem guarantee. Node-local bytes do not protect against node loss; verify the actual
+storage policy. Configured terminal retention integrates with preview-first cleanup; failed/
+interrupted evidence and pins remain protected. Increasing retention after preview is rechecked
+before deletion. Live rotation, application-specific deserialization and cross-host/Fleet transfer
+acceptance are not certified by this cadence/metadata API.
+
+<a id="guide-operational-reliability-emergency-procedure"></a>
+
+### Emergency procedure
+
+1. Preserve the exact Job ID. Inspect `health --refresh --json`, Job details, bounded logs and
+   incidents. Do not delete history, checkpoints or processes to make a stale row disappear.
+2. Separate connectivity loss from proved process loss, scheduler failure and consumer failure.
+   An inaccessible host may still be computing. Retry is not permission to duplicate it.
+3. Restore connectivity, inspect/reconcile native evidence and preview deliberate recovery.
+   Select moved YAML if necessary; inspect reuse/retry/pending Runs and code compatibility.
+4. Confirm apply only when ownership and scientific identity are valid. Track the **new** Job's
+   preparation, admission, heartbeat and subsequent scientific progress, retaining the origin ID.
+5. Preserve diagnostic/incident/recovery events. Notify site support for infrastructure failures.
+   Historical successes are reusable; arbitrary consumer exceptions are not automatically retried.
+
+Local regression evidence is listed in the acceptance ledger. It does not certify a real SMTP
+server, CUDA failure, SLURM site or systemd activation. The native local two-Study/Textual recovery
+fixture passes with simulated provider/admission faults; real detached preparation and the full
+multi-host chaos scenario remain outside that demonstrated acceptance.
+
+<a id="guide-operational-reliability-deliberate-extension-versus-recovery"></a>
+
+### Deliberate extension versus recovery
+
+Adding fixed-sweep values/seeds uses **Extend Study**, not Resume. Its reviewed delta receives
+a separate native Execution/Job; previous revisions and physical Attempt/time expenditure remain
+unchanged. A failed delta still uses native `lf retry` / Console **Resume Study…** on its linked
+Job, preserving its Execution and successful Runs. The series follows the exact retry lineage
+without duplicating evidence. Missing Job plus existing preparation/provider state is uncertain,
+not permission to resubmit. Only a proven pre-Job handoff gap can reuse the preallocated ID.
+Checkpoint epoch continuation remains an explicit consumer Work contract. See
+[Study extensions](#guide-study-extensions) for supported placements and safe reconciliation.
+
+Extension review defaults to `--code-policy revisioned`: changed/dirty project code may add new
+cells using normal native managed deployment, with separate code/runtime provenance and per-revision
+inference. It does not relabel completed Runs as new-code evidence. Strict equivalence remains
+available with `--code-policy strict`. Reviewed source is pinned through preparation, and the actual
+host's staged semantic contract/Execution identity is attested before provider submission.
+
+
+<a id="guide-resource-safety"></a>
+
+## 31. Shared-host resource safety — implementation in progress
+
+[Español](MANUAL.es.md#guide-resource-safety) · English
+
+This is unreleased work on 0.19.0, not acceptance of the complete resource reform or an
+explanation of a server reboot. No real CiTIUS connection, reservation change, stress test or
+scientific computation was performed for this implementation. See the
+[baseline audit and remaining work](ai/IMPLEMENTATION.md#history-resource-robustness-audit).
+
+<a id="guide-resource-safety-observation-is-not-a-grant"></a>
+
+### Observation is not a grant
+
+The existing runner, supervisor and direct resource service use one same-user/host GPU cache.
+Ordinary measurement uses the optional official distribution `nvidia-ml-py` (module `pynvml`);
+no PyTorch import, tensor, allocation or CUDA compute context is needed. CPU installations do
+not acquire a mandatory GPU dependency. Without the optional binding, the same isolated
+observer batches bounded `nvidia-smi` memory/process queries; unavailable attribution stays
+unknown rather than pretending a device has no processes. MIG instance memory requires a
+measured instance identity; parent capacity is never substituted.
+
+Default policy: 5 s informative TTL, 0.5 s admission TTL, 0.25 s minimum refresh interval,
+5 s isolated helper deadline and failure backoff from 2 to 60 s. Concurrent misses are
+single-flight. Cache hits create no helper. The native cache exposes request/query/hit/error/
+timeout counts and last latency. A timed-out private helper group is killed and reaped;
+unresolved ownership prevents another helper. Cache data is bounded to 1 MiB. Storage/ownership
+errors fail closed. Last-known numbers remain informative, never fresh admission evidence.
+
+The root is UID-owned/private, scoped by host and boot, and independent of Project/virtualenv:
+`$HOME/.cache/lambdaforge/hosts/<host-hash>/`. An operator may explicitly choose its base using
+`LAMBDAFORGE_HOST_COORDINATION_ROOT`; different projects must use the same base. Symlinks,
+foreign ownership and unsafe permissions are rejected. This metadata is operational, not a
+scientific identity or a second result store. Do not manually edit it during execution.
+
+Full GPU/MIG UUID grants need no CUDA API. Legacy numeric grants require a **one-time bounded
+driver identity enumeration** (`cuInit`/`cuDeviceGetUuid_v2`, without creating a compute context),
+cached/pinned to the controller lifetime, boot, original visibility and CUDA ordering.
+This initializes the driver for identity resolution; it is not a periodic memory probe.
+CUDA ordinals are never assumed equal to NVML indices. Missing/remapped UUIDs pause admission,
+not permission to substitute another GPU. After an established baseline, loss of one device's
+measurement does not prevent launching on a healthy granted sibling. Last-known failed-slot
+values are excluded from prediction updates/admission and visibly qualified as unavailable.
+
+<a id="guide-resource-safety-cross-study-startup"></a>
+
+### Cross-Study startup
+
+Both `shared` and `command` modes coordinate starts using short per-GPU/MIG UUID locks.
+The existing `GPUPlacementPlanner` remains authoritative; it rechecks fresh physical headroom
+under that lock. A temporary startup commitment is persisted **before** spawning, with native
+controller/worker lifetime and Job/Execution/Run/Attempt references when available. Disk errors
+cannot hide an already spawned Future. Other GPUs have independent admission locks.
+
+Peer startup demand is `max(startup commitment - observed resident bytes, 0)`. Physical free
+VRAM already excludes resident bytes; do not subtract them again. The current controller's
+future envelopes already cover its own Runs. Confirmed dead worker lifetimes are reconciled;
+unresolved owners remain protected, and a missing worker record alone proves nothing. Orphan
+reconciliation can use the native Job ownership observation; a timestamp does not prove absence.
+The default 60 s startup window for an attested live worker is finite, not a permanent reservation
+of `gpu_memory` per resident. Compatible learned time-to-envelope may extend it (bounded to one
+hour). A peer's pending startup cannot be bypassed by baseline or exploration. Packing ceilings
+and scientific decisions are unchanged. Per-device bounded waiters account for native lifetime,
+priority, wait age and served launches. Older feasible Studies get an opportunity, without
+forced alternation or blocking light work behind a peer that cannot fit. Stale waiters expire;
+startup commitments require stronger ownership reconciliation. Cross-user fairness remains the
+provider's responsibility; unrelated scientific scores are not compared.
+
+<a id="guide-resource-safety-ram-and-cpu"></a>
+
+### RAM and CPU
+
+Read-only host observation reconciles physical availability with readable cgroup v2 ancestor
+`memory.max`/`memory.current`; it records memory pressure and OOM events where available. It
+writes no cgroup limits. Invalid current/limit evidence is unavailable, not zero. Job admission
+uses the effective capacity; an impossible request is rejected before computation. Before a
+GPU Run starts, host availability is checked again against its native dispatch-time RAM share.
+
+Process memory attribution verifies PID birth and UID. RSS, PSS and USS remain distinct;
+RSS sums may double-count shared pages. Only qualified PSS reduces an unmaterialized Job RAM
+commitment. Unknown attribution conservatively retains that commitment. `ram_bytes=0` is
+explicitly labelled unknown demand, not a claim that the Job consumes no RAM. Unresolved/exec-
+changed lease owners retain CPU/RAM protection; argv mismatch is not proof of death.
+
+Direct access leases store host/boot ownership below `hosts/<host-id>` in the configured
+lease root. GPU keys and child visibility use exact GPU/MIG UUIDs, not CUDA/NVML ordinals.
+Exclusive parent-device access conflicts with its MIG instances; independent instances remain
+independent. Discovery runs outside the lease lock; release uses retained ownership rather
+than probing a potentially changed topology. The original outer lock namespace is retained
+so old supervisors cannot race new writers. Legacy unscoped/ordinal records remain protected,
+including apparently dead local PIDs: shared-home records may belong to another host.
+Queued Job feedback explains this ambiguity. Active older supervisors normally release their
+own leases on exit; crash leftovers without host/boot evidence require explicit ownership
+reconciliation, not blind deletion.
+
+Existing native affinity/thread-pool limits and elastic Run CPU leases remain in force. No
+consumer DataLoader parameter, scientific fidelity, seed, checkpoint or result was rewritten.
+Readable `cpu.max`/`cpuset.cpus.effective` narrow effective capacity; fractional quota is disclosed
+and bounded by its ceiling, without expanding inherited affinity. Controller overhead is
+deducted before dividing aggregate Run RAM. Online learned RAM demand and process-pressure
+backpressure remain incomplete.
+
+<a id="guide-resource-safety-profiles-device-circuits-and-diagnostic-reports"></a>
+
+### Profiles, device circuits and diagnostic reports
+
+Memory errors/disappearing UUIDs open expiring device-observation circuits (5–120 s by default).
+Suppressed NVML devices skip ordinary memory/activity queries until recovery time; identity
+enumeration remains necessary. A new qualified same-UUID read closes its circuit. Existing
+candidate/placement-specific OOM dominance remains separate. A single OOM does not permanently
+cap concurrency; generic CUDA exceptions do not imply ECC, Xid, reset or retry permission.
+
+Cluster-operational settings, not Work YAML:
+
+```sh
+lf clusters set CLUSTER resource_safety shared-host
+lf clusters set CLUSTER resource_safety.priority 2
+lf clusters set CLUSTER resource_safety.probe_timeout 3
+lf resources --report --on CLUSTER --since 2026-10-13T00:00:00Z --until 2026-10-14T00:00:00Z --json
+```
+
+`balanced` preserves defaults; `throughput` uses 3 s informative TTL/20 s fairness wait;
+`shared-host` uses 10 s TTL/15 s wait; `conservative` uses 120 s startup and longer device backoff.
+No profile changes scientific parameters or concurrency ceilings. Overrides are validated and
+propagate through native direct/remote submission. The Console's Advanced YAML can edit
+`resource_safety`; existing profiles use balanced without a parallelism migration.
+
+CPU-only Job heartbeats create no GPU helper. New operational `usage.jsonl` rotates above 2 MiB
+into four compressed windows, retaining recent samples and cumulative sampled peaks in
+`usage-summary.json`. Scientific metrics, logs and checkpoints are untouched. An already
+oversized legacy operational log is neither read unboundedly nor silently deleted; current
+state remains available and cleanup is deliberate/scoped.
+Interrupted archive temporaries do not disable subsequent compaction and are never adopted
+or removed as somebody else's evidence.
+
+The sanitized saved-evidence report is also available under cluster **Resources → Saved resource
+report** and the session-pinned agent method `get_resource_report` (`clusters.resource_report`).
+It reads bounded project-owned Job metadata, without a provider query or asset/full-log read.
+Commands, paths, arbitrary errors, credentials and other users' PIDs are excluded. It works
+offline/after reboot if metadata survives. Missing facts remain unknown. Peaks are labelled
+Job-lifetime sampled maxima, not exact selected-interval peaks. It does not fabricate complete
+historical timelines, driver-event diagnoses or the cause of a host reboot.
+
+<a id="guide-resource-safety-site-reservations-and-visibility"></a>
+
+### Site reservations and visibility
+
+For CiTIUS, use `command_prefix: [gpu, exec]`; a persistent reservation can be made manually
+through the provider. Absolute managed Python is passed inside the wrapper, without relying
+on shell/Conda activation. LambdaForge does not issue `gpu release` on success/failure/cancel.
+The provider owns wrapper-created reservations; manual reservations remain user-owned.
+
+Generic `claim_command`/`release_command` pairs have no verified, scoped reservation receipt.
+Automatic use is rejected **before any claim**, including preview. Existing profiles remain
+readable but must remove that pair. This is an explicit conservative unsupported boundary,
+not an invented gpuctl ownership protocol. A reservation-scoped provider integration needs
+authorized real-site validation; do not infer ownership from GPU activity or a matching UUID.
+
+Exact `[gpu, exec]` derives `[gpu, env, --shell]`. Explicit custom `visibility_command` argv
+is unchanged. The parser accepts one CSV token line or one explicit `CUDA_VISIBLE_DEVICES`
+assignment, never executes output, rejects ambiguity and bounds its size. Confirmed empty
+grants differ from unavailable probes. Cross-format comparison needs pinned identities;
+ambiguous numerical/UUID mappings do not trigger false revocation. Grants can only shrink or
+restore original tokens. Healthy siblings are not cancelled on observer failure.
+
+Study recovery establishes a fresh grant for the new Job. In `command` mode (`gpu exec`),
+an authored three-GPU Study can resume with one currently granted GPU, without editing YAML,
+reusing the old device list or replaying completed evidence. Numeric `runs_per_gpu` limits
+apply to the new count; the physical-memory/resource gates still apply. This is covered with
+native adaptive, repeated and fixed-sweep recovery using synthetic hardware. Explicit empty/
+disabled `CUDA_VISIBLE_DEVICES` fails closed in every mode, rather than inventing physical
+indices. CPU-only dispatch remains valid with GPU visibility disabled. Scheduler allocations
+remain exact contracts; application-specific distributed topology is not automatically rewritten.
+
+<a id="guide-resource-safety-remaining-acceptance"></a>
+
+### Remaining acceptance
+
+Remaining work: phase-aware startup beyond the bounded learned window, online RAM demand for
+unauthored budgets, process-pressure backpressure, complete historical interval/confirmed hardware
+event reports, native reconciliation of ambiguous legacy leases and extended provider acceptance.
+Direct outer leases are now host/UUID scoped and locally regression-tested; that does not
+certify an actual shared-home/site deployment. Existing throughput/resource intelligence is retained, not FIFO
+or a one-Run-per-GPU policy. Initial baseline establishment still requires all requested device
+identities; optional-binding/MIG and real-site preemption/claim cleanup need explicit validation.
+CPU synthetic gates compare static/dynamic packing and terminal/live cold start. A cache
+microbenchmark measures local coordination with a fake backend, not NVML latency or real science.
+Competition tests use independent native processes.
+
+Primary references: [official NVIDIA binding](https://pypi.org/project/nvidia-ml-py/),
+[CUDA visibility/order](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html),
+[NVIDIA SMI](https://docs.nvidia.com/deploy/nvidia-smi/index.html),
+[CiTIUS reservation manual](https://wiki.citius.gal/en:centro:servizos:servidores_de_computacion_gpgpu).
+
+
+<a id="guide-developer-experience"></a>
+
+## 32. Developer experience — incremental implementation
+
+[Español](MANUAL.es.md#guide-developer-experience)
+
+This development checkpoint adds native ergonomics without changing scientific identity, YAML
+meaning, recovery, GPU scheduling or the uncommitted Study-extension implementation. It is **not
+the completed broad UX reform**. No release number is changed. Read the acceptance ledger for
+tested/unfinished boundaries.
+
+<a id="guide-developer-experience-start-and-discover"></a>
+
+### Start and discover
+
+```bash
+lf init my-research --template minimal
+cd my-research
+python -m pip install -e .
+lf validate experiments/work.yaml
+lf explain experiments/work.yaml
+lf run experiments/work.yaml --dry-run
+lf help --search "recover study"
+lf help --search "recuperar estudio" --json
+```
+
+Init derives distribution, import package, YAML, README and lightweight test names from the
+directory. Unicode is transliterated where possible; invalid/empty names receive a safe fallback,
+numbers get a package prefix, and Python keywords/stdlib/framework shadows receive a suffix.
+Old projects are not migrated. Overwrites require existing explicit `--force`; symlinks are refused.
+Agent/knowledge setup and dependency installation remain separate opt-ins. The dry-run does not
+execute Work.run. Generated instructions name the actual files; no checkout installation path is
+invented. Pytest is needed only to run generated tests, not scientific Work execution.
+
+Task help projects the installed argparse grammar and reuses the native bilingual discovery
+vocabulary. Results contain real command usage, not guessed services. Standard `lf help`,
+`lf --help`, and nested help remain supported. Misspellings suggest actual grammar choices.
+
+Shell completions are generated from that same grammar, including subcommands, flags and enum
+choices. They never load projects, query clusters, read secrets or import Torch:
+
+```bash
+source <(lf completion bash)
+source <(lf completion zsh)  # after the shell's usual compinit
+lf completion fish | source
+```
+
+Choose the command appropriate for your shell. Nothing edits your startup files. Dynamic cluster/
+dataset names are deliberately not expanded; filename fallback is owned by the shell. Bash is
+syntax-tested locally; live Zsh/Fish interaction remains an acceptance gate.
+
+<a id="guide-developer-experience-understand-yaml-before-running"></a>
+
+### Understand YAML before running
+
+```bash
+lf config schema
+lf config schema --output work.schema.json
+lf config explain experiments/work.yaml --field execution.max_parallel
+lf config diff experiments/previous.yaml experiments/work.yaml --json
+lf config resolve experiments/work.yaml --format json
+```
+
+Schema output is the installed schema, not another grammar. `--output` creates an explicit new
+file and never overwrites it. Associate it with YAML in your editor yourself; no VS Code settings
+are changed. Field explanation reads bounded YAML/schema metadata. Execution limits are normalized
+by the native ExecutionPolicy, without consumer imports. `with` parameter names/types still belong
+to Work.run; use existing native `lf explain`/`validate` with trusted project imports for those.
+
+The schema now documents concurrency/budgets and matches native null/case-insensitive `auto`
+concurrency values. It does not claim complete schema parity for every legacy resource alias.
+
+Semantic diff uses WorkConfig normalization and the existing pure extension comparison's canonical
+JSON helper; it does not change that extension service. It reports parameter, seed, policy, resource,
+analysis and product differences. It does **not** establish recovery/extension compatibility,
+dependency equivalence or byte identity of two path declarations. It imports trusted Work code,
+but never calls Work.run. Native `lf explain` now distinguishes experiment totals, allocation and
+admission ceilings: requested concurrency is not guaranteed future GPU availability.
+
+<a id="guide-developer-experience-inspect-diagnose-and-observe"></a>
+
+### Inspect, diagnose and observe
+
+```bash
+lf inspect job-EXACT --json
+lf inspect execution-EXACT --kind execution
+lf inspect NAME --kind work
+lf diagnose job-EXACT --json
+lf watch job-EXACT --refresh --interval 2 --count 10 --json
+```
+
+Exact prefixes select native identities. Ambiguous names across Work/Study/Execution/Job require
+`--kind` or an exact ID. First scope does not include arbitrary Run/product/dataset selectors.
+Results use compact ResultStore catalogues, native Work grouping and JobService/OperationalHealth;
+no artifact/model/checkpoint bytes are opened. `--refresh` deliberately requests provider metadata
+through the existing observation gate. Without it these commands show persisted observation age,
+not a fictitious current provider state.
+
+Diagnose includes native persisted diagnostics, confirmed recorded failures and recent native audit
+events. It does not guess possible causes or certify recovery from FAILED/UNKNOWN. Use the reported
+`lf retry JOB --dry-run --json` to inspect actual ownership/checkpoint eligibility. It never retries
+automatically. Deep scientific traceback/Run analysis remains explicit through existing commands.
+
+Watch is a foreground observer, not another permanent monitor. JSON is **NDJSON**: one valid bounded
+document per changed snapshot. Unchanged observations back off up to 60 seconds; age alone is not a
+new event. Ctrl-C stops only this observer, never the Job. It does not stream log bodies or detailed
+per-Run resources; use existing `lf logs --follow` and saved resource reports for those.
+
+<a id="guide-developer-experience-small-result-tables-without-a-full-experiment-export"></a>
+
+### Small result tables without a full experiment export
+
+```bash
+lf results table execution-EXACT --metric val_accuracy --metric val_loss --json
+lf results table execution-EXACT --trial 2 --columns seed,value,parameters --format csv --output scalars.csv
+lf results table execution-EXACT --offset 100 --limit 100 --fingerprint sha256:PREVIOUS_PAGE
+lf results table execution-EXACT --attempts all --json
+```
+
+The native `ResultStore.table` projects local retained or imported Execution metadata. By default
+only the latest Attempt of each logical Run appears; `--attempts all` explicitly includes physical
+history. Exact repeatable metric/Run/Trial selectors and optional columns narrow the table. Missing
+values remain empty; pruned observations are `censored_snapshot`, not invented final scores.
+Values are **persisted scalar snapshots**, not a claim about best epoch or selection aggregation.
+Execution/Run/Attempt IDs, fingerprint, status and evidence kind remain mandatory provenance columns.
+This operation reads the selected aggregate metadata, not series, log, model, checkpoint or artifact
+payloads; it does not recompute StudyAnalysis or retrieve remote artifacts.
+
+JSON carries the descriptive notice, row count, next offset and an evidence fingerprint. Supplying
+that fingerprint on the next page rejects changed evidence rather than silently mixing snapshots.
+CSV retains provenance on every row and prints pagination/interpretation guidance to stderr;
+spreadsheet-formula strings are escaped and native secret redaction applies. Pages have at most
+1000 rows and a bounded byte size; reduce optional columns for an oversized single row. Explicit
+file output creates a new non-symbolic path outside native Run evidence and never overwrites it.
+These tables are disposable analysis aids, not importable scientific authority. Complete native
+experiment export/import remains unchanged.
+
+<a id="guide-developer-experience-agent-setup-without-pretending-a-connection-exists"></a>
+
+### Agent setup without pretending a connection exists
+
+```bash
+lf ai doctor
+lf ai context
+lf ai connect codex --json
+lf ai connect codex --apply --plan-hash sha256:REVIEWED_PLAN
+lf ai launch codex
+```
+
+`ai context` pages existing local YAML/AST Work metadata, clusters, knowledge status, installed
+integration/SDK metadata and actual default READ/PLAN permissions. It does not import consumer
+Python, read note bodies or probe clusters. Doctor adds bounded installed Codex version/help/
+registry inspection. Missing or incompatible clients remain explicit and no installation occurs.
+
+Connect uses the [official Codex MCP CLI](https://developers.openai.com/codex/mcp/), verifying the
+installed add/get/list grammar before preparing a project-specific server name and the invoking
+Python. Preview writes nothing. Explicit apply requires the current exact plan hash, compatible
+optional SDK and native project lock; conflicting entries are refused, matching entries are
+idempotent. The official client manages its own configuration; LambdaForge does not directly edit
+TOML or overwrite another server. Independent non-LambdaForge client edits are not protected by
+this project lock; actual-client config/comment preservation acceptance is still pending.
+
+**Registry verification is not an MCP handshake or an agent conversation.** The result explicitly
+reports that limitation. Use existing `lf ai mcp test` for the SDK test and Codex `/mcp` for actual
+client discovery. SDK installation, client registration and launch are separate actions. Launch
+requires TTY and existing exact registration, uses the pinned project cwd, passes no permission/
+sandbox upgrades and launches no scientific work. No global Codex configuration was changed during
+this implementation; registration is tested using disposable simulated client state.
+
+<a id="guide-developer-experience-console-and-skills"></a>
+
+### Console and Skills
+
+Work/Study root tables have local name/state/cluster/exact-ID filters. Typing does not call the
+provider. Filtering, opening and refreshing use the same filtered rows and exact entity identity.
+Unchanged snapshots update freshness without clearing tables; changed snapshots retain scroll and
+the existing selection logic. Removed widgets discard late presentation replies without stopping
+science. Other domain screens keep their own layouts and controls.
+
+The packaged Work and Study Skills now route through these real authoring commands and explain
+design choices, missing/censored evidence, imports, explicit input types and the actual native
+extension boundary. They never grant submission; consult the current native extension guide for
+fixed-design, same-placement managed GPU and cumulative revision/analysis contracts.
+
+<a id="guide-developer-experience-remaining-scope"></a>
+
+### Remaining scope
+
+Global paged entity search, broad table sorting/paging, complete consolidated recovery eligibility,
+cross-Execution compatibility/paired comparison improvements, guided editor merging,
+recipe-copy operations, rich report refinements,
+larger Workspace extraction, comprehensive MCP/output-schema improvements and the other priority
+Skills remain pending. No live GPU/SLURM/SSH, external agent conversation or complete backend suite
+is claimed. Existing domain owners, public commands/JSON and unfinished incremental extensions
+remain authoritative.
+
+
+<a id="guide-integration"></a>
+
+## 33. Project-pinned agent integration
+
+[Español](MANUAL.es.md#guide-integration). **The full reform is not complete.**
+[The acceptance ledger](ai/IMPLEMENTATION.md) identifies implemented foundations and remaining gates.
+Nothing here changes Work identities, HPO, GPU grants, recovery or existing scientific records.
+
+<a id="guide-integration-quick-start"></a>
+
+### Quick start
+
+```bash
+lf init my-research --agents portable --knowledge markdown
+# Existing pyproject project: preview first, explicit local operator apply:
+lf ai --project /absolute/my-research init --agents codex --knowledge obsidian
+lf ai --project /absolute/my-research init --agents codex --knowledge obsidian --apply
+lf ai --project /absolute/my-research doctor
+lf ai skills list
+lf ai skills show lambdaforge-work
+lf ai capabilities --limit 20 --json
+```
+
+Legacy init remains science-only. `--interactive` asks about agent/memory modes in a TTY.
+No dependency is installed automatically. **Agents / knowledge…** in the Console uses the same
+Python services, displays pending/error/success and confirms asset setup. Consumer instructions
+teach public APIs, not framework internals. The root contributor guide is canonical; detailed
+contracts were preserved in [FRAMEWORK_CONTRACTS.md](ai/FRAMEWORK_CONTRACTS.md). Spanish explains it.
+24 packaged specialized Skills copy into `.agents/skills/`; `lf ai skills examples` exposes native
+CPU fixtures for metrics, checkpoints, product promotion, HTML, repeated seeds and adaptive design.
+
+<a id="guide-integration-mcp-and-clients"></a>
+
+### MCP and clients
+
+```bash
+python -m pip install "lambdaforge[agents]"  # Explicit operator installation
+python -m lambdaforge ai --project /absolute/my-research mcp serve
+lf ai mcp test  # Actual SDK in-memory handshake; not external-client acceptance
+```
+
+The verified dependency range is official SDK 2.3. Stdio stdout is protocol-only. MCP tools,
+input/output schemas, resources, prompts and version use the SDK. Tests additionally handshake
+through a real stdio subprocess from a foreign cwd. Trusted consumer imports are isolated in a
+fresh planning process, with timeout/cancellation cleanup and stdout directed away from protocol.
+
+Codex mode generates `.lambdaforge/agents/codex-config.example.toml`, never edits global settings.
+Review and merge its named entry into your client configuration, preserving existing entries:
+
+```toml
+[mcp_servers.lambdaforge]
+command = "/absolute/my-research/.venv/bin/python"
+args = ["-m", "lambdaforge", "ai", "--project", "/absolute/my-research", "mcp", "serve"]
+```
+
+Use the same command/argv with any standards-compatible stdio client; no shell wrapper needed.
+Actual Codex 0.162.0-alpha.17.2 discovery and direct tool calls have been verified with an
+isolated temporary client configuration, a foreign cwd and no model credentials. This is not
+an LLM conversation; second vendor-client and conversational acceptance remain **pending**.
+See [official Codex MCP](https://developers.openai.com/codex/mcp/) and
+[Skill discovery](https://developers.openai.com/codex/skills/).
+
+Fixed toolsets: core/work/study/results/products/datasets/clusters/operations/knowledge.
+Core is always present; default core/work/knowledge. Restart the server to change toolsets.
+Catalog discovery distinguishes implemented, session-enabled and unsupported. Listings are compact
+pages; Study panels/logs are explicit provider reads, not recursive startup artifact downloads.
+Resources identify project/capabilities/installed Work and Study contracts, project structure,
+recipe inventory, exact results/products and a paged note index. Toolset-disabled resources are
+not registered; no resource template accepts arbitrary paths. Thirteen short prompts cover
+authoring, models, checkpointing, analysis/comparison, HTML, products, diagnostics, recovery,
+evidence review, architecture decisions and next experiments. Prompts guide but never authorize.
+Responses include schema/project/source/retrieval time/data/warnings/structured error. Retrieval
+time is not fresh provider observation; native evidence retains its own age/state.
+
+Default READ/PLAN does not permit submission, operation, deletion or agent writes. Validation imports
+project Python and requires operator `--allow-project-code`. Isolation is **not a sandbox** against
+trusted code or an agent with independent same-user shell access. Submission/recovery/deletion
+remain disabled as agent actions. Exact Job cancellation requires OPERATE, operations toolset and
+separate local human review. Approved knowledge edits and paired loopback HTTP are opt-ins. Notes, prompts,
+model answers and `approved=true` are not authorization. No arbitrary shell or read-file tool exists.
+
+<a id="guide-integration-local-human-approvals"></a>
+
+### Local human approvals
+
+Exact Job cancellation uses the same signed approval service, not a second authorization engine.
+The stdio operator selects `--toolsets core,operations --permissions READ,PLAN,OPERATE`.
+`prepare_job_cancellation(job_id)` reads saved metadata only, without a provider query or write;
+`request_job_cancellation(job_id)` proposes but does not stop anything. The human reviews the
+exact project/Job/scheduler/provider binding and scope through the same local CLI/Console below.
+Then `apply_job_cancellation(request_id, plan_hash)` reobserves, revalidates ownership and invokes
+native `JobService.cancel`. It affects that exact Job, not every Job in the semantic Work, and
+retains scientific evidence. Unknown ownership/changed plans block apply; Fleet is explicitly
+unsupported. `job_cancellation_status(request_id)` returns signed state and the saved native
+outcome. A crash/failure after claiming never grants replay. Knowledge permissions/approval
+cannot authorize cancellation; no MCP endpoint approves.
+
+The v1 response envelope remains compatible. Declared payloads have operation-specific JSON
+schemas validated by the facade and advertised by the SDK's public output-model contract.
+Tool failures set `isError=true`, with distinct approval-required/expired/stale/conflict,
+provider-uncertain/unreachable and internal-error codes. `retryable` is never permission to
+repeat a mutation. Deterministic English/Spanish intent discovery supports, for example,
+`lf ai capabilities --search "recuperar estudio" --limit 20 --json`; relevance is not scientific
+confidence. Catalog metadata identifies native owner, permissions, preconditions, costs,
+freshness, errors and actual next tools; it does not certify provider configuration.
+
+For note actions the stdio operator enables `--permissions READ,PLAN,WRITE_PROJECT`.
+Discover `agent_actions`: its knowledge subset contains `knowledge.create`, `knowledge.update`, `knowledge.link` and
+`knowledge.export` (a notes-only ZIP, not scientific export).
+Use `preview_agent_action`, then `request_agent_action` with exact arguments. Neither writes a note.
+A human reviews that request through **Agents / knowledge… → Review agent requests…**, or:
+
+```bash
+lf ai approvals list
+lf ai approvals show approval-EXACT
+lf ai approvals approve approval-EXACT --plan-hash EXACT_HASH
+```
+
+The CLI requires a real local TTY and the typed full request ID. Console shows every argument and
+requires the same typed confirmation. Approval does not apply the edit: the agent calls
+`apply_agent_action(request_id, plan_hash)` separately, within the requested expiry (maximum
+15 minutes). Exact project, arguments, target revisions and plan hash are revalidated. Signed
+records, a cross-process claim and metadata audit reject forged/stale/replayed/concurrent requests.
+A crash after claiming is not permission to replay. No MCP tool can approve; a note saying the human
+approved grants nothing. This does not sandbox another program with unrestricted same-user shell.
+
+<a id="guide-integration-optional-dependencies-and-paired-http"></a>
+
+### Optional dependencies and paired HTTP
+
+```bash
+lf ai dependencies check
+lf ai dependencies install                 # exact preview, no installation
+lf ai dependencies install --apply         # invoking virtualenv/Conda only
+lf ai dependencies install --wheelhouse wheels --apply  # offline, project-owned wheels
+lf ai init --agents portable --apply --install-deps
+lf ai mcp token --apply                    # private pairing file; never prints its token
+lf ai mcp serve --transport http --port 8765
+```
+
+Only the declared `agents` extra is installable; no arbitrary package/command, system Python,
+desktop application or cluster installation. Failed installs preserve project files/notes and
+report bounded diagnostics with a failing exit status. `init --install-deps` is explicit consent.
+HTTP uses the **same official SDK and services**, restricted to READ/PLAN, `127.0.0.1` and an
+exact Host. Pair a trusted local client using `Authorization: Bearer TOKEN` from the private
+`.lambdaforge/agents/http/token` file; never embed it in a URL. Browser clients also need an exact
+operator `--origin https://your-local-client.example` allowlist. Every request rechecks the token
+and project. Requests are bounded, forwarded headers untrusted and non-loopback peers refused.
+This is a local capability token, **not an OAuth server**: public/network deployment is unsupported.
+Stdio remains recommended and never needs this token.
+
+<a id="guide-integration-portable-knowledge"></a>
+
+### Portable knowledge
+
+```bash
+lf ai knowledge init --apply
+lf ai knowledge create hypothesis "Does width improve score?" --author-type ai --apply
+lf ai knowledge search width --kind hypothesis
+lf ai knowledge read EXACT_NOTE_ID
+lf ai knowledge update EXACT_NOTE_ID --revision CURRENT_SHA256 --body "Revised draft" --apply
+lf ai knowledge reindex --force
+lf ai knowledge reindex --rebuild  # Explicitly rebuild a corrupt derived index
+lf ai knowledge audit --limit 20  # Follow the returned byte next_cursor with --cursor
+lf ai knowledge export notes-snapshot.zip          # exact preview, no archive created
+lf ai knowledge export notes-snapshot.zip --apply  # explicit local operator export
+lf ai knowledge obsidian                 # passive hints only; never starts the app
+lf ai knowledge obsidian --probe-cli --apply  # explicit version probe may start Obsidian
+lf ai knowledge open                     # preview the owned README URI
+lf ai knowledge open --apply             # explicit desktop request, when available
+```
+
+Markdown is canonical; SQLite FTS under `.lambdaforge/agent-knowledge/` is disposable. Eleven kinds:
+decision/hypothesis/experiment/finding/concept/architecture/issue/research-question/procedure/
+literature/task. Schema-1 frontmatter retains human/AI author, timestamps, project, tags, links,
+status and exact evidence references. AI hypotheses are proposed, never verified conclusions.
+Use Python `KnowledgeService.create(..., evidence_refs=[{"kind":"execution","id":EXACT_ID}])`;
+products/datasets use SHA-256 content IDs. `verify_references` takes a native resolver; existence
+does not verify interpretation. Retrieved text is untrusted data, never permission or instructions.
+
+Search supports title/text, kind/status/tag/evidence/date filters, pages and exact backlinks.
+`knowledge_related` returns explicit links/shared tags/exact evidence, not a truth score;
+hypothesis/decision/open-question tools give bounded views. `knowledge_verify_references` resolves
+local registered identities through native owners, never downloading artifacts or verifying a claim.
+External edits refresh within a bounded five-second discovery interval, or immediate reindex.
+Unchanged note bytes are not reread. A corrupt index gives an actionable rebuild diagnostic;
+rebuild retains its old copy and never changes notes. `knowledge link` requires exact existing
+note IDs and the current source revision. Hash revisions reject stale native writes; external editors
+do not participate in the lock. Corrupt notes/duplicate IDs are excluded with warnings, not deleted.
+Native create/update/link operations record intent and completion, note identity and before/after
+revisions in a metadata-only journal; no note titles/bodies are copied. Interrupted intent is not
+success. Byte-cursor paging never loads the full journal. External editor changes are not attributed
+to a person or silently called verified; the Markdown revision remains authoritative.
+The journal is `.lambdaforge/agents/knowledge-audit.jsonl`, separate from the disposable FTS cache;
+rebuilding/deleting the search index never deletes history. A malformed journal requires explicit
+local inspection and prevents further native edits rather than silently discarding audit evidence.
+
+Knowledge export validates every canonical note and creates a compressed ZIP with exact bytes and
+a checksum manifest. It refuses corrupt/duplicate notes, stale plans, symlinks, unsafe destinations
+and existing archives; failures clean only owned temporary files, never notes. Choose an existing
+project-relative parent outside the vault. The bounded snapshot includes neither scientific data
+nor indexes, plugins, desktop settings or unrelated Markdown; it is not `lf export STUDY` or a
+recovery package. MCP previews with `knowledge_export(destination)`; actual export uses the same
+separate human approval workflow for action `knowledge.export` and binds the entire note inventory.
+Obsidian mode uses the same Markdown and an optional empty .obsidian directory: no app/plugins/CLI
+required, existing preferences preserved. External vault configuration and semantic/hybrid search
+remain pending. Text retrieval works offline without an LLM key.
+
+`knowledge_obsidian_status` only inspects configuration/PATH/desktop hints; installed/running/
+compatible are **not** assumed. Explicit local CLI probes use bounded `obsidian version`, and
+may launch the app as explained in the [official CLI documentation](https://obsidian.md/help/cli).
+`knowledge open --apply` uses the [official encoded open URI](https://obsidian.md/help/uri) for
+the exact owned README. Register that folder as a vault manually first. A successful opener is
+only `open_requested`, not proof of an open window; headless/missing/disabled/timeout cases return
+actionable hints. No app/plugins/settings are installed or changed, and no MCP desktop-launch tool
+is exposed. These helpers are fixture-tested, not a claim of real Obsidian desktop acceptance.
+
+<a id="guide-integration-python-gui-and-sync"></a>
+
+### Python, GUI and sync
+
+```python
+from lambdaforge.agents import AgentServices, IntegrationService
+
+service = AgentServices("/absolute/my-research")
+project = service.project_info()                 # typed AgentResponse
+notes = service.knowledge_search("width")        # bounded interpretations
+result = service.get_result("execution-EXACT")   # native metadata-first evidence
+plan = IntegrationService("/absolute/my-research").preview()
+```
+
+The facade pins its project regardless of cwd and rejects secret/traversal/symlink paths.
+Widgets never own scientific records/provider logic. `examples/agent_gui.py` is an optional tiny
+nonblocking Tk client, not a chatbot or vendor-specific LLM integration.
+`lf ai sync` previews; `--apply` checks managed hashes and protects personalized AGENTS/Skills.
+`.agents/LAMBDAFORGE.md` is a separate managed reference when custom root instructions exist.
+Plans bind project/version/paths/content hashes and reject changes. Notes and global client settings
+are never part of sync. This local operator command is not the future agent approval protocol.
+
+Static model discovery now resolves public exports to installed constructor/forward signatures
+and docstrings without importing Torch. Declared tensor semantics come from their owner,
+not invented or inferred. Recipes use installed native examples. Product contract/member/producer/
+consumer queries are metadata-only; selected Run curves/logs and cluster resources are explicit
+bounded native reads. A text artifact preview is explicit, ownership/integrity checked and 64 KiB.
+
+Tests cover protocol/stdio/resources/prompts, isolation, malformed inputs, external note edits,
+revision conflicts, duplicates, assets and one deterministic native CPU Work with durable evidence.
+The reference Agent Skills validator checks all 24 packages. Approved-note and loopback HTTP
+protocol/security tests pass. Remaining scientific actions, semantic retrieval, complete domain
+tool/resource/prompt coverage, second vendor-client E2E and full GUI
+conversations remain explicit gates in the ledger.
+
+Standards: [MCP](https://modelcontextprotocol.io/specification/latest),
+[official Python SDK](https://py.sdk.modelcontextprotocol.io/),
+[Agent Skills](https://agentskills.io/specification).

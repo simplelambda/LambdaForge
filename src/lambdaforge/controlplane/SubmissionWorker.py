@@ -65,11 +65,88 @@ def serve(request_path: str | Path) -> int:
             def builder(prepared: PreparedWork) -> Sequence[str]:
                 return ("lambdaforge.controlplane.FleetStudyService", str(path))
 
+        extension = jobs.get(job_id, refresh=False).metadata.get("study_extension")
+        if isinstance(extension, Mapping) and extension.get("code_review_pin"):
+            from lambdaforge.work.extension_compatibility import code_review_pin
+
+            if project is None or code_review_pin(project) != extension["code_review_pin"]:
+                raise ValueError(
+                    "Extension source changed after review; no native dispatch occurred."
+                )
+        if isinstance(extension, Mapping) and extension.get("retained_runtime"):
+            from lambdaforge.controlplane.StudyExtensionDispatch import (
+                prepared_entrypoint,
+                retained_profile,
+            )
+
+            if value.get("fleet") is not None:
+                raise ValueError("Fleet extension dispatch is not supported.")
+            proof = extension["retained_runtime"]
+            origin = jobs.get(str(extension["origin_job_id"]), refresh=False)
+            if (
+                origin.cluster != cluster
+                or origin.metadata.get("environment_id") != proof["environment_id"]
+            ):
+                raise ValueError("Retained runtime differs from its native origin Job.")
+            profile = retained_profile(profile, proof)
+            catalog = ClusterCatalog({cluster: profile}, project=project)
+            jobs = JobService(catalog, store=store)
+
+            def builder(prepared: PreparedWork) -> Sequence[str]:
+                return prepared_entrypoint(prepared, proof, tuple(str(item) for item in arguments))
+
+        if (
+            isinstance(extension, Mapping) and extension.get("delta_contract")
+            and cluster != "local"
+        ):
+            from lambdaforge.controlplane.StudyExtensionDispatch import (
+                current_entrypoint,
+                prepare_native_delta,
+            )
+
+            def builder(prepared: PreparedWork) -> Sequence[str]:
+                # Recheck after ordinary managed preparation, before provider submission.
+                if extension.get("code_review_pin"):
+                    from lambdaforge.work.extension_compatibility import code_review_pin
+
+                    if project is None or code_review_pin(project) != extension["code_review_pin"]:
+                        raise ValueError("Extension source changed during native preparation.")
+                attestation = prepare_native_delta(prepared, extension["delta_contract"])
+                current = jobs.get(job_id, refresh=False)
+                if current.state is JobState.CANCELLED:
+                    raise ValueError("Extension submission was cancelled during preparation.")
+                if current.metadata.get("recovery_execution_dir"):
+                    # Native recovery restores the ORIGINAL namespace/Execution; its new
+                    # staged configuration must not replace that execution's identity.
+                    previous = current.metadata.get("prepared_extension_attestation")
+                    if not isinstance(previous, Mapping):
+                        raise ValueError("Missing original extension preparation attestation.")
+                    attestation["scientific_identity"] = str(previous["scientific_identity"])
+                jobs.store.write(current.with_updates(metadata={
+                    **current.metadata, "prepared_extension_attestation": attestation,
+                }))
+                forwarded = tuple(str(item) for item in arguments)
+                if extension.get("retained_runtime"):
+                    return prepared_entrypoint(
+                        prepared, extension["retained_runtime"], forwarded,
+                        attestation=attestation,
+                    )
+                return current_entrypoint(prepared, attestation, forwarded)
+
+        native_arguments = (
+            ()
+            if isinstance(extension, Mapping) and (
+                extension.get("retained_runtime")
+                or extension.get("delta_contract") and cluster != "local"
+            )
+            else arguments
+        )
+
         ControlPlane(catalog, jobs=jobs).submit(
             str(value["config"]),
             cluster=cluster,
             resources=ResourceRequest.from_mapping(value.get("resources", {})),
-            run_arguments=tuple(str(item) for item in arguments),
+            run_arguments=tuple(str(item) for item in native_arguments),
             group_id=str(value["group_id"]) if value.get("group_id") else None,
             reserved_job_id=job_id,
             allow_duplicate=bool(value.get("allow_duplicate", False)),

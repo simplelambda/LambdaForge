@@ -237,10 +237,29 @@ def test_shared_launch_rechecks_physical_memory_before_worker_creation(
     monkeypatch: Any,
 ) -> None:
     from lambdaforge.execution import ResourceRequest
+    from lambdaforge.runtime.GPUObservation import GPUObservationCache
     from lambdaforge.work import runner
 
     monkeypatch.setenv("LAMBDAFORGE_GPU_ADMISSION_ROOT", str(tmp_path))
-    monkeypatch.setattr(runner, "_gpu_memory_inventory", lambda count: ((GIB, 80 * GIB),))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-test")
+    monkeypatch.setattr(runner, "_GPU_BOUND_IDENTITIES", {})
+    monkeypatch.setattr(GPUObservationCache, "__init__", lambda self: None)
+    monkeypatch.setattr(
+        GPUObservationCache,
+        "read",
+        lambda self, **kw: {
+            "quality": "measured",
+            "devices": [
+                {
+                    "uuid": "GPU-test",
+                    "quality": "measured",
+                    "free_bytes": GIB,
+                    "total_bytes": 80 * GIB,
+                    "processes": [],
+                }
+            ],
+        },
+    )
 
     def forbidden(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("A stale fit must not create a worker.")
@@ -261,7 +280,108 @@ def test_shared_launch_rechecks_physical_memory_before_worker_creation(
         )
         is None
     )
-    assert not list(tmp_path.glob("*.json"))
+    assert all(
+        not json.loads(path.read_text()).get("commitments") for path in tmp_path.glob("*.json")
+    )
+
+
+def test_missing_device_evidence_only_blocks_that_devices_new_admissions():
+    failed = replace(gpu(0), observation_quality="unavailable")
+    healthy = gpu(1)
+    admitted, blocked = GPUPlacementPlanner(ResourceDemandModel()).place(
+        [action("c1", 10 * GIB, 1.0)], [failed, healthy], max_launches=1
+    )
+    assert len(admitted) == 1 and admitted[0].target_gpu == 1
+    assert not blocked
+    view = _resource_admission_diagnostics(
+        [failed, healthy],
+        admitted=admitted,
+        blocked=(),
+        pending=1,
+        max_parallel=2,
+        configured_runs_per_gpu=2,
+        user_minimum_bytes=0,
+        granted_slots={0, 1},
+    )
+    assert view["allocation"]["currently_granted_tokens"] == ["0", "1"]
+    assert view["allocation"]["admission_slots"] == [1]
+    assert view["devices"][0]["physical_free_bytes"] is None
+    assert view["devices"][0]["allocation_granted"] is True  # Missing != revoked.
+
+
+def test_peer_startup_blocks_a_second_cold_baseline_and_exploration():
+    model = ResourceDemandModel()
+    cold = model.predict(
+        candidate_key="cold",
+        compatibility_key="family",
+        parameters={},
+        hardware="H100-80",
+        total_bytes=80 * GIB,
+    )
+    contender = CandidateResourceAction("cold", {"trial_index": 1}, 1, cold)
+    shared = replace(gpu(), peer_startup_bytes=60 * GIB)
+    admitted, blocked = GPUPlacementPlanner(model).place([contender], [shared], max_launches=1)
+    assert not admitted
+    assert blocked[0].devices[0]["reason"] == "peer-startup-future-envelope-headroom"
+    assert shared.provisional_headroom_bytes == 20 * GIB
+
+
+def test_native_shared_launch_accepts_path_metadata_without_losing_returned_future(
+    tmp_path, monkeypatch
+):
+    from lambdaforge.execution import ResourceRequest
+    from lambdaforge.runtime.GPUObservation import GPUObservationCache
+    from lambdaforge.work import runner
+
+    monkeypatch.setenv("LAMBDAFORGE_GPU_ADMISSION_ROOT", str(tmp_path / "coord"))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-test")
+    monkeypatch.setattr(runner, "_GPU_BOUND_IDENTITIES", {})
+    monkeypatch.setattr(GPUObservationCache, "__init__", lambda self: None)
+    monkeypatch.setattr(
+        GPUObservationCache,
+        "read",
+        lambda self, **kw: {
+            "quality": "measured",
+            "devices": [
+                {
+                    "uuid": "GPU-test",
+                    "quality": "measured",
+                    "free_bytes": 80 * GIB,
+                    "total_bytes": 80 * GIB,
+                    "processes": [],
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "lambdaforge.runtime.HostObservation.observe_host",
+        lambda: {"effective_available_bytes": 1000},
+    )
+    future = object()
+
+    class Pool:
+        def __init__(self, **kw):
+            pass
+
+        def submit(self, *args):
+            return future
+
+    monkeypatch.setattr(runner, "ProcessPoolExecutor", Pool)
+    value = {"hpo_worker_identity_path": tmp_path / "worker.json"}
+    started = runner._launch_gpu_run(
+        value,
+        token="GPU-test",
+        slot=0,
+        resources=ResourceRequest(gpu_count=1),
+        action=action("c1", 10 * GIB, 1),
+        device=gpu(),
+        model=ResourceDemandModel(),
+    )
+    assert started is not None and started[0] is future
+    ledger = json.loads(next((tmp_path / "coord").glob("*.json")).read_text())
+    assert ledger["commitments"][0]["metadata"]["worker_identity_path"] == str(
+        tmp_path / "worker.json"
+    )
 
 
 def test_three_gpu_runtime_baselines_allow_a_real_one_to_two_probe() -> None:
@@ -1136,6 +1256,79 @@ def test_live_update_prefers_per_process_vram_over_predicted_proportions(
     assert commitments[first].current_bytes == 10 * GIB
     assert commitments[second].current_bytes == 30 * GIB
     assert {value.measurement_provenance for value in evidence} == {"nvml-process-exact"}
+
+
+def test_stable_resident_uses_learned_envelope_but_retains_rare_tail(monkeypatch):
+    from lambdaforge.work import runner
+
+    future = object()
+    specification = {
+        "trial_parameters": {},
+        "definition": {"resources": {"gpu_memory_bytes": 0}},
+        "hpo_dispatched_monotonic": 0.0,
+    }
+    metadata = {
+        future: {
+            "candidate_key": "resident",
+            "compatibility_key": "compatible",
+            "hardware": "H100-80",
+        }
+    }
+    current = {"step": 0, "phase": "training"}
+    monkeypatch.setattr(runner, "_read_live_resource_snapshot", lambda _: dict(current))
+    monkeypatch.setattr(
+        runner, "_gpu_process_memory", lambda *_: ({future: 20 * GIB}, "nvml-process-exact")
+    )
+    model = ResourceDemandModel((observation("resident", 24 * GIB),))
+    commitments = {
+        future: ActiveResourceCommitment(
+            "resident",
+            80 * GIB,
+            admission_mode="EXPLORATORY_ADMISSION",
+        )
+    }
+    trajectories = {}
+    for step in range(5):
+        current["step"] = step
+        runner._update_active_resource_commitments(
+            ((60 * GIB, 80 * GIB),),
+            pending={future: (specification, 0, object())},
+            commitments=commitments,
+            trajectories=trajectories,
+            metadata=metadata,
+            model=model,
+            now=float(step * 10),
+        )
+    resident = commitments[future]
+    assert resident.resource_state == "PROVISIONALLY_STABLE"
+    assert resident.admission_mode == "SAFE_ADMISSION"
+    assert resident.commitment_bytes == 24 * GIB
+    assert max(resident.future_peak_samples) == 80 * GIB
+    assert resident.future_peak_weights[-1] > 0
+    assert resident.current_bytes == 20 * GIB
+
+
+def test_launch_block_is_visible_in_admission_even_with_planner_approval():
+    approved, _ = GPUPlacementPlanner(ResourceDemandModel()).place(
+        (action("c1", 20 * GIB, 1.0),),
+        (gpu(),),
+        max_launches=1,
+    )
+    state = _resource_admission_diagnostics(
+        (gpu(),),
+        admitted=approved,
+        blocked=(),
+        pending=54,
+        max_parallel=36,
+        configured_runs_per_gpu=36,
+        user_minimum_bytes=0,
+        launch_waits=(
+            {"candidate": "c1", "gpu": 0, "reason": "study_ram_allocation_headroom_or_unknown"},
+        ),
+    )
+    assert state["summary"] == "waiting_for_resources"
+    assert state["devices"][0]["idle_reason"] == "study_ram_allocation_headroom_or_unknown"
+    assert len(state["launch_waits"]) == 1
 
 
 def test_known_failed_placement_blocks_only_the_dominated_resident_set() -> None:

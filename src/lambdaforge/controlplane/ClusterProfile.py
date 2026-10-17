@@ -16,6 +16,7 @@ from lambdaforge.controlplane.SlurmProfile import SlurmProfile
 from lambdaforge.controlplane.SshConnectionPolicy import SshConnectionPolicy
 from lambdaforge.controlplane.TorchInstallationPolicy import TorchInstallationPolicy
 from lambdaforge.ImmutableJson import FrozenJsonMapping
+from lambdaforge.runtime.ResourceSafetyPolicy import ResourceSafetyPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +48,13 @@ class ClusterProfile:
     python_runtime: PythonRuntimePolicy | None = None
     project_root: str | None = None
     gpu_access: GpuAccessPolicy = field(default_factory=GpuAccessPolicy)
+    resource_safety: ResourceSafetyPolicy = field(default_factory=ResourceSafetyPolicy)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.resource_safety, ResourceSafetyPolicy):
+            object.__setattr__(
+                self, "resource_safety", ResourceSafetyPolicy.from_value(self.resource_safety)
+            )
         if not self.name.strip():
             raise ValueError("Cluster profile names cannot be empty.")
         if self.transport not in {"local", "ssh"}:
@@ -179,6 +185,7 @@ class ClusterProfile:
             project_module=(str(value["project_module"]) if value.get("project_module") else None),
             project_root=(str(value["project_root"]) if value.get("project_root") else None),
             gpu_access=GpuAccessPolicy.from_mapping(value.get("gpu_access")),
+            resource_safety=ResourceSafetyPolicy.from_value(value.get("resource_safety")),
             data_environment=(
                 str(value["data_environment"])
                 if value.get("data_environment") is not None
@@ -237,6 +244,7 @@ class ClusterProfile:
             "project_module": self.project_module,
             "project_root": self.project_root,
             "gpu_access": self.gpu_access.to_dict(),
+            "resource_safety": self.resource_safety.to_dict(),
             "data_environment": self.data_environment or self.name,
             "ssh_options": list(self.ssh_options),
             "command_prefix": list(self.command_prefix),

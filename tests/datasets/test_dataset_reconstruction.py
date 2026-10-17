@@ -310,9 +310,12 @@ def test_native_comparison_reports_exact_and_unresolved_without_mutation(
     assert "Dataset comparison: EXACT" in human
     assert "Exact byte equality: True" in human
     report = tmp_path / "comparison.json"
-    assert CommandLineInterface.main(
-        ["datasets", "compare", str(a), str(b), "--output", str(report), "--json"]
-    ) == 1
+    assert (
+        CommandLineInterface.main(
+            ["datasets", "compare", str(a), str(b), "--output", str(report), "--json"]
+        )
+        == 1
+    )
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "unresolved" and not result["registration_changed"]
     assert json.loads(report.read_text()) == result

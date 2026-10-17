@@ -221,10 +221,14 @@ def audit_pruner(
     absolute_errors = sorted(abs(value) for value in errors)
     # Split-conformal finite-sample quantile.  The ``n + 1`` rank makes sparse calibration
     # honestly conservative instead of pretending that two residuals validate a 90% interval.
-    conformal_index = min(
-        len(absolute_errors) - 1,
-        max(0, math.ceil(0.90 * (len(absolute_errors) + 1)) - 1),
-    ) if absolute_errors else None
+    conformal_index = (
+        min(
+            len(absolute_errors) - 1,
+            max(0, math.ceil(0.90 * (len(absolute_errors) + 1)) - 1),
+        )
+        if absolute_errors
+        else None
+    )
     competitive_rate = (
         statistics.fmean(float(competitive[trial]) for trial in last_probabilities)
         if last_probabilities
@@ -232,8 +236,7 @@ def audit_pruner(
     )
     null_brier = (
         statistics.fmean(
-            (competitive_rate - float(competitive[trial])) ** 2
-            for trial in last_probabilities
+            (competitive_rate - float(competitive[trial])) ** 2 for trial in last_probabilities
         )
         if competitive_rate is not None
         else None

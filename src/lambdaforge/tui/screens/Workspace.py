@@ -231,7 +231,9 @@ class ResearchWorkspace(Screen[None]):
         def generate() -> None:
             try:
                 path = writer()
-                opened = webbrowser.open_new_tab(path.as_uri())
+                opener = getattr(getattr(self, "services", None), "open_report", None)
+                url = opener(path) if callable(opener) else path.as_uri()
+                opened = webbrowser.open_new_tab(url)
             except Exception as error:
                 self.app.call_from_thread(
                     self.notify,
@@ -409,11 +411,12 @@ class StudyWorkspace(ResearchWorkspace):
 
     def compose_workspace(self) -> ComposeResult:
         yield Static(id="study-header", classes="workspace-header")
-        with Horizontal(id="study-control-bar"):
+        with Grid(id="study-control-bar"):
             yield Button("Cancel Study", id="study-cancel", variant="warning")
             yield Button("Resume Study…", id="study-retry", variant="success")
+            yield Button("Extend Study…", id="study-extend", variant="primary")
             yield Button("Export Study…", id="study-export", variant="success")
-            yield Button("Delete Study History…", id="study-delete", variant="error")
+            yield Button("Delete History…", id="study-delete", variant="error")
             yield Button("Recovery history", id="study-recovery-history", flat=True, compact=True)
             yield Static("", id="study-action-status", classes="freshness-line")
         with Vertical(id="study-loading", classes="workspace-loading"):
@@ -567,6 +570,9 @@ class StudyWorkspace(ResearchWorkspace):
         }
         self.query_one("#study-cancel", Button).disabled = terminal or not bool(self._selector)
         self.query_one("#study-retry", Button).disabled = not self._recovery_eligible()
+        self.query_one("#study-extend", Button).disabled = (
+            str(self.work.get("state", "unknown")) != "succeeded"
+        )
         self.query_one("#study-export", Button).disabled = not bool(self._selector)
         self.query_one("#study-delete", Button).disabled = not bool(self._selector)
         self.query_one("#study-loading").display = not bool(self.study)
@@ -592,12 +598,16 @@ class StudyWorkspace(ResearchWorkspace):
             self._load_action_history()
 
     def _render_workspace(self) -> None:
+        self.query_one("#study-extend", Button).disabled = str(
+            self.work.get("state", "unknown")
+        ) != "succeeded" or bool(self.work.get("imported"))
         if not self._retry_running:
             self.query_one("#study-retry", Button).disabled = not self._recovery_eligible()
         if self.work.get("imported"):
             for identifier in (
                 "study-cancel",
                 "study-retry",
+                "study-extend",
                 "study-delete",
                 "study-export",
                 "study-recovery-history",
@@ -2030,6 +2040,12 @@ class StudyWorkspace(ResearchWorkspace):
             self.app.push_screen(ExactConfirmation("Cancel Study", preview), self._apply_cancel)
         elif event.button.id == "study-retry":
             self._preview_retry()
+        elif event.button.id == "study-extend":
+            from lambdaforge.tui.screens.StudyExtension import StudyExtensionDialog
+
+            self.app.push_screen(
+                StudyExtensionDialog(self.work, self.services), self._extension_submitted
+            )
         elif event.button.id == "study-recovery-history":
             self._open_recovery_history()
         elif event.button.id == "study-delete":
@@ -2069,6 +2085,26 @@ class StudyWorkspace(ResearchWorkspace):
                 "Response and interaction surfaces always target the Study's declared selection objective; "
                 "switching to an unrelated metric would describe a different model, not the HPO controller.",
             )
+
+    def _extension_submitted(self, result: Mapping[str, Any] | None) -> None:
+        if result is not None and self.is_mounted:
+            self.query_one("#study-action-status", Static).update(
+                f"Extension {result.get('state')} · Job {result.get('job_id') or 'none'} · "
+                f"{result.get('study_series_id')} · original evidence retained"
+            )
+            if result.get("study_series_id") and result.get("job_id"):
+                from lambdaforge.tui.screens.StudySeries import StudySeriesWorkspace
+
+                self.app.push_screen(
+                    StudySeriesWorkspace(
+                        {
+                            "study_series_id": result["study_series_id"],
+                            "name": self.work.get("name", "Study series"),
+                            "cluster": self.work.get("cluster", "local"),
+                        },
+                        self.services,
+                    )
+                )
 
     @property
     def _selector(self) -> str:
@@ -3649,6 +3685,17 @@ class RecoveryConfigurationFailed(Message):
 class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
     """An explicit scientific compatibility acknowledgement, never inferred from a code fix."""
 
+    DEFAULT_CSS = """
+    StudyRetryConfirmation { align: center middle; background: rgba(0, 0, 0, 0.65); }
+    #study-retry-dialog { width: 92; max-width: 95%; height: 90%; }
+    #retry-plan-body { height: 1fr; min-height: 3; overflow-x: hidden; }
+    #retry-controls { height: auto; }
+    #retry-submit-status, #retry-code-change-warning { height: auto; }
+    #retry-submit-status { color: $accent; margin-top: 1; }
+    #retry-compatible-code { width: 100%; height: auto; }
+    #retry-controls .modal-actions { height: 3; min-height: 3; }
+    """
+
     def __init__(
         self, preview: Mapping[str, Any], *, services: Any = None, job_id: str = ""
     ) -> None:
@@ -3659,11 +3706,12 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
         self._valid_config = self.preview.get("configuration", {}).get("selected_exists", True)
         self._config_override: dict[str, Any] = {}
         self._validating = False
+        self._confirmed = False
 
     def compose(self) -> ComposeResult:
-        with Vertical(classes="modal-card wide-modal"):
+        with Vertical(classes="modal-card wide-modal", id="study-retry-dialog"):
             yield Label("Resume Study", classes="modal-title")
-            with VerticalScroll():
+            with VerticalScroll(id="retry-plan-body"):
                 configuration = self.preview.get("configuration", {})
                 if self.services is not None:
                     yield Label(
@@ -3743,42 +3791,50 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
                     "If the code fix changes the meaning of earlier metrics or checkpoint structure, "
                     "cancel this dialog and start a new Study."
                 )
+            with Vertical(id="retry-controls"):
+                yield Static("", id="retry-submit-status", markup=False)
+                yield Static(
+                    "Code changed · explicitly confirm that earlier evidence remains valid.",
+                    id="retry-code-change-warning",
+                    markup=False,
+                )
                 yield Checkbox(
                     "I changed code, but earlier evidence and checkpoints remain valid",
                     id="retry-compatible-code",
                 )
-                if self.preview.get("code_change_detected"):
-                    yield Static(
-                        "The current project code differs from the previous Execution revision. "
-                        "Review compatibility and tick the acknowledgement before resuming. "
-                        "Without it, no recovery Job will be submitted.",
-                        id="retry-code-change-warning",
-                        markup=False,
-                    )
-            with Horizontal(classes="modal-actions"):
-                yield Button("Cancel", id="retry-cancel")
-                yield Button(
-                    "Resume Study",
-                    id="retry-confirm",
-                    variant="success",
-                    disabled=bool(self.preview.get("code_change_detected"))
-                    or not self._valid_config,
-                )
+                with Horizontal(classes="modal-actions"):
+                    yield Button("Cancel", id="retry-cancel")
+                    yield Button("Resume Study", id="retry-confirm", variant="success")
+
+    def on_mount(self) -> None:
+        self._sync_confirmation()
+
+    def _sync_confirmation(self) -> None:
+        """Keep the next required action visible even when a long plan is scrolled."""
+        code_changed = bool(self.preview.get("code_change_detected"))
+        acknowledgement = self.query_one("#retry-compatible-code", Checkbox).value
+        self.query_one("#retry-code-change-warning").display = code_changed
+        self.query_one("#retry-confirm", Button).disabled = self._validating or self._confirmed
+        if self._validating:
+            message = "Validating recovery configuration… please wait; nothing submitted yet."
+        elif not self._valid_config:
+            message = "Action required · choose an existing YAML and validate its recovery plan."
+        elif code_changed and not acknowledgement:
+            message = "Action required · review code compatibility and tick the checkbox below."
+        else:
+            message = "Ready · Resume Study will preserve completed Runs and submit recovery once."
+        self.query_one("#retry-submit-status", Static).update(message)
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
-        if event.checkbox.id == "retry-compatible-code" and self.preview.get(
-            "code_change_detected"
-        ):
-            self.query_one("#retry-confirm", Button).disabled = (
-                not event.value or not self._valid_config
-            )
+        if event.checkbox.id == "retry-compatible-code":
+            self._sync_confirmation()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "retry-config" and event.value != self.preview.get(
             "configuration", {}
         ).get("selected_path", ""):
             self._valid_config = False
-            self.query_one("#retry-confirm", Button).disabled = True
+            self._sync_confirmation()
             self.query_one("#retry-config-status", Static).update(
                 "Configuration changed · validate a new recovery plan before submitting."
             )
@@ -3793,10 +3849,11 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
         selected = self.query_one("#retry-config", Input).value.strip()
         self._validating = True
         self.query_one("#retry-config-validate", Button).disabled = True
-        self.query_one("#retry-confirm", Button).disabled = True
+        self._sync_confirmation()
         self.query_one("#retry-config-status", Static).update(
             "Checking original identity and selected configuration…"
         )
+
         def validate() -> None:
             try:
                 preview = self.services.retry_preview(self.job_id, config=selected)
@@ -3821,6 +3878,7 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
         self._validating = False
         self._valid_config = False
         self.query_one("#retry-config-validate", Button).disabled = False
+        self._sync_confirmation()
         self.query_one("#retry-config-status", Static).update(
             f"Recovery blocked · {type(error).__name__}: {SecretRedactor.redact(error)[:1000]}"
         )
@@ -3842,7 +3900,11 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
             self.app.push_screen(RecoveryWorkspace(self.services, self.job_id))
         elif action == "logs":
             workspace = next(
-                (screen for screen in reversed(self.app.screen_stack) if isinstance(screen, StudyWorkspace)),
+                (
+                    screen
+                    for screen in reversed(self.app.screen_stack)
+                    if isinstance(screen, StudyWorkspace)
+                ),
                 None,
             )
             if workspace is not None:
@@ -3860,6 +3922,7 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
         self.query_one("#retry-config-validate", Button).disabled = False
         if self.query_one("#retry-config", Input).value.strip() != selected:
             self._valid_config = False
+            self._sync_confirmation()
             self.query_one("#retry-config-status", Static).update(
                 "Selection changed while validating · validate again."
             )
@@ -3871,10 +3934,7 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
             "config_sha256": configuration["sha256"],
         }
         self._valid_config = True
-        acknowledgement = self.query_one("#retry-compatible-code", Checkbox).value
-        self.query_one("#retry-confirm", Button).disabled = (
-            bool(preview.get("code_change_detected")) and not acknowledgement
-        )
+        self._sync_confirmation()
         self.query_one("#retry-plan-detail", Static).update(
             confirmation_text({key: value for key, value in preview.items() if key != "runs"})
         )
@@ -3888,16 +3948,37 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
         if event.button.id == "retry-confirm":
+            if self._confirmed:
+                return
+            if self._validating:
+                self._sync_confirmation()
+                return
             acknowledgement = self.query_one("#retry-compatible-code", Checkbox).value
-            if self._valid_config and (
-                not self.preview.get("code_change_detected") or acknowledgement
-            ):
-                self.dismiss(
-                    {**self._config_override, "accept_code_change": acknowledgement}
-                    if self._config_override
-                    else acknowledgement
+            if not self._valid_config:
+                self.query_one("#retry-submit-status", Static).update(
+                    "Not submitted · select an existing YAML and press Validate recovery plan first."
                 )
+                if self.services is not None:
+                    self.query_one("#retry-config", Input).focus()
+                return
+            if self.preview.get("code_change_detected") and not acknowledgement:
+                self.query_one("#retry-submit-status", Static).update(
+                    "Not submitted · code changed. Review compatibility and tick the checkbox below."
+                )
+                self.query_one("#retry-compatible-code", Checkbox).focus()
+                return
+            self._confirmed = True
+            self.query_one("#retry-confirm", Button).disabled = True
+            self.query_one("#retry-submit-status", Static).update(
+                "Submitting recovered Study… previous scientific evidence is preserved."
+            )
+            self.dismiss(
+                {**self._config_override, "accept_code_change": acknowledgement}
+                if self._config_override
+                else acknowledgement
+            )
         elif event.button.id == "retry-config-browse":
             from lambdaforge.tui.App import YamlFilePicker
 
@@ -4049,7 +4130,16 @@ class ClusterWorkspace(ResearchWorkspace):
                 with TabPane("Connection", id="cluster-connection"):
                     yield Static(id="cluster-connection-content", classes="workspace-panel")
                 with TabPane("Resources", id="cluster-resources"):
-                    yield VerticalScroll(Static(id="cluster-resource-content"))
+                    with Horizontal(classes="workspace-actions nested-actions"):
+                        yield Button(
+                            "Saved resource report",
+                            id="cluster-resource-report",
+                            compact=True,
+                            flat=True,
+                        )
+                    with VerticalScroll():
+                        yield Static(id="cluster-resource-content")
+                        yield Static(id="cluster-resource-report-content", markup=False)
                 with TabPane("Environment", id="cluster-environment"):
                     yield Static(id="cluster-environment-content", classes="workspace-panel")
                 with TabPane("GPU policy", id="cluster-gpu"):
@@ -4183,6 +4273,12 @@ class ClusterWorkspace(ResearchWorkspace):
             editor = getattr(self.app, "edit_cluster", None)
             if callable(editor):
                 editor(self.cluster_name, self._edited)
+        elif selected == "cluster-resource-report":
+            self._run_operation(
+                "Saved resource report",
+                lambda: self.services.cluster_resource_report(self.cluster_name),
+                self._apply_resource_report,
+            )
         elif selected == "cluster-doctor":
             self._run_operation("Doctor", lambda: self.services.doctor(self.cluster_name))
         elif selected == "cluster-bootstrap-plan":
@@ -4388,6 +4484,13 @@ class ClusterWorkspace(ResearchWorkspace):
         if len(lines) == 11:
             lines.append("No GPU telemetry reported.")
         return "\n".join(lines)
+
+    def _apply_resource_report(self, value: Mapping[str, Any]) -> None:
+        from lambdaforge.controlplane.ResourceDiagnosticReport import ResourceDiagnosticReport
+
+        self.query_one("#cluster-resource-report-content", Static).update(
+            ResourceDiagnosticReport.summary(value)
+        )
 
     @staticmethod
     def _bytes(value: Any) -> str:

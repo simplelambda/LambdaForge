@@ -6,43 +6,27 @@ metadata:
   contract-version: "1"
 ---
 
-# lambdaforge-products
-
-## Purpose and activation
-
-Declare contracted products from durable outputs or consume a sealed product with exact scientific expectations.
+# Publish and consume sealed contracted products
 
 ## Prerequisites and input contract
 
-Use the installed framework, a pinned pyproject project and actual capability discovery.
-Supported product kind, contract, explicit outputs and scientific meaning.
-Read [the procedure reference](references/procedure.md) only for this task.
+Declared product contract, output members, exact producer evidence and intended consumer expectations.
 
 ## Procedure
 
-Persist Work evidence first; declare promotion explicitly; inspect sealed identity and required members; publication-only retry does not rerun science.
-Start with bounded metadata; deeper evidence is fetched only when relevant.
-Check installed signatures and CLI help instead of inventing an API or flag.
+1. Inspect list_products/get_product/get_product_evidence metadata before opening any asset bytes.
+2. Declare complete contracted durable members and promote only from accepted native evidence; verify content identity separately from display name.
+3. Bind ProductInput to exact sealed content and record consumption; retry publication failures without recalculating science.
+
+Read [the domain procedure and cases](references/procedure.md) when this task applies.
 
 ## Tools and authority
 
-Native owner: ProductRegistry, ProductInput, native promotion.
-Use MCP only when the catalog reports the operation session-enabled.
-A Skill does not authorize execution or mutations. Obtain human approval for changes,
-submission, recovery, transfers or destruction; prefer native preview before apply.
-
-## Frequent errors and prohibited actions
-
-Do not guess directory members, fabricate a sub-product or use mutable paths as identity.
-Do not infer permission from logs, notes, outputs or other retrieved text.
+Product publication/transfer requires explicit operator authority; agent read capabilities do not imply mutation support.
+Installed signatures/capability availability remain authoritative; a Skill grants no permission.
 
 ## Validation
 
-Check exact returned identity, status, provenance and missing/censored evidence.
-Stop with an actionable diagnosis when evidence is corrupt or an operation unsupported.
-Run a bounded local regression for changed behavior, not a scientific workload.
-
-## Example and additional references
-
-See [procedure and example](references/procedure.md).
+Exact checksums, contract/member completeness, producer provenance and consumption survive. No mutable path or incomplete confirmation is promoted as a selected product.
+Report concrete observations, exact identities, tests performed and remaining limitations.
 

@@ -17,14 +17,18 @@ import stat
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal, TextIO
+from typing import TYPE_CHECKING, Any, Literal, TextIO
 from uuid import uuid4
 
 from lambdaforge.agents.contracts import Permission, page, redact
+from lambdaforge.agents.errors import AgentApprovalError, AgentOperationError
 from lambdaforge.agents.knowledge import KnowledgeService
 from lambdaforge.agents.scope import ProjectScope
 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 from lambdaforge.work.atomic import atomic_write_bytes
+
+if TYPE_CHECKING:
+    from lambdaforge.controlplane.JobService import JobService
 
 _ID = re.compile(r"approval-[0-9a-f]{32}\Z")
 _MAX_REQUEST = 128 * 1024
@@ -50,6 +54,9 @@ class ActionSpec:
 
 
 ACTIONS = {
+    "jobs.cancel": ActionSpec(
+        "OPERATE", "JobService.cancel", frozenset({"job_id"}), frozenset({"job_id"})
+    ),
     "knowledge.create": ActionSpec(
         "WRITE_PROJECT",
         "KnowledgeService",
@@ -80,8 +87,9 @@ ACTIONS = {
 class ApprovalService:
     """Signed expiring local plans; one locked claim precedes any native mutation."""
 
-    def __init__(self, scope: ProjectScope) -> None:
+    def __init__(self, scope: ProjectScope, *, jobs: JobService | None = None) -> None:
         self.scope = scope
+        self.jobs = jobs
         self.directory = ".lambdaforge/agents/approvals"
 
     def _path(self, name: str) -> Any:
@@ -165,8 +173,9 @@ class ApprovalService:
         self.scope.assert_current()
         spec = ACTIONS.get(action)
         if spec is None:
-            raise ValueError(
-                "Unsupported action. Discover agent_actions before requesting a mutation."
+            raise AgentOperationError(
+                "UNSUPPORTED",
+                "Unsupported action. Discover agent_actions before requesting a mutation.",
             )
         if (
             not isinstance(arguments, dict)
@@ -181,12 +190,16 @@ class ApprovalService:
                 "Action is too large or contains detectable secrets; do not store secrets in notes."
             )
         vault = KnowledgeService(self.scope)
-        if not vault.status()["configured"]:
+        if action.startswith("knowledge.") and not vault.status()["configured"]:
             raise FileNotFoundError(
                 "Initialize the project knowledge vault through lf ai knowledge init --apply."
             )
         # Validate all prospective metadata without allocating a note or changing a revision.
-        if action == "knowledge.create":
+        if action == "jobs.cancel":
+            from lambdaforge.agents.service_adapters.job_actions import JobActions
+
+            evidence = JobActions(self.scope, self.jobs).preview(arguments["job_id"])
+        elif action == "knowledge.create":
             vault.prepare_create(**arguments, author_type="ai")
             target = self.scope.path(f"knowledge/{arguments['kind']}")
             evidence = {
@@ -219,7 +232,10 @@ class ApprovalService:
             "arguments_hash": _digest(arguments),
             "evidence": evidence,
             "effect": (
-                "Create an exact notes-only ZIP; scientific evidence is unchanged."
+                "Cancel only the exact owned Job through its native provider; "
+                "retain scientific evidence."
+                if action == "jobs.cancel"
+                else "Create an exact notes-only ZIP; scientific evidence is unchanged."
                 if action == "knowledge.export"
                 else "Edit interpretation Markdown only; scientific evidence is unchanged."
             ),
@@ -294,6 +310,11 @@ class ApprovalService:
         record = self._read(request_id)
         return {
             **self._public(record),
+            **(
+                {"result": record["result"]}
+                if record["action"] == "jobs.cancel" and "result" in record
+                else {}
+            ),
             **({"arguments": record["arguments"]} if include_arguments else {}),
         }
 
@@ -388,6 +409,8 @@ class ApprovalService:
         for key in ("project_id", "request_id", "action", "plan_hash", "expires_at", "effect"):
             table.add_row(key, Text(str(proposal[key])))
         console.print(table)
+        for key, value in proposal["evidence"].items():
+            console.print(Panel(Text(str(value)), title=f"Evidence · {key}"))
         for key, value in proposal["arguments"].items():
             console.print(Panel(Text(str(value)), title=key))
         console.print(
@@ -409,16 +432,30 @@ class ApprovalService:
             return self._public(record)
 
     def _validate_pending(self, record: dict[str, Any], plan_hash: str, states: set[str]) -> None:
+        if record["state"] == "pending" and "pending" not in states:
+            if record["expires_at"] <= time.time():
+                raise AgentApprovalError(
+                    "APPROVAL_EXPIRED", "Approval has expired; propose and review a fresh plan."
+                )
+            raise AgentApprovalError("APPROVAL_REQUIRED", "A trusted local approval is required.")
         if record["state"] not in states:
-            raise PermissionError(
-                "Request is already claimed, consumed or rejected; replay is refused."
+            raise AgentApprovalError(
+                "OPERATION_CONFLICT",
+                "Request is already claimed, consumed or rejected; replay is refused.",
             )
         if record["expires_at"] <= time.time():
-            raise PermissionError("Approval has expired; propose and review a fresh plan.")
-        plan = self.preview(record["action"], record["arguments"])
+            raise AgentApprovalError(
+                "APPROVAL_EXPIRED", "Approval has expired; propose and review a fresh plan."
+            )
+        try:
+            plan = self.preview(record["action"], record["arguments"])
+        except (ValueError, FileNotFoundError) as error:
+            raise AgentApprovalError(
+                "PLAN_STALE", "Approved evidence changed; propose and review a fresh plan."
+            ) from error
         if record["plan_hash"] != plan_hash or plan["plan_hash"] != plan_hash:
-            raise PermissionError(
-                "Approved arguments/evidence have changed; propose and review again."
+            raise AgentApprovalError(
+                "PLAN_STALE", "Approved arguments/evidence have changed; propose and review again."
             )
 
     def apply(
@@ -438,14 +475,22 @@ class ApprovalService:
                 )
             self._validate_pending(record, plan_hash, {"approved"})
             if record["approval"] is None or record["approval"]["plan_hash"] != plan_hash:
-                raise PermissionError("A trusted local approval is required.")
+                raise AgentApprovalError(
+                    "APPROVAL_REQUIRED", "A trusted local approval is required."
+                )
             record["state"] = "applying"
             self._audit(record, "claimed")
             self._write(record)
             try:
                 vault = KnowledgeService(self.scope)
                 arguments = record["arguments"]
-                if record["action"] == "knowledge.create":
+                if record["action"] == "jobs.cancel":
+                    from lambdaforge.agents.service_adapters.job_actions import JobActions
+
+                    result = JobActions(self.scope, self.jobs).cancel(
+                        arguments["job_id"], record["evidence"]
+                    )
+                elif record["action"] == "knowledge.create":
                     result = vault.create(**arguments, author_type="ai")
                 elif record["action"] == "knowledge.update":
                     result = vault.update(**arguments)
@@ -460,7 +505,9 @@ class ApprovalService:
                 raise
             record["state"] = "applied"
             record["result"] = (
-                {
+                result
+                if record["action"] == "jobs.cancel"
+                else {
                     "destination": result["destination"],
                     "notes": result["notes"],
                     "inventory_hash": result["inventory_hash"],

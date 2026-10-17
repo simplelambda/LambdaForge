@@ -60,11 +60,17 @@ cluster-password = [
 clustering = [
     "scikit-learn>=1.3,<2",
 ]
+optimal-transport = [
+    "POT>=0.9.6,<0.10",
+]
 adaptive-hpo = [
     "botorch>=0.17,<1",
 ]
 analysis-report = [
     "plotly>=7,<8",
+]
+gpu-observation = [
+    "nvidia-ml-py>=12.535,<14",
 ]
 dev = [
     "build>=1.2",
@@ -117,9 +123,11 @@ lambdaforge = [
 "share/lambdaforge/examples" = [
     "examples/agent_gui.py",
     "examples/clustering.py",
+    "examples/fgw.py",
     "examples/lambdaforge.clusters.yaml",
     "examples/input.txt",
     "examples/work.py",
+    "examples/managed_report.py",
     "examples/work.yaml",
     "examples/sequence.yaml",
     "examples/search.yaml",
@@ -129,31 +137,8 @@ lambdaforge = [
 "share/lambdaforge/docs" = [
     "docs/MANUAL.md",
     "docs/MANUAL.es.md",
-    "docs/RESEARCH_ANALYSIS.md",
-    "docs/RESEARCH_ANALYSIS.es.md",
-    "docs/CONDITIONAL_STUDIES.md",
-    "docs/CONDITIONAL_STUDIES.es.md",
-    "docs/COORDINATED_STUDIES.md",
-    "docs/COORDINATED_STUDIES.es.md",
-    "docs/STORAGE.md",
-    "docs/STORAGE.es.md",
-    "docs/DATASET_RECONSTRUCTION.md",
-    "docs/DATASET_RECONSTRUCTION.es.md",
-    "docs/ARCHITECTURAL_REFORM.md",
-    "docs/ARCHITECTURAL_REFORM.es.md",
-    "docs/SCIENTIFIC_AUDIT.md",
-    "docs/SCIENTIFIC_AUDIT.es.md",
-    "docs/PRODUCTS.md",
-    "docs/PRODUCTS.es.md",
-    "docs/WORK_RESULTS.md",
-    "docs/WORK_RESULTS.es.md",
-    "docs/OPERATIONAL_RELIABILITY.md",
-    "docs/OPERATIONAL_RELIABILITY.es.md",
-    "docs/OPERATIONAL_RELIABILITY_PROGRESS.md",
 ]
 "share/lambdaforge/docs/ai" = [
-    "docs/ai/INTEGRATION.md",
-    "docs/ai/INTEGRATION.es.md",
     "docs/ai/IMPLEMENTATION.md",
     "docs/ai/IMPLEMENTATION.es.md",
     "docs/ai/FRAMEWORK_CONTRACTS.md",
@@ -198,10 +183,13 @@ warn_redundant_casts = true
 module = [
     "keyring",
     "mcp.*",
+    "pydantic",
     "starlette.*",
     "uvicorn",
     "psutil",
     "sklearn.*",
+    "scipy.*",
+    "ot.*",
     "threadpoolctl",
     "jsonschema",
     "plotly.*",

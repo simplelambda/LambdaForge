@@ -1,30 +1,30 @@
-# lambdaforge-models procedure reference
+# Find a component before inventing a model family · procedure
 
-## Native entry point
+## Native discovery/example
 
 ```bash
 lf ai api
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Run in the intended project. Uppercase selectors/paths are placeholders, not a Work-name guess.
+Inspect installed help first. These commands are metadata/planning; parsing them does not execute science.
 
-## Acceptance
+Inspect get_model_contract('MLP') before importing the optional backend; use its returned declaration rather than a guessed constructor.
 
-Inspect installed lambdaforge.nn.models exports and public signatures; compare existing primitives before implementing a new one.
-Do not add a generic GNN factory or import optional backends merely to inventory names.
+## Decision cases
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+| Situation | Native interpretation / next step |
+|---|---|
+| Listing imports Torch/CUDA | Use installed static catalog discovery instead. |
+| Many similar model aliases | Prefer the existing component whose contract fits. |
+| Generic GNN factory requested | Do not introduce recursive construction or a redundant model family. |
+| Dtype mismatch in consumer forward | Verify the actual boundary; do not blame scheduler or treat it as OOM. |
 
-## Recovery of uncertainty
+## Verification and handoff
 
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+Test declared shapes, masked/empty cases, dtype/device preservation and gradients; do not claim unsupported tensor contracts.
+Static discovery does not execute models. A real forward/backward test needs the appropriate dependency and local fixture.
+
+If a capability is missing, stale or unsupported, retain evidence and explain the exact blocker.
+Do not create a CLI subprocess adapter, a second runner/result store or an application-specific workaround.
 

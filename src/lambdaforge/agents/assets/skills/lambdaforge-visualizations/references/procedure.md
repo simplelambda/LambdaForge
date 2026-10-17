@@ -1,30 +1,30 @@
-# lambdaforge-visualizations procedure reference
+# Add useful self-contained project HTML · procedure
 
-## Native entry point
+## Native discovery/example
 
 ```bash
 lf results list --json
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Run in the intended project. Uppercase selectors/paths are placeholders, not a Work-name guess.
+Inspect installed help first. These commands are metadata/planning; parsing them does not execute science.
 
-## Acceptance
+Inspect the self-contained managed HTML section in packaged work.py, then exercise the report with disposable data rather than a live Study.
 
-Declare outputs.html_section and write self-contained content; use native report/export to collect it only when requested.
-No external HTML assets, secret requests, hidden scientific execution or fabricated plot values.
+## Decision cases
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+| Situation | Native interpretation / next step |
+|---|---|
+| Long metric list | Search/collapse categories and choose a bounded relevant view. |
+| Multiple metrics have compatible ranges | Share readable scales where meaningful; identify which metric uses each. |
+| Custom protein/other domain viewer | Declare an isolated consumer HTML section, not framework domain-specific code. |
+| Pruned seed plotted | Label censored display evidence rather than claiming a final score. |
 
-## Recovery of uncertainty
+## Verification and handoff
 
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+No invented scientific series, parent-script injection or secret/network dependencies. State and exact provenance remain visible in exported views.
+Consumer scripts stay isolated; metadata listings must not eagerly transfer every HTML/asset.
+
+If a capability is missing, stale or unsupported, retain evidence and explain the exact blocker.
+Do not create a CLI subprocess adapter, a second runner/result store or an application-specific workaround.
 

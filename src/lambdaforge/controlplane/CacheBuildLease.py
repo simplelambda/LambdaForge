@@ -18,9 +18,7 @@ class CacheBuildLease:
     """Publish ownership atomically with collection; unknown remote owners stay protected."""
 
     @staticmethod
-    def acquire(
-        transport: Transport, lock: PurePosixPath, *, python: str, timeout: float
-    ) -> None:
+    def acquire(transport: Transport, lock: PurePosixPath, *, python: str, timeout: float) -> None:
         runtime = lock.name.startswith(".python-runtime-")
         owner = {
             "host": socket.gethostname(),
@@ -28,7 +26,8 @@ class CacheBuildLease:
             "heartbeat": time.time(),
             "created_at": time.time(),
             "environment_id": lock.name.removeprefix(".environment-build-")
-            .removeprefix(".python-runtime-").removesuffix(".lock"),
+            .removeprefix(".python-runtime-")
+            .removesuffix(".lock"),
             "operation": "runtime-build" if runtime else "environment-build",
             "job_id": os.environ.get("LAMBDAFORGE_JOB_ID"),
         }

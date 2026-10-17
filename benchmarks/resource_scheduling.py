@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -21,6 +23,39 @@ from lambdaforge.hpo.AdaptiveResources import (
 from lambdaforge.hpo.ResourceReplay import ResourceSchedulerReplay
 
 GIB = 1024**3
+
+
+def benchmark_shared_observation(requests: int = 100) -> dict[str, float | int | str]:
+    """CPU-only native cache microbenchmark; no driver, CUDA or scientific execution.
+
+    Driver-query latency is not fabricated from file-lock latency. This complements the
+    existing packing simulation and multiprocessing startup race tests, not a real-site claim.
+    """
+    from lambdaforge.runtime.GPUObservation import GPUObservationCache
+
+    if not 1 <= requests <= 10000:
+        raise ValueError("Observation benchmark requires 1..10000 bounded requests.")
+    calls = 0
+
+    def probe() -> dict:
+        nonlocal calls
+        calls += 1
+        return {"quality": "measured", "devices": [], "observed_at": 100.0}
+
+    with tempfile.TemporaryDirectory(prefix="lf-observation-benchmark-") as temporary:
+        cache = GPUObservationCache(Path(temporary) / "cache", clock=lambda: 100.0, probe=probe)
+        started = time.perf_counter()
+        for _ in range(requests):
+            cache.read()
+        elapsed = time.perf_counter() - started
+    return {
+        "evidence": "synthetic CPU-only cache requests; driver latency unmeasured",
+        "requests": requests,
+        "uncoordinated_query_count": requests,
+        "shared_real_query_count": calls,
+        "shared_helper_count": 0,
+        "local_coordination_seconds": elapsed,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,9 +142,7 @@ def compare_terminal_and_live_cold_start() -> dict[str, ColdStartBenchmark]:
         )
     )
     analysis = ResourceTrajectoryAnalyzer.analyze(trajectory, total_bytes=80 * GIB)
-    future = tuple(
-        analysis.running_peak_bytes + residual for residual in analysis.residual_samples
-    )
+    future = tuple(analysis.running_peak_bytes + residual for residual in analysis.residual_samples)
     live = ActiveResourceEvidence(
         "cheap",
         "compatible",

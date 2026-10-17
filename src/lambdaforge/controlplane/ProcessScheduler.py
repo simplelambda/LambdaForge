@@ -95,6 +95,7 @@ class ProcessScheduler(Scheduler):
             "work_dir": str(scientific_work),
             "resources": resources.to_dict(),
             "gpu_access": self.profile.gpu_access.to_dict(),
+            "resource_safety": self.profile.resource_safety.to_dict(),
             "storage": self.storage.to_dict(),
             "cache_root": self.storage.cache_root,
             "product_root": self._product_root(work_dir),

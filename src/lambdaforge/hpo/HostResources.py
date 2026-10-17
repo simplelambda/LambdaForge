@@ -27,7 +27,9 @@ class HostResourceLease:
     ram_commitment_bytes: int
     storage_commitment_bytes: int
     processes: int
+    controller_memory_bytes: int = 0
     policy_version: str = "elastic-host-lease-v1"
+    observed_resident_memory_bytes: int | None = None
 
     @classmethod
     def allocate(
@@ -36,13 +38,23 @@ class HostResourceLease:
         *,
         active_runs: int,
         hard_concurrency_ceiling: int,
+        controller_memory_bytes: int = 0,
+        resident_memory_bytes: int | None = None,
     ) -> HostResourceLease:
         residents = max(1, int(active_runs))
         ceiling = max(residents, int(hard_concurrency_ceiling))
         cpu_share = max(1, resources.cpu_cores // residents)
         # RAM and scratch are committed against current residents. They are re-evaluated before
         # every dispatch instead of being permanently divided by a hypothetical maximum.
-        ram = resources.ram_bytes // residents if resources.ram_bytes else 0
+        overhead = max(0, int(controller_memory_bytes))
+        ram = max(0, resources.ram_bytes - overhead) // residents if resources.ram_bytes else 0
+        # The final launch observes the whole tree, including resource trackers and existing
+        # workers. A stale fair share is a ceiling, not an additional fixed RAM requirement.
+        # Reconcile with actual aggregate headroom rather than blocking a lone Run forever
+        # because helper memory was absent from the earlier controller-only measurement.
+        observed = max(0, int(resident_memory_bytes)) if resident_memory_bytes is not None else None
+        if resources.ram_bytes and observed is not None:
+            ram = min(ram, max(0, resources.ram_bytes - observed))
         storage = resources.storage_bytes // residents if resources.storage_bytes else 0
         return cls(
             aggregate_cpu=resources.cpu_cores,
@@ -55,6 +67,8 @@ class HostResourceLease:
             ram_commitment_bytes=ram,
             storage_commitment_bytes=storage,
             processes=min(cpu_share, resources.processes),
+            controller_memory_bytes=overhead,
+            observed_resident_memory_bytes=observed,
         )
 
     def resources(self, aggregate: ResourceRequest) -> ResourceRequest:
@@ -81,6 +95,8 @@ class HostResourceLease:
             "cpu_floor": self.cpu_floor,
             "cpu_soft_share": self.cpu_soft_share,
             "ram_commitment_bytes": self.ram_commitment_bytes,
+            "controller_memory_bytes": self.controller_memory_bytes,
+            "observed_resident_memory_bytes": self.observed_resident_memory_bytes,
             "storage_commitment_bytes": self.storage_commitment_bytes,
             "processes": self.processes,
             "provenance": "dispatch-time-aggregate-host-capacity",

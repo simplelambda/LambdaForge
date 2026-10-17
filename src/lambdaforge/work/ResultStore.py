@@ -397,6 +397,15 @@ class ResultStore:
     @staticmethod
     def _validate_deletion(selected: Mapping[str, Any], directory: Path) -> None:
         """Require persisted ownership and terminal state, not a guessed observer status."""
+        from lambdaforge.work.StudySeriesStore import StudySeriesStore
+
+        dependents = StudySeriesStore.execution_dependents(
+            directory.parent.parent, str(selected.get("execution_id", ""))
+        )
+        if dependents:
+            raise ValueError(
+                "Execution evidence is retained by a Study series: " + ", ".join(dependents)
+            )
         if selected.get("execution_id") != directory.name:
             raise ValueError("Execution deletion identity differs from its owned directory.")
         if selected.get("imported"):
@@ -412,6 +421,18 @@ class ResultStore:
                 "Cannot delete active or unverifiable Execution evidence; cancel/reconcile first."
             )
         origin = directory / "execution.json"
+        if origin.is_file() and not origin.is_symlink():
+            from lambdaforge.work.recovery import read_owned_json
+
+            job_id = read_owned_json(origin).get("job_id")
+            if job_id:
+                from lambdaforge.ProjectContext import ProjectContext
+
+                retained = StudySeriesStore(ProjectContext.discover(directory)).job_references()
+                if job_id in retained:
+                    raise ValueError(
+                        "Execution evidence is retained by a Study series Job reference."
+                    )
         if origin.resolve() != origin or not origin.is_file():
             raise ValueError("Deletion requires a regular persisted Execution ownership record.")
         value = _read_mapping(origin)
@@ -560,6 +581,40 @@ class ResultStore:
                 tail=tail,
                 include_traceback=include_traceback,
             )["text"]
+        )
+
+    def table(
+        self,
+        selector: str,
+        *,
+        metrics: Sequence[str] = (),
+        runs: Sequence[str] = (),
+        trials: Sequence[int] = (),
+        columns: Sequence[str] = (),
+        attempts: str = "latest",
+        offset: int = 0,
+        limit: int = 100,
+        fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        """Export a bounded scalar metadata page; never materialize retained artifact bytes."""
+        from lambdaforge.work.result_projection import projection
+        from lambdaforge.work.result_tables import result_table
+
+        selected = self.select(selector)
+        if selected.get("already_deleted"):
+            raise ValueError("Deleted Execution evidence cannot be exported as a result table.")
+        directory = self._evidence_dir(Path(str(selected["_manifest_path"])).resolve())
+        projection(directory, selected, view="overview")  # Native origin identity checks.
+        return result_table(
+            selected,
+            metrics=metrics,
+            runs=runs,
+            trials=trials,
+            columns=columns,
+            attempts=attempts,
+            offset=offset,
+            limit=limit,
+            fingerprint=fingerprint,
         )
 
     def compare(
@@ -751,7 +806,7 @@ class ResultStore:
         return write_html(
             self.analysis(selector, recompute=recompute),
             output,
-            sections=read_html_sections(selected.get("runs", ()), execution_dir),
+            sections=read_html_sections(selected.get("runs", ()), execution_dir, relocate=True),
         )
 
     def view(
@@ -928,7 +983,32 @@ class ResultStore:
             reports = stage / "reports"
             reports.mkdir(parents=True, exist_ok=True)
             if finalized and not study_expected:
-                self.work_report(execution_id, reports / "work-results.html")
+                # Regenerate deployment references against retained portable bytes, not the
+                # temporary remote transfer/native producer path that may later disappear.
+                from lambdaforge.analysis.WorkReport import write_work_html
+                from lambdaforge.study_projection import read_html_sections
+
+                overview = self.view(execution_id)
+                details = [
+                    self.view(
+                        execution_id,
+                        view="attempt",
+                        run_id=r["run_id"],
+                        attempt=r["attempt_number"],
+                    )
+                    for r in overview["attempts"]
+                ]
+                write_work_html(
+                    overview,
+                    details,
+                    reports / "work-results.html",
+                    sections=read_html_sections(
+                        selected.get("runs", ()),
+                        stage / "execution",
+                        relocate=True,
+                        skip_unretained=True,
+                    ),
+                )
             if analysis is not None:
                 atomic_json(reports / "study-analysis.json", analysis)
                 try:
@@ -938,7 +1018,7 @@ class ResultStore:
                         analysis,
                         reports / "study-analysis.html",
                         sections=read_html_sections(
-                            selected.get("runs", ()), execution_dir, relocate=True
+                            selected.get("runs", ()), stage / "execution", relocate=True
                         ),
                     )
                 except RuntimeError as error:

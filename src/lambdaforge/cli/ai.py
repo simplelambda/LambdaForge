@@ -27,6 +27,21 @@ def add_ai_parser(commands: argparse._SubParsersAction) -> None:
     actions.add_parser(
         "doctor", help="Check optional SDK compatibility without installing anything."
     )
+    actions.add_parser(
+        "context", help="Bounded local project/agent metadata; no remote or Work imports."
+    )
+    connect = actions.add_parser(
+        "connect",
+        help="Preview official Codex MCP registration; apply needs an exact reviewed plan.",
+    )
+    connect.add_argument("client", choices=("codex",))
+    connect.add_argument("--apply", action="store_true")
+    connect.add_argument("--plan-hash")
+    launch = actions.add_parser(
+        "launch",
+        help="Launch an installed configured client in this project, without permission changes.",
+    )
+    launch.add_argument("client", choices=("codex",))
     dependencies = actions.add_parser(
         "dependencies", help="Inspect/install fixed optional Python extras with explicit consent."
     )
@@ -325,15 +340,20 @@ def run_ai_command(arguments: argparse.Namespace) -> int:
 
         payload = asyncio.run(test())
     elif command == "doctor":
-        from lambdaforge.agents.mcp_server import dependency_status
+        from lambdaforge.agents.doctor import integration_doctor
 
-        payload = {
-            "project": asdict(service.project_info()),
-            "mcp": dependency_status(),
-            "human_approval": "local interactive CLI/Console; approved knowledge edits only",
-            "http": "opt-in paired loopback READ/PLAN; no public-network serving",
-            "installation_performed": False,
-        }
+        payload = integration_doctor(service)
+    elif command == "context":
+        from lambdaforge.agents.doctor import agent_context
+
+        payload = agent_context(service)
+    elif command in {"connect", "launch"}:
+        from lambdaforge.agents.client import CodexClient
+
+        client = CodexClient(service.scope)
+        if command == "launch":
+            return client.launch()
+        payload = client.connect(apply=arguments.apply, plan_hash=arguments.plan_hash)
     elif command == "knowledge":
         action = arguments.knowledge_command
         vault = service.knowledge

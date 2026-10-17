@@ -1,30 +1,30 @@
-# lambdaforge-project procedure reference
+# Orient without executing the project · procedure
 
-## Native entry point
+## Native discovery/example
 
 ```bash
 lf ai status
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Run in the intended project. Uppercase selectors/paths are placeholders, not a Work-name guess.
+Inspect installed help first. These commands are metadata/planning; parsing them does not execute science.
 
-## Acceptance
+Start with metadata from an unfamiliar project, then inspect one YAML before requesting permission to validate it.
 
-Read project_info and framework_version; inventory project_structure and list_project_configs without importing code.
-Do not treat a virtual environment or Work display name as project identity.
+## Decision cases
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+| Situation | Native interpretation / next step |
+|---|---|
+| Changing cwd | Keep the original pinned project, not the nearest new directory. |
+| Same Work name on two clusters | Use exact Job/Execution identity and placement, never a name key. |
+| Nested project or secret path | Refuse traversal; request the intended root instead. |
+| Consumer modules print or allocate GPU | Do not import them for metadata discovery. |
 
-## Recovery of uncertainty
+## Verification and handoff
 
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+Return relevant Work/YAML paths, installed version, exact historical selectors and gaps. Merely finding a class does not validate it.
+Discovery authorizes neither project writes nor scientific execution.
+
+If a capability is missing, stale or unsupported, retain evidence and explain the exact blocker.
+Do not create a CLI subprocess adapter, a second runner/result store or an application-specific workaround.
 

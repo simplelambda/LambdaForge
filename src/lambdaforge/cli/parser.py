@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import difflib
+import re
 from pathlib import Path
 from typing import NoReturn
 
@@ -12,7 +14,30 @@ from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
-        raise ValueError(f"Invalid command line: {message}")
+        suggestion = ""
+        invalid = re.search(r"invalid choice: '([^']+)' \(choose from (.+)\)", message)
+        if invalid:
+            choices = re.findall(r"'([^']+)'", invalid.group(2))
+            matches = difflib.get_close_matches(invalid.group(1), choices, n=1, cutoff=0.6)
+            if matches:
+                suggestion = f" Did you mean {matches[0]!r}?"
+        elif message.startswith("unrecognized arguments:"):
+            word = message.split(":", 1)[1].strip().split()[0]
+
+            def options(parser: argparse.ArgumentParser) -> set[str]:
+                names = set(parser._option_string_actions)
+                for action in parser._actions:
+                    if isinstance(action, argparse._SubParsersAction):
+                        for child in action.choices.values():
+                            names.update(options(child))
+                return names
+
+            matches = difflib.get_close_matches(word, options(self), n=1, cutoff=0.6)
+            if matches:
+                suggestion = f" Did you mean {matches[0]!r}?"
+        raise ValueError(
+            f"Invalid command line: {message}{suggestion} Use lf --help for real commands."
+        )
 
 
 def _cluster_selector(parser: argparse.ArgumentParser) -> None:
@@ -20,7 +45,7 @@ def _cluster_selector(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the only supported 0.13 command grammar."""
+    """Build the sole installed Work-centric command grammar."""
     parser = _Parser(
         prog="lf",
         description="Run reproducible scientific Work locally or on managed clusters.",
@@ -35,6 +60,91 @@ def build_parser() -> argparse.ArgumentParser:
     from lambdaforge.cli.ai import add_ai_parser
 
     add_ai_parser(commands)
+    intent_help = commands.add_parser("help", help="Find real operations by task intent.")
+    intent_help.add_argument("--search", default="")
+    intent_help.add_argument("--limit", type=int, default=10)
+    intent_help.add_argument("--json", action="store_true")
+    completion = commands.add_parser(
+        "completion", help="Print shell completion; never edit shell settings."
+    )
+    completion.add_argument("shell", choices=("bash", "zsh", "fish"))
+    completion_query = commands.add_parser("_complete", help=argparse.SUPPRESS)
+    completion_query.add_argument("words", nargs=argparse.REMAINDER)
+    for inspection_verb in ("inspect", "diagnose", "watch"):
+        inspection = commands.add_parser(
+            inspection_verb, help="Read native Work/Study/Execution/Job evidence and observation."
+        )
+        inspection.add_argument("selector")
+        inspection.add_argument(
+            "--kind", choices=("auto", "work", "study", "execution", "job"), default="auto"
+        )
+        inspection.add_argument(
+            "--refresh",
+            action="store_true",
+            help="Explicit provider observation; never read artifacts.",
+        )
+        inspection.add_argument("--clusters", type=Path)
+        inspection.add_argument("--json", action="store_true")
+        if inspection_verb == "watch":
+            inspection.add_argument("--interval", type=float, default=2)
+            inspection.add_argument(
+                "--count",
+                type=int,
+                help="Stop after this many observations; JSON output is NDJSON.",
+            )
+    studies = commands.add_parser(
+        "studies", help="Review and submit verified incremental fixed Study deltas."
+    )
+    study_commands = studies.add_subparsers(dest="study_command", required=True)
+    extension = study_commands.add_parser(
+        "extend", help="Preview a fixed delta; explicitly apply a reviewed supported plan."
+    )
+    extension.add_argument(
+        "study", help="Exact Series, Job, Execution ID or unambiguous native name."
+    )
+    extension.add_argument("--config", type=Path, required=True)
+    extension.add_argument(
+        "--on", help="Defaults to the exact origin placement; no implicit migration."
+    )
+    extension_mode = extension.add_mutually_exclusive_group()
+    extension_mode.add_argument("--dry-run", action="store_true")
+    extension_mode.add_argument(
+        "--apply", action="store_true", help="Submit only new cells of a reviewed supported plan."
+    )
+    extension.add_argument("--plan-hash", help="Exact reviewed preview hash required with --apply.")
+    extension.add_argument(
+        "--code-policy", choices=("revisioned", "strict"), default="revisioned",
+        help="Revisioned permits current code with separate inference cohorts; "
+             "strict requires equivalence.",
+    )
+    extension.add_argument("--json", action="store_true")
+    _cluster_selector(extension)
+    for series_verb in ("history", "show", "refresh", "analyze", "report", "export"):
+        series_action = study_commands.add_parser(
+            series_verb,
+            help=(
+                "Reconcile native delta outcomes."
+                if series_verb == "refresh"
+                else "Read owned series metadata only."
+            ),
+        )
+        series_action.add_argument("series", help="Exact Study series ID.")
+        series_action.add_argument("--json", action="store_true")
+        if series_verb == "report":
+            series_action.add_argument("--output", type=Path, required=True)
+        if series_verb == "export":
+            series_action.add_argument("--destination", type=Path, required=True)
+        _cluster_selector(series_action)
+    reports = commands.add_parser("reports", help="Open generated reports with scoped lazy assets.")
+    report_actions = reports.add_subparsers(dest="report_command", required=True)
+    serve_report = report_actions.add_parser(
+        "serve", help="Read-only loopback viewer; no science executed."
+    )
+    serve_report.add_argument("path", type=Path)
+    serve_report.add_argument("--max-asset-mib", type=int, default=256)
+    serve_report.add_argument("--idle-seconds", type=float, default=1800)
+    serve_report.add_argument("--open", action="store_true")
+    _cluster_selector(serve_report)
     project = commands.add_parser(
         "project", help="Show the current project identity and discovered root."
     )
@@ -91,6 +201,23 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("config", type=Path)
     resolve.add_argument("--format", choices=("human", "json", "yaml"), default="human")
     resolve.add_argument("--json", action="store_true")
+    schema = config_commands.add_parser(
+        "schema", help="Print/export the installed Work JSON Schema."
+    )
+    schema.add_argument("--output", type=Path)
+    schema.add_argument("--json", action="store_true")
+    field_help = config_commands.add_parser(
+        "explain", help="Static schema field help without Work imports."
+    )
+    field_help.add_argument("config", type=Path)
+    field_help.add_argument("--field", required=True)
+    field_help.add_argument("--json", action="store_true")
+    comparison = config_commands.add_parser(
+        "diff", help="Native semantic diff, not recovery permission."
+    )
+    comparison.add_argument("previous", type=Path)
+    comparison.add_argument("proposed", type=Path)
+    comparison.add_argument("--json", action="store_true")
 
     fleets = commands.add_parser("fleets", help="Inspect operational cluster fleets.")
     fleets.add_argument("--catalog", type=Path)
@@ -219,6 +346,16 @@ def build_parser() -> argparse.ArgumentParser:
     resources.add_argument("--on")
     resources.add_argument("--all", action="store_true")
     resources.add_argument("--processes", action="store_true")
+    resources.add_argument(
+        "--report",
+        action="store_true",
+        help="Sanitized saved-evidence diagnostic; no cluster query.",
+    )
+    resources.add_argument("--since", help="Report interval start, ISO-8601 UTC.")
+    resources.add_argument("--until", help="Report interval end, ISO-8601 UTC.")
+    resources.add_argument(
+        "--limit", type=int, default=500, help="Maximum saved report Jobs (1..1000)."
+    )
     _cluster_selector(resources)
     resources.add_argument("--json", action="store_true")
 
@@ -304,21 +441,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--gpu-claim-command",
         nargs="+",
         help=(
-            "optional argv run before each GPU submission; {gpu_count} expands to the requested "
-            "count (for example: gpu claim {gpu_count})"
+            "legacy claim configuration; automatic use is refused without a scoped ownership "
+            "receipt. Prefer a provider-owned wrapper or manually established reservation."
         ),
     )
     add.add_argument(
         "--gpu-release-command",
         nargs="+",
-        help="cleanup argv paired with --gpu-claim-command (for example: gpu release)",
+        help="legacy paired release configuration; unscoped external release is never executed",
     )
     add.add_argument(
         "--gpu-visibility-command",
         nargs="+",
         help=(
             "argv that prints the currently granted CUDA tokens; required for dynamic grant "
-            "shrink/growth unless a '... exec' launcher has a sibling '... env' command"
+            "shrink/growth. Exact 'gpu exec' derives 'gpu env --shell'; other launchers need "
+            "an explicit command. CSV or explicit CUDA_VISIBLE_DEVICES assignment is accepted."
         ),
     )
     cluster_commands.add_parser("list").add_argument("--json", action="store_true")
@@ -390,7 +528,12 @@ def build_parser() -> argparse.ArgumentParser:
     clear.add_argument("--json", action="store_true")
 
     for operation in ("show", "logs", "cancel", "retry", "delete"):
-        item = commands.add_parser(operation, help=f"Work-level {operation} operation.")
+        description = (
+            "Recover a failed/interrupted Work or Study with native retry; preserve completed Runs."
+            if operation == "retry"
+            else f"Work-level {operation} operation."
+        )
+        item = commands.add_parser(operation, help=description)
         item.add_argument("selector")
         item.add_argument("--clusters", type=Path)
         item.add_argument("--apply", action="store_true")
@@ -644,6 +787,28 @@ def build_parser() -> argparse.ArgumentParser:
     result_compare.add_argument("--mode", choices=("min", "max"), default="max")
     result_compare.add_argument("--root", type=Path)
     result_compare.add_argument("--json", action="store_true")
+    result_table = result_commands.add_parser(
+        "table", help="Export a bounded page of scalar Run evidence, not artifact bytes."
+    )
+    result_table.add_argument("selector")
+    result_table.add_argument(
+        "--metric", action="append", default=[], help="Exact metric; repeatable."
+    )
+    result_table.add_argument("--run", dest="run_id", action="append", default=[])
+    result_table.add_argument("--trial", type=int, action="append", default=[])
+    result_table.add_argument(
+        "--columns", help="Comma-separated optional columns; provenance is retained."
+    )
+    result_table.add_argument("--attempts", choices=("latest", "all"), default="latest")
+    result_table.add_argument("--offset", type=int, default=0)
+    result_table.add_argument("--limit", type=int, default=100)
+    result_table.add_argument(
+        "--fingerprint", help="Refuse if evidence changed since the previous page."
+    )
+    result_table.add_argument("--format", choices=("json", "csv"), default="json")
+    result_table.add_argument("--output", type=Path, help="Create a new file outside Run evidence.")
+    result_table.add_argument("--root", type=Path)
+    result_table.add_argument("--json", action="store_true")
     result_analyze = result_commands.add_parser("analyze")
     result_analyze.add_argument("selector")
     result_analyze.add_argument("--root", type=Path)
@@ -663,4 +828,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     result_replay.add_argument("--root", type=Path)
     result_replay.add_argument("--json", action="store_true")
+    commands.metavar = (
+        "{" + ",".join(name for name in commands.choices if not name.startswith("_")) + "}"
+    )
+    commands._choices_actions = [
+        item for item in commands._choices_actions if item.help != argparse.SUPPRESS
+    ]
     return parser

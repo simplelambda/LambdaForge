@@ -18,6 +18,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
+from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
 from lambdaforge.controlplane.jobs import JobHandle, JobRecord, JobState
@@ -48,6 +49,22 @@ class JobService:
         self.store = store or JobStore(project=self.catalog.project)
         self.factory = factory or ControlPlaneFactory()
         self._study_projection_cache: dict[str, tuple[str, dict[str, Any]]] = {}
+
+    @staticmethod
+    def _reader_python(record: JobRecord, profile: ClusterProfile) -> str:
+        """Use the actual native entrypoint's interpreter, including extension preflights."""
+        python = sys.executable if profile.transport == "local" else profile.python
+        retained = record.metadata.get("study_extension", {}).get("retained_runtime") or {}
+        if retained.get("python"):
+            python = str(retained["python"])
+        for index in range(1, len(record.command) - 1):
+            module = record.command[index + 1]
+            if record.command[index] == "-m" and (
+                module.startswith("lambdaforge")
+                or module in {"_lambdaforge_extension_guard", "_lambdaforge_current_extension"}
+            ):
+                return record.command[index - 1]
+        return python
 
     def submit(
         self,
@@ -849,17 +866,25 @@ json.dump({"rows":rows,"next_offset":next_offset,"eof":eof},sys.stdout,separator
             allowed.append(str(WorkRunner._project_root(source.parent) / ".lambdaforge/runs"))
         recovery = record.metadata.get("recovery_execution_dir")
         if isinstance(recovery, str):
-            if self._owned_study_path(record, recovery) is None:
+            # The native helper authorizes Run-tree descendants. Validate that exact
+            # descendant rather than incorrectly rejecting the owned Execution root itself.
+            if self._owned_study_path(record, str(PurePosixPath(recovery) / "runs")) is None:
                 raise ValueError("Unowned Work recovery result.")
             allowed.append(recovery)
+        from lambdaforge.analysis.report_assets import reader_prelude
+
         script = (
-            Path(result_projection.__file__)
-            .read_text(encoding="utf-8")
-            .replace(
-                "from lambdaforge.work.checkpoint_policy import checkpoint_payloads",
-                inspect.getsource(checkpoint_payloads),
-            )
-            + """
+            "from __future__ import annotations\n"
+            + (reader_prelude(include_sections=True) if options.get("view") == "html" else "")
+            + (
+                Path(result_projection.__file__)
+                .read_text(encoding="utf-8")
+                .replace("from __future__ import annotations\n", "")
+                .replace(
+                    "from lambdaforge.work.checkpoint_policy import checkpoint_payloads",
+                    inspect.getsource(checkpoint_payloads),
+                )
+                + """
 import sys
 owner = Path(sys.argv[1])
 request = json.loads(sys.argv[2])
@@ -888,12 +913,9 @@ if request.get("view", "overview") == "overview" and progress_path.exists():
     value["operational"]["progress"] = read_mapping(progress_path)
 print(json.dumps(page(value, offset), separators=(",", ":")))
 """
+            )
         )
-        python = sys.executable if profile.transport == "local" else profile.python
-        for index in range(1, len(record.command) - 1):
-            if record.command[index : index + 2] == ("-m", "lambdaforge"):
-                python = record.command[index - 1]
-                break
+        python = self._reader_python(record, profile)
         for _generation in range(3):
             chunks: list[bytes] = []
             offset, fingerprint = 0, ""
@@ -946,6 +968,11 @@ print(json.dumps(page(value, offset), separators=(",", ":")))
                         raise ValueError("Work result pages differ from their exact generation.")
                     value = json.loads(raw)
                     value["cluster"] = record.cluster
+                    if options.get("view") == "html":
+                        for section in value.get("sections", ()):
+                            if isinstance(section.get("bundle"), Mapping):
+                                section["bundle"]["source"]["job_id"] = record.job_id
+                                section["bundle"]["source"]["remote"] = profile.transport != "local"
                     return cast(dict[str, Any], value)
                 if not chunk:
                     raise ValueError("Work result pagination made no progress.")
@@ -1191,19 +1218,22 @@ print(json.dumps(page(value, offset), separators=(",", ":")))
         # The stdlib reader travels with the controller: old installed workers receive the same
         # current projection, never a legacy full payload. Prefer the recorded compatible Python;
         # a cluster's system python3 can be older than the supported managed runtime.
-        script = Path(study_projection.__file__).read_text(encoding="utf-8") + (
-            "\nimport sys\n"
-            "json.dump(projection_page(sys.argv[1],json.loads(sys.argv[2])),sys.stdout,"
-            "separators=(',',':'))\n"
+        from lambdaforge.analysis.report_assets import reader_prelude
+
+        script = (
+            "from __future__ import annotations\n"
+            + (reader_prelude() if view == "report-sections" else "")
+            + Path(study_projection.__file__)
+            .read_text(encoding="utf-8")
+            .replace("from __future__ import annotations\n", "")
+            + (
+                "\nimport sys\n"
+                "json.dump(projection_page(sys.argv[1],json.loads(sys.argv[2])),sys.stdout,"
+                "separators=(',',':'))\n"
+            )
         )
         profile = self.catalog.get(record.cluster)
-        python = sys.executable if profile.transport == "local" else profile.python
-        for index in range(1, len(record.command) - 1):
-            if record.command[index] == "-m" and record.command[index + 1].startswith(
-                "lambdaforge"
-            ):
-                python = record.command[index - 1]
-                break
+        python = self._reader_python(record, profile)
         prefix: tuple[str, ...] = (python,)
         if profile.transport == "local":
             if os.path.isabs(python) and not Path(python).is_file():
@@ -1302,6 +1332,11 @@ exec "$fallback" "$@"
                         raise RuntimeError("Invalid Study projection.")
                     if view == "interactive" and value.get("study_telemetry_version") != 1:
                         raise RuntimeError("Unsupported Study telemetry.")
+                    if view == "report-sections":
+                        for section in value.get("sections", ()):
+                            if isinstance(section.get("bundle"), Mapping):
+                                section["bundle"]["source"]["job_id"] = record.job_id
+                                section["bundle"]["source"]["remote"] = profile.transport != "local"
                     self._study_projection_cache[cache_key] = (fingerprint, value)
                     if len(self._study_projection_cache) > 32:
                         self._study_projection_cache.pop(next(iter(self._study_projection_cache)))
@@ -1641,6 +1676,8 @@ exec "$fallback" "$@"
         for the explicit preview/apply history operation in :class:`WorkService`.
         """
         record = self.get(job_id, refresh=False)
+        if self.series_dependents(job_id):
+            raise ValueError("Job state is retained by a Study series.")
         if set(self.recovery_dependents(job_id)) - set(deleting_jobs):
             raise ValueError(
                 "Job state is retained by a recovered Study; delete its latest history first."
@@ -2034,6 +2071,91 @@ exec "$fallback" "$@"
         state = str(value.get("state", "unknown"))
         return f"[{timestamp}] [{phase}] {state}: {value.get('message', '')}"
 
+    def extension_evidence(self, job_id: str) -> dict[str, Any]:
+        """Inspect fixed evidence on the recorded host, in bounded metadata-only pages.
+
+        The reader is supplied by this controller; an old immutable scientific environment
+        need not install the new extension UI. Native Work/recovery identity checks still run
+        on the host where typed inputs and dataset identities can actually be resolved.
+        """
+        import base64
+
+        from lambdaforge.work.extension_evidence import (
+            inspect_extension_execution,
+            read_extension_configuration,
+        )
+        from lambdaforge.work.result_projection import page
+
+        record = self.get(job_id, refresh=False)
+        if record.state.value != "succeeded" or record.metadata.get("fleet"):
+            raise ValueError(
+                "Extension requires a successful non-Fleet native Job; use retry first."
+            )
+        profile, transport, _ = self._provider(record)
+        python = self._reader_python(record, profile)
+        owner_id = str(record.metadata.get("recovery_owner_job") or job_id)
+        owner = self.get(owner_id, refresh=False)
+        allowed = [owner.work_dir]
+        if profile.transport == "local" and self.store.project is not None:
+            allowed.append(str(self.store.project.root / ".lambdaforge/runs"))
+        script = (
+            "from __future__ import annotations\n"
+            "import sys,json,hashlib\nfrom typing import Any,Mapping\nfrom pathlib import Path\n"
+            + inspect.getsource(read_extension_configuration) + "\n"
+            + inspect.getsource(inspect_extension_execution) + "\n" + inspect.getsource(page)
+            + "\nrequest=json.loads(sys.argv[1])\n"
+            "from lambdaforge.work.recovery import read_owned_json\n"
+            "pointer=read_owned_json(Path(request['owner'])/'result.json')\n"
+            "root=Path(pointer['execution_dir'])\n"
+            "if root.resolve()!=root or not any(\n"
+            " root.is_relative_to(Path(p)) for p in request['allowed']):\n"
+            " raise ValueError('Extension evidence escaped native provider ownership')\n"
+            "value=inspect_extension_execution(str(root), request['execution_job'])\n"
+            "print(json.dumps(page(value,request['offset']),separators=(',',':')))\n"
+        )
+        chunks: list[bytes] = []
+        offset, digest = 0, None
+        while True:
+            request = {
+                "owner": str(PurePosixPath(owner.work_dir).parent), "allowed": allowed,
+                "execution_job": owner_id, "offset": offset,
+            }
+            assert profile.storage is not None
+            environment = (
+                "env", f"LAMBDAFORGE_CLUSTER={record.cluster}",
+                "LAMBDAFORGE_DATASET_REGISTRY="
+                + str(PurePosixPath(profile.storage.state_root) / "datasets.json"),
+                f"LAMBDAFORGE_DATASET_ROOT={profile.storage.dataset_root or ''}",
+                f"LAMBDAFORGE_PRODUCT_ROOT={profile.storage.product_root}",
+                f"LAMBDAFORGE_STORAGE_POLICY={json.dumps(profile.storage.to_dict())}",
+            )
+            response = transport.run((
+                *environment,
+                *ControlPlaneFactory.reader_command(profile, preferred=python),
+                "-c", script, json.dumps(request),
+            ), timeout=60)
+            if response.returncode:
+                raise ValueError("Cannot inspect extension evidence: " + response.stderr[-2000:])
+            if len(response.stdout.encode()) > 1024**2:
+                raise ValueError("Extension evidence page exceeds its wire bound.")
+            envelope = json.loads(response.stdout)
+            chunk = base64.b64decode(envelope["data"], validate=True)
+            if (len(chunk) > 512 * 1024 or envelope.get("offset") != offset
+                    or envelope.get("next_offset") != offset + len(chunk)
+                    or type(envelope.get("eof")) is not bool
+                    or digest is not None and digest != envelope.get("fingerprint")):
+                raise ValueError("Extension evidence changed during inspection; retry preview.")
+            digest = envelope["fingerprint"]
+            chunks.append(chunk)
+            offset += len(chunk)
+            if offset > 64 * 1024**2 or not chunk and not envelope["eof"]:
+                raise ValueError("Extension metadata exceeds its bounded inventory contract.")
+            if envelope["eof"]:
+                raw = b"".join(chunks)
+                if hashlib.sha256(raw).hexdigest() != digest:
+                    raise ValueError("Extension evidence page checksum differs.")
+                return cast(dict[str, Any], json.loads(raw))
+
     def retry_preview(self, job_id: str, *, config: str | Path | None = None) -> dict[str, Any]:
         """Read a bounded recovery plan on its execution host; never copy scientific bytes."""
         from lambdaforge.work.sweep_blocks import sweep_block_inventory
@@ -2077,7 +2199,10 @@ else:
  if not paths:
   root=work/".lambdaforge"/"runs"
   if work.name=="runs" and work.parent.name==".lambdaforge": root=work
-  paths=[p.parent for p in list(root.glob("*/execution-*/execution.json"))[:65]]
+  # A local project can contain other completed Studies. Their Execution is not
+  # recovery evidence for a Job whose preparation never reached science.
+  paths=[p.parent for p in list(root.glob("*/execution-*/execution.json"))[:65]
+         if read(p).get("job_id")==result.parent.name]
 if len(paths)>1: raise SystemExit("Ambiguous persisted Study execution; refusing guessed recovery")
 out={"resumable":False}
 if paths:
@@ -2213,6 +2338,13 @@ json.dump(out,sys.stdout)
                 "code_change_policy": "explicit compatibility acknowledgement required",
             }
         )
+        if not plan.get("resumable") and previous.metadata.get("study_extension"):
+            plan["will_preserve"] = (
+                "original Study revisions, completed Runs, reviewed delta and scientific identities"
+            )
+            plan["will_retry"] = (
+                "preparation of the reviewed extension delta only; no training Execution to resume"
+            )
         return cast(dict[str, Any], plan)
 
     def recovery_dependents(self, job_id: str) -> tuple[str, ...]:
@@ -2234,6 +2366,16 @@ json.dump(out,sys.stdout)
             if job_id in record.metadata.get("recovery_dependencies", ())
             or record.metadata.get("fleet_parent_job") == job_id
             or record.job_id == parent
+        )
+
+    def series_dependents(self, job_id: str) -> tuple[str, ...]:
+        """Return exact Series references separately; Series IDs are never Job identities."""
+        from lambdaforge.work.StudySeriesStore import StudySeriesStore
+
+        return (
+            StudySeriesStore(self.store.project).job_references().get(job_id, ())
+            if self.store.project is not None
+            else ()
         )
 
     def recovery_history(self, job_id: str, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
@@ -2436,7 +2578,16 @@ json.dump(out,sys.stdout)
                     "only if previous metrics and checkpoints remain scientifically compatible. "
                     "No recovery Job was submitted."
                 )
-            recovery_metadata: dict[str, Any] = {}
+            # A preparation failure may precede any Execution. Retrying its exact delta
+            # still belongs to the reviewed extension, not an unrelated fresh Study.
+            recovery_metadata: dict[str, Any] = {
+                **({"study_extension": dict(previous.metadata["study_extension"])}
+                   if previous.metadata.get("study_extension") else {}),
+                **({"pinned_scientific_identity": previous.metadata[
+                    "pinned_scientific_identity"
+                ]} if previous.metadata.get("study_extension")
+                   and previous.metadata.get("pinned_scientific_identity") else {}),
+            }
             if preview.get("resumable"):
                 cleaned = [
                     argument for argument in cleaned if argument not in {"--rerun", "--restart"}
@@ -2466,6 +2617,10 @@ json.dump(out,sys.stdout)
                     exclude_job_id=previous.job_id,
                 )
                 recovery_metadata = {
+                    **recovery_metadata,
+                    **({"prepared_extension_attestation": dict(previous.metadata[
+                        "prepared_extension_attestation"
+                    ])} if previous.metadata.get("prepared_extension_attestation") else {}),
                     "recovery_configuration": preview.get("configuration"),
                     "recovery_execution_dir": preview["execution_dir"],
                     "recovery_owner_job": preview["owner_job_id"],
@@ -2508,7 +2663,7 @@ json.dump(out,sys.stdout)
                 return replace(handle, recovery_plan=preview or None)
             from lambdaforge.controlplane.SubmissionService import SubmissionService
 
-            if recovery_metadata:
+            if recovery_metadata.get("recovery_execution_dir"):
                 from lambdaforge.runtime.CrossProcessFileLock import CrossProcessFileLock
 
                 token = hashlib.sha256(
@@ -2635,7 +2790,9 @@ json.dump(out,sys.stdout)
         ):
             raise ValueError(
                 "Recovery blocked: execution may still own live processes or provider state "
-                "is unresolved. Diagnose/reconcile before retrying."
+                "is unresolved. "
+                + SecretRedactor.redact(details.get("observation_reason", ""))[:200]
+                + f" Inspect lf health {record.job_id} --refresh --json before retrying."
             )
         return {
             "source": details.get("source", record.scheduler),

@@ -70,6 +70,7 @@ _NAMES = (
     "StorageReport",
     "StorageService",
     "StudyExportService",
+    "StudyExtensionService",
     "SubmissionService",
     "SystemKeyringCredentialProvider",
     "TorchInstallationPlan",

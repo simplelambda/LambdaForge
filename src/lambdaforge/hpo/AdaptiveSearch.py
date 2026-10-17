@@ -259,9 +259,7 @@ class AdaptiveSearchPolicy:
             seed_margin if seed_margin_authored else early_margin if early_margin_authored else None
         )
         raw_candidate_budget = value.get("trials")
-        candidate_budget = (
-            int(raw_candidate_budget) if raw_candidate_budget is not None else None
-        )
+        candidate_budget = int(raw_candidate_budget) if raw_candidate_budget is not None else None
         proposal_pool_size = int(
             value.get(
                 "proposal_pool_size",

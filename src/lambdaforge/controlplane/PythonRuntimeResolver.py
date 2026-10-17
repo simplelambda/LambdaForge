@@ -657,8 +657,12 @@ class PythonRuntimeResolver:
             raise RuntimeError(f"Could not publish runtime state: {published.stderr.strip()}")
 
     def _acquire(
-        self, transport: Transport, lock: PurePosixPath, completion: PurePosixPath,
-        *, python: str = "python3",
+        self,
+        transport: Transport,
+        lock: PurePosixPath,
+        completion: PurePosixPath,
+        *,
+        python: str = "python3",
     ) -> bool:
         # Even a complete receipt needs a GC-safe verification/activation lease.
         del completion

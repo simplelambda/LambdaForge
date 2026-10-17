@@ -37,9 +37,7 @@ class SobolSearch:
             attempts += 1
             point = engine.draw(1, dtype=torch.float64).reshape(-1).tolist()
             parameters: dict[str, Any] = {}
-            for descriptor, coordinate in zip(
-                self.parameter_space.descriptors, point, strict=True
-            ):
+            for descriptor, coordinate in zip(self.parameter_space.descriptors, point, strict=True):
                 if descriptor.active(parameters):
                     parameters[descriptor.name] = descriptor.sample(float(coordinate))
             encoded = json.dumps(parameters, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -50,5 +48,6 @@ class SobolSearch:
         if len(output) != count:
             raise ValueError("Search space cannot produce the requested number of unique trials.")
         return tuple(output)
+
 
 __all__ = ["SobolSearch"]

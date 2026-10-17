@@ -43,5 +43,8 @@ def test_normal_documentation_contains_no_superseded_yaml_language() -> None:
         "docs/MANUAL.es.md",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
-        for removed in ("kind:", "schema_version", "required_artifacts", "bindings:", "needs:"):
+        # Nested kind fields are valid product/analysis declarations, not an old
+        # top-level executable Task dialect. The consolidated manual documents both.
+        assert not re.search(r"^kind:", text, re.MULTILINE), relative
+        for removed in ("schema_version", "required_artifacts", "bindings:", "needs:"):
             assert removed not in text, (relative, removed)

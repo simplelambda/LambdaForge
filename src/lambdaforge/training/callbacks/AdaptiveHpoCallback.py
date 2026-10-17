@@ -66,9 +66,7 @@ class AdaptiveHpoCallback(CallbackBase):
         metrics = os.environ.get("LAMBDAFORGE_HPO_METRICS_PATH")
         stop = os.environ.get("LAMBDAFORGE_STOP_REQUEST_PATH")
         training = os.environ.get("LAMBDAFORGE_TRAINING_METRICS_PATH")
-        resource_checkpoint_request = os.environ.get(
-            "LAMBDAFORGE_RESOURCE_CHECKPOINT_REQUEST_PATH"
-        )
+        resource_checkpoint_request = os.environ.get("LAMBDAFORGE_RESOURCE_CHECKPOINT_REQUEST_PATH")
         resource_checkpoint_dir = os.environ.get("LAMBDAFORGE_RESOURCE_CHECKPOINT_DIR")
         raw_objective = os.environ.get("LAMBDAFORGE_HPO_OBJECTIVE_CONFIG")
         try:

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass
 
 import numpy as np
 
+from ._types import ArrayInput
 from .backend import feature_array, require_sklearn
-from .base import ArrayInput, Clusterer, ClusteringResult
+from .Clusterer import Clusterer
+from .ClusteringResult import ClusteringResult
+from .StabilityResult import StabilityResult
 
 
 def adjusted_rand_index(first: np.ndarray, second: np.ndarray) -> float:
@@ -34,17 +36,6 @@ def silhouette_score(
 
     labels = result.labels if isinstance(result, ClusteringResult) else np.asarray(result)
     return float(backend_score(feature_array(features), labels, metric=distance))
-
-
-@dataclass(frozen=True, slots=True)
-class StabilityResult:
-    """Generic adjusted-Rand evidence across explicitly chosen clusterers."""
-
-    scores: tuple[float, ...]
-    pairwise: tuple[tuple[float, ...], ...]
-    median: float
-    minimum: float
-    results: tuple[ClusteringResult, ...]
 
 
 def stability(

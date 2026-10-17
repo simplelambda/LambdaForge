@@ -83,16 +83,20 @@ def test_fixed_and_legacy_exhaustive_use_the_common_resource_dispatcher(
     ]
     runner._execute_fixed_evidence_group(specifications)
 
-    legacy = WorkConfig.from_mapping(
-        {
-            "name": "legacy",
-            "run": "tests.work_cases.AdaptiveScoreWork",
-            "seeds": [1, 2],
-            "search": {"strategy": "exhaustive", "quality": [1.0, 2.0]},
-            "execution": {"max_parallel": 3},
-        },
-        source=tmp_path / "legacy.yaml",
-    ).levels[0].runs[0]
+    legacy = (
+        WorkConfig.from_mapping(
+            {
+                "name": "legacy",
+                "run": "tests.work_cases.AdaptiveScoreWork",
+                "seeds": [1, 2],
+                "search": {"strategy": "exhaustive", "quality": [1.0, 2.0]},
+                "execution": {"max_parallel": 3},
+            },
+            source=tmp_path / "legacy.yaml",
+        )
+        .levels[0]
+        .runs[0]
+    )
     assert legacy.study_design is not None and legacy.study_design.kind == "sweep"
     assert legacy.search_policy is None
     legacy_specifications = [
@@ -178,54 +182,66 @@ def test_structured_and_legacy_adaptive_yaml_normalize_identically(tmp_path: Pat
         "objective": {"metric": "score", "mode": "max", "practical_margin": 0.01},
         "resources": {"cpu": 4},
     }
-    modern = WorkConfig.from_mapping(
-        {
-            **shared,
-            "search": {
-                "budget": {"candidates": 3, "runs": 12},
-                "space": {"quality": [0.1, 0.5, 0.9]},
-                "replication": {"minimum": 4, "confirmation": []},
-                "pruning": {"enabled": False},
+    modern = (
+        WorkConfig.from_mapping(
+            {
+                **shared,
+                "search": {
+                    "budget": {"candidates": 3, "runs": 12},
+                    "space": {"quality": [0.1, 0.5, 0.9]},
+                    "replication": {"minimum": 4, "confirmation": []},
+                    "pruning": {"enabled": False},
+                },
+                "execution": {"runs_per_gpu": "auto", "max_parallel": 4},
             },
-            "execution": {"runs_per_gpu": "auto", "max_parallel": 4},
-        },
-        source=tmp_path / "modern.yaml",
-    ).levels[0].runs[0]
-    legacy = WorkConfig.from_mapping(
-        {
-            **shared,
-            "search": {
-                "trials": 3,
-                "max_runs": 12,
-                "min_seeds": 4,
-                "confirmation_seeds": [],
-                "early_stopping": {"enabled": False},
-                "runs_per_gpu": "auto",
-                "max_parallel": 4,
-                "quality": [0.1, 0.5, 0.9],
+            source=tmp_path / "modern.yaml",
+        )
+        .levels[0]
+        .runs[0]
+    )
+    legacy = (
+        WorkConfig.from_mapping(
+            {
+                **shared,
+                "search": {
+                    "trials": 3,
+                    "max_runs": 12,
+                    "min_seeds": 4,
+                    "confirmation_seeds": [],
+                    "early_stopping": {"enabled": False},
+                    "runs_per_gpu": "auto",
+                    "max_parallel": 4,
+                    "quality": [0.1, 0.5, 0.9],
+                },
             },
-        },
-        source=tmp_path / "legacy.yaml",
-    ).levels[0].runs[0]
+            source=tmp_path / "legacy.yaml",
+        )
+        .levels[0]
+        .runs[0]
+    )
 
     assert modern.search_policy is not None and legacy.search_policy is not None
     assert modern.search_policy.to_dict() == legacy.search_policy.to_dict()
     assert modern.execution_policy == legacy.execution_policy
     assert modern.search_policy.scientific_margin == pytest.approx(0.01)
 
-    alias_only = WorkConfig.from_mapping(
-        {
-            **{key: value for key, value in shared.items() if key != "objective"},
-            "objective": {"metric": "score", "mode": "max"},
-            "search": {
-                "trials": 1,
-                "confirmation_seeds": [],
-                "seed_racing": {"equivalence_margin": 0.02},
-                "quality": [0.5],
+    alias_only = (
+        WorkConfig.from_mapping(
+            {
+                **{key: value for key, value in shared.items() if key != "objective"},
+                "objective": {"metric": "score", "mode": "max"},
+                "search": {
+                    "trials": 1,
+                    "confirmation_seeds": [],
+                    "seed_racing": {"equivalence_margin": 0.02},
+                    "quality": [0.5],
+                },
             },
-        },
-        source=tmp_path / "legacy-margin.yaml",
-    ).levels[0].runs[0]
+            source=tmp_path / "legacy-margin.yaml",
+        )
+        .levels[0]
+        .runs[0]
+    )
     assert alias_only.objective is not None
     assert alias_only.objective["practical_margin"] == pytest.approx(0.02)
 
@@ -256,9 +272,7 @@ def test_candidate_budget_does_not_cancel_required_minimum_replication(
     assert result.status == "succeeded"
     assert len(result.runs) == 12
     assert {
-        (int(run.trial["index"]), run.seed)
-        for run in result.runs
-        if run.trial is not None
+        (int(run.trial["index"]), run.seed) for run in result.runs if run.trial is not None
     } == {(trial, seed) for trial in range(1, 4) for seed in (11, 12, 13, 14)}
     assert result.summary["evidence"]["required_missing"] == 0
 
@@ -294,9 +308,7 @@ def test_structured_space_parameter_names_do_not_collide_with_policy_names(
 
 def test_sweep_grid_and_budget_validation_are_strict(tmp_path: Path) -> None:
     mapping = _sweep_mapping(values=2, seeds=2)
-    mapping["sweep"] = {
-        "space": {"quality": {"range": [1e-5, 1e-3], "points": 3, "scale": "log"}}
-    }
+    mapping["sweep"] = {"space": {"quality": {"range": [1e-5, 1e-3], "points": 3, "scale": "log"}}}
     definition = WorkConfig.from_mapping(mapping, source=tmp_path / "grid.yaml").levels[0].runs[0]
     assert [variant["quality"] for variant in definition.variants] == pytest.approx(
         [1e-5, 1e-4, 1e-3]
@@ -439,12 +451,8 @@ def test_sweep_analysis_uses_shared_seed_blocks_without_imputation() -> None:
     assert 3 in comparison["missing_seed_cells"]
     assert sweep["missing_cells_are_imputed"] is False
     assert sweep["evidence_matrix"]["seeds"] == [1, 2, 3, 4]
-    third_row = next(
-        row for row in sweep["evidence_matrix"]["rows"] if row["trial"] == 3
-    )
-    assert next(cell for cell in third_row["cells"] if cell["seed"] == 3)["state"] == (
-        "missing"
-    )
+    third_row = next(row for row in sweep["evidence_matrix"]["rows"] if row["trial"] == 3)
+    assert next(cell for cell in third_row["cells"] if cell["seed"] == 3)["state"] == ("missing")
     assert analysis["summary"]["observed_candidate_count"] == 3
     assert analysis["summary"]["evidence_complete_candidate_count"] == 2
 

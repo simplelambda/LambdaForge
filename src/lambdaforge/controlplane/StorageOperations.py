@@ -47,7 +47,9 @@ class StorageOperations:
         if apply:
             state.mkdir(parents=True, exist_ok=True)
             with CrossProcessFileLock(
-                state / ".storage-ledger.lock", shared=False, timeout_seconds=10,
+                state / ".storage-ledger.lock",
+                shared=False,
+                timeout_seconds=10,
                 poll_interval_seconds=0.05,
             ):
                 return cls._reconcile_locked(descriptor, ledger, apply=True)
@@ -471,12 +473,14 @@ class StorageOperations:
             if cls._orphan_lease(marker):
                 orphan_names.add(
                     marker.name.removeprefix(".environment-build-")
-                    .removeprefix(".python-runtime-").removesuffix(".lock")
+                    .removeprefix(".python-runtime-")
+                    .removesuffix(".lock")
                 )
             else:
                 builds.add(
                     marker.name.removeprefix(".environment-build-")
-                    .removeprefix(".python-runtime-").removesuffix(".lock")
+                    .removeprefix(".python-runtime-")
+                    .removesuffix(".lock")
                 )
         runtime_refs = cls._runtime_references(roots, tuple(refs.get("runtimes", ())))
         categories = (
@@ -749,9 +753,7 @@ class StorageOperations:
             for process in psutil.process_iter():
                 try:
                     if any(
-                        needle in argument
-                        for argument in process.cmdline()
-                        for needle in needles
+                        needle in argument for argument in process.cmdline() for needle in needles
                     ):
                         return True
                 except psutil.NoSuchProcess:
@@ -860,8 +862,11 @@ class StorageOperations:
 
         if not path.exists() or path.is_symlink():
             return {
-                "path": str(path), "bytes": 0, "allocated_bytes": 0,
-                "files": 0, "exists": False,
+                "path": str(path),
+                "bytes": 0,
+                "allocated_bytes": 0,
+                "files": 0,
+                "exists": False,
             }
         if path.is_file():
             metadata = path.stat()

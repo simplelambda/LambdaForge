@@ -171,22 +171,24 @@ class ClusterEditor(ModalScreen[bool]):
         ),
         "cluster-gpu-mode": (
             "Who grants GPU access. Command wraps GPU-sensitive processes with the site's argv; "
-            "claim/release optionally owns one reservation for the complete submission."
+            "Provider-owned wrappers may reuse manual reservations. Generic claim/release "
+            "does not prove reservation ownership and is not executed automatically."
         ),
         "cluster-gpu-prefix": (
             "Shell-style input converted to an argv list, for example: gpu exec --guaranteed. "
             "No shell expansion is performed."
         ),
         "cluster-gpu-claim": (
-            "Optional persistent reservation argv. Only {gpu_count} is interpolated; a matching "
-            "release command is mandatory."
+            "Legacy configuration only. Automatic claim is refused without a scoped ownership "
+            "receipt. Leave claim/release empty and use gpu exec with a provider/manual grant."
         ),
         "cluster-gpu-release": (
-            "Cleanup argv paired with the claim and attempted after success, failure or "
-            "cancellation."
+            "Legacy paired release argv. Automatic claim/release is refused without a "
+            "verified reservation receipt; use the site's owned wrapper or a manual reservation."
         ),
         "cluster-advanced": (
-            "Validated YAML for uncommon OpenSSH and SLURM dialect fields. It cannot override the "
+            "Validated YAML for resource_safety policy, OpenSSH and SLURM fields. "
+            "It cannot override the "
             "guided fields on the other tabs."
         ),
     }
@@ -196,6 +198,7 @@ class ClusterEditor(ModalScreen[bool]):
             "ssh_options",
             "command_prefix",
             "scheduler_options",
+            "resource_safety",
             "resource_mapping",
             "scheduler_directives",
             "scheduler_commands",
@@ -552,12 +555,16 @@ class ClusterEditor(ModalScreen[bool]):
                             placeholder="For example: gpu exec",
                             id="cluster-gpu-prefix",
                         )
-                        yield Label("Persistent claim command", classes="field-label")
+                        yield Label(
+                            "Legacy claim command (automatic use unsupported)",
+                            classes="field-label",
+                        )
                         yield Input(
                             value=shlex.join(
                                 tuple(str(item) for item in gpu.get("claim_command", ()))
                             ),
-                            placeholder='For example: gpu claim --numgpus "{gpu_count}"',
+                            placeholder="Leave empty for provider-owned gpu exec / manual "
+                            "reservations",
                             id="cluster-gpu-claim",
                         )
                         yield Label("Paired release command", classes="field-label")
@@ -585,7 +592,8 @@ class ClusterEditor(ModalScreen[bool]):
                     with Vertical(classes="cluster-editor-page"):
                         yield Static(
                             "Optional validated YAML: ssh_options, command_prefix, "
-                            "scheduler_options, resource_mapping, scheduler_directives, "
+                            "resource_safety, scheduler_options, resource_mapping, "
+                            "scheduler_directives, "
                             "scheduler_commands and job_script.",
                             classes="muted",
                         )
@@ -1309,7 +1317,12 @@ class LambdaForgeApp(App[None]):
         """Push the real entity workspace selected with Enter or the right arrow."""
         message.stop()
         if message.kind == "study":
-            self.push_screen(StudyWorkspace(message.value, self.services))
+            if message.value.get("study_series_id"):
+                from lambdaforge.tui.screens.StudySeries import StudySeriesWorkspace
+
+                self.push_screen(StudySeriesWorkspace(message.value, self.services))
+            else:
+                self.push_screen(StudyWorkspace(message.value, self.services))
         elif message.kind == "work":
             self.push_screen(
                 ResultWorkspace(message.value, self.services)

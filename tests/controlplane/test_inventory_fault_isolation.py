@@ -106,7 +106,7 @@ def test_inventory_isolates_corruption_and_never_adopts_error_rows(
     originals = {path: path.read_bytes() for path in root.rglob("*.json")}
     for directory in (good, finished, bad):
         remember(jobs, directory)
-    monkeypatch.setattr(ProcessSupervisor, "_process_markers", lambda: ({}, True))
+    monkeypatch.setattr(ProcessSupervisor, "_process_markers", lambda: ({}, []))
     rows = ProcessSupervisor.inventory(root)
     assert len(rows) == 4
     errors = {row["request"]["job_id"] for row in rows if "observation_error" in row}
@@ -164,7 +164,7 @@ def test_bad_terminal_record_retains_outcome_and_healthy_jobs_keep_refreshing(
     remember(jobs, bad, JobState.FAILED)
     valid = (bad / "state.json").read_bytes()
     (bad / "state.json").write_text("corrupt", encoding="utf-8")
-    monkeypatch.setattr(ProcessSupervisor, "_process_markers", lambda: ({}, True))
+    monkeypatch.setattr(ProcessSupervisor, "_process_markers", lambda: ({}, []))
     monkeypatch.setattr(jobs, "_inventory", lambda name: ProcessSupervisor.inventory(root))
     jobs.reconcile(all_clusters=True)
     terminal = jobs.store.get(bad.name)

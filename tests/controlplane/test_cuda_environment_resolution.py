@@ -70,7 +70,10 @@ class InstallationTransport(Transport):
         self.files: set[str] = set()
 
     def run(
-        self, command: Sequence[str], *, cwd: str | Path | None = None,
+        self,
+        command: Sequence[str],
+        *,
+        cwd: str | Path | None = None,
         timeout: float | None = None,
     ) -> CommandResult:
         del cwd

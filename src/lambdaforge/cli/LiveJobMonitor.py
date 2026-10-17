@@ -38,7 +38,11 @@ def _gpu(observed: Mapping[str, Any]) -> float | None:
     if not isinstance(values, (list, tuple)):
         return None
     percentages = [
-        float(item.get("utilization_percent", 0)) for item in values if isinstance(item, Mapping)
+        float(item["utilization_percent"])
+        for item in values
+        if isinstance(item, Mapping)
+        and isinstance(item.get("utilization_percent"), (int, float))
+        and item.get("parent_uuid") is None
     ]
     return sum(percentages) / len(percentages) if percentages else None
 
@@ -46,6 +50,15 @@ def _gpu(observed: Mapping[str, Any]) -> float | None:
 def _gpu_memory(observed: Mapping[str, Any]) -> float | None:
     values = observed.get("gpus", ())
     if not isinstance(values, (list, tuple)):
+        return None
+    values = [
+        item for item in values if isinstance(item, Mapping) and item.get("parent_uuid") is None
+    ]
+    if any(
+        not isinstance(item.get("memory_used_bytes"), (int, float))
+        or not isinstance(item.get("memory_total_bytes"), (int, float))
+        for item in values
+    ):
         return None
     used = sum(
         float(item.get("memory_used_bytes", 0) or 0) for item in values if isinstance(item, Mapping)

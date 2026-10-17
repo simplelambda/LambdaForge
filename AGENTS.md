@@ -94,17 +94,17 @@ Consult `docs/ai/IMPLEMENTATION.md` for honest integration acceptance and remain
 
 | Task | Read the relevant reference, then inspect code/tests |
 |---|---|
-| Work lifecycle, outputs, logging | `docs/WORK_RESULTS.md`; detailed contracts § Writing Work |
-| YAML, seeds, conditional studies | `docs/CONDITIONAL_STUDIES.md`; native WorkConfig/ParameterSpace |
+| Work lifecycle, outputs, logging | `docs/MANUAL.md#guide-work-results`; detailed contracts § Writing Work |
+| YAML, seeds, conditional studies | `docs/MANUAL.md#guide-conditional-studies`; native WorkConfig/ParameterSpace |
 | HPO, scientific planning, ARI | Detailed contracts § YAML composition and studies |
 | Study analysis or HTML | Detailed contracts § Study Analysis and console; analysis/ and outputs |
-| Recovery, state, cancellation | `docs/OPERATIONAL_RELIABILITY.md`; work/recovery and lifecycle |
+| Recovery, state, cancellation | `docs/MANUAL.md#guide-operational-reliability`; work/recovery and lifecycle |
 | Providers, Fleet, ownership | Detailed contracts § Control-plane invariants; provider tests |
-| Dataset reconstruction | `docs/DATASET_RECONSTRUCTION.md`; native registry/publisher/verifier |
-| Products and historical evidence | `docs/PRODUCTS.md`, `docs/WORK_RESULTS.md` |
+| Dataset reconstruction | `docs/MANUAL.md#guide-dataset-reconstruction`; native registry/publisher/verifier |
+| Products and historical evidence | `docs/MANUAL.md#guide-products`, `docs/MANUAL.md#guide-work-results` |
 | Neural or clustering component | Manual model catalog; detailed neural/clustering contracts |
 | Console and lazy data loading | Detailed console contracts; tui/services and read models |
-| Agents, MCP, memory, Skills | `docs/ai/INTEGRATION.md`, packaged specialized Skills |
+| Agents, MCP, memory, Skills | `docs/MANUAL.md#guide-integration`, packaged specialized Skills |
 
 The detailed reference is `docs/ai/FRAMEWORK_CONTRACTS.md`; retain its task-specific rules.
 `docs/MANUAL.md` contains API details. Prefer one relevant section over the whole document.

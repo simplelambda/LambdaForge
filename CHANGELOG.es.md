@@ -9,6 +9,110 @@ metadata empaquetada.
 
 ## [Sin publicar]
 
+### Añadido
+
+- Distancia Fused Gromov–Wasserstein q=2 balanceada y genérica mediante POT opcional
+  (`lambdaforge[optimal-transport]`): objetos ponderados, atributos vectoriales o definidos por el
+  proyecto, distancias precalculadas, inicio factible y acoplamiento/diagnóstico de convergencia
+  local. Reserva densa protegida, sin lógica específica de aplicación ni clustering.
+- Un manual público con índice por idioma: guías integradas como capítulos y auditorías históricas
+  conservadas en el registro interno. Enlaces del repositorio, agentes, Skills y paquete actualizados.
+  Estrategias y contratos/resultados de clustering separados por clase, conservando importaciones.
+
+- Ampliación exacta de sweeps fijos condicionales y puntos selectivos `sweep.include`. Deltas nativos
+  `sweep.candidates` conservan claves inactivas ausentes, controles, seeds y evidencia, sin generar
+  productos cruzados extra. Preview estricto bloquea parsers antiguos; el modo revisionado permite
+  despliegue nativo actual revisado, sin modificar el prefijo inmutable anterior.
+- Ampliaciones revisionadas útiles: origen dirty o código distinto no exige fingir equivalencia.
+  Revisión actual de código/runtime conserva Runs anteriores, delta exacto, identidades y gasto;
+  se vuelve a fijar código antes/después de preparar el Job y se acredita identidad/diseño reales
+  del host hasta recogida/retry. Historial unificado, análisis nativo y HTML
+  separados por revisión, sin mezclar medias de seeds incompatibles. `--code-policy strict` mantiene
+  la puerta anterior para quien exija equivalencia demostrada.
+- UX incremental: ayuda por tareas derivada del parser real, completion opt-in Bash/Zsh/Fish,
+  export de schema instalado, explicación estática de campos y diff nativo descriptivo.
+  Scaffold deriva nombres seguros y rutas reales. Inspect/diagnose/watch de lectura reutilizan
+  catálogos/diagnóstico nativos; filtros locales Work/Study conservan navegación exacta y snapshots
+  iguales. Doctor/context y registro Codex oficial revisado distinguen disponibilidad/registro
+  de handshake. Dos Skills añaden workflows concretos. Reforma amplia MCP/HTML/búsqueda global
+  y aceptación externa siguen pendientes.
+- Páginas derivadas JSON/CSV `results table` con selectores exactos de métricas/Run/Trial,
+  procedencia, último/todos los Attempts, snapshots censurados y paginación que detecta cambios.
+  Destinos explícitos nuevos fuera de evidencia Run; no se leen bytes de artefactos ni se recalcula
+  análisis ni se modifica export/import científico.
+- Ampliaciones nativas de sweeps fijos: editar YAML original, revisar conservados/nuevos y ejecutar
+  solo el delta. Entornos gestionados CPU/GPU conservados en el mismo destino, revisiones inmutables
+  sucesivas, StudyAnalysis/HTML acumulados con procedencia, agrupación en consola, retry nativo del
+  delta y export de colección de lectura reutilizan servicios existentes. Snapshots fijados, Job
+  idempotente, reconciliación anterior al Job y retención conservan identidad/coste. Preview de lectura;
+  extensiones exploratorias no son confirmación retroactiva. Fleet, migración y diseños adaptativos/
+  automáticos siguen fuera del contrato inicial.
+- Observación GPU ligera compartida con NVML oficial opcional, helpers acotados, caché UID/host
+  y backoff por dispositivo. Arranques shared/command coordinan compromisos UUID GPU/MIG,
+  fairness y rechecks nativos; RAM/CPU física y cgroup tienen calidad explícita. Perfiles
+  `resource_safety`, informes sanitizados de evidencia guardada e historial operativo comprimido
+  acotado. La reforma amplia sigue en curso, sin afirmar validación real del centro.
+- Pestañas nativas `html_bundle` conservan assets completos con manifiesto atestiguado y API
+  lazy del navegador. Visor loopback de lectura trae solo el asset elegido por transporte
+  existente; export/import conserva todos los bytes. HTML autocontenido sigue disponible y
+  assets ausentes/corruptos producen errores de presentación explícitos.
+
+### Corregido
+
+- El dispatch ya no bloquea un Study totalmente inactivo por calcular la cuota elástica sin RAM
+  de auxiliares y contarla después al lanzar. La medición fresca del árbol completo limita solo
+  cuotas nativas derivadas, sin quitar controles físicos/cgroup ni agregados. Avance real plano
+  cierra rampas iniciales antiguas y permite promover pruebas de packing; residentes estables usan
+  envolventes terminales válidas sin eliminar riesgo de cola rara. El check final GPU conserva
+  contexto de hermanas/exploración y evidencia WAIT. Los vetos al lanzar son visibles en telemetría
+  e historial deduplicado, sin confundirlos con falta de memoria GPU.
+
+- Preparación de ampliaciones con mucha semántica de métricas: huellas canónicas por campo
+  sustituyen metadatos crudos en argv SSH sin perder comprobaciones exactas. Retry anterior a
+  Execution conserva delta/serie revisados y pin de envío; la búsqueda local de recuperación
+  no confunde una Execution de otro Study con esta preparación fallida.
+
+- Ampliación de sweeps conserva el orden original de Trials: ordenar claves JSON ya no provoca
+  falsos cambios de identidad al inspeccionar evidencia. Snapshot propio contrastado exactamente
+  con configuración congelada, huella y Attempts; el paginado remoto conserva su orden. No se
+  eluden controles de compatibilidad de código o entorno.
+- Recovery GPU comprobado de tres dispositivos pedidos a uno concedido por `gpu exec` para
+  diseños adaptativos, seeds repetidas y sweeps, conservando evidencia completada y coste.
+  Una visibilidad CUDA explícitamente vacía/deshabilitada ya no se convierte en índices físicos
+  en modos directos; dispatch CPU no necesita concesión GPU.
+- Los leases GPU exteriores y la visibilidad del hijo usan UUID GPU/MIG; los leases CPU/GPU
+  tienen scoping host/boot en homes compartidos. Propietarios antiguos ambiguos quedan protegidos
+  con feedback de espera, no se borran por PID locales ajenos. Los temporales de archivo
+  interrumpidos ya no impiden compactaciones operativas posteriores.
+- Configurar claim/release genérico no autoriza mutar reservas sin propiedad acotada: se usa
+  wrapper/concesión manual del proveedor y el claim automático inseguro se rechaza antes de
+  ejecutarlo. Capacidad/atribución MIG no se duplica entre padre e instancia; un PID reutilizado
+  no recibe cambios nativos de afinidad.
+- Recovery tras reinicio verificado del host no confunde sesiones de acceso nuevas con
+  descendientes de Jobs anteriores al arranque. Marcas vivas y propietarios posteriores
+  inciertos siguen protegidos; preview no cambia registros científicos.
+- MCP marca errores con `isError` y diferencia aprobación caducada/obsoleta/consumida,
+  incertidumbre de proveedor y fallo interno. Payloads declarados se validan y anuncian con
+  esquemas por operación mediante API pública del SDK, sin cambiar managers privados.
+- CI de agentes usa virtualenv aislado; pruebas de dependencias/fallo offline no dependen del
+  SDK ambiente. Se normaliza formato del repositorio sin cambios de AST.
+- Resume Study mantiene aprobación de cambios de código y feedback de bloqueo junto a los
+  controles, incluso en planes largos. Pulsar sin aprobación/validación explica el motivo;
+  cambiar la casilla no elude validación en curso y confirmar envía una sola recuperación.
+- Recovery de Study no confunde procesos SSH/PAM inaccesibles ajenos con workers vivos posibles.
+  La sonda usa evidencia de vida/sesión por Job y un único inventario compartido; supervisores
+  vivos, huérfanos marcados y propietarios realmente inciertos siguen protegidos. Preview de
+  lectura conserva Runs exitosos e identifica el Run fallido exacto que se reintentará.
+
+### Añadido
+
+- Cancelación de Job exacto del proyecto con OPERATE, ApprovalService humano firmado y
+  JobService nativo: preview puro, apply único, revalidación de propietario y evidencia conservada.
+  Envío/recovery/borrado/Fleet como agente siguen no soportados.
+- Descubrimiento técnico bilingüe determinista con permisos/origen/frescura/errores; adapters
+  nativos de resultados y acciones Job. Las 24 Skills incluyen procedimientos/casos específicos,
+  comandos comprobados con parser y nombres reales de fachada; controles de aprobación fijos.
+
 ## [0.19.0] - 2026-10-11
 
 Fundamentos nativos para agentes y fiabilidad operativa sobre el modelo de ejecución existente.

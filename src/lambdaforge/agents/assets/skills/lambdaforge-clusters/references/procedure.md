@@ -1,30 +1,30 @@
-# lambdaforge-clusters procedure reference
+# Inspect providers and edit safe native profiles · procedure
 
-## Native entry point
+## Native discovery/example
 
 ```bash
 lf clusters list --json
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Run in the intended project. Uppercase selectors/paths are placeholders, not a Work-name guess.
+Inspect installed help first. These commands are metadata/planning; parsing them does not execute science.
 
-## Acceptance
+Use list_clusters/get_cluster for cached profile inspection, then request get_cluster_resources only for the selected host.
 
-Inspect registered profile names; use native doctor/resources when authorized; preserve GPU grant tokens and credential references.
-Never reveal credentials, invent GPU tokens or run a bootstrap without authority.
+## Decision cases
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+| Situation | Native interpretation / next step |
+|---|---|
+| Site uses gpu exec | Direct backend plus command GPU access; never invent --gpu-slot. |
+| Provider exposes fewer GPUs than YAML asks | Use only valid inherited grants under supported scaling rules. |
+| More free VRAM exists on an ungranted GPU | Do not use it. |
+| Long provisioning | Show native action progress, avoid duplicate bootstrap requests. |
 
-## Recovery of uncertainty
+## Verification and handoff
 
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+No broadened CUDA tokens, system Python/CUDA mutation or guessed host identity. All configured fields round-trip through the native profile contract.
+Profile edits, bootstrap, claims, release and credentials require explicit operator consent; never place passwords in notes/argv.
+
+If a capability is missing, stale or unsupported, retain evidence and explain the exact blocker.
+Do not create a CLI subprocess adapter, a second runner/result store or an application-specific workaround.
 

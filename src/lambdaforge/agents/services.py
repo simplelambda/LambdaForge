@@ -1,7 +1,7 @@
 """Public project-pinned facade for agents and external Python applications.
 
-Only metadata/explicit native planning is exposed initially. No shell execution, CLI subprocess,
-widget dependencies, hidden artifact download or alternate scientific state exists here.
+Metadata/planning and separately human-approved exact Job cancellation use native owners.
+No shell execution, CLI subprocess, hidden artifact download or alternate scientific state exists.
 """
 
 from __future__ import annotations
@@ -16,8 +16,10 @@ import yaml
 
 from lambdaforge._version import VERSION
 from lambdaforge.agents.contracts import Operation, Permission, operation, page
+from lambdaforge.agents.errors import AgentOperationError
 from lambdaforge.agents.knowledge import KINDS, KnowledgeService
 from lambdaforge.agents.scope import ProjectScope
+from lambdaforge.agents.service_adapters.results import ResultQueries
 
 
 class AgentServices:
@@ -106,8 +108,14 @@ class AgentServices:
             for record in self._datasets().registry.records()
             if record.dataset_id == content_id
         ]
+        if not matches:
+            raise AgentOperationError(
+                "NOT_FOUND", "Dataset identity is missing from this project's registry."
+            )
         if len(matches) != 1:
-            raise ValueError("Dataset identity is missing or ambiguous in this project's registry.")
+            raise AgentOperationError(
+                "AMBIGUOUS_SELECTOR", "Dataset identity is ambiguous in this project's registry."
+            )
         return matches[0]
 
     @operation("project.info", "core", "READ", "ProjectContext", "docs/MANUAL.md")
@@ -121,13 +129,15 @@ class AgentServices:
             "knowledge": self.knowledge.status(),
             "http_available": True,
             "http_scope": "opt-in paired loopback READ/PLAN; no network deployment",
-            "mutations_available": "WRITE_PROJECT" in self.permissions,
+            "mutations_available": bool(set(self.permissions) & {"WRITE_PROJECT", "OPERATE"}),
             "mutation_scope": (
-                "locally approved knowledge edits/ZIP export; no scientific operations"
+                "locally approved knowledge edits/ZIP export and exact Job cancellation only"
             ),
         }
 
-    @operation("agent.actions", "core", "READ", "ApprovalService", "docs/ai/INTEGRATION.md")
+    @operation(
+        "agent.actions", "core", "READ", "ApprovalService", "docs/MANUAL.md#guide-integration"
+    )
     def agent_actions(self) -> dict[str, Any]:
         """Discover the closed native action set; unavailable permissions never become approval."""
         from lambdaforge.agents.approvals import ACTIONS
@@ -139,7 +149,10 @@ class AgentServices:
                     "permission": spec.permission,
                     "service": spec.service,
                     "session_enabled": spec.permission in self.permissions
-                    and (self.toolsets is None or "knowledge" in self.toolsets),
+                    and (
+                        self.toolsets is None
+                        or ("operations" if name == "jobs.cancel" else "knowledge") in self.toolsets
+                    ),
                     "arguments": sorted(spec.arguments),
                     "required_arguments": sorted(spec.required),
                     "human_approval_required": True,
@@ -147,15 +160,24 @@ class AgentServices:
                 for name, spec in ACTIONS.items()
             ],
             "submit_operate_destructive_available": False,
+            "submission_available": False,
+            "deletion_available": False,
+            "job_cancellation_available": "OPERATE" in self.permissions
+            and (self.toolsets is None or "operations" in self.toolsets),
         }
 
     @operation(
-        "agent.action.preview", "knowledge", "PLAN", "ApprovalService", "docs/ai/INTEGRATION.md"
+        "agent.action.preview",
+        "knowledge",
+        "PLAN",
+        "ApprovalService",
+        "docs/MANUAL.md#guide-integration",
     )
     def preview_agent_action(self, action: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Pure exact proposal; consumer content is data, never an approval or instruction."""
         from lambdaforge.agents.approvals import ApprovalService
 
+        self._knowledge_action(action)
         return ApprovalService(self.scope).preview(action, arguments)
 
     @operation(
@@ -163,7 +185,7 @@ class AgentServices:
         "knowledge",
         "WRITE_PROJECT",
         "ApprovalService",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
         side_effects=("persist expiring unapproved local proposal and audit metadata",),
     )
     def request_agent_action(
@@ -172,10 +194,15 @@ class AgentServices:
         """Queue a proposal for a human local reviewer; this never approves or executes it."""
         from lambdaforge.agents.approvals import ApprovalService
 
+        self._knowledge_action(action)
         return ApprovalService(self.scope).request(action, arguments, ttl_seconds=ttl_seconds)
 
     @operation(
-        "agent.action.status", "knowledge", "READ", "ApprovalService", "docs/ai/INTEGRATION.md"
+        "agent.action.status",
+        "knowledge",
+        "READ",
+        "ApprovalService",
+        "docs/MANUAL.md#guide-integration",
     )
     def agent_action_status(self, request_id: str) -> dict[str, Any]:
         """Exact signed approval status without note bodies, credentials or signing key."""
@@ -188,7 +215,7 @@ class AgentServices:
         "knowledge",
         "WRITE_PROJECT",
         "ApprovalService",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
         side_effects=("consume trusted approval once and edit exact interpretation Markdown",),
         idempotent=False,
     )
@@ -196,9 +223,86 @@ class AgentServices:
         """Apply only a still-valid locally approved plan; replay/stale/self-approval is refused."""
         from lambdaforge.agents.approvals import ApprovalService
 
-        return ApprovalService(self.scope).apply(
-            request_id, plan_hash=plan_hash, permissions=self.permissions
+        approvals = ApprovalService(self.scope)
+        self._knowledge_action(approvals.inspect(request_id)["action"])
+        return approvals.apply(request_id, plan_hash=plan_hash, permissions=self.permissions)
+
+    @staticmethod
+    def _knowledge_action(action: str) -> None:
+        if not isinstance(action, str) or not action.startswith("knowledge."):
+            raise AgentOperationError(
+                "UNSUPPORTED", "This endpoint handles knowledge only; discover agent_actions."
+            )
+
+    @operation(
+        "jobs.cancel.preview",
+        "operations",
+        "PLAN",
+        "ApprovalService/JobService.get",
+        "docs/MANUAL.md#guide-integration",
+    )
+    def prepare_job_cancellation(self, job_id: str) -> dict[str, Any]:
+        """Preview one exact persisted Job without provider queries or artifact reads."""
+        from lambdaforge.agents.approvals import ApprovalService
+
+        return ApprovalService(self.scope, jobs=self._job_service()).preview(
+            "jobs.cancel", {"job_id": job_id}
         )
+
+    @operation(
+        "jobs.cancel.request",
+        "operations",
+        "OPERATE",
+        "ApprovalService",
+        "docs/MANUAL.md#guide-integration",
+        side_effects=("persist expiring unapproved exact Job cancellation proposal and audit",),
+    )
+    def request_job_cancellation(self, job_id: str, ttl_seconds: int = 900) -> dict[str, Any]:
+        """Propose cancellation for local human review; this never stops or approves a Job."""
+        from lambdaforge.agents.approvals import ApprovalService
+
+        return ApprovalService(self.scope, jobs=self._job_service()).request(
+            "jobs.cancel", {"job_id": job_id}, ttl_seconds=ttl_seconds
+        )
+
+    @operation(
+        "jobs.cancel.status",
+        "operations",
+        "READ",
+        "ApprovalService",
+        "docs/MANUAL.md#guide-integration",
+    )
+    def job_cancellation_status(self, request_id: str) -> dict[str, Any]:
+        """Inspect signed status/outcome; retrieval time is not provider freshness."""
+        from lambdaforge.agents.approvals import ApprovalService
+
+        approvals = ApprovalService(self.scope)
+        record = approvals.inspect(request_id)
+        if record["action"] != "jobs.cancel":
+            raise AgentOperationError("OPERATION_CONFLICT", "Request is not a Job cancellation.")
+        return record
+
+    @operation(
+        "jobs.cancel.apply",
+        "operations",
+        "OPERATE",
+        "ApprovalService/JobService.cancel",
+        "docs/MANUAL.md#guide-integration",
+        external=True,
+        side_effects=(
+            "consume approved exact plan once; native owned Job process-tree cancellation",
+        ),
+        idempotent=False,
+        destructive=True,
+    )
+    def apply_job_cancellation(self, request_id: str, plan_hash: str) -> dict[str, Any]:
+        """Apply a human-approved cancellation only; no submission, recovery or automatic replay."""
+        from lambdaforge.agents.approvals import ApprovalService
+
+        approvals = ApprovalService(self.scope, jobs=self._job_service())
+        if approvals.inspect(request_id)["action"] != "jobs.cancel":
+            raise AgentOperationError("OPERATION_CONFLICT", "Request is not a Job cancellation.")
+        return approvals.apply(request_id, plan_hash=plan_hash, permissions=self.permissions)
 
     @operation("framework.version", "core", "READ", "LambdaForgeVersion", "README.md")
     def framework_version(self) -> dict[str, Any]:
@@ -206,7 +310,11 @@ class AgentServices:
         return {"version": VERSION, "agent_schema_version": 1}
 
     @operation(
-        "agent.dependencies.check", "core", "READ", "DependencyService", "docs/ai/INTEGRATION.md"
+        "agent.dependencies.check",
+        "core",
+        "READ",
+        "DependencyService",
+        "docs/MANUAL.md#guide-integration",
     )
     def check_dependencies(self, extra: str = "agents") -> dict[str, Any]:
         """Check the declared optional group without import, install or network access."""
@@ -214,7 +322,7 @@ class AgentServices:
 
         return DependencyService(self.scope).check(extra)
 
-    @operation("agent.http", "core", "READ", "Official MCP SDK", "docs/ai/INTEGRATION.md")
+    @operation("agent.http", "core", "READ", "Official MCP SDK", "docs/MANUAL.md#guide-integration")
     def describe_http_transport(self) -> dict[str, Any]:
         """Describe paired local transport, without revealing keys or starting a server."""
         from lambdaforge.agents.mcp_server import dependency_status
@@ -230,7 +338,11 @@ class AgentServices:
         }
 
     @operation(
-        "framework.skills.list", "core", "READ", "Installed assets", "docs/ai/INTEGRATION.md"
+        "framework.skills.list",
+        "core",
+        "READ",
+        "Installed assets",
+        "docs/MANUAL.md#guide-integration",
     )
     def list_agent_skills(self, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Discover official installed Skills without loading their entire procedures."""
@@ -246,7 +358,11 @@ class AgentServices:
         )
 
     @operation(
-        "framework.skills.describe", "core", "READ", "Installed assets", "docs/ai/INTEGRATION.md"
+        "framework.skills.describe",
+        "core",
+        "READ",
+        "Installed assets",
+        "docs/MANUAL.md#guide-integration",
     )
     def get_agent_skill_metadata(self, name: str) -> dict[str, Any]:
         """Read one installed specialized Skill, never an arbitrary filesystem path."""
@@ -255,7 +371,11 @@ class AgentServices:
         return skill_metadata(name)
 
     @operation(
-        "framework.capabilities", "core", "READ", "CapabilityCatalog", "docs/ai/INTEGRATION.md"
+        "framework.capabilities",
+        "core",
+        "READ",
+        "CapabilityCatalog",
+        "docs/MANUAL.md#guide-integration",
     )
     def framework_capabilities(self, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Page actual operations, disabled permissions and native limitations."""
@@ -268,7 +388,7 @@ class AgentServices:
         "core",
         "READ",
         "CapabilityCatalog",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def capability_describe(self, identifier: str) -> dict[str, Any]:
         """Describe one exact capability, including schemas, service and session availability."""
@@ -280,27 +400,18 @@ class AgentServices:
         return matches[0]
 
     @operation(
-        "framework.capability.search", "core", "READ", "CapabilityCatalog", "docs/ai/INTEGRATION.md"
+        "framework.capability.search",
+        "core",
+        "READ",
+        "CapabilityCatalog",
+        "docs/MANUAL.md#guide-integration",
     )
     def capability_search(self, query: str, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Search descriptions/identifiers without sending every tool to the model's context."""
         from lambdaforge.agents.catalog import capabilities
+        from lambdaforge.agents.discovery import search_capabilities
 
-        if len(query) > 500:
-            raise ValueError("Capability query is too long.")
-        terms = query.casefold().split()
-        return page(
-            [
-                row
-                for row in capabilities(self)
-                if all(
-                    term in (row["identifier"] + " " + row["description"]).casefold()
-                    for term in terms
-                )
-            ],
-            offset,
-            limit,
-        )
+        return page(search_capabilities(capabilities(self), query), offset, limit)
 
     @operation("project.structure", "core", "READ", "ProjectScope", "docs/MANUAL.md")
     def project_structure(self, offset: int = 0, limit: int = 50) -> dict[str, Any]:
@@ -480,7 +591,13 @@ class AgentServices:
 
         return model_contract(name)
 
-    @operation("framework.recipes", "work", "READ", "Installed examples", "docs/ai/INTEGRATION.md")
+    @operation(
+        "framework.recipes",
+        "work",
+        "READ",
+        "Installed examples",
+        "docs/MANUAL.md#guide-integration",
+    )
     def get_recipe(self, name: str) -> dict[str, Any]:
         """One packaged native example, never arbitrary project files or executable construction."""
         from lambdaforge.agents.integration import example_assets
@@ -496,7 +613,11 @@ class AgentServices:
         }
 
     @operation(
-        "framework.recipes.list", "work", "READ", "Installed examples", "docs/ai/INTEGRATION.md"
+        "framework.recipes.list",
+        "work",
+        "READ",
+        "Installed examples",
+        "docs/MANUAL.md#guide-integration",
     )
     def list_recipes(self) -> dict[str, Any]:
         """Discover packaged native Work/Study/input examples without writing them."""
@@ -510,7 +631,11 @@ class AgentServices:
         }
 
     @operation(
-        "jobs.list", "operations", "READ", "JobService.list", "docs/OPERATIONAL_RELIABILITY.md"
+        "jobs.list",
+        "operations",
+        "READ",
+        "JobService.list",
+        "docs/MANUAL.md#guide-operational-reliability",
     )
     def list_jobs(self, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Persisted project Job summaries, with native observation age; no provider refresh."""
@@ -549,7 +674,7 @@ class AgentServices:
         "operations",
         "READ",
         "OperationalHealth.describe",
-        "docs/OPERATIONAL_RELIABILITY.md",
+        "docs/MANUAL.md#guide-operational-reliability",
     )
     def get_execution_health(self, job_id: str) -> dict[str, Any]:
         """Separate native operational health from scientific outcome; no forged freshness."""
@@ -563,7 +688,13 @@ class AgentServices:
             "live_refresh": False,
         }
 
-    @operation("jobs.get", "operations", "READ", "JobStore.get", "docs/OPERATIONAL_RELIABILITY.md")
+    @operation(
+        "jobs.get",
+        "operations",
+        "READ",
+        "JobStore.get",
+        "docs/MANUAL.md#guide-operational-reliability",
+    )
     def get_job(self, job_id: str) -> dict[str, Any]:
         """Exact persisted Job identity/state/resources; no provider refresh or artifacts."""
         value = self._job_service().store.get(job_id).to_dict()
@@ -589,7 +720,7 @@ class AgentServices:
         "operations",
         "READ",
         "OperationalIncidents.list",
-        "docs/OPERATIONAL_RELIABILITY.md",
+        "docs/MANUAL.md#guide-operational-reliability",
     )
     def get_incidents(
         self, job_id: str | None = None, offset: int = 0, limit: int = 20
@@ -604,7 +735,11 @@ class AgentServices:
         )
 
     @operation(
-        "jobs.events", "operations", "READ", "JobService.events", "docs/OPERATIONAL_RELIABILITY.md"
+        "jobs.events",
+        "operations",
+        "READ",
+        "JobService.events",
+        "docs/MANUAL.md#guide-operational-reliability",
     )
     def get_job_events(self, job_id: str, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Page native Job lifecycle events, not scientific metric history."""
@@ -626,7 +761,7 @@ class AgentServices:
         "study",
         "READ",
         "JobService.study_trial",
-        "docs/RESEARCH_ANALYSIS.md",
+        "docs/MANUAL.md#guide-research-analysis",
         external=True,
     )
     def get_study_trial(self, job_id: str, trial: int) -> dict[str, Any]:
@@ -641,7 +776,7 @@ class AgentServices:
         "study",
         "READ",
         "JobService.study_run",
-        "docs/RESEARCH_ANALYSIS.md",
+        "docs/MANUAL.md#guide-research-analysis",
         external=True,
     )
     def get_study_run(
@@ -663,7 +798,7 @@ class AgentServices:
         "study",
         "READ",
         "JobService.study_panel",
-        "docs/RESEARCH_ANALYSIS.md",
+        "docs/MANUAL.md#guide-research-analysis",
         external=True,
     )
     def get_study_panel(
@@ -680,7 +815,7 @@ class AgentServices:
         "operations",
         "PLAN",
         "JobService.retry_preview",
-        "docs/OPERATIONAL_RELIABILITY.md",
+        "docs/MANUAL.md#guide-operational-reliability",
         external=True,
         project_code=True,
     )
@@ -694,23 +829,27 @@ class AgentServices:
         "operations",
         "READ",
         "JobService.recovery_history",
-        "docs/OPERATIONAL_RELIABILITY.md",
+        "docs/MANUAL.md#guide-operational-reliability",
     )
     def get_recovery_history(self, job_id: str, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Paged native recovery audit; no provider calls or checkpoint payloads."""
         self._job_service().store.get(job_id)
         return self._job_service().recovery_history(job_id, offset=offset, limit=limit)
 
-    @operation("results.list", "results", "READ", "ResultStore.catalog", "docs/WORK_RESULTS.md")
+    @operation(
+        "results.list",
+        "results",
+        "READ",
+        "ResultStore.catalog",
+        "docs/MANUAL.md#guide-work-results",
+    )
     def list_results(self, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Compact local/imported result catalog, without artifact bytes or consumer imports."""
-        values = [
-            {k: v for k, v in row.items() if k != "_manifest_path"}
-            for row in self._results().catalog()
-        ]
-        return page(values, offset, limit)
+        return ResultQueries(self.scope, self._results).catalog(offset, limit)
 
-    @operation("results.view", "results", "READ", "ResultStore.view", "docs/WORK_RESULTS.md")
+    @operation(
+        "results.view", "results", "READ", "ResultStore.view", "docs/MANUAL.md#guide-work-results"
+    )
     def get_result(
         self,
         execution_id: str,
@@ -720,41 +859,45 @@ class AgentServices:
         points: int = 100,
     ) -> dict[str, Any]:
         """Exact Execution/Run/Attempt evidence; missing values stay absent, never zero."""
-        if not execution_id.startswith("execution-") or not 1 <= points <= 500:
-            raise ValueError("Use an exact Execution ID and 1–500 curve points.")
-        if view not in {"overview", "metrics", "outputs", "logs", "provenance"}:
-            raise ValueError("Unknown result view.")
-        return self._results().view(
-            execution_id, view=view, run_id=run_id, attempt=attempt, points=points, tail=100
+        return ResultQueries(self.scope, self._results).view(
+            execution_id, view, run_id, attempt, points
         )
 
     @operation(
-        "results.reference", "results", "PLAN", "ResultStore.reference", "docs/WORK_RESULTS.md"
+        "results.reference",
+        "results",
+        "PLAN",
+        "ResultStore.reference",
+        "docs/MANUAL.md#guide-work-results",
     )
     def get_historical_reference(
         self, execution_id: str, run_id: str | None = None, attempt: int | None = None
     ) -> dict[str, Any]:
         """Pin native historical evidence; an import never becomes an executable recovery."""
-        if not execution_id.startswith("execution-"):
-            raise ValueError("Use an exact Execution ID.")
-        return self._results().reference(execution_id, run=run_id, attempt=attempt)
+        return ResultQueries(self.scope, self._results).reference(execution_id, run_id, attempt)
 
     @operation(
         "results.artifact.preview",
         "results",
         "READ",
         "ResultStore.output_preview",
-        "docs/WORK_RESULTS.md",
+        "docs/MANUAL.md#guide-work-results",
     )
     def preview_result_artifact(
         self, execution_id: str, name: str, run_id: str | None = None, attempt: int | None = None
     ) -> dict[str, Any]:
         """Explicit verified UTF-8 preview of one registered owned artifact, at most 64 KiB."""
-        if not execution_id.startswith("execution-"):
-            raise ValueError("Use an exact Execution ID.")
-        return self._results().output_preview(execution_id, name, run_id=run_id, attempt=attempt)
+        return ResultQueries(self.scope, self._results).artifact(
+            execution_id, name, run_id, attempt
+        )
 
-    @operation("results.compare", "results", "READ", "ResultStore.compare", "docs/WORK_RESULTS.md")
+    @operation(
+        "results.compare",
+        "results",
+        "READ",
+        "ResultStore.compare",
+        "docs/MANUAL.md#guide-work-results",
+    )
     def compare_results(
         self,
         execution_ids: list[str],
@@ -762,13 +905,11 @@ class AgentServices:
         mode: Literal["min", "max"] = "max",
     ) -> dict[str, Any]:
         """Compare 2–8 exact local/imported Executions using native Run evidence semantics."""
-        if not 2 <= len(execution_ids) <= 8 or any(
-            not item.startswith("execution-") for item in execution_ids
-        ):
-            raise ValueError("Compare 2–8 exact Execution IDs.")
-        return self._results().compare(tuple(execution_ids), metric=metric, mode=mode)
+        return ResultQueries(self.scope, self._results).compare(execution_ids, metric, mode)
 
-    @operation("products.list", "products", "READ", "ProductRegistry.list", "docs/PRODUCTS.md")
+    @operation(
+        "products.list", "products", "READ", "ProductRegistry.list", "docs/MANUAL.md#guide-products"
+    )
     def list_products(self, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Sealed product metadata only; do not read/download model members."""
         page([], offset, limit)
@@ -788,14 +929,18 @@ class AgentServices:
             "next_offset": offset + limit if len(values) > limit else None,
         }
 
-    @operation("products.get", "products", "READ", "ProductRegistry.show", "docs/PRODUCTS.md")
+    @operation(
+        "products.get", "products", "READ", "ProductRegistry.show", "docs/MANUAL.md#guide-products"
+    )
     def get_product(self, content_id: str) -> dict[str, Any]:
         """Exact sealed product identity/contract and artifact metadata, not arbitrary paths."""
         if not content_id.startswith("sha256:"):
             raise ValueError("Use an exact sealed product content ID.")
         return {"product": self._products().show(content_id).to_dict()}
 
-    @operation("products.evidence", "products", "READ", "ProductRegistry", "docs/PRODUCTS.md")
+    @operation(
+        "products.evidence", "products", "READ", "ProductRegistry", "docs/MANUAL.md#guide-products"
+    )
     def get_product_evidence(
         self,
         content_id: str,
@@ -823,7 +968,11 @@ class AgentServices:
         }
 
     @operation(
-        "datasets.list", "datasets", "READ", "DatasetService.list", "docs/DATASET_RECONSTRUCTION.md"
+        "datasets.list",
+        "datasets",
+        "READ",
+        "DatasetService.list",
+        "docs/MANUAL.md#guide-dataset-reconstruction",
     )
     def list_datasets(self, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Local registry summaries/placements, without asset scans or remote transfers."""
@@ -848,7 +997,7 @@ class AgentServices:
         "datasets",
         "READ",
         "DatasetRegistry.records",
-        "docs/DATASET_RECONSTRUCTION.md",
+        "docs/MANUAL.md#guide-dataset-reconstruction",
     )
     def get_dataset(self, content_id: str) -> dict[str, Any]:
         """Exact cached dataset counts/partitions/contract; no member index or asset scan."""
@@ -870,7 +1019,7 @@ class AgentServices:
         "datasets",
         "READ",
         "DatasetRegistry.records",
-        "docs/DATASET_RECONSTRUCTION.md",
+        "docs/MANUAL.md#guide-dataset-reconstruction",
     )
     def get_dataset_placements(
         self, content_id: str, offset: int = 0, limit: int = 20
@@ -888,7 +1037,7 @@ class AgentServices:
         "datasets",
         "READ",
         "DatasetService.members",
-        "docs/DATASET_RECONSTRUCTION.md",
+        "docs/MANUAL.md#guide-dataset-reconstruction",
         external=True,
     )
     def get_dataset_members(
@@ -946,7 +1095,35 @@ class AgentServices:
         return ResourceService(self._clusters(), cache_path=cache).get(name).to_dict()
 
     @operation(
-        "knowledge.status", "knowledge", "READ", "KnowledgeService.status", "docs/ai/INTEGRATION.md"
+        "clusters.resource_report",
+        "clusters",
+        "READ",
+        "ResourceDiagnosticReport.build",
+        "docs/MANUAL.md#guide-resource-safety",
+    )
+    def get_resource_report(
+        self,
+        name: str | None = None,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Sanitized saved project observations only; no driver or external provider query."""
+        from lambdaforge.controlplane.ResourceDiagnosticReport import ResourceDiagnosticReport
+
+        if name is not None:
+            self._clusters().definition(name)
+        return ResourceDiagnosticReport.build(
+            self._job_service().store, cluster=name, since=since, until=until, limit=limit
+        )
+
+    @operation(
+        "knowledge.status",
+        "knowledge",
+        "READ",
+        "KnowledgeService.status",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_status(self) -> dict[str, Any]:
         """Markdown vault availability; Obsidian Desktop and embeddings are not required."""
@@ -957,7 +1134,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "ObsidianService.status",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_obsidian_status(self) -> dict[str, Any]:
         """Inspect optional desktop hints without launching a process or requiring Obsidian."""
@@ -970,7 +1147,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.audit",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_audit(self, cursor: int = 0, limit: int = 20) -> dict[str, Any]:
         """Page metadata-only native edit events using the returned exact byte cursor."""
@@ -981,14 +1158,18 @@ class AgentServices:
         "knowledge",
         "PLAN",
         "KnowledgeService.preview_export",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_export(self, destination: str) -> dict[str, Any]:
         """Preview a notes-only ZIP; request knowledge.export for separately approved apply."""
         return self.knowledge.preview_export(destination)
 
     @operation(
-        "knowledge.search", "knowledge", "READ", "KnowledgeService.search", "docs/ai/INTEGRATION.md"
+        "knowledge.search",
+        "knowledge",
+        "READ",
+        "KnowledgeService.search",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_search(
         self,
@@ -1020,7 +1201,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.search",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
         side_effects=("refresh disposable text index, never canonical notes",),
     )
     def knowledge_list(
@@ -1034,7 +1215,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.reindex",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
         side_effects=("rebuild disposable text index, preserve old copy and all canonical notes",),
     )
     def knowledge_reindex(self, rebuild: bool = False) -> dict[str, Any]:
@@ -1042,7 +1223,11 @@ class AgentServices:
         return self.knowledge.reindex(force=True, rebuild=rebuild)
 
     @operation(
-        "knowledge.read", "knowledge", "READ", "KnowledgeService.read", "docs/ai/INTEGRATION.md"
+        "knowledge.read",
+        "knowledge",
+        "READ",
+        "KnowledgeService.read",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_read(self, note_id: str) -> dict[str, Any]:
         """Read one exact note (64 KiB maximum) with revision, provenance and evidence refs."""
@@ -1053,7 +1238,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.backlinks",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_backlinks(self, note_id: str, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Find exact note backlinks without executing Markdown or following arbitrary paths."""
@@ -1064,7 +1249,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.related",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_related(self, note_id: str, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Find explicit links/tags/exact evidence, not semantic or scientific confidence."""
@@ -1075,7 +1260,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.verify_references",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_verify_references(self, note_id: str) -> dict[str, Any]:
         """Check local exact references, never the interpretation's scientific validity."""
@@ -1119,7 +1304,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.search",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_list_hypotheses(self, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Page proposed hypotheses without mistaking them for verified scientific findings."""
@@ -1130,7 +1315,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.search",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_list_decisions(self, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Page interpretations/decisions, distinct from sealed StudyDecision products."""
@@ -1141,7 +1326,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.search",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_list_open_questions(self, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Page draft/proposed/open research questions, not closed interpretations."""
@@ -1157,7 +1342,7 @@ class AgentServices:
         "knowledge",
         "READ",
         "KnowledgeService.template",
-        "docs/ai/INTEGRATION.md",
+        "docs/MANUAL.md#guide-integration",
     )
     def knowledge_templates(self, kind: str | None = None) -> dict[str, Any]:
         """List supported note types or return a purpose-specific Markdown template."""

@@ -6,8 +6,10 @@
   "additionalProperties": false,
   "properties": {
     "name": {"type": "string", "minLength": 1},
-    "run": {"type": "string", "pattern": "^[A-Za-z_]\\w*(\\.[A-Za-z_]\\w*)+$"},
-    "with": {"type": "object"},
+    "run": {"type": "string", "pattern": "^[A-Za-z_]\\w*(\\.[A-Za-z_]\\w*)+$",
+            "description": "Importable Work subclass. Work.run owns scientific parameter types; no constructors or free functions."},
+    "with": {"type": "object",
+             "description": "Fixed Work.run arguments. The Python signature owns accepted names/types; strings are not inferred as typed file inputs."},
     "resources": {"$ref": "#/$defs/resources"},
     "seeds": {
       "type": "array",
@@ -522,18 +524,45 @@
           "additionalProperties": {"$ref": "#/$defs/sweepDimension"}
         },
         "reference": {"type": "object", "minProperties": 1}
-        ,"replicates": {"type": "integer", "minimum": 1}
-      }
+        ,"replicates": {"type": "integer", "minimum": 1},
+        "include": {"$ref": "#/$defs/sweepCandidates",
+                    "description": "Additional complete active scalar candidates; union with the base sweep without Cartesian expansion."},
+        "candidates": {"$ref": "#/$defs/sweepCandidates",
+                       "description": "Execute only these complete active candidates inside space, not its Cartesian product."}
+      },
+      "not": {"required": ["include", "candidates"]}
+    },
+    "sweepCandidates": {
+      "type": "array", "minItems": 1,
+      "items": {"type": "object", "minProperties": 1,
+                "additionalProperties": {"type": ["string", "number", "boolean", "null"]}}
     },
     "execution": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "runs_per_gpu": {"oneOf": [{"type": "integer", "minimum": 1}, {"const": "auto"}]},
-        "max_parallel": {"oneOf": [{"type": "integer", "minimum": 1}, {"const": "auto"}, {"type": "null"}]},
-        "failure_retries": {"type": "integer", "minimum": 0, "maximum": 3},
-        "max_runs": {"type": "integer", "minimum": 1},
+        "runs_per_gpu": {
+          "oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "pattern": "^[Aa][Uu][Tt][Oo]$"}, {"type": "null"}],
+          "default": "auto", "examples": [2, "auto"],
+          "description": "Hard maximum active Runs per granted GPU, not a promise of physical capacity. Auto is bounded by native resource admission.",
+          "x-lambdaforge-related": ["execution.max_parallel", "resources.gpu", "resources.gpu_memory"],
+          "x-lambdaforge-common-errors": ["Cannot use ungranted GPUs; raising this ceiling does not reserve VRAM."]
+        },
+        "max_parallel": {
+          "oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "pattern": "^[Aa][Uu][Tt][Oo]$"}, {"type": "null"}],
+          "default": "auto", "examples": [4, "auto"],
+          "description": "Hard global active-Run ceiling. Total experiment Runs are separate; availability and grants still bound actual admission.",
+          "x-lambdaforge-related": ["execution.runs_per_gpu", "execution.max_runs", "resources"],
+          "x-lambdaforge-common-errors": ["A concurrency ceiling is not the number of Runs planned or guaranteed to run simultaneously."]
+        },
+        "failure_retries": {"type": "integer", "minimum": 0, "maximum": 3, "default": 1,
+                            "description": "Native bounded retries for classified recoverable impediments, not arbitrary consumer exceptions.", "examples": [0, 1]},
+        "max_runs": {"type": "integer", "minimum": 1,
+                     "description": "Physical Attempt budget. Failed/retried Attempts cost budget; spent history is not refunded.", "examples": [40]},
         "max_time": {
+          "description": "Total Study wall-time budget, separate from resources.time scheduler ceiling. Native normalization uses seconds.",
+          "examples": [3600, "24h"],
+          "x-lambdaforge-related": ["resources.time", "execution.max_runs"],
           "oneOf": [
             {"type": "number", "exclusiveMinimum": 0},
             {"type": "string", "pattern": "^\\s*[0-9]+(?:\\.[0-9]+)?\\s*[smhd]\\s*$"}

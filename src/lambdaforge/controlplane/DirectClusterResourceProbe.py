@@ -11,7 +11,7 @@ from lambdaforge.controlplane.Transport import Transport
 
 
 class DirectClusterResourceProbe(ClusterResourceProbe):
-    """Use standard Python, optional psutil and nvidia-smi without a system agent."""
+    """Use the native host/GPU observers when installed, without a system daemon."""
 
     def probe(self, profile: ClusterProfile, transport: Transport) -> ResourceSnapshot:
         assert profile.storage is not None
@@ -19,6 +19,7 @@ class DirectClusterResourceProbe(ClusterResourceProbe):
         storage = repr(profile.storage.to_dict())
         code = (
             "import json,os,shutil\n"
+            f"os.environ['LAMBDAFORGE_RESOURCE_SAFETY']={json.dumps(profile.resource_safety.to_dict())!r}\n"
             "value={'cpu_total':os.cpu_count(),'cpu_load':None,'ram_total_bytes':None,"
             "'ram_available_bytes':None}\n"
             "try:\n"
@@ -57,40 +58,47 @@ class DirectClusterResourceProbe(ClusterResourceProbe):
             "else 'NORMAL'})\n"
             "  volume['roots'].append(key)\n"
             " value['storage']=volumes\n"
+            "try:\n"
+            " from lambdaforge.runtime.HostObservation import observe_host\n"
+            " value['host_capacity']=observe_host()\n"
+            "except ImportError: pass\n"
+            "try:\n"
+            " from lambdaforge.runtime.GPUObservation import GPUObservationCache\n"
+            " snapshot=GPUObservationCache().read()\n"
+            " value['gpu_observation']={key:snapshot.get(key) for key in "
+            "('quality','observed_at','age_seconds','error','statistics')}\n"
+            " value['gpus']=[{'index':row['index'],'uuid':row['uuid'],'name':row['name'],"
+            "'parent_uuid':row.get('parent_uuid'),'source':row.get('source'),"
+            "'quality':row['quality'],'utilization_percent':row.get('utilization_percent'),"
+            "'memory_total_bytes':row.get('total_bytes'),"
+            "'memory_used_bytes':row['total_bytes']-row['free_bytes'] "
+            "if row.get('quality')=='measured' else None} "
+            "for row in snapshot.get('devices',[])]\n"
+            "except Exception as error:\n"
+            " value['gpus']=[]\n"
+            " value['gpu_observation']={'quality':'unavailable','error':type(error).__name__}\n"
             "print(json.dumps(value))\n"
         )
         result = transport.run((*profile.command_prefix, profile.python, "-c", code), timeout=20.0)
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or "Direct resource probe failed.")
         observed = json.loads(result.stdout)
-        gpu = transport.run(
-            (
-                "nvidia-smi",
-                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-            ),
-            timeout=20.0,
-        )
-        gpus = []
-        if gpu.returncode == 0:
-            for line in gpu.stdout.splitlines():
-                values = [item.strip() for item in line.split(",")]
-                if len(values) == 5:
-                    gpus.append(
-                        {
-                            "index": int(values[0]),
-                            "name": values[1],
-                            "utilization_percent": float(values[2]),
-                            "memory_used_bytes": int(float(values[3]) * 1024**2),
-                            "memory_total_bytes": int(float(values[4]) * 1024**2),
-                        }
-                    )
-        observed["gpus"] = gpus
+        gpus = observed.get("gpus", [])
         available = {
-            "cpu_cores": observed.get("cpu_total"),
-            "ram_bytes": observed.get("ram_available_bytes"),
+            "cpu_cores": observed.get("host_capacity", {}).get(
+                "effective_cpu_cores", observed.get("cpu_total")
+            ),
+            "ram_bytes": observed.get("host_capacity", {}).get(
+                "effective_available_bytes", observed.get("ram_available_bytes")
+            ),
             "disk_bytes": observed.get("disk_free_bytes"),
-            "gpu_count": sum(1 for gpu_value in gpus if gpu_value["utilization_percent"] == 0),
+            "gpu_count": sum(
+                1
+                for gpu_value in gpus
+                if gpu_value["utilization_percent"] == 0 and gpu_value.get("parent_uuid") is None
+            )
+            if observed.get("gpu_observation", {}).get("quality") == "measured"
+            else None,
             "gpu_capacity_confidence": "observed-not-enforced",
         }
         return ResourceSnapshot(

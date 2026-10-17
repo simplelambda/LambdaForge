@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 from lambdaforge.hpo.AdaptiveResources import (
@@ -111,9 +112,12 @@ def test_long_run_keeps_incremental_evidence_beyond_bounded_curve() -> None:
 
     restored = ResourceTrajectoryStatistics.from_mapping(trajectory.statistics.to_dict())
     assert restored.progress_cycles_seen == 1_999
-    assert ResourceTrajectoryAnalyzer.analyze(
-        (), total_bytes=80 * GIB, trajectory_statistics=restored
-    ).growth_hazard == analysis.growth_hazard
+    assert (
+        ResourceTrajectoryAnalyzer.analyze(
+            (), total_bytes=80 * GIB, trajectory_statistics=restored
+        ).growth_hazard
+        == analysis.growth_hazard
+    )
 
 
 def test_monotonic_growth_is_not_confused_with_jitter() -> None:
@@ -129,9 +133,7 @@ def test_monotonic_growth_is_not_confused_with_jitter() -> None:
         for step in range(8)
     )
     jitter = tuple(
-        ResourceTrajectorySample(
-            float(step), int(value * GIB), step=step, phase="forward"
-        )
+        ResourceTrajectorySample(float(step), int(value * GIB), step=step, phase="forward")
         for step, value in enumerate((10.00, 10.05, 10.00, 10.04, 10.01, 10.03))
     )
     same_step = tuple(
@@ -148,6 +150,88 @@ def test_monotonic_growth_is_not_confused_with_jitter() -> None:
     assert ResourceTrajectoryAnalyzer.analyze(slow_ramp, total_bytes=80 * GIB).state == "RAMPING"
     assert ResourceTrajectoryAnalyzer.analyze(jitter, total_bytes=80 * GIB).state != "RAMPING"
     assert ResourceTrajectoryAnalyzer.analyze(same_step, total_bytes=80 * GIB).state == "RAMPING"
+
+
+def test_startup_ramp_expires_after_real_flat_progress_not_duplicate_polls():
+    trajectory = BoundedResourceTrajectory()
+    for index, amount in enumerate((4, 8, 16, 20)):
+        trajectory.append(
+            ResourceTrajectorySample(
+                float(index),
+                amount * GIB,
+                step=0,
+                phase="work-progress",
+            )
+        )
+    for index in range(4, 40):
+        trajectory.append(
+            ResourceTrajectorySample(
+                float(index),
+                20 * GIB,
+                step=0,
+                phase="work-progress",
+            )
+        )
+    assert (
+        ResourceTrajectoryAnalyzer.analyze(
+            (),
+            trajectory_statistics=trajectory.statistics,
+            total_bytes=140 * GIB,
+        ).state
+        == "RAMPING"
+    )
+    # A resumed statistics snapshot must heal without losing historical peaks/tails.
+    restored = ResourceTrajectoryStatistics.from_mapping(trajectory.statistics.to_dict())
+    for step in (1, 2, 3):
+        result = ResourceTrajectoryAnalyzer.update(
+            restored,
+            ResourceTrajectorySample(40.0 + step, 20 * GIB, step=step, phase="work-progress"),
+            total_bytes=140 * GIB,
+        )
+    assert result.state == "PROVISIONALLY_STABLE"
+    assert restored.positive_streak == 0
+    assert restored.running_peak_bytes == 20 * GIB
+    assert max(result.residual_samples) == 120 * GIB
+    assert result.tail_probability > 0
+
+
+def test_launch_recheck_retains_exploration_value_and_grant_without_side_effects():
+    resident = ActiveResourceCommitment(
+        "resident",
+        80 * GIB,
+        current_bytes=15 * GIB,
+        future_peak_samples=(15 * GIB, 80 * GIB),
+        future_peak_weights=(0.99, 0.01),
+        growth_hazard=0.01,
+        remaining_seconds=200.0,
+        next_decision_seconds=20.0,
+        elapsed_seconds=10_000.0,
+        resource_state="PROVISIONALLY_STABLE",
+    )
+    device = _device(active=(resident,), free=65)
+    action = CandidateResourceAction(
+        "candidate",
+        {"trial_index": 1, "resource_compatibility_key": "compatible"},
+        1.0,
+        _prediction((10 * GIB, 80 * GIB), (0.99, 0.01)),
+    )
+    planner = GPUPlacementPlanner(ResourceDemandModel())
+    admitted = ()
+    for instant in (0.0, 1000.0, 2000.0):
+        admitted, _ = planner.place((action,), (device,), max_launches=1, now=instant)
+        if admitted:
+            break
+    assert admitted and admitted[0].admission_mode == "EXPLORATORY_ADMISSION"
+    regret_before = planner.wait_regret.to_dict()
+    evaluations_before = planner.last_exploration_evaluations
+    assert planner.recheck_launch(action, device, admitted[0], devices=(device,))[0]
+    assert planner.wait_regret.to_dict() == regret_before
+    assert planner.last_exploration_evaluations == evaluations_before
+    assert not planner.recheck_launch(action, device, admitted[0], devices=())[0]
+    tight = replace(device, free_bytes=GIB)
+    assert not planner.recheck_launch(action, tight, admitted[0], devices=(tight,))[0]
+    peer = replace(device, peer_startup_bytes=60 * GIB)
+    assert not planner.recheck_launch(action, peer, admitted[0], devices=(peer,))[0]
 
 
 def test_wait_regret_closes_segments_and_survives_restart(tmp_path: Path) -> None:
@@ -177,9 +261,7 @@ def test_rare_and_multiple_tails_remain_in_joint_fit_probability() -> None:
         future_peak_samples=(10 * GIB, 80 * GIB),
         future_peak_weights=(0.99, 0.01),
     )
-    combined = _joint_fit_probability(
-        _prediction(), _device(active=(resident, resident), free=60)
-    )
+    combined = _joint_fit_probability(_prediction(), _device(active=(resident, resident), free=60))
     # Equal ensemble of independent residual tails (0.99²) and shared epistemic tail (0.99).
     assert math.isclose(combined, (0.99**2 + 0.99) / 2.0)
 
@@ -192,9 +274,7 @@ def test_checkpoint_horizon_and_per_resident_rollback_are_dimensionally_correct(
         checkpoint_elapsed_seconds=200.0,
         checkpoint_cadence_seconds=100.0,
     )
-    assert _next_decision_horizon(
-        _prediction(duration=None), _device(active=(cadence,))
-    ) == 50.0
+    assert _next_decision_horizon(_prediction(duration=None), _device(active=(cadence,))) == 50.0
 
     residents = (
         ActiveResourceCommitment(
@@ -207,9 +287,7 @@ def test_checkpoint_horizon_and_per_resident_rollback_are_dimensionally_correct(
             checkpoint_request_path="/not-created/a",
             checkpoint_duration_seconds=2.0,
         ),
-        ActiveResourceCommitment(
-            "b", 10 * GIB, current_bytes=10 * GIB, elapsed_seconds=50.0
-        ),
+        ActiveResourceCommitment("b", 10 * GIB, current_bytes=10 * GIB, elapsed_seconds=50.0),
         ActiveResourceCommitment(
             "c",
             10 * GIB,
@@ -269,12 +347,8 @@ def test_checkpoint_rollback_handles_all_and_no_checkpointable_residents() -> No
     assert all_result.rollback_after_checkpoint_seconds == 0.0
 
     none_checkpointable = (
-        ActiveResourceCommitment(
-            "a", 10 * GIB, current_bytes=10 * GIB, elapsed_seconds=100.0
-        ),
-        ActiveResourceCommitment(
-            "b", 10 * GIB, current_bytes=10 * GIB, elapsed_seconds=70.0
-        ),
+        ActiveResourceCommitment("a", 10 * GIB, current_bytes=10 * GIB, elapsed_seconds=100.0),
+        ActiveResourceCommitment("b", 10 * GIB, current_bytes=10 * GIB, elapsed_seconds=70.0),
     )
     none_result = planner._exploration_value(
         candidate,
@@ -313,9 +387,7 @@ def test_dynamic_frontier_does_not_prevent_wait_regret_liveness() -> None:
             resource_state="PLATEAU_UNCONFIRMED",
         )
         device = _device(active=(resident,), free=65)
-        admitted, _ = planner.place(
-            (action,), (device,), max_launches=1, now=float(cycle * 2_000)
-        )
+        admitted, _ = planner.place((action,), (device,), max_launches=1, now=float(cycle * 2_000))
         if admitted:
             break
     assert admitted
@@ -413,16 +485,12 @@ def test_phase_statistics_capture_checkpoint_peaks_and_generic_training() -> Non
         ResourceTrajectorySample(0.0, 8 * GIB, step=0, phase="forward"),
         ResourceTrajectorySample(10.0, 9 * GIB, step=0, phase="backward"),
         ResourceTrajectorySample(20.0, 9 * GIB, step=1, phase="optimizer-step"),
-        ResourceTrajectorySample(
-            30.0, 18 * GIB, step=1, phase="checkpoint", checkpoint_step=1
-        ),
+        ResourceTrajectorySample(30.0, 18 * GIB, step=1, phase="checkpoint", checkpoint_step=1),
         ResourceTrajectorySample(40.0, 10 * GIB, step=2, phase="forward"),
     )
     statistics_state = ResourceTrajectoryStatistics()
     for sample in samples:
-        ResourceTrajectoryAnalyzer.update(
-            statistics_state, sample, total_bytes=80 * GIB
-        )
+        ResourceTrajectoryAnalyzer.update(statistics_state, sample, total_bytes=80 * GIB)
     assert statistics_state.phase_maxima["checkpoint"] == 18 * GIB
     assert statistics_state.last_material_peak_phase == "checkpoint"
     assert statistics_state.checkpoint_times == [30.0]
@@ -455,15 +523,9 @@ def test_phase_statistics_capture_checkpoint_peaks_and_generic_training() -> Non
 
 def test_checkpoint_cadence_predicts_time_until_next_event() -> None:
     samples = (
-        ResourceTrajectorySample(
-            100.0, 10 * GIB, step=1, phase="checkpoint", checkpoint_step=1
-        ),
-        ResourceTrajectorySample(
-            200.0, 10 * GIB, step=2, phase="checkpoint", checkpoint_step=2
-        ),
-        ResourceTrajectorySample(
-            250.0, 10 * GIB, step=3, phase="forward", checkpoint_step=2
-        ),
+        ResourceTrajectorySample(100.0, 10 * GIB, step=1, phase="checkpoint", checkpoint_step=1),
+        ResourceTrajectorySample(200.0, 10 * GIB, step=2, phase="checkpoint", checkpoint_step=2),
+        ResourceTrajectorySample(250.0, 10 * GIB, step=3, phase="forward", checkpoint_step=2),
     )
     analysis = ResourceTrajectoryAnalyzer.analyze(samples, total_bytes=80 * GIB)
     assert analysis.checkpoint_cadence_seconds == 100.0
@@ -476,9 +538,7 @@ def test_checkpoint_cadence_predicts_time_until_next_event() -> None:
             ResourceTrajectorySample(
                 300.0, 10 * GIB, step=3, phase="checkpoint", checkpoint_step=3
             ),
-            ResourceTrajectorySample(
-                350.0, 10 * GIB, step=4, phase="forward", checkpoint_step=3
-            ),
+            ResourceTrajectorySample(350.0, 10 * GIB, step=4, phase="forward", checkpoint_step=3),
         ),
         total_bytes=80 * GIB,
     )

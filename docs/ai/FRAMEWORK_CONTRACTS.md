@@ -26,7 +26,7 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Resolve all automatic Study policy | `lf config resolve CONFIG [--format json\|yaml]` |
 | Inspect project seed streams | `lf seeds [--role confirmation] [--count N]` |
 | Operational health / incidents | `lf health [JOB] [--refresh] --json`; `lf incidents --json` |
-| Independent observer | `lf monitor start/stop/status/config/diagnose/once/install/test-alert`; `docs/OPERATIONAL_RELIABILITY.md` |
+| Independent observer | `lf monitor start/stop/status/config/diagnose/once/install/test-alert`; `docs/MANUAL.md#guide-operational-reliability` |
 | Read-only expansion | `lf run CONFIG --dry-run` |
 | Execute | `lf run CONFIG [--on CLUSTER]` |
 | Limited fresh adaptive/fixed Fleet Study | `lf run CONFIG --on-fleet FLEET`; see control-plane limits below |
@@ -36,11 +36,11 @@ compatibility path unless the project explicitly reverses this architectural dec
 | Work operations | `lf show/logs/cancel/retry/delete SELECTOR`; study Run: `show/logs WORK --run KEY` |
 | Low-level jobs | `lf jobs list/show/logs/cancel/retry/delete`; `lf jobs clear [--apply]` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/replicate/delete` |
-| Dataset reconstruction/publication | `lf datasets preflight/compare/publish-candidate`; `docs/DATASET_RECONSTRUCTION.md` |
-| Explicit durable dataset equivalence | `lambdaforge.data.DatasetEquivalenceCertificate`; `docs/DATASET_RECONSTRUCTION.md` |
-| Durable products / decisions / selection | `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`; `docs/PRODUCTS.md` |
+| Dataset reconstruction/publication | `lf datasets preflight/compare/publish-candidate`; `docs/MANUAL.md#guide-dataset-reconstruction` |
+| Explicit durable dataset equivalence | `lambdaforge.data.DatasetEquivalenceCertificate`; `docs/MANUAL.md#guide-dataset-reconstruction` |
+| Durable products / decisions / selection | `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`; `docs/MANUAL.md#guide-products` |
 | Results | `lf results list/show/compare/analyze/report/replay`; portable Study: `lf export SELECTOR --output DIR` |
-| Import portable evidence, never execute | `lf import PACKAGE [--apply]`; `docs/PRODUCTS.md` |
+| Import portable evidence, never execute | `lf import PACKAGE [--apply]`; `docs/MANUAL.md#guide-products` |
 | Runtime diagnosis | `lf doctor --on CLUSTER`; `lf resources --on CLUSTER` |
 | Cluster profiles | Research Console; `lf clusters add/set/unset/...` for automation |
 | Inspect/reconcile storage | `lf storage status/reconcile [--on CLUSTER]`; reconcile `--apply` updates only the ledger |
@@ -58,7 +58,7 @@ fake Study. ResultInput is exact read-only Execution evidence; ProductInput is i
 contracted content. Historical names must reject ambiguity. Launch input bindings are explicit typed
 inputs, pinned before enqueue and never authored YAML edits. Ordinary product declarations promote
 explicit outputs only after science is durable; failed publication protects required artifacts for
-publication-only retry. See docs/WORK_RESULTS.md. Metadata-only listings must never open artifact bytes.
+publication-only retry. See docs/MANUAL.md#guide-work-results. Metadata-only listings must never open artifact bytes.
 Product inputs may pin an exact registered `artifact` member; it remains within the same sealed
 contract/content identity and adds the member choice to consumer identity. Never turn it into a path
 selector or choose another member implicitly.
@@ -69,9 +69,9 @@ consumer EOFError/ValueError and generic CUDA kernel errors are not lost-worker/
 `work/state.py` owns aggregate lifecycle projection and shared required-evidence accounting;
 `work/attempt_history.py` preserves bounded display history with cumulative physical counters.
 Presentation consumes `lifecycle`, never invents recovery or refunds prior Attempts. Follow
-`docs/ARCHITECTURAL_REFORM.md` for remaining reform boundaries. `lambdaforge.products` and
+`docs/ai/IMPLEMENTATION.md#history-architectural-reform` for remaining reform boundaries. `lambdaforge.products` and
 `lf products` implement explicit contracts/catalog/byte promotion/product transport, documented
-in `docs/PRODUCTS.md`; local `products select` uses same-snapshot metrics and preserves latest Attempts.
+in `docs/MANUAL.md#guide-products`; local `products select` uses same-snapshot metrics and preserves latest Attempts.
 `products decide` preserves native selection without HPO refit. Typed product Work inputs resolve
 contract/expectations, workers receive a project-owned durable root and actual Attempts record
 consumption. Single native Study YAML may declare `products` (StudyDecision/ModelSet); persist
@@ -81,7 +81,7 @@ replanning, composed/Fleet promotion
 and full Fleet lifecycle are not implemented merely because they appear in the plan.
 `lf import PACKAGE [--apply]` verifies/registers native single-host exports and sealed products.
 Original records remain in `portable/`, placement in `import.json`; imported evidence is read-only,
-not executable recovery. Provider export never samples product bytes. See `docs/PRODUCTS.md`.
+not executable recovery. Provider export never samples product bytes. See `docs/MANUAL.md#guide-products`.
 Console Studies/Overview include imported read-only snapshots through local compact indexes;
 Studies → Import Study uses the same preview/apply service as CLI. Never create fake Jobs or contact
 the original host to read an import. Selected Trial/Run views relocate only owned evidence paths.
@@ -213,6 +213,14 @@ the algorithm capability table and guard custom precomputed matrices before O(N�
 KMeans and Ward are Euclidean; reject invalid combinations with the scientific reason. Do not hide
 scaling, imputation, PCA, thresholds or stability policy in clusterer defaults.
 
+Whole-object transport is separate: `lambdaforge.distances.StructuredMeasure` and
+`FusedGromovWassersteinDistance` compare attributed weighted objects via optional
+`lambdaforge[optimal-transport]` (POT). This is balanced q=2 FGW with explicit geometry,
+feature units and normalized probability weights, not a Clusterer or the neural pointwise
+Distance interface. Keep coupling/marginal/convergence evidence honest: local convergence
+does not certify a global optimum. Do not introduce domain-specific feature parsing.
+See the [FGW manual chapter](../MANUAL.md#20-fused-gromovwasserstein-distance-fgw).
+
 `print()` and standard Python logging are captured by Job logs. Use `self.log()` for timestamped,
 immediately flushed human narration, `self.progress.update()` for completion and `metrics.log()` for
 scientific numeric evidence. The Research Console presents bounded Work/study/result read models;
@@ -270,7 +278,21 @@ Root resources alone inherit into steps; reject ignored root with/seeds/replicat
 execution/objective/analysis. Preflight distinguishes Study dispatch budgets from scheduler ceilings
 (sum sequential, max parallel). Only live reliable direct GPU capacity may reject impossible
 requests; scheduler login/command grants remain runtime-owned and never broadened.
-Details: docs/CONDITIONAL_STUDIES.md.
+Details: docs/MANUAL.md#guide-conditional-studies.
+
+Fixed `sweep.include` is an exact union of complete active scalar candidate dictionaries with the
+unchanged base design, not a branch-domain expansion. Native `sweep.candidates` instead selects
+only complete points within declared space, without Cartesian enumeration; the modes are mutually
+exclusive. Preserve inactive keys as absent and validate via the same activation authority.
+Conditional Study extensions compare exact candidate/seed sets, retain every old cell/condition
+contract and submit only the difference. Sparse delta geometry does not imply unmeasured points
+were required. Strict policy rejects unsupported retained parsers before handoff. Default revisioned
+policy can deploy current code/runtime through the native managed pipeline, with a reviewed source
+pin and explicit new provenance cohort; never patch immutable runtimes or fake equivalence.
+Historical Runs remain immutable and counted once. If any revision has unproven code/runtime
+equivalence, keep the series history together but analyse each revision separately using the native
+engine. Do not pool seed means, effects, intervals or tests across incompatible revisions. Current
+code approval does not waive fixed parameter/input/dataset/seed/objective checks or authorize retries.
 
 `steps` is a sequence. `{parallel: [...]}` is one concurrent level. The following level waits for
 all members. Cross-step outputs reference `step.output` and are invalid when the producer has
@@ -496,6 +518,15 @@ iframes. Never insert consumer scripts in the parent DOM or relax network/owners
 Documents embed assets/data; limits are 16 MiB/document and 64 MiB/report. Chart axes identify their
 member metrics; empirical histogram/CDF distributions are presentation, never new HPO evidence.
 
+Full-resolution presentation uses `outputs.html_bundle` as an ordinary owned directory artifact
+with a bounded entry and attested explicit asset manifest. No automatic scientific selection or
+array truncation. The native read-only loopback viewer fetches only selected declared assets via
+existing providers, outside scheduling/heartbeat; never relax opaque-origin `connect-src 'none'`.
+Pass verified ArrayBuffers through the exact iframe's scoped MessagePort, with bounded concurrency,
+abort/disposal and visible presentation errors. Portable exports/imports retain every asset and
+relocatable deployment references; `file://` is not a lazy-fetch workflow. Presentation regeneration
+uses explicit retained evidence only, not training/forward passes. See `docs/MANUAL.md#guide-managed-reports`.
+
 Study HTML opens Overview, with exact candidate states and contextual importance. Exclude conditional
 parameters from the global chart; retain their branch/support/model score in a separate table, never
 label predictive variation causal responsibility. Interpretation/questions use carousels, complete
@@ -596,7 +627,7 @@ commitment from `sweep-blocks.json` on recovery; reject conflicting/missing coor
 Keep predictive stability separate when observed support blocks a descriptive conclusion; unresolved
 stability is its own realization mass, never the complement of another hypothesis. Missing sequential
 state is not formal approval. Historical v1 decisions/manifests remain unchanged. The current audit
-and unfinished acceptance boundaries are in `docs/SCIENTIFIC_AUDIT.md` (Spanish sibling).
+and unfinished acceptance boundaries are in `docs/ai/IMPLEMENTATION.md#history-scientific-audit` (Spanish sibling).
 Terminal Studies reconcile every queued identity and expose execution `status`, `design_status`,
 `scientific_status` and `finish_reason`. Fixed designs may be complete while scientifically
 unresolved; time/Run exhaustion with required debt is incomplete. Keep observed and
@@ -663,7 +694,7 @@ candidates never become exact final evidence. BY-adjusted exploratory permutatio
 adaptive-sampling inference or scientific confidence. Show constants/missing metadata explicitly,
 preserve family coordinates/lineage, and separate unknown/different-unit Y axes unless the user
 opts into visual normalization. Research inbox/search/metric browser/validated saved views use
-persisted domain data. Routes and limits: `docs/RESEARCH_ANALYSIS.md` (Spanish sibling).
+persisted domain data. Routes and limits: `docs/MANUAL.md#guide-research-analysis` (Spanish sibling).
 Coverage uses bounded cards/charts/tables, not raw JSON, and contextual help explains
 statistical terms. Decisions append to `study/controller-history.jsonl`; keep
 `controller.json.recent` bounded, load the full
@@ -730,7 +761,7 @@ independent live Work-cache leases.
 **Clear storage…** confirms native cleanup; **Clear output** only clears text. Successful unpinned
 checkpoints have configurable grace; failed/interrupted recovery remains protected. Named
 `checkpoints.pin/unpin`, `outputs.from_checkpoint` and dataset `source_checkpoint` declare independent
-publication/retention; never mutable hardlinks. Read `docs/STORAGE.md` for exact scope and unfinished
+publication/retention; never mutable hardlinks. Read `docs/MANUAL.md#guide-storage` for exact scope and unfinished
 provisioning/code-layer guarantees rather than claiming those are implemented.
 
 Project-scoped dataset roots affect new publications only. Preserve a verified legacy absolute
@@ -753,7 +784,7 @@ source contracts stay exact. Equivalence keeps both content IDs, never replaces 
 Publication failures protect artifacts/checkpoints and sealed candidates; `datasets publish-candidate`
 previews/applies bytes-only recovery without rerunning science or changing failed history. Inventory
 is read-only, merges (name, version, content ID), discovers all configured Console locations and
-shows conflicts without ambiguous mutations. See `docs/DATASET_RECONSTRUCTION.md` (Spanish sibling).
+shows conflicts without ambiguous mutations. See `docs/MANUAL.md#guide-dataset-reconstruction` (Spanish sibling).
 
 ## Control-plane invariants
 
@@ -775,7 +806,7 @@ source placements remain usable; loopback tests do not certify real site SSH con
 Public `lf run CONFIG --on-fleet NAME` supports fresh adaptive/fixed/repeated/automatic paired Studies,
 local coordinator and managed member profiles. Run Work exposes the same targets. Checkpoint/fidelity
 continuation, co-location, recovery/adoption, live expansion and distributed export remain gated; see
-`docs/COORDINATED_STUDIES.md`. Never describe independent JobGroups as a coordinated Study or
+`docs/MANUAL.md#guide-coordinated-studies`. Never describe independent JobGroups as a coordinated Study or
 instantiate a second optimizer. Dry-run never acquires grants. Do not claim SSH/command/SLURM
 acceptance from loopback tests.
 
@@ -822,13 +853,16 @@ VRAM. Fixed/repeated Study parallelism counts required Runs, not just distinct c
 Environment build contention waits through provisioning; optional cleanup defers under cache
 leases without weakening reference protection. Command requires an argv `command_prefix` for a site
 claim wrapper; never encode it as shell. Prefer a self-contained `gpu exec`-style wrapper. Optional
-`claim_command` and `release_command` are an atomic pair; only `{gpu_count}` expands, the direct
-supervisor releases on every terminal path, and persistent claims are invalid with SLURM. In
+`claim_command`/`release_command` remain readable/renderable configuration, but automatic use is
+rejected before external mutation: a generic argv pair has no per-reservation ownership receipt.
+Never release a manual or sibling reservation. Use a provider-owned wrapper/manual reservation;
+persistent claims are invalid with SLURM. In
 command/scheduler modes inherited `CUDA_VISIBLE_DEVICES` tokens are opaque grants: never replace or
 broaden them. Missing/duplicate grants fail closed; scheduler grants are exact, while an adaptive
 Study behind a command launcher may safely scale down to fewer non-empty inherited tokens. The
-optional `visibility_command` reports the current comma-separated opaque grant; `[gpu, exec]`
-derives `[gpu, env]`. Intersect it with the original grant, stop only verified workers on revoked
+optional `visibility_command` reports one CSV grant or explicit CUDA_VISIBLE_DEVICES assignment;
+exact `[gpu, exec]` derives `[gpu, env, --shell]`. Intersect by pinned identities with the original
+grant, stop only verified workers on revoked
 tokens and checkpoint-requeue those logical Runs; keep siblings running and block new admission
 when the ownership probe is unavailable. Never accept a newly reported physical token. The
 Research Console edits the

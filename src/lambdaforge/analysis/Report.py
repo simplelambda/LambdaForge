@@ -52,7 +52,7 @@ def write_html(
     analysis: Mapping[str, Any],
     output: str | Path,
     *,
-    sections: Sequence[Mapping[str, str]] = (),
+    sections: Sequence[Mapping[str, Any]] = (),
 ) -> Path:
     """Write the offline dashboard with optional isolated project HTML tabs.
 
@@ -68,13 +68,35 @@ def write_html(
             "Install lambdaforge[analysis-report] to export interactive HTML reports."
         ) from error
 
-    return _write_study_dashboard(analysis, output, go=go, plot=plot, sections=sections)
+    sections = tuple({k: v for k, v in row.items() if k != "framework_analysis"} for row in sections)
+    cohorts = analysis.get("code_cohort_analyses")
+    if isinstance(cohorts, Mapping) and cohorts:
+        from tempfile import TemporaryDirectory
+
+        additions = []
+        with TemporaryDirectory(prefix="lambdaforge-cohort-report-") as temporary:
+            for index, (name, cohort) in enumerate(cohorts.items()):
+                rendered = _write_study_dashboard(
+                    cohort, Path(temporary) / f"cohort-{index}.html", go=go, plot=plot
+                )
+                additions.append({
+                    "name": f"code-cohort-{index}", "title": f"Code · {name}",
+                    "html": rendered.read_text(encoding="utf-8"),
+                    "framework_analysis": True,
+                })
+        sections = (*sections, *additions)
+    target = _write_study_dashboard(analysis, output, go=go, plot=plot, sections=sections)
+    from lambdaforge.analysis.report_assets import write_sources
+
+    write_sources(target, sections)
+    return target
 
 
-def _project_sections(sections: Sequence[Mapping[str, str]]) -> tuple[str, str, str]:
+def _project_sections(sections: Sequence[Mapping[str, Any]]) -> tuple[str, str, str]:
     """Escape declarations and encode HTML; never insert consumer markup in the parent."""
     groups: dict[str, dict[str, Any]] = {}
     total = 0
+    bundle_index = 0
     for section in sections:
         name, title, content = (section.get(key) for key in ("name", "title", "html"))
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
@@ -83,17 +105,41 @@ def _project_sections(sections: Sequence[Mapping[str, str]]) -> tuple[str, str, 
             raise ValueError("HTML section title must contain 1–120 characters.")
         if not isinstance(content, str):
             raise ValueError("HTML section content must be a UTF-8 string.")
+        bundle = section.get("bundle")
+        client_bundle = None
+        if isinstance(bundle, Mapping):
+            assets = bundle["manifest"]["assets"]
+            bridge = (
+                files("lambdaforge.analysis")
+                .joinpath("assets/report_bundle_bridge.js")
+                .read_text(encoding="utf-8")
+            )
+            public = [
+                {k: row[k] for k in ("id", "size_bytes", "media_type", "metadata")}
+                for row in assets
+            ]
+            bridge = bridge.replace(
+                "__LF_ASSETS__", json.dumps(public, ensure_ascii=True).replace("<", "\\u003c")
+            )
+            content = "<script>" + bridge + "</script>" + content
+            client_bundle = {"index": bundle_index, "assets": assets}
+            bundle_index += 1
         encoded = content.encode("utf-8")
         total += len(encoded)
         if len(encoded) > 16 * 1024 * 1024 or total > 64 * 1024 * 1024:
             raise ValueError("Project HTML exceeds the 16 MiB/document or 64 MiB/report limit.")
-        group = groups.setdefault(name, {"title": title, "documents": []})
+        group = groups.setdefault(name, {
+            "title": title, "documents": [],
+            "framework_analysis": bool(section.get("framework_analysis")),
+        })
         if group["title"] != title:
             raise ValueError(f"Conflicting titles for HTML section {name!r}.")
         group["documents"].append(
             {
                 "label": section.get("label") or title,
                 "content": base64.b64encode(encoded).decode("ascii"),
+                "bundle": client_bundle,
+                "error": section.get("presentation_error"),
             }
         )
     buttons, panels = [], []
@@ -110,43 +156,22 @@ def _project_sections(sections: Sequence[Mapping[str, str]]) -> tuple[str, str, 
         panels.append(
             f'<section class="view" id="{key}" hidden><article class="panel">'
             f'<div class="tools"><h2 data-authored>{title}</h2><label>Document <select id="{key}-document" class="project-document" data-authored>{options}</select></label></div>'
-            '<p class="note">Project-provided HTML · isolated offline viewer. Its content is authored by the project, not LambdaForge analysis.</p>'
+            + ('<p class="note">Native LambdaForge analysis · isolated code/runtime cohort. '
+               'Análisis nativo de una revisión; sin mezcla entre versiones.</p>'
+               if group["framework_analysis"] else
+               '<p class="note">Project-provided HTML · isolated offline viewer. Its content is authored by the project, not LambdaForge analysis.</p>')
+            +
+            '<p class="note lf-report-asset-status" role="status" aria-live="polite"></p>'
             f'<iframe title="{title}" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer" '
             'style="width:100%;height:75vh;min-height:400px;resize:vertical;border:1px solid #30363d;border-radius:10px;background:white"></iframe>'
             "</article></section>"
         )
     payload = json.dumps(list(groups.values()), ensure_ascii=True).replace("<", "\\u003c")
-    script = r"""
-(() => {
- const groups = JSON.parse(document.getElementById('lf-project-sections').textContent);
- const key = 'lambdaforge:project-sections:' + JSON.parse(document.getElementById('lf-study-data').textContent).report_id;
- let preferences = {}; try { preferences = JSON.parse(localStorage.getItem(key) || '{}'); } catch(_error) {}
- const policy = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'unsafe-inline' data: blob:; img-src data: blob:; font-src data: blob:; media-src data: blob:; worker-src blob:; connect-src 'none'; form-action 'none'; base-uri 'none';";
- function load(index) {
-  const panel = document.getElementById('project-section-' + index);
-  if (panel.hidden) return;
-  const selected = panel.querySelector('select').value, frame = panel.querySelector('iframe');
-  if (frame.dataset.document === selected) return;
-  const raw = Uint8Array.from(atob(groups[index].documents[Number(selected)].content), c => c.charCodeAt(0));
-  frame.srcdoc = '<!doctype html><meta http-equiv="Content-Security-Policy" content="' + policy + '">' + new TextDecoder().decode(raw);
-  frame.dataset.document = selected;
- }
- groups.forEach((group,index) => {
-  const panel = document.getElementById('project-section-' + index);
-  const select = panel.querySelector('select');
-  if ([...select.options].some(option => option.value === preferences[index])) {
-   select.value = preferences[index];select.dispatchEvent(new Event('change'));
-  }
-  select.addEventListener('change', () => {
-   preferences[index] = select.value;
-   try { localStorage.setItem(key, JSON.stringify(preferences)); } catch(_error) {}
-   load(index);
-  });
-  new MutationObserver(() => load(index)).observe(panel, {attributes:true, attributeFilter:['hidden']});
-  load(index);
- });
-})();
-"""
+    script = (
+        files("lambdaforge.analysis")
+        .joinpath("assets/report_project_tabs.js")
+        .read_text(encoding="utf-8")
+    )
     return (
         "".join(buttons),
         "".join(panels),
@@ -160,10 +185,49 @@ def _write_study_dashboard(
     *,
     go: Any,
     plot: Any,
-    sections: Sequence[Mapping[str, str]] = (),
+    sections: Sequence[Mapping[str, Any]] = (),
 ) -> Path:
     """Render persisted Study Analysis as one navigable offline dashboard."""
     section_buttons, section_panels, section_script = _project_sections(sections)
+    series = analysis.get("study_series")
+    series_banner = ""
+    if isinstance(series, Mapping):
+        provenance = "".join(
+            "<tr>"
+            + "".join(
+                "<td>" + html.escape(str(row.get(key, "—"))) + "</td>"
+                for key in (
+                    "origin_revision",
+                    "original_trial",
+                    "presentation_trial",
+                    "execution_id",
+                    "run_id",
+                    "attempt_id",
+                )
+            )
+            + "</tr>"
+            for row in series.get("provenance", ())
+            if isinstance(row, Mapping)
+        )
+        series_banner = (
+            '<aside class="panel" role="note"><strong>Exploratory Study series · '
+            "Serie exploratoria</strong><p>"
+            + html.escape(str(series.get("study_series_id", "")))
+            + " · "
+            + html.escape(str(series.get("code_cohort", "compatible-series")))
+            + ". "
+            + ("Different code revisions: use the Code tabs; cross-revision inference disabled. "
+               "Código distinto: consulta las pestañas Code; no se mezclan inferencias. "
+               if series.get("mixed_code") else "")
+            + html.escape(str(series.get("revision_count", 0)))
+            + " revisions. Post-hoc extensions do not provide retroactive confirmatory guarantees. "
+            "Las ampliaciones post hoc no son confirmación retroactiva.</p>"
+            "<details><summary>Native provenance / Procedencia nativa</summary>"
+            '<div class="table-wrap"><table><thead><tr><th>Revision</th><th>Original trial</th>'
+            "<th>Presentation trial</th><th>Execution</th><th>Run</th><th>Attempt</th></tr></thead><tbody>"
+            + provenance
+            + "</tbody></table></div></details></aside>"
+        )
     candidates = [
         dict(value) for value in analysis.get("candidates", ()) if isinstance(value, Mapping)
     ]
@@ -661,7 +725,8 @@ else if(visible==='study-trials')updateRanking();}};
         f'<span class="status">{status}</span></header><div class="cards"><div class="card"><small>Candidates</small><strong>{len(candidates)}</strong></div>'
         f'<div class="card"><small>Complete candidates</small><strong>{completed}</strong></div><div class="card"><small>Censored Runs</small><strong>{censored}</strong></div>'
         f'<div class="card"><small>Leading trial</small><strong>{html.escape(str(winning_trial or "—"))}</strong></div></div>'
-        '<nav class="tabs"><button class="tab" data-target="study-overview" aria-selected="true">Overview</button>'
+        + series_banner
+        + '<nav class="tabs"><button class="tab" data-target="study-overview" aria-selected="true">Overview</button>'
         '<button class="tab" data-target="study-research" aria-selected="false">Research</button>'
         '<button class="tab" data-target="study-metrics" aria-selected="false">Metrics & health</button>'
         '<button class="tab" data-target="study-trials" aria-selected="false">Trials</button><button class="tab" data-target="study-parameters" aria-selected="false">Parameters</button>'

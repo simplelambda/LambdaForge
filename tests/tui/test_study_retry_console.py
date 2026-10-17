@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from threading import Event
 
 import pytest
 
 pytest.importorskip("textual")
-from textual.widgets import Button, Checkbox, DataTable, TabbedContent  # noqa: E402
+from textual.widgets import Button, Checkbox, DataTable, Input, Static, TabbedContent  # noqa: E402
 
 from lambdaforge.tui.App import LambdaForgeApp  # noqa: E402
 from lambdaforge.tui.screens.Workspace import StudyRetryConfirmation, StudyWorkspace  # noqa: E402
@@ -114,16 +115,139 @@ def test_detected_code_change_requires_explicit_acknowledgement_before_submit() 
         async with app.run_test(size=(130, 42)) as pilot:
             app.push_screen(StudyRetryConfirmation({"code_change_detected": True}))
             await pilot.pause()
-            assert app.screen.query_one("#retry-confirm", Button).disabled
+            assert not app.screen.query_one("#retry-confirm", Button).disabled
             assert app.screen.query_one("#retry-code-change-warning")
+            await pilot.click("#retry-confirm")
+            await pilot.pause()
+            assert isinstance(app.screen, StudyRetryConfirmation)
+            assert "Not submitted" in str(app.screen.query_one("#retry-submit-status").render())
             app.screen.query_one("#retry-compatible-code", Checkbox).value = True
             await pilot.pause()
             assert not app.screen.query_one("#retry-confirm", Button).disabled
             app.screen.query_one("#retry-compatible-code", Checkbox).value = False
             await pilot.pause()
-            assert app.screen.query_one("#retry-confirm", Button).disabled
+            assert not app.screen.query_one("#retry-confirm", Button).disabled
+            await pilot.click("#retry-confirm")
+            await pilot.pause()
+            assert isinstance(app.screen, StudyRetryConfirmation)
+            assert "Not submitted" in str(app.screen.query_one("#retry-submit-status").render())
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("size", [(120, 35), (80, 24)])
+def test_long_realistic_plan_keeps_acknowledgement_and_blocking_reason_visible(size) -> None:
+    class Services(FakeServices):
+        def retry_preview(self, job_id):
+            return {
+                "resumable": True,
+                "strategy": "sweep",
+                "code_change_detected": True,
+                "reuse_runs": 47,
+                "retry_runs": 1,
+                "pending_runs": 0,
+                "configuration": {"selected_path": "v6b.yaml", "selected_exists": True},
+                "runs": [
+                    {"trial": i // 4 + 1, "seed": i % 4, "action": "reuse"} for i in range(48)
+                ],
+            }
+
+        def retry_job(self, job_id, *, accept_code_change=False):
+            self.calls.append(("retry_job", (job_id, accept_code_change)))
+            return {"job_id": "job-recovered", "state": "preparing"}
+
+        def study(self, job_id):
+            return {"candidates": [], "counts": {}, "job_state": "preparing"}
+
+    async def exercise() -> None:
+        services = Services()
+        app = LambdaForgeApp(services)
+        async with app.run_test(size=size) as pilot:
+            workspace = StudyWorkspace(
+                {
+                    "name": "v6b",
+                    "state": "failed",
+                    "primary_job_id": "job-original",
+                    "study": {"candidates": [], "counts": {}},
+                },
+                services,
+            )
+            app.push_screen(workspace)
+            await pilot.pause()
+            workspace._confirm_retry(services.retry_preview("job-original"))
+            await pilot.pause()
+            dialog = app.screen
+            for selector in ("#retry-compatible-code", "#retry-submit-status", "#retry-confirm"):
+                widget = dialog.query_one(selector)
+                assert widget.region.y >= 0 and widget.region.bottom <= size[1]
+                assert widget.region.x >= 0 and widget.region.right <= size[0]
+            assert "Action required" in str(dialog.query_one("#retry-submit-status").render())
+            await pilot.click("#retry-confirm")
+            await pilot.pause()
+            assert app.screen is dialog
+            assert not any(name == "retry_job" for name, _ in services.calls)
+            assert "Not submitted" in str(dialog.query_one("#retry-submit-status").render())
+            await pilot.click("#retry-compatible-code")
+            await pilot.pause()
+            assert dialog.query_one("#retry-compatible-code", Checkbox).value
+            assert "Ready" in str(dialog.query_one("#retry-submit-status").render())
+            await pilot.click("#retry-confirm")
+            await pilot.pause()
+            assert app.screen is workspace
+            assert services.calls.count(("retry_job", ("job-original", True))) == 1
+            assert workspace.operation_job_id == "job-recovered"
+
+    asyncio.run(exercise())
+
+
+def test_pending_configuration_validation_cannot_be_bypassed_by_acknowledgement() -> None:
+    entered, release = Event(), Event()
+    preview = {
+        "configuration": {"selected_path": "old.yaml", "selected_exists": True},
+        "code_change_detected": True,
+    }
+
+    class Services:
+        def retry_preview(self, job_id, *, config):
+            entered.set()
+            assert release.wait(5)
+            return {
+                "configuration": {"selected_path": config, "sha256": "verified"},
+                "code_change_detected": True,
+            }
+
+    async def exercise() -> None:
+        app = LambdaForgeApp(FakeServices())
+        async with app.run_test(size=(120, 35)) as pilot:
+            dialog = StudyRetryConfirmation(preview, services=Services(), job_id="job-original")
+            app.push_screen(dialog)
+            await pilot.pause()
+            dialog.query_one("#retry-config", Input).value = "moved.yaml"
+            await pilot.pause()
+            await pilot.click("#retry-confirm")
+            await pilot.pause()
+            assert "Not submitted" in str(dialog.query_one("#retry-submit-status").render())
+            await pilot.click("#retry-config-validate")
+            await pilot.pause()
+            assert entered.is_set()
+            assert "Validating" in str(dialog.query_one("#retry-submit-status").render())
+            await pilot.click("#retry-compatible-code")
+            await pilot.pause()
+            assert dialog.query_one("#retry-confirm", Button).disabled
+            assert app.screen is dialog
+            release.set()
+            for _ in range(60):
+                await pilot.pause(0.02)
+                if not dialog._validating:
+                    break
+            assert not dialog._validating
+            assert not dialog.query_one("#retry-confirm", Button).disabled
+            assert "Ready" in str(dialog.query_one("#retry-submit-status", Static).render())
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
 
 
 def test_checkpoint_preview_is_visible_without_claiming_epoch_continuation() -> None:

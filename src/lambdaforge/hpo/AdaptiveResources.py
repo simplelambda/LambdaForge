@@ -14,7 +14,7 @@ import os
 import re
 import statistics
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -271,6 +271,12 @@ class ResourceTrajectoryStatistics:
                 self.positive_streak += 1
                 self.monotonic_growth_bytes += delta
             elif delta < 0:
+                self.positive_streak = 0
+                self.monotonic_growth_bytes = 0
+            elif meaningful:
+                # A genuine epoch/phase completed with no further allocation. Do not let
+                # startup's positive streak classify a later flat multi-hour curve as a ramp.
+                # Identical polls within an epoch are not new stability evidence.
                 self.positive_streak = 0
                 self.monotonic_growth_bytes = 0
             if sign_reversal or (
@@ -1343,6 +1349,8 @@ class GPUResourceState:
     active: tuple[ActiveResourceCommitment, ...] = ()
     run_cap: int = 1
     external_busy: bool | None = None
+    peer_startup_bytes: int = 0
+    observation_quality: str = "measured"
 
     @property
     def future_committed_bytes(self) -> int:
@@ -1363,12 +1371,19 @@ class GPUResourceState:
 
     @property
     def provisional_headroom_bytes(self) -> int:
-        return max(0, self.total_bytes - self.external_bytes - self.provisional_committed_bytes)
+        return max(
+            0,
+            min(
+                self.free_bytes,
+                self.total_bytes - self.external_bytes - self.provisional_committed_bytes,
+            )
+            - self.peer_startup_bytes,
+        )
 
     @property
     def admission_headroom_bytes(self) -> int:
         """Return the strictest physical/current or future-envelope capacity bound."""
-        return min(self.free_bytes, self.predicted_headroom_bytes)
+        return max(0, min(self.free_bytes, self.predicted_headroom_bytes) - self.peer_startup_bytes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1602,6 +1617,7 @@ class GPUPlacementPlanner:
         max_launches: int,
         now: float | None = None,
     ) -> tuple[tuple[AdmissionDecision, ...], tuple[AdmissionDecision, ...]]:
+        devices = tuple(device for device in devices if device.observation_quality == "measured")
         ranked = sorted(
             actions[:RESOURCE_FRONTIER_LIMIT],
             key=lambda value: (
@@ -1749,17 +1765,7 @@ class GPUPlacementPlanner:
                 seed=_optional_int(action.specification.get("seed")),
                 admission_mode=admission_mode,
             )
-            mutable[selected] = GPUResourceState(
-                device.index,
-                device.token,
-                device.hardware,
-                device.total_bytes,
-                device.free_bytes,
-                device.external_bytes,
-                (*device.active, commitment),
-                device.run_cap,
-                device.external_busy,
-            )
+            mutable[selected] = replace(device, active=(*device.active, commitment))
             higher = next(
                 (item for item in blocked if item.scientific_value > action.scientific_value), None
             )
@@ -1920,6 +1926,50 @@ class GPUPlacementPlanner:
         self.last_exploration_evaluations = tuple(evaluations)
         return tuple(admitted), tuple(blocked)
 
+    def recheck_launch(
+        self,
+        action: CandidateResourceAction,
+        device: GPUResourceState,
+        decision: AdmissionDecision,
+        *,
+        devices: Sequence[GPUResourceState],
+    ) -> tuple[bool, str]:
+        """Revalidate an approved placement without replanning or consuming wait evidence.
+
+        Keep sibling protection and the original exploration value/WAIT comparison. A new
+        single-device planner would forget both the grant context and the accumulated regret
+        (which place() already consumed), and could reject the same experiment forever.
+        Fresh physical memory, peer starts and failed-placement bounds still veto the launch.
+        """
+        if (
+            decision.state != "ADMITTED"
+            or decision.candidate_key != action.key
+            or decision.target_gpu != device.index
+            or device.observation_quality != "measured"
+        ):
+            return False, "invalid-or-stale-placement-approval"
+        if not any(other.index == device.index for other in devices):
+            return False, "device-not-in-approved-grant"
+        state, reason = self._fit_state(action, device)
+        if self._hurts_throughput(action, device):
+            return False, "predicted-aggregate-throughput-would-not-improve"
+        if decision.admission_mode != "EXPLORATORY_ADMISSION":
+            return state == "ADMITTED", reason
+        if state == "RESOURCE_INFEASIBLE_ON_DEVICE_TYPE":
+            return False, reason
+        approved = decision.exploration_evaluation
+        if not approved or not approved.get("accepted"):
+            return False, "missing-exploration-approval"
+        fresh_devices = tuple(device if other.index == device.index else other for other in devices)
+        evaluation = self._exploration_value(
+            action,
+            device,
+            fresh_devices,
+            normalized_scientific_value=float(approved["normalized_scientific_value"]),
+            wait_regret=float(approved["wait_regret"]),
+        )
+        return evaluation.accepted, evaluation.rejection_reason
+
     def _exploration_value(
         self,
         action: CandidateResourceAction,
@@ -1960,6 +2010,8 @@ class GPUPlacementPlanner:
 
         if len(device.active) >= device.run_cap:
             return rejected("RUN_CAP")
+        if device.peer_startup_bytes:
+            return rejected("PEER_STARTUP_UNMATERIALIZED")
         if device.active and not any(value.current_bytes > 0 for value in device.active):
             return rejected("AWAITING_LIVE_TELEMETRY")
         if policy_reason == "reserved-window-for-higher-value-heavy-action":
@@ -2240,6 +2292,11 @@ class GPUPlacementPlanner:
             return "RESOURCE_BLOCKED", "known-failed-placement-dominates-current-condition"
         if prediction.known_lower_bound_bytes > device.admission_headroom_bytes:
             return "RESOURCE_BLOCKED", "dominated-by-known-oom-lower-bound"
+        if (
+            device.peer_startup_bytes
+            and prediction.commitment_bytes > device.admission_headroom_bytes
+        ):
+            return "RESOURCE_BLOCKED", "peer-startup-future-envelope-headroom"
         # 0 -> 1 is baseline progress, never a packing experiment. This invariant is independent
         # of whether the prediction is labelled cold-start: a partially learned conservative
         # future envelope may still span the whole device and must not leave another granted GPU
@@ -2517,6 +2574,7 @@ class ResourceHistoryStore:
                 "future_committed_bytes": device.future_committed_bytes,
                 "predicted_headroom_bytes": device.predicted_headroom_bytes,
                 "admission_headroom_bytes": device.admission_headroom_bytes,
+                "observation_quality": device.observation_quality,
             }
             for device in devices
         ]

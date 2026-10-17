@@ -70,6 +70,10 @@ class StorageService:
             for record in records
             for job_id in record.metadata.get("recovery_dependencies", ())
         }
+        if self.jobs.store.project is not None:
+            from lambdaforge.work.StudySeriesStore import StudySeriesStore
+
+            retained.update(StudySeriesStore(self.jobs.store.project).job_references())
         dependency_records = tuple(record for record in records if record.job_id in retained)
         references = {
             "bundles": [
@@ -175,6 +179,8 @@ class StorageService:
         deleting_jobs: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Preview or delete one exact job workspace without touching shared state."""
+        if self.jobs.series_dependents(job_id):
+            raise ValueError("Workspace is retained by a Study series.")
         if set(self.jobs.recovery_dependents(job_id)) - set(deleting_jobs):
             raise ValueError(
                 "Workspace is retained by a recovered Study; delete its latest history first."

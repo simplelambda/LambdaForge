@@ -162,6 +162,29 @@ class ErrorDiagnostic:
     details: tuple[str, ...] = ()
     failure_disposition: FailureDisposition | None = None
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ErrorDiagnostic:
+        """Restore the existing persisted diagnostic contract without reclassifying its cause."""
+        failure = value.get("failure_disposition")
+        return cls(
+            category=ErrorCategory(value["category"]),
+            title=str(value["title"]),
+            summary=str(value["message"]),
+            reason=str(value["reason"]),
+            impact=tuple(value.get("impact", ())),
+            fixes=tuple(value.get("fixes", ())),
+            commands=tuple((item["label"], item["command"]) for item in value.get("commands", ())),
+            context=dict(value.get("context", {})),
+            retryable=RetryDisposition(value.get("retryable", "after_fix")),
+            operation=value.get("operation"),
+            job_id=value.get("job_id"),
+            diagnostic_path=value.get("diagnostic_record"),
+            details=tuple(value.get("details", ())),
+            failure_disposition=FailureDisposition.from_dict(failure)
+            if isinstance(failure, Mapping)
+            else None,
+        )
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "impact", tuple(str(value) for value in self.impact))
         object.__setattr__(self, "fixes", tuple(str(value) for value in self.fixes))

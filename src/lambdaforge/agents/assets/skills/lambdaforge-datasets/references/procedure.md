@@ -1,30 +1,30 @@
-# lambdaforge-datasets procedure reference
+# Respect immutable content and explicit reconstruction · procedure
 
-## Native entry point
+## Native discovery/example
 
 ```bash
 lf datasets list --json
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Run in the intended project. Uppercase selectors/paths are placeholders, not a Work-name guess.
+Inspect installed help first. These commands are metadata/planning; parsing them does not execute science.
 
-## Acceptance
+Use get_dataset/get_dataset_placements/get_dataset_members with exact content identity. Listing metadata must not scan NPZ/model/asset bytes.
 
-Inspect local registered identities and placements; run preflight before costly reconstruction; preview replication or deletion before apply.
-Never ignore checksums, overwrite a version or declare approximate equality of bytes.
+## Decision cases
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+| Situation | Native interpretation / next step |
+|---|---|
+| Same name/version has three hashes | Diagnose authority conflicts and require an exact chosen content/placement. |
+| Operational metadata differs inside NPZ | The project must declare its scientific contract; LF does not strip arbitrary fields. |
+| Eigenvector sign/base changes | Use appropriate explicit invariants, not indiscriminate rounding. |
+| Placement folder is gone | Native index removal differs from owned-content deletion; preview exact scope. |
 
-## Recovery of uncertainty
+## Verification and handoff
 
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+Transport hashes remain exact. Scientific equivalence is separate, explicit and never permission to relabel/replace immutable bytes.
+Replication/reconciliation/destruction need explicit authority; scientific equivalence never waives checksums.
+
+If a capability is missing, stale or unsupported, retain evidence and explain the exact blocker.
+Do not create a CLI subprocess adapter, a second runner/result store or an application-specific workaround.
 

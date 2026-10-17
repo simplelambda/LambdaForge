@@ -201,6 +201,16 @@ class FakeServices:
         self.calls.append(("doctor", name))
         return {"cluster": name, "status": "ok"}
 
+    def cluster_resource_report(self, name):
+        from tempfile import TemporaryDirectory
+
+        from lambdaforge.controlplane.JobStore import JobStore
+        from lambdaforge.controlplane.ResourceDiagnosticReport import ResourceDiagnosticReport
+
+        self.calls.append(("cluster_resource_report", name))
+        with TemporaryDirectory() as temporary:
+            return ResourceDiagnosticReport.build(JobStore(temporary))
+
     def bootstrap(self, name, *, project=None, dry_run=False, progress=None):
         self.calls.append(("bootstrap", (name, dry_run)))
         if progress is not None:
@@ -2462,6 +2472,28 @@ def test_palette_never_advertises_an_action_without_a_real_handler() -> None:
     assert unsupported_destructive.destructive is True
     assert unsupported_destructive.status == "CLI-ONLY BY DESIGN"
     assert unsupported_destructive not in PALETTE_ACTIONS
+
+
+def test_cluster_resource_report_has_visible_saved_evidence_feedback_without_remote_queries():
+    from textual.widgets import Static
+
+    async def exercise():
+        services = FakeServices()
+        app = LambdaForgeApp(services=services)
+        async with app.run_test(size=(140, 45)) as pilot:
+            await pilot.pause()
+            app.push_screen(ClusterWorkspace("gpu12", services))
+            await pilot.pause(0.2)
+            tabs = app.screen.query_one("#cluster-detail-tabs", TabbedContent)
+            tabs.active = "cluster-resources"
+            await pilot.pause()
+            await pilot.click("#cluster-resource-report")
+            await pilot.pause(0.2)
+            widget = app.screen.query_one("#cluster-resource-report-content", Static)
+            assert "saved project evidence" in str(widget.render())
+            assert ("cluster_resource_report", "gpu12") in services.calls
+
+    asyncio.run(exercise())
 
 
 def test_no_command_dispatch_uses_console_only_for_a_tty(monkeypatch, capsys) -> None:

@@ -27,6 +27,7 @@ class ProcessSupervisor:
 
     POLL_SECONDS = 0.5
     HEARTBEAT_SECONDS = 5.0
+    _lease_wait_reason: str | None = None
 
     @classmethod
     def launch(cls, request_path: str | Path) -> dict[str, Any]:
@@ -84,6 +85,8 @@ class ProcessSupervisor:
                 "process_identity": None,
                 "allocated_gpus": [],
                 "allocated_cpus": [],
+                "resource_safety": request.get("resource_safety", {}),
+                "requested_resources": request.get("resources", {}),
                 "exit_code": None,
                 "message": "Supervisor started.",
             },
@@ -102,6 +105,12 @@ class ProcessSupervisor:
         gpu_access: Mapping[str, Any] = {}
         gpu_mode = "exclusive"
         try:
+            from lambdaforge.runtime.ResourceSafetyPolicy import ResourceSafetyPolicy
+
+            resource_safety = ResourceSafetyPolicy.from_value(request.get("resource_safety"))
+            # Configure this detached supervisor before outer admission, without
+            # changing the user's parent environment or provider grant.
+            os.environ["LAMBDAFORGE_RESOURCE_SAFETY"] = json.dumps(resource_safety.to_dict())
             if not cls._wait_for_storage(job_dir, request, supervisor):
                 return 0
             if bool(request.get("stage_source", False)):
@@ -118,6 +127,10 @@ class ProcessSupervisor:
             gpu_count = int(resources.get("gpu_count", 0))
             gpu_access = cls._required_mapping(request.get("gpu_access", {}), "gpu_access")
             gpu_mode = str(gpu_access.get("mode", "exclusive"))
+            if gpu_count and gpu_mode == "command":
+                from lambdaforge.controlplane.GpuAccessPolicy import GpuAccessPolicy
+
+                GpuAccessPolicy.from_mapping(gpu_access).require_owned_reservation_contract()
             if gpu_mode == "auto":
                 gpu_mode = "exclusive"
             leases = (
@@ -135,6 +148,7 @@ class ProcessSupervisor:
             if current.get("state") == JobState.CANCELLED.value:
                 return 0
             environment = os.environ.copy()
+            environment["LAMBDAFORGE_RESOURCE_SAFETY"] = json.dumps(resource_safety.to_dict())
             environment["LAMBDAFORGE_CLUSTER"] = str(request.get("cluster", "local"))
             environment["LAMBDAFORGE_JOB_ID"] = job_id
             environment["LAMBDAFORGE_EXECUTION_MODE"] = "worker"
@@ -146,8 +160,12 @@ class ProcessSupervisor:
             environment["LAMBDAFORGE_STUDY_PATH"] = str(job_dir / "study")
             environment["LAMBDAFORGE_GPU_ACCESS_MODE"] = gpu_mode
             environment["LAMBDAFORGE_REQUESTED_GPUS"] = str(gpu_count)
-            if gpu_mode == "shared":
-                environment["LAMBDAFORGE_GPU_ADMISSION_ROOT"] = str(request["lease_root"])
+            if gpu_mode in {"shared", "command"}:
+                from lambdaforge.runtime.HostCoordination import coordination_root
+
+                environment["LAMBDAFORGE_GPU_ADMISSION_ROOT"] = str(
+                    coordination_root("gpu-admission")
+                )
             raw_visibility = gpu_access.get("visibility_command", ())
             visibility = (
                 tuple(str(value) for value in raw_visibility)
@@ -156,15 +174,8 @@ class ProcessSupervisor:
                 else ()
             )
             prefix = gpu_access.get("command_prefix", ())
-            if (
-                not visibility
-                and gpu_mode == "command"
-                and isinstance(prefix, Sequence)
-                and not isinstance(prefix, str | bytes)
-                and len(prefix) >= 2
-                and str(prefix[-1]) == "exec"
-            ):
-                visibility = (*tuple(str(value) for value in prefix[:-1]), "env")
+            if not visibility and gpu_mode == "command" and list(prefix) == ["gpu", "exec"]:
+                visibility = ("gpu", "env", "--shell")
             if visibility:
                 environment["LAMBDAFORGE_GPU_VISIBILITY_COMMAND"] = json.dumps(visibility)
             cache_root = request.get("cache_root")
@@ -176,8 +187,10 @@ class ProcessSupervisor:
             if dataset_registry is not None:
                 environment["LAMBDAFORGE_DATASET_REGISTRY"] = str(dataset_registry)
             if leases:
-                environment["CUDA_VISIBLE_DEVICES"] = ",".join(str(item) for item in leases)
-            environment.setdefault("OMP_NUM_THREADS", str(max(1, len(cpu_leases))))
+                environment["CUDA_VISIBLE_DEVICES"] = cls._leased_gpu_visibility(
+                    Path(str(request["lease_root"])), job_id, leases
+                )
+            environment = cls._limit_thread_environment(environment, max(1, len(cpu_leases)))
             with (
                 stdout_path.open("ab", buffering=0) as stdout,
                 stderr_path.open("ab", buffering=0) as stderr,
@@ -333,41 +346,16 @@ class ProcessSupervisor:
     def _release_external_gpu(
         cls, job_dir: Path, work_dir: Path, policy: Mapping[str, Any]
     ) -> None:
-        """Release an explicitly claimed site GPU without replacing scientific state."""
-        raw = policy.get("release_command", ())
-        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
-            cls._update_state(job_dir, {"gpu_release_warning": "Invalid release_command argv."})
-            return
-        command = tuple(str(item) for item in raw)
-        if not command:
-            cls._update_state(job_dir, {"gpu_release_warning": "Missing release_command argv."})
-            return
-        try:
-            released = subprocess.run(
-                command,
-                cwd=work_dir,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=60.0,
-                check=False,
-            )
-            if released.returncode:
-                cls._update_state(
-                    job_dir,
-                    {
-                        "gpu_release_warning": (
-                            released.stderr.strip()
-                            or released.stdout.strip()
-                            or f"release exited {released.returncode}"
-                        )
-                    },
-                )
-        except Exception as error:
-            cls._update_state(
-                job_dir,
-                {"gpu_release_warning": f"{type(error).__name__}: {error}"},
-            )
+        """Legacy request cleanup: without a scoped receipt, never release site grants."""
+        del work_dir, policy
+        cls._update_state(
+            job_dir,
+            {
+                "gpu_release_warning": "External release skipped: no verified Job-owned "
+                "reservation receipt. "
+                "Manual and sibling reservations remain provider/user-owned."
+            },
+        )
 
     @classmethod
     def control(cls, operation: str, job_dir: str | Path) -> dict[str, Any]:
@@ -433,7 +421,10 @@ class ProcessSupervisor:
 
     @classmethod
     def observe(
-        cls, job_dir: str | Path, *, markers: tuple[dict[str, list[int]], bool] | None = None
+        cls,
+        job_dir: str | Path,
+        *,
+        markers: tuple[dict[str, list[int]], list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         """Verify owned process lifetimes on the execution host, without writes/signals.
 
@@ -468,7 +459,11 @@ class ProcessSupervisor:
                 "provider_observation": "unknown",
                 "observation_reason": "LEGACY_TERMINAL_OWNERSHIP_UNVERIFIED",
             }
+        boot_time = cls._host_boot_time()
+        if boot_time is not None:
+            state["observed_boot_time"] = boot_time
         lifetimes = {}
+        owner_births = []
         for role in ("supervisor_identity", "process_identity"):
             raw = state.get(role)
             if raw is None:
@@ -477,12 +472,25 @@ class ProcessSupervisor:
             identity = ProcessIdentity.from_mapping(cls._required_mapping(raw, role))
             if identity.job_id != directory.name:
                 raise ValueError(f"Process identity ownership mismatch: {role}.")
-            lifetimes[role] = identity.storage_status()
+            if not 0 < identity.create_time < float("inf"):
+                raise ValueError(f"Invalid process creation time: {role}.")
+            owner_births.append(identity.create_time)
+            # A lifetime from a previous host boot cannot survive as this PID. Keep
+            # markers authoritative: a newly launched process bearing the same Job
+            # marker still blocks recovery below, even after a verified reboot.
+            lifetimes[role] = (
+                "dead"
+                if boot_time is not None and identity.create_time < boot_time - 1.0
+                else identity.storage_status()
+            )
         state["process_lifetimes"] = lifetimes
         supervisor, child = lifetimes["supervisor_identity"], lifetimes["process_identity"]
         if recorded.terminal:
-            owned, complete = markers if markers is not None else cls._process_markers()
-            live = child == "alive" or bool(owned.get(directory.name))
+            owned, unresolved = markers if markers is not None else cls._process_markers()
+            complete = cls._marker_scope(state, unresolved, owner_births, boot_time=boot_time)
+            complete = complete and "unresolved" not in lifetimes.values()
+            live = "alive" in lifetimes.values() or bool(owned.get(directory.name))
+            state["owned_process_count"] = len(owned.get(directory.name, ()))
             return {
                 **state,
                 "provider_observation": "degraded"
@@ -510,7 +518,8 @@ class ProcessSupervisor:
                 "provider_observation": "degraded",
                 "observation_reason": "SUPERVISOR_LOST_CHILD_ALIVE",
             }
-        owned, complete = markers if markers is not None else cls._process_markers()
+        owned, unresolved = markers if markers is not None else cls._process_markers()
+        complete = cls._marker_scope(state, unresolved, owner_births, boot_time=boot_time)
         state["owned_process_count"] = len(owned.get(directory.name, ()))
         # A legacy identity-less state cannot certify death, even on an otherwise empty host.
         proven = supervisor in {"dead", "reused"} and child in {"dead", "reused", "missing"}
@@ -528,12 +537,107 @@ class ProcessSupervisor:
         }
 
     @staticmethod
-    def _process_markers() -> tuple[dict[str, list[int]], bool]:
-        """Bounded host inventory; access denial is uncertainty, never an empty success."""
+    def _host_boot_time() -> float | None:
+        """Read OS boot evidence; unavailable/invalid evidence never relaxes ownership."""
+        import psutil
+
+        try:
+            value = float(psutil.boot_time())
+            return value if 0 < value < float("inf") else None
+        except (OSError, RuntimeError, ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _marker_scope(
+        state: dict[str, Any],
+        unresolved: list[dict[str, Any]],
+        owner_births: list[float],
+        *,
+        boot_time: float | None = None,
+    ) -> bool:
+        """An inaccessible unrelated login must not poison every Job on the host.
+
+        Native Jobs create fresh processes/sessions, never attach a preexisting process.
+        Descendants can reparent or start new sessions, but cannot join another existing
+        session. Only positive lifetime/session evidence excludes an unreadable process;
+        unknown birth/ownership and ordinary new same-user workers remain unresolved.
+        """
+        owner_birth = min(owner_births) if owner_births else None
+        previous_boot = (
+            boot_time is not None and bool(owner_births) and max(owner_births) < boot_time - 1.0
+        )
+        relevant = []
+        for value in unresolved:
+            birth = value.get("create_time")
+            origin = value.get("foreign_session_origin")
+            unrelated = owner_birth is not None and (
+                (isinstance(birth, (int, float)) and 0 < birth < owner_birth)
+                or (isinstance(origin, (int, float)) and 0 < origin < owner_birth)
+                # Post-reboot access sessions cannot descend from pre-reboot Jobs.
+                # Require positive process birth evidence; unknown metadata stays
+                # fail-closed. No exclusion is based on a name or htop absence.
+                or (
+                    previous_boot
+                    and isinstance(birth, (int, float))
+                    and boot_time is not None
+                    and boot_time - 1.0 <= birth < float("inf")
+                )
+            )
+            if not unrelated:
+                relevant.append(value)
+        state["unresolved_process_count"] = len(relevant)
+        state["excluded_unrelated_process_count"] = len(unresolved) - len(relevant)
+        state["unresolved_processes"] = relevant[:20]
+        return not relevant
+
+    @staticmethod
+    def _unreadable_process(process: Any) -> dict[str, Any]:
+        """Collect metadata only; never guess non-membership from a process name.
+
+        A foreign-owned session leader spawned by a foreign-owned, preexisting service
+        proves an independent access session. Ignore PID 1: reparented scientific workers
+        are not independent merely because their parent died. Linux session membership
+        cannot be changed to another existing session by an orphan or an exec.
+        """
+        import psutil
+
+        value: dict[str, Any] = {"pid": process.pid, "create_time": None}
+        try:
+            if not process.is_running():
+                return value  # process_iter can cache a lifetime whose PID has been reused.
+            value["create_time"] = process.create_time()
+            if os.name != "posix":
+                return value
+            sid = os.getsid(process.pid)
+            leader = psutil.Process(sid)
+            parent = leader.parent()
+            if parent is None or parent.pid == 1:
+                return value
+            own_uid = os.getuid()
+            leader_uids, parent_uids = leader.uids(), parent.uids()
+            if leader_uids != parent_uids or any(uid == own_uid for uid in leader_uids):
+                return value
+            leader_birth, parent_birth = leader.create_time(), parent.create_time()
+            if (
+                os.getsid(leader.pid) == leader.pid
+                and 0 < parent_birth <= leader_birth <= value["create_time"]
+                and os.getsid(process.pid) == sid
+                and process.is_running()
+                and leader.is_running()
+                and parent.is_running()
+            ):
+                value["foreign_session_origin"] = parent_birth
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            pass  # Unresolved evidence stays protected, including races during metadata reads.
+        return value
+
+    @classmethod
+    def _process_markers(cls) -> tuple[dict[str, list[int]], list[dict[str, Any]]]:
+        """One host scan, with per-Job uncertainty instead of a host-wide denial flag."""
         import psutil
 
         markers: dict[str, list[int]] = {}
-        complete = True
+        unresolved = []
         user = psutil.Process().username()
         for process in psutil.process_iter(("pid", "status", "username")):
             if process.pid == os.getpid():
@@ -550,8 +654,8 @@ class ProcessSupervisor:
             except psutil.NoSuchProcess:
                 continue
             except (psutil.AccessDenied, OSError):
-                complete = False
-        return markers, complete
+                unresolved.append(cls._unreadable_process(process))
+        return markers, unresolved
 
     @classmethod
     def inventory(cls, root: str | Path) -> tuple[dict[str, Any], ...]:
@@ -665,19 +769,27 @@ class ProcessSupervisor:
             import psutil
 
             process = psutil.Process(identity.pid)
+            if process.create_time() != identity.create_time or (
+                os.name == "posix" and process.uids().real != os.getuid()
+            ):
+                raise RuntimeError("Resource observation owner lifetime is unavailable.")
             processes = (process, *process.children(recursive=True))
             cpu_time = 0.0
             rss_bytes = 0
             threads = 0
             descendants: set[int] = set()
+            lifetimes: dict[int, float] = {}
             for child in processes:
                 try:
                     with child.oneshot():
+                        if os.name == "posix" and child.uids().real != os.getuid():
+                            continue
                         times = child.cpu_times()
                         cpu_time += float(times.user + times.system)
                         rss_bytes += int(child.memory_info().rss)
                         threads += int(child.num_threads())
                         descendants.add(child.pid)
+                        lifetimes[child.pid] = child.create_time()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
             previous = state.get("observed_usage", {})
@@ -702,28 +814,75 @@ class ProcessSupervisor:
                     "threads": threads,
                 }
             )
-            gpu = subprocess.run(
-                (
-                    "nvidia-smi",
-                    "--query-compute-apps=pid,used_memory",
-                    "--format=csv,noheader,nounits",
-                ),
-                check=False,
-                capture_output=True,
-                text=True,
+            from lambdaforge.runtime.HostObservation import observe_host, process_tree_memory
+
+            usage["host_capacity"] = observe_host()
+            usage["memory_attribution"] = process_tree_memory(identity.pid, identity.create_time)
+            from lambdaforge.runtime.GPUObservation import GPUObservationCache, GPUObservationPolicy
+            from lambdaforge.runtime.ResourceSafetyPolicy import ResourceSafetyPolicy
+
+            requested = state.get("requested_resources")
+            gpu: dict[str, Any] = (
+                {"quality": "not-requested", "devices": []}
+                if isinstance(requested, Mapping) and not requested.get("gpu_count")
+                else GPUObservationCache(
+                    policy=GPUObservationPolicy.from_operational(
+                        ResourceSafetyPolicy.from_value(state.get("resource_safety"))
+                    )
+                ).read()
             )
-            if gpu.returncode == 0:
-                usage["gpu_memory_bytes"] = sum(
-                    int(float(row[1])) * 1024**2
-                    for line in gpu.stdout.splitlines()
-                    if len(row := [item.strip() for item in line.split(",")]) == 2
-                    and row[0].isdigit()
-                    and int(row[0]) in descendants
+            devices = gpu.get("devices", ())
+            ambiguous_lifetime = any(
+                item.get("pid") in descendants and item.get("create_time") != lifetimes[item["pid"]]
+                for row in devices
+                for item in row.get("processes", ())
+            )
+            attributable = [
+                item
+                for row in devices
+                for item in row.get("processes", ())
+                if item.get("pid") in descendants
+                and item.get("create_time") == lifetimes[item["pid"]]
+            ]
+            physical_usage: dict[tuple[str, int], int] = {}
+            for row in devices:
+                for item in row.get("processes", ()):
+                    if (
+                        item.get("pid") not in descendants
+                        or item.get("create_time") != lifetimes[item["pid"]]
+                        or item.get("used_bytes") is None
+                    ):
+                        continue
+                    key = (str(row.get("parent_uuid") or row.get("uuid")), item["pid"])
+                    physical_usage[key] = max(physical_usage.get(key, 0), item["used_bytes"])
+            usage["gpu_observation"] = {
+                "quality": gpu.get("quality"),
+                "observed_at": gpu.get("observed_at"),
+                "error": gpu.get("error"),
+                "statistics": gpu.get("statistics", {}),
+                "process_attribution": "unavailable" if ambiguous_lifetime else "qualified",
+            }
+            if (
+                gpu.get("quality") == "measured"
+                and not ambiguous_lifetime
+                and bool(devices)
+                and all(
+                    row.get("compute_process_count") is not None
+                    and row.get("quality") == "measured"
+                    for row in devices
                 )
+                and all(item.get("used_bytes") is not None for item in attributable)
+            ):
+                usage["gpu_memory_bytes"] = sum(physical_usage.values())
+            usage["process_count"] = len(descendants)
         except Exception:
             usage["process_observation"] = "unavailable"
-        with (job_dir / "usage.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(usage, sort_keys=True) + "\n")
+        from lambdaforge.runtime.ResourceUsageHistory import record_usage
+
+        try:
+            history_summary = record_usage(job_dir, usage)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            history_summary = {"quality": "unavailable", "error": type(error).__name__}
         progress = cls._read_json(job_dir / "progress.json")
         cls._update_state(
             job_dir,
@@ -732,6 +891,7 @@ class ProcessSupervisor:
                 "updated_at_utc": now,
                 "started_at_utc": state.get("started_at_utc", started),
                 "observed_usage": usage,
+                "usage_history_summary": history_summary,
                 "progress": progress if isinstance(progress, Mapping) else None,
             },
         )
@@ -748,7 +908,9 @@ class ProcessSupervisor:
     ) -> tuple[int, ...]:
         if count <= 0:
             return ()
-        lease_root = Path(str(request["lease_root"])).resolve()
+        lease_root = Path(str(request["lease_root"])).absolute()
+        from lambdaforge.runtime.GPUObservation import GPUObservationUnavailable
+
         while True:
             state = cls._read_json(job_dir / "state.json") or {}
             if state.get("state") == JobState.CANCELLED.value:
@@ -757,7 +919,7 @@ class ProcessSupervisor:
                 allocated = cls._acquire_gpus(
                     lease_root, supervisor, count, allow_external_use=allow_external_use
                 )
-            except TimeoutError:
+            except (TimeoutError, GPUObservationUnavailable):
                 allocated = None  # Ordinary host lease contention keeps the Job queued.
             if allocated is not None:
                 return allocated
@@ -767,7 +929,8 @@ class ProcessSupervisor:
                     "state": JobState.QUEUED.value,
                     "updated_at_utc": cls._now(),
                     "heartbeat_at_utc": cls._now(),
-                    "message": f"Waiting for {count} LambdaForge GPU lease(s).",
+                    "message": cls._lease_wait_reason
+                    or f"Waiting for {count} LambdaForge GPU lease(s).",
                 },
             )
             (job_dir / "heartbeat").touch()
@@ -783,7 +946,7 @@ class ProcessSupervisor:
         resources = cls._required_mapping(request.get("resources", {}), "resources")
         cpu_count = int(resources.get("cpu_cores", 1))
         ram_bytes = int(resources.get("ram_bytes", 0))
-        root = Path(str(request["resource_lease_root"])).resolve()
+        root = Path(str(request["resource_lease_root"])).absolute()
         while True:
             try:
                 allocated = cls._acquire_capacity(root, supervisor, cpu_count, ram_bytes)
@@ -800,7 +963,8 @@ class ProcessSupervisor:
                     "state": JobState.QUEUED.value,
                     "updated_at_utc": cls._now(),
                     "heartbeat_at_utc": cls._now(),
-                    "message": f"Waiting for {cpu_count} CPU core(s) and {ram_bytes} RAM bytes.",
+                    "message": cls._lease_wait_reason
+                    or f"Waiting for {cpu_count} CPU core(s) and {ram_bytes} RAM bytes.",
                 },
             )
             (job_dir / "heartbeat").touch()
@@ -814,9 +978,16 @@ class ProcessSupervisor:
         cpu_count: int,
         ram_bytes: int,
     ) -> tuple[int, ...] | None:
-        import psutil
+        from lambdaforge.runtime.HostCoordination import boot_identity, host_identity
+        from lambdaforge.runtime.HostLeaseStore import lease_directory, lease_records
+        from lambdaforge.runtime.HostObservation import (
+            observe_host,
+            pending_ram_bytes,
+            process_tree_memory,
+        )
 
-        root.mkdir(parents=True, exist_ok=True)
+        cls._lease_wait_reason = None
+        scoped = lease_directory(root)
         available_cpus = (
             tuple(sorted(os.sched_getaffinity(0)))
             if hasattr(os, "sched_getaffinity")
@@ -826,8 +997,15 @@ class ProcessSupervisor:
             raise RuntimeError(
                 f"Requested {cpu_count} CPU cores but only {len(available_cpus)} are available."
             )
-        if ram_bytes > psutil.virtual_memory().total:
-            raise RuntimeError("Requested RAM exceeds physical host memory.")
+        capacity = observe_host()
+        effective_cpu = capacity.get("effective_cpu_cores")
+        if effective_cpu is None:
+            return None
+        if cpu_count > effective_cpu:
+            raise RuntimeError("Requested CPU cores exceed effective affinity/cgroup capacity.")
+        available_cpus = tuple(capacity.get("cpu_affinity", available_cpus))
+        if ram_bytes > capacity["effective_total_bytes"]:
+            raise RuntimeError("Requested RAM exceeds physical/cgroup host capacity.")
         with CrossProcessFileLock(
             root / ".leases.lock",
             shared=False,
@@ -836,26 +1014,38 @@ class ProcessSupervisor:
         ):
             occupied: set[int] = set()
             reserved_ram = 0
-            for path in root.glob("job-*.json"):
-                lease = cls._read_json(path)
-                raw = lease.get("supervisor_identity") if lease else None
-                if not isinstance(raw, Mapping) or not ProcessIdentity.from_mapping(raw).matches():
-                    path.unlink(missing_ok=True)
+            for path, lease in lease_records(root, scoped, "job-"):
+                if not cls._host_lease_active(path, lease):
                     continue
-                assert lease is not None
+                owner = ProcessIdentity.from_mapping(lease["supervisor_identity"])
                 occupied.update(int(item) for item in lease.get("cpus", ()))
-                reserved_ram += int(lease.get("ram_bytes", 0))
+                observed = (
+                    process_tree_memory(owner.pid, owner.create_time)
+                    if lease.get("host") == host_identity() and lease.get("boot") == boot_identity()
+                    else {"pss_bytes": None}
+                )
+                reserved_ram += pending_ram_bytes(int(lease.get("ram_bytes", 0)), observed)
             cpus = tuple(item for item in available_cpus if item not in occupied)[:cpu_count]
-            free_ram = int(psutil.virtual_memory().available)
-            if len(cpus) < cpu_count or ram_bytes > max(0, free_ram - reserved_ram):
+            capacity = observe_host()
+            free_ram = capacity["effective_available_bytes"]
+            if (
+                free_ram is None
+                or free_ram <= 0
+                or len(cpus) < cpu_count
+                or ram_bytes > max(0, free_ram - reserved_ram)
+            ):
                 return None
             cls._write_json(
-                root / f"{supervisor.job_id}.json",
+                scoped / f"{supervisor.job_id}.json",
                 {
-                    "lease_version": 1,
+                    "lease_version": 2,
                     "job_id": supervisor.job_id,
                     "cpus": list(cpus),
                     "ram_bytes": ram_bytes,
+                    "ram_demand_known": ram_bytes > 0,
+                    "host": host_identity(),
+                    "boot": boot_identity(),
+                    "capacity": capacity,
                     "supervisor_identity": supervisor.to_dict(),
                     "created_at_utc": cls._now(),
                 },
@@ -864,6 +1054,8 @@ class ProcessSupervisor:
 
     @classmethod
     def _release_capacity(cls, root: Path, job_id: str) -> None:
+        from lambdaforge.runtime.HostLeaseStore import lease_directory, read_lease
+
         if not root.exists():
             return
         with CrossProcessFileLock(
@@ -872,10 +1064,48 @@ class ProcessSupervisor:
             timeout_seconds=10.0,
             poll_interval_seconds=0.05,
         ):
-            path = root / f"{job_id}.json"
-            value = cls._read_json(path)
-            if value and value.get("job_id") == job_id:
-                path.unlink(missing_ok=True)
+            for path in (lease_directory(root) / f"{job_id}.json", root / f"{job_id}.json"):
+                if path.exists():
+                    value = read_lease(path)
+                    if value.get("job_id") == job_id and cls._owned_host_lease(value):
+                        path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _owned_host_lease(value: Mapping[str, Any]) -> bool:
+        from lambdaforge.runtime.HostCoordination import boot_identity, host_identity
+
+        raw = value.get("supervisor_identity")
+        return (
+            value.get("host") == host_identity()
+            and value.get("boot") == boot_identity()
+            and isinstance(raw, Mapping)
+            and raw.get("job_id") == value.get("job_id")
+            and ProcessIdentity.from_mapping(raw).pid == os.getpid()
+            and ProcessIdentity.from_mapping(raw).storage_status() == "alive"
+        )
+
+    @classmethod
+    def _host_lease_active(cls, path: Path, value: Mapping[str, Any]) -> bool:
+        from lambdaforge.runtime.HostCoordination import boot_identity, host_identity
+
+        raw = value.get("supervisor_identity")
+        if not isinstance(raw, Mapping):
+            raise ValueError("Resource lease has missing/corrupt ownership evidence.")
+        owner = ProcessIdentity.from_mapping(raw)
+        # Legacy unscoped files may belong to another shared-home host. A local PID
+        # lookup cannot prove them dead; preserve them until explicit reconciliation.
+        if value.get("host") is None or value.get("boot") is None:
+            cls._lease_wait_reason = (
+                "Waiting for legacy unscoped resource lease ownership to be reconciled; "
+                "a local PID lookup cannot prove its shared-home host or lifetime."
+            )
+            return True
+        if value.get("host") != host_identity():
+            return False
+        if value["boot"] != boot_identity() or owner.storage_status() in {"dead", "reused"}:
+            path.unlink(missing_ok=True)
+            return False
+        return True
 
     @classmethod
     def _acquire_gpus(
@@ -886,35 +1116,75 @@ class ProcessSupervisor:
         *,
         allow_external_use: bool = False,
     ) -> tuple[int, ...] | None:
-        root.mkdir(parents=True, exist_ok=True)
+        from lambdaforge.runtime.HostCoordination import boot_identity, host_identity
+        from lambdaforge.runtime.HostLeaseStore import (
+            gpu_lease_name,
+            lease_directory,
+            lease_records,
+        )
+
+        cls._lease_wait_reason = None
+        scoped = lease_directory(root)
+        # Slow observation/identity discovery never runs inside the outer lease lock.
+        devices = cls._direct_gpu_devices()
+        gpu_indices = tuple(devices)
+        if count > len(gpu_indices):
+            raise RuntimeError(f"Requested {count} GPUs but only {len(gpu_indices)} are visible.")
+        occupied = (
+            set()
+            if allow_external_use
+            else {
+                token
+                for token, row in devices.items()
+                if row.get("quality") != "measured" or row.get("compute_process_count") != 0
+            }
+        )
         with CrossProcessFileLock(
             root / ".leases.lock",
             shared=False,
             timeout_seconds=10.0,
             poll_interval_seconds=0.05,
         ):
-            gpu_indices = cls._gpu_indices()
-            if count > len(gpu_indices):
-                raise RuntimeError(
-                    f"Requested {count} GPUs but only {len(gpu_indices)} are visible."
-                )
-            occupied = set() if allow_external_use else cls._externally_occupied_gpus()
+            active = [
+                value
+                for path, value in lease_records(root, scoped, "gpu-")
+                if cls._host_lease_active(path, value)
+            ]
             available = []
             for index in gpu_indices:
-                path = root / f"gpu-{index}.json"
-                lease = cls._read_json(path)
-                if lease:
-                    raw = lease.get("supervisor_identity")
-                    if isinstance(raw, Mapping) and ProcessIdentity.from_mapping(raw).matches():
-                        continue
-                    path.unlink(missing_ok=True)
-                if not allow_external_use and cls._shared_gpu_leased(root, index):
+                device_uuid = str(devices[index].get("uuid", ""))
+                gpu_lease_name(device_uuid)  # Fail closed before any lease write.
+                if any(
+                    # Old ordinals cannot be compared across CUDA ordering; parent
+                    # exclusive access also conflicts with any of its MIG instances.
+                    not value.get("device_uuid")
+                    or (
+                        (
+                            value["device_uuid"] == device_uuid
+                            or value.get("parent_uuid") == device_uuid
+                            or devices[index].get("parent_uuid") == value.get("device_uuid")
+                        )
+                        and (not allow_external_use or value.get("mode") != "shared")
+                    )
+                    for value in active
+                ):
                     continue
                 if index not in occupied:
                     available.append(index)
             if len(available) < count:
                 return None
-            loads = cls._gpu_loads() if allow_external_use else {}
+            loads = (
+                {
+                    token: (
+                        float(row.get("utilization_percent") or 0),
+                        1 - row["free_bytes"] / row["total_bytes"],
+                    )
+                    for token, row in devices.items()
+                    if row.get("quality") == "measured"
+                }
+                if allow_external_use
+                else {}
+            )
             selected = tuple(
                 sorted(
                     available,
@@ -922,17 +1192,22 @@ class ProcessSupervisor:
                 )[:count]
             )
             for index in selected:
+                device_uuid = str(devices[index]["uuid"])
                 cls._write_json(
-                    root
+                    scoped
                     / (
-                        f"gpu-{index}-shared-{supervisor.job_id}.json"
+                        f"{gpu_lease_name(device_uuid)}-shared-{supervisor.job_id}.json"
                         if allow_external_use
-                        else f"gpu-{index}.json"
+                        else f"{gpu_lease_name(device_uuid)}.json"
                     ),
                     {
-                        "lease_version": 1,
+                        "lease_version": 2,
                         "mode": "shared" if allow_external_use else "exclusive",
+                        "device_uuid": device_uuid,
+                        "parent_uuid": devices[index].get("parent_uuid"),
                         "gpu": index,
+                        "host": host_identity(),
+                        "boot": boot_identity(),
                         "job_id": supervisor.job_id,
                         "supervisor_identity": supervisor.to_dict(),
                         "created_at_utc": cls._now(),
@@ -940,21 +1215,42 @@ class ProcessSupervisor:
                 )
             return selected
 
-    @classmethod
-    def _shared_gpu_leased(cls, root: Path, index: int) -> bool:
-        """Shared access blocks a new exclusive grant, not another shared Job."""
-        active = False
-        for path in root.glob(f"gpu-{index}-shared-*.json"):
-            value = cls._read_json(path)
-            raw = value.get("supervisor_identity") if value else None
-            if isinstance(raw, Mapping) and ProcessIdentity.from_mapping(raw).matches():
-                active = True
+    @staticmethod
+    def _limit_thread_environment(environment: Mapping[str, str], cpu_cores: int) -> dict[str, str]:
+        """Clamp only native child thread limits, preserving lower authored values and grants."""
+        result = dict(environment)
+        for key, proposed in ProcessGuard().cpu_thread_env_updates(max(1, cpu_cores), 1).items():
+            if key.endswith("THREADS") or key in {
+                "ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS",
+                "OPENCV_FOR_THREADS_NUM",
+            }:
+                try:
+                    authored = int(result.get(key, proposed))
+                except ValueError:
+                    authored = int(proposed)
+                result[key] = str(min(max(1, authored), int(proposed)))
             else:
-                path.unlink(missing_ok=True)
-        return active
+                result.setdefault(key, proposed)
+        return result
+
+    @classmethod
+    def _leased_gpu_visibility(cls, root: Path, job_id: str, indices: Sequence[int]) -> str:
+        """Narrow child visibility to attested lease UUIDs, independent of CUDA ordering."""
+        from lambdaforge.runtime.HostLeaseStore import lease_directory, lease_records
+
+        selected = {
+            int(value["gpu"]): str(value["device_uuid"])
+            for _, value in lease_records(root, lease_directory(root), "gpu-")
+            if value.get("job_id") == job_id and cls._owned_host_lease(value)
+        }
+        if len(selected) != len(indices) or any(index not in selected for index in indices):
+            raise RuntimeError("Granted GPU lease identity is missing; refusing ordinal inference.")
+        return ",".join(selected[index] for index in indices)
 
     @classmethod
     def _release_gpus(cls, root: Path, job_id: str, indices: Sequence[int]) -> None:
+        from lambdaforge.runtime.HostLeaseStore import lease_directory, lease_records
+
         if not root.exists():
             return
         with CrossProcessFileLock(
@@ -963,92 +1259,79 @@ class ProcessSupervisor:
             timeout_seconds=10.0,
             poll_interval_seconds=0.05,
         ):
-            for index in indices:
-                for path in (
-                    root / f"gpu-{index}.json",
-                    root / f"gpu-{index}-shared-{job_id}.json",
-                ):
-                    value = cls._read_json(path)
-                    if value and value.get("job_id") == job_id:
-                        path.unlink(missing_ok=True)
+            # Release recorded UUIDs, not a fresh topology mapping of the old ordinals.
+            for path, value in lease_records(root, lease_directory(root), "gpu-"):
+                if value.get("job_id") == job_id and cls._owned_host_lease(value):
+                    path.unlink(missing_ok=True)
 
     @staticmethod
     def _gpu_loads() -> dict[int, tuple[float, float]]:
         """Rank permitted devices by live utilization and occupied VRAM, not index."""
         try:
-            result = subprocess.run(
-                (
-                    "nvidia-smi",
-                    "--query-gpu=index,utilization.gpu,memory.used,memory.total",
-                    "--format=csv,noheader,nounits",
-                ),
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5.0,
-            )
-        except (OSError, subprocess.SubprocessError):
+            devices = ProcessSupervisor._direct_gpu_devices()
+        except (OSError, RuntimeError, ValueError):
             return {}  # Ranking is optional; the Run's physical admission probe is not.
-        loads: dict[int, tuple[float, float]] = {}
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                try:
-                    index, utilization, used, total = (
-                        float(value.strip()) for value in line.split(",")
-                    )
-                    loads[int(index)] = (utilization, used / max(1.0, total))
-                except ValueError:
-                    continue
-        return loads
+        return {
+            token: (
+                float(row.get("utilization_percent") or 0),
+                1 - row["free_bytes"] / row["total_bytes"],
+            )
+            for token, row in devices.items()
+            if row.get("quality") == "measured"
+        }
 
     @staticmethod
     def _gpu_indices() -> tuple[int, ...]:
-        result = subprocess.run(
-            ("nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"),
-            check=False,
-            capture_output=True,
-            text=True,
+        return tuple(ProcessSupervisor._direct_gpu_devices())
+
+    @staticmethod
+    def _direct_gpu_devices() -> dict[int, Mapping[str, Any]]:
+        """Resolve CUDA ordinals once; ordinary memory refreshes share the native cache."""
+        from lambdaforge.runtime.GPUDeviceIdentity import visible_devices
+        from lambdaforge.runtime.GPUObservation import (
+            GPUObservationCache,
+            GPUObservationUnavailable,
         )
-        if result.returncode:
-            return ()
-        indices = tuple(
-            int(line.strip()) for line in result.stdout.splitlines() if line.strip().isdigit()
-        )
+
         inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
-        if inherited is None:
-            return indices
-        # A numeric inherited grant is already a physical subset. Never broaden it with
-        # nvidia-smi's host-wide inventory; UUID/MIG grants belong to the command launcher.
-        permitted = {int(value) for value in inherited.split(",") if value.strip().isdigit()}
-        return tuple(index for index in indices if index in permitted)
+        if inherited is not None:
+            tokens = tuple(value.strip() for value in inherited.split(",") if value.strip())
+            if not tokens or any(
+                value.lower() in {"-1", "none", "void", "nodevfiles"} for value in tokens
+            ):
+                return {}
+        else:
+            tokens = ()
+        snapshot = GPUObservationCache().read(admission=True)
+        if snapshot.get("quality") != "measured":
+            raise GPUObservationUnavailable(
+                "GPU observation unavailable/backoff; awaiting fresh evidence."
+            )
+        count = (
+            len(tokens)
+            if inherited is not None
+            else sum(row.get("parent_uuid") is None for row in snapshot["devices"])
+        )
+        if count == 0:
+            return {}
+        try:
+            rows = visible_devices(snapshot["devices"], count)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise GPUObservationUnavailable("Granted GPU identity is unavailable.") from error
+        keys = (
+            tuple(int(value) for value in tokens)
+            if tokens and all(value.isdigit() for value in tokens)
+            else tuple(range(count))
+        )
+        return dict(zip(keys, rows, strict=True))
 
     @staticmethod
     def _externally_occupied_gpus() -> set[int]:
         """Conservatively avoid GPUs with observable compute processes."""
-        gpu = subprocess.run(
-            ("nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        processes = subprocess.run(
-            ("nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader,nounits"),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if gpu.returncode or processes.returncode:
-            return set()
-        by_uuid = {
-            values[1]: int(values[0])
-            for line in gpu.stdout.splitlines()
-            if len(values := [item.strip() for item in line.split(",")]) == 2
-        }
         return {
-            by_uuid[values[0]]
-            for line in processes.stdout.splitlines()
-            if len(values := [item.strip() for item in line.split(",")]) >= 2
-            and values[0] in by_uuid
+            token
+            for token, row in ProcessSupervisor._direct_gpu_devices().items()
+            if row.get("quality") != "measured" or row.get("compute_process_count") != 0
         }
 
     @classmethod

@@ -2067,20 +2067,29 @@ def test_cpu_dispatch_replaces_stale_queued_work_before_the_straggler_finishes(
     assert len(results) == 3
 
 
-def test_gpu_memory_probe_uses_an_ephemeral_child_process(
+def test_gpu_memory_probe_uses_shared_light_observation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: dict[str, Any] = {}
 
-    def run(command: list[str], **kwargs: Any) -> SimpleNamespace:
-        observed.update(command=command, kwargs=kwargs)
-        return SimpleNamespace(stdout="[[100, 200], [300, 400]]\n")
+    from lambdaforge.runtime.GPUObservation import GPUObservationCache
 
-    monkeypatch.setattr("lambdaforge.work.runner.subprocess.run", run)
+    def read(self: Any, *, admission: bool = False) -> dict[str, Any]:
+        observed["admission"] = admission
+        return {
+            "quality": "measured",
+            "devices": [
+                {"uuid": "GPU-one", "free_bytes": 100, "total_bytes": 200, "quality": "measured"},
+                {"uuid": "GPU-two", "free_bytes": 300, "total_bytes": 400, "quality": "measured"},
+            ],
+        }
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-one,GPU-two")
+    monkeypatch.setattr(GPUObservationCache, "__init__", lambda self: None)
+    monkeypatch.setattr(GPUObservationCache, "read", read)
 
     assert _gpu_memory_inventory(2) == ((100, 200), (300, 400))
-    assert observed["command"][:2] == [__import__("sys").executable, "-c"]
-    assert observed["kwargs"]["timeout"] == 20
+    assert observed["admission"] is True
 
 
 def test_transient_gpu_probe_failure_pauses_admission_without_losing_active_runs(
@@ -2154,18 +2163,17 @@ def test_transient_gpu_probe_failure_pauses_admission_without_losing_active_runs
     assert executors == []
 
 
-def test_gpu_probe_error_retains_bounded_child_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
-    import subprocess
+def test_gpu_probe_error_retains_structured_observation_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lambdaforge.runtime.GPUObservation import GPUObservationCache
 
     def fail(*args: Any, **kwargs: Any) -> None:
         del args, kwargs
-        raise subprocess.CalledProcessError(
-            1,
-            ("python", "-c", "probe"),
-            stderr="AssertionError: only 1 CUDA device(s) visible",
-        )
+        raise RuntimeError("only 1 CUDA device(s) visible")
 
-    monkeypatch.setattr("lambdaforge.work.runner.subprocess.run", fail)
+    monkeypatch.setattr(GPUObservationCache, "__init__", lambda self: None)
+    monkeypatch.setattr(GPUObservationCache, "read", fail)
 
     with pytest.raises(RuntimeError, match="only 1 CUDA device"):
         _gpu_memory_inventory(2)

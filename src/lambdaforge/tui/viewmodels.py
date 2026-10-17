@@ -256,7 +256,7 @@ def entity_key(
     """Return a collision-safe UI identity without treating a display name as an ID."""
     if kind == "cluster":
         return f"cluster:{item.get('cluster', '')}"
-    for field in ("work_id", "execution_id", "primary_job_id"):
+    for field in ("study_series_id", "work_id", "execution_id", "primary_job_id"):
         value = item.get(field)
         if value not in (None, ""):
             return f"{kind}:{field}:{value}"

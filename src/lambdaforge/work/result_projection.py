@@ -195,6 +195,9 @@ def projection(
                     "finished_at_utc",
                     "duration_seconds",
                     "work_class",
+                    "trial",
+                    "metrics",
+                    "objective_observation",
                 )
             }
             for row in rows

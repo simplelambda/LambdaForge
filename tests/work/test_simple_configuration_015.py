@@ -68,23 +68,31 @@ resources: {gpu: 2}
 
 def test_explicit_seeds_and_fixed_sweep_replicates_remain_authoritative(tmp_path: Path) -> None:
     _project(tmp_path)
-    explicit = WorkConfig.from_mapping(
-        {
-            "run": "tests.work_cases.AdaptiveScoreWork",
-            "seeds": [4, 7, 32],
-            "search": {"trials": 2, "quality": [0.0, 1.0]},
-            "objective": {"metric": "score", "mode": "max"},
-        },
-        source=tmp_path / "explicit.yaml",
-    ).levels[0].runs[0]
-    fixed = WorkConfig.from_mapping(
-        {
-            "run": "tests.work_cases.AdaptiveScoreWork",
-            "sweep": {"replicates": 3, "space": {"quality": [0.0, 1.0]}},
-            "objective": {"metric": "accuracy", "mode": "max"},
-        },
-        source=tmp_path / "fixed.yaml",
-    ).levels[0].runs[0]
+    explicit = (
+        WorkConfig.from_mapping(
+            {
+                "run": "tests.work_cases.AdaptiveScoreWork",
+                "seeds": [4, 7, 32],
+                "search": {"trials": 2, "quality": [0.0, 1.0]},
+                "objective": {"metric": "score", "mode": "max"},
+            },
+            source=tmp_path / "explicit.yaml",
+        )
+        .levels[0]
+        .runs[0]
+    )
+    fixed = (
+        WorkConfig.from_mapping(
+            {
+                "run": "tests.work_cases.AdaptiveScoreWork",
+                "sweep": {"replicates": 3, "space": {"quality": [0.0, 1.0]}},
+                "objective": {"metric": "accuracy", "mode": "max"},
+            },
+            source=tmp_path / "fixed.yaml",
+        )
+        .levels[0]
+        .runs[0]
+    )
 
     assert explicit.seeds == (4, 7, 32)
     assert [value["role"] for value in explicit.seed_metadata] == ["explicit"] * 3
@@ -96,17 +104,21 @@ def test_explicit_seeds_and_fixed_sweep_replicates_remain_authoritative(tmp_path
 
 def test_auto_sweep_uses_shared_blocks_and_anytime_valid_decision(tmp_path: Path) -> None:
     _project(tmp_path)
-    definition = WorkConfig.from_mapping(
-        {
-            "run": "tests.work_cases.AdaptiveScoreWork",
-            "sweep": {
-                "space": {"quality": [0.0, 1.0]},
-                "sequential_alpha": 0.025,
+    definition = (
+        WorkConfig.from_mapping(
+            {
+                "run": "tests.work_cases.AdaptiveScoreWork",
+                "sweep": {
+                    "space": {"quality": [0.0, 1.0]},
+                    "sequential_alpha": 0.025,
+                },
+                "objective": "accuracy",
             },
-            "objective": "accuracy",
-        },
-        source=tmp_path / "auto-sweep.yaml",
-    ).levels[0].runs[0]
+            source=tmp_path / "auto-sweep.yaml",
+        )
+        .levels[0]
+        .runs[0]
+    )
     assert definition.study_design is not None
     assert definition.study_design.replication == "auto-blocks"
     assert definition.study_design.sequential_alpha == 0.025

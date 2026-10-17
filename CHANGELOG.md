@@ -10,6 +10,114 @@ metadata rather than invented release numbers.
 
 ## [Unreleased]
 
+### Added
+
+- Generic balanced q=2 Fused Gromov–Wasserstein distance through optional
+  `lambdaforge[optimal-transport]` (POT): weighted structured measures, vector or project-defined
+  attributes, precomputed feature distances, feasible warm starts and inspectable transport/local
+  convergence evidence. Dense allocations are guarded; no application-specific parsing or clustering.
+- One indexed public framework manual per language. Detailed topic guides are consolidated as
+  chapters and historical audits retained in the internal acceptance ledger. Repository, agent,
+  Skill and installed-wheel links follow the new structure. Clustering implementations and shared
+  result/contracts now live in individual class modules while public imports remain unchanged.
+
+- Exact conditional fixed-sweep extensions and selective `sweep.include` points. Native sparse
+  `sweep.candidates` deltas preserve inactive-key absence, controls, seeds and historical evidence;
+  no Cartesian over-generation. Strict preview rejects retained parsers lacking sparse support.
+  Revisioned mode instead permits a reviewed native current-runtime deployment; no old prefix mutation.
+- Useful revisioned extensions: dirty origins or changed project code no longer require false
+  equivalence. A reviewed current-code/native-runtime cohort preserves every prior Run, exact
+  delta, identity and spent budget. Source is pinned again before and after native preparation;
+  actual staged science/identity is attested on the host and pinned through collection/retry. Series
+  history remains unified, while native analysis and offline Code tabs isolate inference per
+  revision and never pool incompatible seed means. `--code-policy strict` retains the earlier gate.
+- Incremental developer UX: task-oriented help from the actual parser, opt-in Bash/Zsh/Fish
+  completion, installed schema export/static field explanation and descriptive native config diff.
+  Scaffolds use directory-derived safe distribution/import names and actual next-step paths.
+  Read-only inspect/diagnose/watch share native catalogues/diagnostics; local Work/Study filters
+  preserve exact navigation and unchanged snapshots. Agent doctor/context and reviewed official
+  Codex registration distinguish availability/registry from handshake. Two packaged Skills gain
+  concrete authoring/design workflows. Broad UX/MCP/report/global-search acceptance remains pending.
+- Bounded derived `results table` JSON/CSV pages with exact metric/Run/Trial selectors, retained
+  provenance, latest/all Attempt views, censored snapshot labels and change-detecting pagination.
+  File destinations are explicit, non-overwriting and outside native Run evidence; no artifact
+  bytes, analysis refits or scientific exports/imports are changed.
+- Native fixed-sweep extensions: edit the original YAML, review exact retained/new cells and
+  explicitly apply only the delta. Same-placement retained managed CPU/GPU environments, successive
+  immutable revisions, cumulative provenance-preserving StudyAnalysis/HTML, Console series grouping,
+  native failed-delta recovery and read-only collection export share existing domain services.
+  Hash-pinned snapshots, idempotent native Job handoff, pre-Job crash reconciliation and retention
+  preserve physical identity and spent budgets. Preview is read-only; exploratory extensions never
+  become retroactive confirmation. Fleet, migration and adaptive/automatic designs remain excluded.
+- Shared lightweight GPU observation with optional official NVML, bounded helper deadlines,
+  UID/host cache and per-device backoff. Shared/command Run starts use GPU/MIG UUID commitments,
+  cooperative fairness and native placement rechecks; physical/cgroup RAM and CPU evidence are
+  qualified. Explicit cluster `resource_safety` profiles, sanitized saved-evidence resource
+  reports and bounded compressed operational usage history are available. The broader resource
+  reform remains in progress; real-site validation is not claimed.
+- Native managed `html_bundle` project tabs retain full-resolution opaque assets with an
+  attested manifest and lazy scoped browser API. The read-only loopback viewer fetches only
+  selected assets through existing transports; portable exports/imports retain complete bytes.
+  Existing self-contained HTML stays supported; missing/corrupt assets show presentation errors.
+
+### Fixed
+
+- Resource dispatch no longer stalls a completely idle Study because helper-process RAM was
+  omitted from its elastic share and counted again at launch. Fresh whole-tree headroom caps only
+  native derived shares; physical/cgroup and aggregate limits remain enforced. Real flat progress
+  ends old startup ramps, allowing bounded packing probes to promote; stable residents use valid
+  learned terminal envelopes without erasing rare-tail risk. Fresh GPU checks retain the approved
+  planner's sibling/exploration context and WAIT evidence. Launch-time vetoes are visible in the
+  resource read model and deduplicated operational history rather than misleading GPU-only waits.
+
+- Fixed extension preparation with large metric semantics: canonical field digests replace raw
+  scientific metadata in SSH argv, preserving exact verification without oversized exec requests.
+  Pre-Execution retries retain the reviewed delta/Series binding and submission pin; local
+  recovery discovery no longer mistakes another Study's Execution for this failed preparation.
+
+- Fixed-sweep extension evidence retains native authored Trial order instead of rebuilding it
+  from alphabetically sorted JSON keys. Read-only snapshots must match frozen configuration
+  exactly, then pass unchanged fingerprint/Attempt checks; ordered metadata survives remote paging.
+  Changed-code and retained-runtime compatibility gates remain enforced.
+- GPU Study recovery is regression-tested from three requested devices to one current `gpu exec`
+  grant for adaptive/repeated/fixed-sweep designs, preserving completed evidence and spent cost.
+  Explicit empty/disabled CUDA visibility no longer falls back to physical indices in direct
+  modes; CPU-only dispatch does not require a GPU grant.
+- Direct outer GPU leases and child visibility now use GPU/MIG UUIDs; CPU/GPU leases are
+  host/boot scoped on shared homes. Ambiguous legacy owners stay protected with queue feedback,
+  not deleted through unrelated local PIDs. Interrupted operational archive temporaries no
+  longer prevent subsequent bounded compaction.
+- Generic external claim/release configuration no longer authorizes unscoped reservation
+  mutation. Use a provider-owned wrapper/manual grant; unsafe automatic claiming is refused
+  explicitly before executing it. MIG parent/instance memory is not double-counted in resource
+  charts/owned attribution; stale process lifetimes cannot receive native affinity updates.
+- Recovery after a verified execution-host reboot no longer treats newly created access
+  sessions as possible descendants of pre-boot Jobs. Exact live Job markers and uncertain
+  post-boot ownership remain protected; previews never change scientific records.
+- MCP tool failures now set `isError` and distinguish expired/stale/claimed approvals, provider
+  uncertainty and internal errors. Declared successful payloads use validated operation-specific
+  schemas, also advertised through the official SDK without private manager overrides.
+- Agent CI uses an explicit isolated virtualenv; dependency unit/offline-failure tests no longer
+  depend on ambient SDK installation. Repository formatting is normalized without AST changes.
+- Resume Study keeps code-change acknowledgement and blocking feedback visible beside its
+  confirmation controls, even for long recovery plans. Missing acknowledgement/validation is
+  explained on click; in-flight validation cannot be bypassed by toggling compatibility, and
+  confirmation dispatches recovery only once.
+- Study recovery no longer mistakes unrelated unreadable SSH/PAM access processes for possible
+  live workers. Direct probes use per-Job lifetime/session evidence from one shared inventory
+  scan; live supervisors, marked orphans and genuinely unresolved owners remain protected.
+  Read-only recovery previews retain successful Runs and report the exact failed Run to retry.
+
+### Added
+
+- Exact project-owned Job cancellation through OPERATE, the shared signed human ApprovalService
+  and native JobService, with pure previews, one-use apply, ownership revalidation and retained
+  scientific evidence. Submission/recovery/deletion/Fleet agent actions remain unsupported.
+- Deterministic bilingual intent discovery with domain/permission/freshness/error metadata;
+  extracted native result and Job-action adapters. All 24 packaged Skills now give task-specific
+  procedures/decision cases with parser-checked commands and actual facade names; approval controls
+  remain pinned while plans scroll.
+
 ## [0.19.0] - 2026-10-11
 
 Agent-native foundations and operational reliability on the existing execution model.

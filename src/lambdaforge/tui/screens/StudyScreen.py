@@ -21,6 +21,7 @@ class StudyScreen(DataScreen):
     """Present adaptive/repeated-seed study state and censored evidence."""
 
     TITLE = "Studies · adaptive HPO, sweeps and repeated seeds"
+    FILTERABLE = True
 
     def __init__(self, loader: Any, *args: Any, **kwargs: Any) -> None:
         super().__init__(loader, *args, **kwargs)
@@ -57,7 +58,7 @@ class StudyScreen(DataScreen):
         table.add_columns(
             "Study", "State", "Health", "Objective", "Candidates", "Running", "Waiting", "Pruned"
         )
-        studies = self._studies(value)
+        studies = self.filter_items(self._studies(value))
         for index, item in enumerate(studies):
             study = item.get("study")
             study = study if isinstance(study, dict) else {}
@@ -87,7 +88,7 @@ class StudyScreen(DataScreen):
     def detail(self, row: int) -> str:
         if not isinstance(self.last_success, dict):
             return "Study data is unavailable."
-        studies = self._studies(self.last_success)
+        studies = self.filter_items(self._studies(self.last_success))
         if not 0 <= row < len(studies):
             return "Study selection is unavailable."
         item = studies[row]
@@ -167,14 +168,14 @@ class StudyScreen(DataScreen):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id != "screen-table" or self._rendering:
             return
-        studies = self._studies(self.last_success)
+        studies = self.filter_items(self._studies(self.last_success))
         if 0 <= event.cursor_row < len(studies):
             self._selected_key = self._key(studies[event.cursor_row])
         self.query_one("#screen-detail", Static).update(self.detail(event.cursor_row))
 
     def open_row(self, row: int) -> None:
         if isinstance(self.last_success, dict):
-            studies = self._studies(self.last_success)
+            studies = self.filter_items(self._studies(self.last_success))
             if 0 <= row < len(studies):
                 self.post_message(EntitySelected("study", studies[row]))
 

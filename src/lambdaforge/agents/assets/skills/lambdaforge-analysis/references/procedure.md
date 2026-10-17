@@ -1,30 +1,30 @@
-# lambdaforge-analysis procedure reference
+# Interpret native Study evidence honestly · procedure
 
-## Native entry point
+## Native discovery/example
 
 ```bash
 lf results list --json
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Run in the intended project. Uppercase selectors/paths are placeholders, not a Work-name guess.
+Inspect installed help first. These commands are metadata/planning; parsing them does not execute science.
 
-## Acceptance
+Use get_study_panel(job_id, view='analysis') explicitly after listing the Study, then inspect only one relevant Trial/Run.
 
-Read compact result/Study panel, then retrieve only relevant Trial/Run evidence; distinguish descriptions from controlled comparisons.
-Do not refit HPO inside an adapter or claim causal confidence from coverage.
+## Decision cases
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+| Situation | Native interpretation / next step |
+|---|---|
+| Two candidates only | Show limited descriptive data without strong inferential claims. |
+| Parameter active only under another value | Interpret conditional/joint support, not global marginal importance alone. |
+| Pruned run has good intermediate score | Mark censored and compare fidelity; preserve display data without treating it as final. |
+| Analysis fails | Report the native diagnostic; do not recompute a speculative replacement client-side. |
 
-## Recovery of uncertainty
+## Verification and handoff
 
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+Coverage/effect magnitude is not scientific confidence or causality; partial evidence never becomes a completed-seed mean.
+An analysis recommendation is not approval to change the objective or launch science.
+
+If a capability is missing, stale or unsupported, retain evidence and explain the exact blocker.
+Do not create a CLI subprocess adapter, a second runner/result store or an application-specific workaround.
 

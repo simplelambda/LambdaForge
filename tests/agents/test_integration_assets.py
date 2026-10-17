@@ -3,7 +3,10 @@
 import importlib
 import inspect
 import json
+import re
+import shlex
 import sys
+from importlib.resources import files
 
 import pytest
 import yaml
@@ -40,6 +43,34 @@ def test_exactly_24_specialized_skills_have_valid_frontmatter_and_local_referenc
         "repeated.yaml",
         "inputs.yaml",
     } <= example_assets().keys()
+
+
+def test_skill_procedures_use_actual_cli_grammar_and_facade_names_without_execution():
+    from lambdaforge.agents.services import AgentServices
+    from lambdaforge.cli.parser import build_parser
+
+    parser = build_parser()
+    commands = 0
+    tool_names = 0
+    root = files("lambdaforge.agents").joinpath("assets/skills")
+    for name in skill_names():
+        procedure = root.joinpath(name, "references/procedure.md").read_text(encoding="utf-8")
+        for block in re.findall(r"```bash\n(.*?)\n```", procedure, flags=re.DOTALL):
+            for line in block.splitlines():
+                if line.startswith("lf "):
+                    # The native CLI removes these global switches before parser dispatch.
+                    arguments = [
+                        a
+                        for a in shlex.split(line)[1:]
+                        if a not in {"--json", "--debug", "--verbose"}
+                    ]
+                    parser.parse_args(arguments)
+                    commands += 1
+        for method in re.findall(r"`([a-z_]+)(?:\([^`]*\))?`", procedure):
+            if method.startswith(("get_", "list_", "knowledge_", "prepare_", "request_", "apply_")):
+                assert callable(getattr(AgentServices, method, None)), (name, method)
+                tool_names += 1
+    assert commands >= 30 and tool_names >= 15
 
 
 def test_apply_is_idempotent_preview_is_read_only_and_customization_is_preserved(tmp_path):

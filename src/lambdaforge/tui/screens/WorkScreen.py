@@ -14,6 +14,7 @@ class WorkScreen(DataScreen):
     """Present semantic Work executions separately from low-level Jobs."""
 
     TITLE = "Work · executions, Attempts, Jobs and logs"
+    FILTERABLE = True
 
     def __init__(self, loader: Any, *args: Any, **kwargs: Any) -> None:
         super().__init__(loader, *args, **kwargs)
@@ -44,7 +45,7 @@ class WorkScreen(DataScreen):
         self._rendering = True
         table.clear(columns=True)
         table.add_columns("Work", "Cluster", "State", "Health", "Attempt", "Progress")
-        items = self._items(value)
+        items = self.filter_items(self._items(value))
         for index, item in enumerate(items):
             table.add_row(
                 str(item.get("name", "-")),
@@ -68,7 +69,7 @@ class WorkScreen(DataScreen):
     def detail(self, row: int) -> str:
         if not isinstance(self.last_success, dict):
             return "Work data is unavailable."
-        items = self._items(self.last_success)
+        items = self.filter_items(self._items(self.last_success))
         if not 0 <= row < len(items):
             return "Work selection is unavailable."
         item = items[row]
@@ -84,14 +85,14 @@ class WorkScreen(DataScreen):
 
     def open_row(self, row: int) -> None:
         if isinstance(self.last_success, dict):
-            items = self._items(self.last_success)
+            items = self.filter_items(self._items(self.last_success))
             if 0 <= row < len(items):
                 self.post_message(EntitySelected("work", items[row]))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id != "screen-table" or self._rendering:
             return
-        items = self._items(self.last_success)
+        items = self.filter_items(self._items(self.last_success))
         if 0 <= event.cursor_row < len(items):
             self._selected_key = self._key(items[event.cursor_row])
         self.query_one("#screen-detail", Static).update(self.detail(event.cursor_row))

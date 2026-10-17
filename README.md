@@ -8,11 +8,11 @@ SSH, or through SLURM. It records inputs, code, parameters, resources, metrics, 
 datasets, attempts, logs and environment provenance without putting infrastructure in scientific
 code.
 
-The [scientific correctness audit](docs/SCIENTIFIC_AUDIT.md) documents acquisition-ordered paired
+The [scientific correctness audit](docs/ai/IMPLEMENTATION.md#history-scientific-audit) documents acquisition-ordered paired
 sweep inference, recovery of committed lookahead blocks and separate predictive/descriptive/formal
 conclusions, including compatibility and explicit unfinished engineering boundaries.
 
-[Operational health and recovery](docs/OPERATIONAL_RELIABILITY.md): `lf health`, durable incidents,
+[Operational health and recovery](docs/MANUAL.md#guide-operational-reliability): `lf health`, durable incidents,
 an independent `lf monitor`, optional SMTP and native retry with relocated YAML (`--config`).
 The Console's **Operational health…** panel uses the same services; cached running is not proof
 of current liveness. The guide includes emergency steps and explicit pending Fleet boundaries.
@@ -23,11 +23,12 @@ history even offline. Rejected recovery requests remain auditable without creati
 
 ## Contents
 
-The [agent integration](docs/ai/INTEGRATION.md) provides a project-pinned Python facade, optional
+The [agent integration](docs/MANUAL.md#guide-integration) provides a project-pinned Python facade, optional
 MCP stdio, 24 packaged Skills and portable Markdown knowledge. `lf init --agents portable
 --knowledge markdown` prepares consumers; **Agents / knowledge…** exposes the same local services.
 Local human-approved note edits, optional dependency management and paired loopback HTTP are
-implemented; scientific agent mutations and several full-reform gates remain explicitly unfinished.
+implemented. Exact Job cancellation adds OPERATE plus separate human review; agent submission,
+recovery/deletion and several full-reform gates remain explicitly unfinished.
 
 1. [Install](#install)
 2. [First Work](#first-work)
@@ -78,7 +79,7 @@ members share one planner and final analysis. Live Run logs/curves and finalized
 and semantic cancellation targets the whole owned family.
 Ordered native metric streams and targeted central pruning support fresh adaptive HPO.
 This is a limited route: checkpoint/fidelity continuation, co-location, recovery/adoption, live expansion and
-distributed export remain gated. See [status and tested boundaries](docs/COORDINATED_STUDIES.md).
+distributed export remain gated. See [status and tested boundaries](docs/MANUAL.md#guide-coordinated-studies).
 Independent cluster submissions remain separate Studies, not shared HPO.
 
 Run bare `lf` in an interactive terminal to open the Research Console. Its Clusters screen adds and
@@ -466,7 +467,7 @@ A sweep fixes its cells. Without a replication count it opens complete shared-se
 sequentially. For alternatives with different applicable parameters, use one conditional space:
 `when: {parent: {in: [a, b]}}` activates a child in several branches. Scalar equality remains valid,
 children may precede parents, and inactive arguments are omitted. See the numbered
-[conditional Study/preflight guide](docs/CONDITIONAL_STUDIES.md) and
+[conditional Study/preflight guide](docs/MANUAL.md#guide-conditional-studies) and
 [runnable example](examples/conditional-sweep.yaml). Root `resources` alone inherits into `steps`;
 root scientific policy must be declared per step, never silently ignored.
 
@@ -1043,20 +1044,12 @@ lf clusters set citius-gpu gpu_access \
   '{mode: command, command_prefix: [gpu, exec]}'
 ```
 
-For a multi-GPU CITIUS Work, or whenever the site requires a persistent claim, configure claim and
-release atomically. This is also the reproducible alternative to making a manual claim in an
-unrelated login shell. The only claim placeholder is `{gpu_count}` and it expands from the maximum
-GPU count declared by the YAML:
-
-```bash
-lf clusters set citius-gpu gpu_access \
-  '{mode: command, command_prefix: [gpu, exec], claim_command: [gpu, claim, --numgpus, "{gpu_count}"], release_command: [gpu, release]}'
-```
-
-Claiming happens in the durable background submission, so waiting for a GPU does not block the
-local terminal. Direct supervisors execute the paired release after success, failure or
-cancellation, and also attempt it when scheduler submission fails. Persistent claim commands are
-rejected for SLURM profiles, where allocation must belong to SLURM or to a self-contained wrapper.
+For a persistent multi-GPU reservation, claim through the provider manually and let `gpu exec`
+reuse that allocation. LambdaForge must not release a user's manual reservation or one still
+used by another Job. Bare `claim_command`/`release_command` pairs are now rejected before any
+reservation command: arbitrary argv provides no verified reservation receipt or scoped cleanup.
+Previously saved profiles remain readable but must remove that unsafe pair before submission.
+Allocation belongs to SLURM or the site wrapper/user, not to an internal coordination lease.
 `gpu exec` receives the immutable managed Python by absolute path, so it does not need to preserve
 a shell/Conda activation.
 
@@ -1073,12 +1066,20 @@ managed environment.
 
 Command allocations may change while a long Study is running. LambdaForge obtains current opaque
 tokens from `gpu_access.visibility_command`; for the usual `[gpu, exec]` prefix it derives
-`[gpu, env]` automatically. A token can only disappear or be restored from the original inherited
+`[gpu, env, --shell]` automatically. A token can only disappear or be restored from the original inherited
 grant—new physical identifiers are never accepted. On shrink, only the verified child Run on each
 revoked token is stopped and requeued with its logical identity/checkpoint; unaffected Runs keep
 going. If the ownership probe is temporarily unavailable, existing Runs are left intact but no new
-Run is admitted. A custom visibility command must print its current comma-separated tokens on its
-first non-empty line.
+Run is admitted. A custom visibility command may print one comma-separated token line or an
+explicit `CUDA_VISIBLE_DEVICES` shell assignment; it is parsed, never executed. Ambiguous output
+is unavailable evidence, not revocation. Cross-format comparison requires pinned UUID evidence.
+
+Ordinary GPU measurement uses the optional official `nvidia-ml-py` binding, isolated timeouts and
+a same-user/host observation cache shared by controllers, supervisors and resource views.
+`shared` and `command` Run starts coordinate by GPU/MIG UUID with temporary startup commitments.
+This does not reserve devices or impose one Run per GPU. RAM observation also respects readable
+cgroup v2 limits and distinguishes RSS, PSS and USS. See [resource safety](docs/MANUAL.md#guide-resource-safety)
+for current guarantees, explicit limitations and the remaining reform work.
 
 The shared mode admits external occupancy while LambdaForge Jobs still coordinate with each other.
 Admission messages in the Run log show launches and periodic waits with current free memory. Since
@@ -1195,7 +1196,7 @@ Executions may release unpinned checkpoints after configurable grace or verified
 Cluster **Clear storage…** previews/confirms native cleanup with background feedback;
 **Clear output** only clears terminal text. `resources.storage` is a future Job commitment admitted
 against physical free space, other leases and safety; a GPU-ready Job may wait for disk. Read the
-[storage guide](docs/STORAGE.md) for exact guarantees and current boundaries.
+[storage guide](docs/MANUAL.md#guide-storage) for exact guarantees and current boundaries.
 `lf storage status --on CLUSTER` inspects usage; `lf storage reconcile --on CLUSTER` reports drift,
 with `--apply` updating diagnostic measurements only. Managed publication copies reserve additional
 space on their destination volume and preserve source evidence if that volume lacks safety margin.
@@ -1210,6 +1211,36 @@ as the concise operational contract; this avoids costly repository crawling and 
 APIs.
 
 ## Study Analysis
+
+Documentation is consolidated in the [indexed framework manual](docs/MANUAL.md), with the same
+public guide in [Spanish](docs/MANUAL.es.md). The former topic files are now detailed chapters;
+historical audits remain in the internal acceptance ledger instead of separate public guides.
+
+For weighted attributed objects, [FGW distance](docs/MANUAL.md#20-fused-gromovwasserstein-distance-fgw)
+uses the optional `lambdaforge[optimal-transport]` POT solver. Geometry, features and weights are
+explicit; the result includes the coupling and local convergence diagnostics. This is a whole-object
+distance, not clustering. See the runnable [example](examples/fgw.py).
+
+To extend a completed fixed sweep, edit its original YAML and choose **Extend Study…** in the
+Console, or review `lf studies extend JOB --config revised.yaml --dry-run` and confirm with
+`--apply --plan-hash HASH`. Only new candidate/seed cells run. Supported local CPU and same-cluster
+retained managed CPU/GPU environments share the native submission pipeline. Successive revisions,
+cumulative Runs/analysis/HTML, history, native delta retry and read-only collection export preserve
+original evidence and physical IDs. See [Study extensions](docs/MANUAL.md#guide-study-extensions) for exact
+compatibility limits. Extend is not Resume, rerun, adaptive-HPO migration or Fleet recovery.
+Conditional sweeps and selective `sweep.include` additions use exact new candidate/seed cells,
+not a Cartesian replay. Changed code/dirty origins now propose a reviewed current-code revision
+instead of blocking expansion. Managed deployments can use a new native environment without
+patching the old prefix. JSON/HTML separate inference by code/runtime revision; use
+`--code-policy strict` to require proven equivalence instead.
+
+For task-oriented help, Bash/Zsh/Fish completion, schema/field guidance, native inspection/watch
+and explicit Codex setup, see [developer experience](docs/MANUAL.md#guide-developer-experience). These are
+incremental ergonomics improvements, not the complete broad Console/agent reform.
+
+Full-resolution project tabs can retain large opaque assets without embedding/downsampling them
+in HTML. See [managed report bundles](docs/MANUAL.md#guide-managed-reports) for the public `html_bundle`
+and browser API, native loopback viewer and portable offline export/import.
 
 Adaptive search answers what to run next; Study Analysis answers what the completed evidence
 supports. A terminal study automatically writes a versioned, atomic `analysis.json`. The same core
@@ -1331,7 +1362,7 @@ sections automatically. Repeated trials/seeds share a tab with a document select
 `section="proteins"` groups several named outputs. LambdaForge checks owned paths/checksums and
 loads the HTML only for explicit report generation. Each document runs in an isolated iframe,
 with external requests and parent-page access blocked. Limits: 16 MiB/document, 64 MiB/report.
-See [project HTML tabs](docs/RESEARCH_ANALYSIS.md#project-html-tabs) for standalone renderer usage.
+See [project HTML tabs](docs/MANUAL.md#guide-research-analysis-project-html-tabs) for standalone renderer usage.
 
 Choose English/Spanish in the header; preferences persist for that file without changing evidence
 or translating authored names. **Research** links prioritized findings to evidence and charts.
@@ -1344,7 +1375,7 @@ automatic discovery. Different/unknown Y units use small multiples; normalizatio
 opt-in. Save views with notes and export/import their JSON specifications. Explore uses **Analyze /
 By / Compare with** and removable chips; explicit axes live in Advanced. Configured questions have
 their own cards, categories form a collapsible tree, and **Evidence** retains the scientific audit.
-See the [research workspace guide](docs/RESEARCH_ANALYSIS.md) for declarations, families,
+See the [research workspace guide](docs/MANUAL.md#guide-research-analysis) for declarations, families,
 methods, statistical caveats, controls and compatibility with older Studies.
 
 Resource admission is evidence too. Each study persists the current GPU/CPU/RAM admission state,
@@ -1360,7 +1391,7 @@ is retained. A persistent loss of the grant fails only after no active Run remai
 Ordinary Works also expose first-class persisted results: exact Run/Attempt selection, metrics,
 structured outputs/checkpoints, project HTML, logs, resources and provenance. Generate offline reports,
 import/export evidence and select exact historical ResultInput/ProductInput dependencies without
-editing YAML. See [Work results and dependencies](docs/WORK_RESULTS.md) and the
+editing YAML. See [Work results and dependencies](docs/MANUAL.md#guide-work-results) and the
 [executable Study-to-visualization example](examples/work_results/README.md).
 
 Bare `lf` opens the Textual 8.2 Research Console on a TTY. The base installation includes
@@ -1516,7 +1547,7 @@ Tar/gzip transfer prefers existing trusted site SSH; otherwise compressed bytes 
 authenticated controller connections without local disk staging. `--route direct|relay` explicitly
 selects policy. Both ends verify exact checksums, atomically publish/register the destination and
 enable `{dataset: corpus@7}`. Configure target `storage.dataset_root`/runtime; keep lf open until
-completion. Conflicting identities remain errors. See [replication](docs/DATASET_RECONSTRUCTION.md).
+completion. Conflicting identities remain errors. See [replication](docs/MANUAL.md#guide-dataset-reconstruction).
 
 To resolve an existing conflict deliberately, open **Datasets → exact identity → Manage copies…**.
 Choose a verified project reference, unregister a specific cluster copy while keeping its files,
@@ -1524,10 +1555,10 @@ or delete that exact managed copy. CLI: `lf datasets adopt NAME@VERSION --on SOU
 and `lf datasets delete/remove NAME@VERSION --on TARGET --content-id ID` preview before `--apply`.
 Adoption selects future resolution only; other copies and historical scientific identities are
 unchanged. Prior declarations are archived and empty retired entries disappear from inventory.
-[Conflict management](docs/DATASET_RECONSTRUCTION.md#conflicting-local-and-remote-registries).
+[Conflict management](docs/MANUAL.md#guide-dataset-reconstruction-conflicting-local-and-remote-registries).
 
 Before expensive reconstruction, use `lf datasets preflight` and `self.outputs.dataset_preflight`.
-[Dataset reconstruction](docs/DATASET_RECONSTRUCTION.md) covers explicit scientific declarations,
+[Dataset reconstruction](docs/MANUAL.md#guide-dataset-reconstruction) covers explicit scientific declarations,
 project-owned comparison, unchanged exact checksums and publication-only recovery. Console Datasets
 discovers all configured cluster locations; divergent content remains visible as a conflict.
 
@@ -1535,13 +1566,13 @@ Study telemetry now exposes `lifecycle.operational`, `.evidence` and `.health` s
 can be waiting/degraded without losing prior failed Attempt evidence, and a recovered Run can be
 successful while its physical history remains visible. Console Study Overview shows these dimensions;
 compact projections carry them without loading Attempt files.
-[Architectural reform](docs/ARCHITECTURAL_REFORM.md) records the current implementation, audit and
+[Architectural reform](docs/ai/IMPLEMENTATION.md#history-architectural-reform) records the current implementation, audit and
 remaining work—not a completed Fleet/products rewrite.
 
 Durable product contracts and the local catalog are available through `lambdaforge.products` and
 `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`. Exact independently promoted bytes
 survive the producer's deletion; import is verified/idempotent and never launches computation.
-See [the product layer](docs/PRODUCTS.md) for working APIs and explicit remaining boundaries:
+See [the product layer](docs/MANUAL.md#guide-products) for working APIs and explicit remaining boundaries:
 local ModelSet selection uses explicit scored snapshots, StudyDecision preserves native selection,
 and typed Work inputs resolve product contracts and record actual consumption. A single Study can
 declare `products` for native finalization; publication-only retry preserves all training evidence.

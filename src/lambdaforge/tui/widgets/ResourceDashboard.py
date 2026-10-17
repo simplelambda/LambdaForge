@@ -252,6 +252,14 @@ class ResourceDashboard(Vertical):
         ram_total = cls._number(observed.get("ram_total_bytes"))
         ram_available = cls._number(observed.get("ram_available_bytes"))
         gpus = cls._sequence(observed.get("gpus"))
+        physical = [item for item in gpus if cls._mapping(item).get("parent_uuid") is None]
+        if physical:
+            gpus = physical  # MIG capacity must not be added to the physical parent's bytes.
+        gpu_measurement_known = bool(gpus) and all(
+            cls._number(cls._mapping(item).get("memory_total_bytes")) is not None
+            and cls._number(cls._mapping(item).get("memory_used_bytes")) is not None
+            for item in gpus
+        )
         gpu_memory_total = sum(
             cls._number(cls._mapping(item).get("memory_total_bytes")) or 0 for item in gpus
         )
@@ -274,7 +282,9 @@ class ResourceDashboard(Vertical):
                 else None,
             ),
             "gpu": (
-                100 * gpu_memory_used / gpu_memory_total if gpu_memory_total else None,
+                100 * gpu_memory_used / gpu_memory_total
+                if gpu_memory_total and gpu_measurement_known
+                else None,
                 100 * (cls._number(mine.get("gpu_memory_bytes")) or 0) / gpu_memory_total
                 if gpu_memory_total and mine.get("job_count")
                 else None,

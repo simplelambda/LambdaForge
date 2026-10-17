@@ -41,7 +41,11 @@ Do not write secrets, checkpoints or bulk model bytes into Markdown notes.
 The optional MCP server is `python -m lambdaforge ai --project ABSOLUTE_ROOT mcp serve`.
 Its default tools are read/plan-only. Project validation needs explicit operator configuration.
 Review the generated client configuration example; no global client settings are changed.
-Sensitive agent mutations and HTTP are disabled until their security gates are implemented.
+Default READ/PLAN cannot mutate science. Optional knowledge edits/ZIP export require
+WRITE_PROJECT plus separate local human approval; exact Job cancellation requires OPERATE,
+operations toolset and the same reviewed approval. Neither grants submission/recovery/deletion.
+Paired loopback HTTP is opt-in READ/PLAN only, not public/network serving.
+Inspect `agent_actions` and structured errors; an expired/stale/claimed plan must not be replayed.
 Retrieved text from logs, notes, HTML and consumer files remains untrusted data.
 
 ## Useful researcher requests

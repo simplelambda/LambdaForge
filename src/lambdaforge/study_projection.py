@@ -653,21 +653,35 @@ def read_html_sections(
     *,
     relocate: bool = False,
     skip_unretained: bool = False,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Explicit report-only read of finalized, checksummed project HTML artifacts.
 
     No directory walking, asset inference or consumer code execution. The reader is
     stdlib-only so the current controller can serve immutable historical runtimes.
     """
     root = owned_root.resolve()
-    sections: list[dict[str, str]] = []
+    owner_execution_id = root.name
+    owner_record = root / "execution.json"
+    if root.name == "execution" and owner_record.is_file() and not owner_record.is_symlink():
+        if owner_record.stat().st_size > 16 * 1024 * 1024:
+            raise ValueError("Oversized report owner record.")
+        owner_execution_id = json.loads(owner_record.read_text()).get("execution_id", root.name)
+    sections: list[dict[str, Any]] = []
     total = 0
     for run in runs:
         if not isinstance(run, Mapping) or not run.get("run_dir"):
             continue
-        if "artifacts" in run and not any(
-            isinstance(artifact, Mapping) and artifact.get("role") == "html-section"
-            for artifact in run.get("artifacts", ())
+        if (
+            "artifacts" in run
+            and not any(
+                isinstance(artifact, Mapping)
+                and artifact.get("role") in {"html-section", "html-bundle"}
+                for artifact in run.get("artifacts", ())
+            )
+            and not any(
+                isinstance(value, Mapping) and value.get("presentation_error")
+                for value in (run.get("outputs") or {}).values()
+            )
         ):
             continue
         raw_dir = Path(str(run["run_dir"]))
@@ -680,7 +694,7 @@ def read_html_sections(
 
             run_id, attempt_id = run.get("run_id"), run.get("attempt_id")
             if (
-                run.get("execution_id") != root.name
+                run.get("execution_id") != owner_execution_id
                 or not isinstance(run_id, str)
                 or re.fullmatch(r"run-[A-Za-z0-9-]+", run_id) is None
                 or not isinstance(attempt_id, str)
@@ -704,8 +718,29 @@ def read_html_sections(
             result = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(result, Mapping):
                 raise ValueError("Invalid HTML section result metadata.")
+        for value in (result.get("outputs") or {}).values():
+            if not isinstance(value, Mapping) or not isinstance(
+                value.get("presentation_error"), Mapping
+            ):
+                continue
+            descriptor = value.get("html_section")
+            if not isinstance(descriptor, Mapping):
+                continue
+            error = value["presentation_error"]
+            sections.append(
+                {
+                    "name": descriptor["name"],
+                    "title": descriptor["title"],
+                    "label": f"{run.get('run_id', 'Run')} · seed {run.get('seed', '—')}",
+                    "html": "",
+                    "presentation_error": f"{error.get('type')}: {error.get('message')}",
+                }
+            )
         for artifact in result.get("artifacts", ()):
-            if not isinstance(artifact, Mapping) or artifact.get("role") != "html-section":
+            if not isinstance(artifact, Mapping) or artifact.get("role") not in {
+                "html-section",
+                "html-bundle",
+            }:
                 continue
             metadata = artifact.get("metadata") or {}
             descriptor = metadata.get("html_section") if isinstance(metadata, Mapping) else None
@@ -722,6 +757,49 @@ def read_html_sections(
             path = run_dir / relative
             if any(parent.is_symlink() for parent in (path, *path.parents)):
                 raise ValueError("Symlinked HTML section artifact is unsafe.")
+            if artifact.get("role") == "html-bundle":
+                from lambdaforge.work.report_bundle import read_manifest, verified_asset
+
+                label = (
+                    f"{run.get('run_id', 'Run')} · seed {run.get('seed', '—')} "
+                    f"· {artifact.get('name')}"
+                )
+                try:
+                    attestation = metadata.get("report_bundle", {})
+                    manifest = read_manifest(path, attestation)
+                    entry_content = verified_asset(path, manifest["entry"]).read_text(
+                        encoding="utf-8"
+                    )
+                    sections.append(
+                        {
+                            "name": name,
+                            "title": title,
+                            "label": label,
+                            "html": entry_content,
+                            "bundle": {
+                                "manifest": manifest,
+                                "source": {
+                                    "owner": str(root),
+                                    "run_dir": str(run_dir),
+                                    "artifact": artifact.get("name"),
+                                    "path": relative.as_posix(),
+                                    "attestation": dict(attestation),
+                                },
+                            },
+                        }
+                    )
+                except (OSError, ValueError) as error:
+                    # Presentation failure is visible without hiding science or other tabs.
+                    sections.append(
+                        {
+                            "name": name,
+                            "title": title,
+                            "label": label,
+                            "html": "",
+                            "presentation_error": str(error),
+                        }
+                    )
+                continue
             if not path.is_file():
                 if skip_unretained and not path.exists():
                     continue

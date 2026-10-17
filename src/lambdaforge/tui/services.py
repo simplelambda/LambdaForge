@@ -213,7 +213,12 @@ class ConsoleServices:
         """Return recent valid local YAML paths from MRU state and existing Job history."""
         choices = {item["path"]: item for item in self.recent_work.items(limit=20)}
         for record in self.jobs.list(refresh=False):
-            source = record.metadata.get("source_config_path") or record.config_path
+            extension = record.metadata.get("study_extension")
+            source = (
+                (extension.get("proposed_yaml") if isinstance(extension, Mapping) else None)
+                or record.metadata.get("source_config_path")
+                or record.config_path
+            )
             if not isinstance(source, str):
                 continue
             path = Path(source).expanduser()
@@ -242,6 +247,7 @@ class ConsoleServices:
     def overview_snapshot(self) -> dict[str, Any]:
         value = self.overview.snapshot()
         self._include_imports(value)
+        self._include_study_series(value)
         self._last_overview = value
         return value
 
@@ -249,7 +255,136 @@ class ConsoleServices:
         """Load only collection-level Work/Study data for those root screens."""
         value = self.overview.research_snapshot()
         self._include_imports(value)
+        self._include_study_series(value)
         return value
+
+    def _include_study_series(self, value: dict[str, Any]) -> None:
+        """Opt-in research grouping from local journals; never fetch remote Run details here."""
+        from lambdaforge.controlplane.OperationalHealth import OperationalHealth
+        from lambdaforge.work.StudySeriesStore import StudySeriesStore
+
+        project = self.catalog.project
+        if project is None:
+            return
+        store = StudySeriesStore(project)
+        if not store.root.exists():
+            return
+        work = value.setdefault("work", {})
+        items = work.setdefault("items", [])
+        records = self.jobs.list(refresh=False)
+        for directory in sorted(store.root.iterdir()):
+            if directory.name == ".locks":
+                continue
+            journal = store.read(directory.name)
+            origin = journal["revisions"][0]
+            jobs = {row.get("job_id") for row in (*journal["revisions"], *journal["operations"])}
+            jobs.update(
+                job for row in journal["operations"] for job in row.get("recovery_jobs", [])
+            )
+            jobs.discard(None)
+            members = [
+                row
+                for row in items
+                if jobs.intersection({row.get("primary_job_id"), *row.get("job_ids", [])})
+                or row.get("execution_id") == origin["execution_id"]
+            ]
+            # The physical jobs remain in the native Jobs inventory/Advanced Jobs view.
+            work.setdefault("series_members", {})[directory.name] = members
+            items[:] = [row for row in items if row not in members]
+            configuration = journal["revisions"][-1]["configuration"]
+            operations = journal["operations"]
+            completed = len(origin["evidence"]) + sum(
+                len(op.get("evidence", [])) for op in operations
+            )
+            latest = next(
+                (
+                    row
+                    for row in records
+                    if operations and row.job_id == operations[-1].get("job_id")
+                ),
+                None,
+            )
+            seen: set[str] = set()
+            while latest is not None and latest.job_id not in seen:
+                seen.add(latest.job_id)
+                children = [record for record in records if record.retry_of == latest.job_id]
+                if len(children) != 1:
+                    break
+                latest = children[0]
+            state = latest.state.value if latest else "planned"
+            required = journal["revisions"][-1]["required_cells"]
+            items.append(
+                {
+                    "study_series_id": directory.name,
+                    "name": configuration.get("name", "Study series"),
+                    "kind": "study-series",
+                    "cluster": origin.get("target", "local"),
+                    "state": state,
+                    "operational": (
+                        OperationalHealth.describe(latest) if latest is not None else {}
+                    ),
+                    "study_expected": True,
+                    "revision_count": len(journal["revisions"]),
+                    "primary_job_id": latest.job_id if latest else origin.get("job_id"),
+                    "job_ids": sorted(jobs),
+                    "progress": {"completed": completed, "total": len(required), "unit": "Runs"},
+                    "study": {
+                        "objective": configuration["objective"],
+                        "counts": {
+                            "candidates": len({cell["candidate_id"] for cell in required}),
+                            "completed_runs": completed,
+                            "queued_runs": len(required) - completed,
+                            "active_runs": sum(
+                                (member.get("study") or {}).get("counts", {}).get("active_runs", 0)
+                                for member in members
+                            ),
+                        },
+                    },
+                }
+            )
+
+    def study_series_overview(
+        self,
+        series: str,
+        *,
+        refresh: bool = False,
+        include_live: bool = False,
+    ) -> dict[str, Any]:
+        from lambdaforge.controlplane.StudyExtensionService import StudyExtensionService
+
+        service = StudyExtensionService(catalog=self.catalog, jobs=self.jobs, results=self.results)
+        if refresh:
+            service.refresh(series)
+        return service.overview(series, include_live=include_live)
+
+    def study_series_analysis(self, series: str) -> dict[str, Any]:
+        from lambdaforge.controlplane.StudyExtensionService import StudyExtensionService
+
+        return StudyExtensionService(
+            catalog=self.catalog, jobs=self.jobs, results=self.results
+        ).analysis(series)
+
+    def study_series_history(self, series: str) -> dict[str, Any]:
+        from lambdaforge.controlplane.StudyExtensionService import StudyExtensionService
+
+        return StudyExtensionService(
+            catalog=self.catalog, jobs=self.jobs, results=self.results
+        ).history(series)
+
+    def study_series_report(self, series: str, output: Path) -> Path:
+        from lambdaforge.analysis.Report import write_html
+
+        return write_html(self.study_series_analysis(series), output)
+
+    def study_series_native_work(self, job_id: str) -> dict[str, Any]:
+        return self.works.show(job_id).to_dict()
+
+    def study_series_export(self, series: str, destination: Path) -> dict[str, Any]:
+        from lambdaforge.controlplane.StudyExtensionService import StudyExtensionService
+
+        return StudyExtensionService(
+            catalog=self.catalog, jobs=self.jobs, results=self.results
+        ).export(series, destination)
 
     def _include_imports(self, value: dict[str, Any]) -> None:
         from lambdaforge.work.ImportedStudy import ImportedStudy
@@ -282,6 +417,10 @@ class ConsoleServices:
     def cluster_resources(self, name: str) -> dict[str, Any]:
         """Return one redacted live resource snapshot for visual refresh."""
         return self.resources.get(name).to_dict()
+
+    def cluster_resource_report(self, name: str) -> dict[str, Any]:
+        """Sanitized metadata only, without probing the cluster or loading study details."""
+        return self.resources.diagnostic_report(cluster=name, limit=200)
 
     def dataset_rows(self) -> list[dict[str, Any]]:
         records = self.datasets.list(all_clusters=True)
@@ -358,6 +497,12 @@ class ConsoleServices:
 
     def report(self, selector: str, output: Path) -> Path:
         return self.results.report(selector, output)
+
+    def open_report(self, output: Path) -> str:
+        """Native scoped presentation server only when the report declares lazy assets."""
+        from lambdaforge.analysis.ReportViewer import open_report
+
+        return open_report(output, jobs=self.jobs)
 
     def work_result_view(self, work: Mapping[str, Any], **options: Any) -> dict[str, Any]:
         """Shared Console route for native/provider/imported evidence, selected on demand."""
@@ -463,10 +608,19 @@ class ConsoleServices:
             return imported.analysis(full=full)
         return self.jobs.study_panel(job_id, "analysis-report" if full else "analysis")
 
-    def study_report_sections(self, job_id: str) -> list[dict[str, str]]:
+    def study_report_sections(self, job_id: str) -> list[dict[str, Any]]:
         """Explicit report generation only; ordinary Study views never fetch project HTML."""
         if self._imported(job_id):
-            return []  # Original project HTML remains in the portable archive.
+            from lambdaforge.study_projection import read_html_sections
+
+            selector = job_id.removeprefix("import:")
+            selected = self.results.select(selector)
+            return read_html_sections(
+                selected.get("runs", ()),
+                self.results.execution_directory(selector),
+                relocate=True,
+                skip_unretained=True,
+            )
         return self.jobs.study_panel(job_id, "report-sections").get("sections", [])
 
     def study_hpo(self, job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -571,6 +725,56 @@ class ConsoleServices:
             config=config,
             config_sha256=config_sha256,
         ).to_dict()
+
+    def extension_context(self, work: Mapping[str, Any]) -> dict[str, Any]:
+        """Resolve the exact origin and authored YAML; no guessed latest Execution."""
+        target = str(work.get("cluster", "local"))
+        if work.get("study_series_id"):
+            from lambdaforge.work.StudySeriesStore import StudySeriesStore
+
+            assert self.catalog.project is not None
+            series = StudySeriesStore(self.catalog.project).read(str(work["study_series_id"]))
+            return {
+                "study": series["study_series_id"],
+                "config": series["revisions"][-1]["proposed_yaml"],
+                "target": target,
+            }
+        job_id = work.get("study_selector") or work.get("primary_job_id")
+        source = None
+        execution = work.get("execution_id")
+        if job_id:
+            record = self.jobs.get(str(job_id), refresh=False)
+            extension = record.metadata.get("study_extension")
+            source = (
+                (extension.get("proposed_yaml") if isinstance(extension, Mapping) else None)
+                or record.metadata.get("source_config_path")
+                or record.config_path
+            )
+            execution = str(job_id)
+        if not execution:
+            raise ValueError("Select an exact completed native Execution to extend.")
+        from lambdaforge.work.recovery import read_owned_json
+
+        if source is None:
+            directory = self.results.execution_directory(str(execution))
+            source = read_owned_json(directory / "execution.json")["source"]
+        return {"study": str(execution), "config": str(source), "target": target}
+
+    def extension_preview(self, context: Mapping[str, Any], config: str) -> dict[str, Any]:
+        from lambdaforge.controlplane.StudyExtensionService import StudyExtensionService
+
+        return StudyExtensionService(
+            catalog=self.catalog, jobs=self.jobs, results=self.results
+        ).preview(str(context["study"]), config, target=str(context["target"]))
+
+    def extend_study(
+        self, context: Mapping[str, Any], config: str, *, plan_hash: str
+    ) -> dict[str, Any]:
+        from lambdaforge.controlplane.StudyExtensionService import StudyExtensionService
+
+        return StudyExtensionService(
+            catalog=self.catalog, jobs=self.jobs, results=self.results
+        ).apply(str(context["study"]), config, target=str(context["target"]), plan_hash=plan_hash)
 
     def dataset_describe(self, selector: str) -> dict[str, Any]:
         return self.datasets.describe(selector)

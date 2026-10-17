@@ -41,6 +41,7 @@ from lambdaforge.hpo.AdaptiveResources import (
     RESOURCE_FRONTIER_LIMIT,
     ActiveResourceCommitment,
     ActiveResourceEvidence,
+    AdmissionDecision,
     AdmissionMode,
     BoundedResourceTrajectory,
     CandidateResourceAction,
@@ -5971,6 +5972,7 @@ def _execute_gpu_admitted_runs(
     active_commitments: dict[Any, ActiveResourceCommitment] = {}
     resource_trajectories: dict[Any, BoundedResourceTrajectory] = {}
     resource_metadata: dict[Any, dict[str, Any]] = {}
+    launch_blocks: dict[tuple[str, int], str] = {}
     code_fingerprint, environment_fingerprint = _resource_runtime_fingerprints(control_root)
     next_wait_log = 0.0
     consecutive_probe_failures = 0
@@ -6296,7 +6298,7 @@ def _execute_gpu_admitted_runs(
                 time.sleep(min(_GPU_ADMISSION_POLL_SECONDS, next_resource_sample - now))
             continue
         try:
-            memory = _gpu_memory_inventory(resources.gpu_count)
+            memory, observed_slots = _refresh_gpu_memory_inventory(resources.gpu_count, memory)
         except RuntimeError as error:
             # Observation is not execution.  A transient NVML/driver/CUDA probe failure must
             # never tear down healthy Runs that are already using the allocation.
@@ -6341,7 +6343,9 @@ def _execute_gpu_admitted_runs(
         live_evidence = (
             _update_active_resource_commitments(
                 memory,
-                pending=pending,
+                pending={
+                    future: item for future, item in pending.items() if item[1] in observed_slots
+                },
                 commitments=active_commitments,
                 trajectories=resource_trajectories,
                 metadata=resource_metadata,
@@ -6406,7 +6410,18 @@ def _execute_gpu_admitted_runs(
             hardware_labels=hardware_labels,
             external_activity=_gpu_compute_activity(visible_gpus),
         )
-        admission_slots = granted_slots if visibility_probe_available else set()
+        devices = tuple(
+            replace(
+                device,
+                observation_quality=(
+                    "measured" if device.index in observed_slots else "unavailable"
+                ),
+            )
+            for device in devices
+        )
+        admission_slots = (
+            granted_slots.intersection(observed_slots) if visibility_probe_available else set()
+        )
         # HPO planning used to refill only after a terminal Run event.  A narrow initial
         # frontier could therefore be fully admitted while another GPU stayed idle for hours;
         # the scientifically deferred actions were not the dispatcher's actual queue.  Resource
@@ -6475,7 +6490,7 @@ def _execute_gpu_admitted_runs(
                         configured_runs_per_gpu=policy.runs_per_gpu,
                         user_minimum_bytes=required,
                         exploration_evaluations=(),
-                        granted_slots=admission_slots,
+                        granted_slots=granted_slots,
                         allocation_probe_available=visibility_probe_available,
                         requested_gpu_count=resources.gpu_count,
                     )
@@ -6602,12 +6617,13 @@ def _execute_gpu_admitted_runs(
                     configured_runs_per_gpu=policy.runs_per_gpu,
                     user_minimum_bytes=required,
                     exploration_evaluations=planner.last_exploration_evaluations,
-                    granted_slots=admission_slots,
+                    granted_slots=granted_slots,
                     allocation_probe_available=visibility_probe_available,
                     requested_gpu_count=resources.gpu_count,
                 )
             )
         launched = False
+        launch_waits: list[dict[str, Any]] = []
         for slot in slots:
             if not queued or len(pending) >= parallelism:
                 break
@@ -6650,11 +6666,31 @@ def _execute_gpu_admitted_runs(
                 action=action,
                 device=devices[slot],
                 model=resource_model,
+                planner=planner,
+                decision=selected_decision,
+                devices=tuple(device for device in devices if device.index in admission_slots),
             )
             if started_run is None:
                 # Another Study is checking/starting on this physical GPU, or its fresh
                 # headroom no longer fits. Preserve the exact queued identity for the next poll.
+                reason = value.get("resource_launch_block")
+                launch_waits.append(
+                    {
+                        "candidate": action.key,
+                        "trial": value.get("trial_index"),
+                        "gpu": slot,
+                        "reason": reason or "fresh-launch-check-did-not-admit",
+                    }
+                )
+                block_key = (action.key, slot)
+                if isinstance(reason, str) and launch_blocks.get(block_key) != reason:
+                    resource_store.record_event(
+                        "RESOURCE_LAUNCH_WAIT",
+                        {"reason": reason, "gpu": slot, "candidate": action.key},
+                    )
+                    launch_blocks[block_key] = reason
                 continue
+            launch_blocks.pop((action.key, slot), None)
             future, pool = started_run
             queued.remove(next(item for item in queued if item is action.specification))
             executors.append(pool)
@@ -6731,6 +6767,24 @@ def _execute_gpu_admitted_runs(
             )
             launched = True
 
+        if telemetry is not None and launch_waits:
+            telemetry.admission_state(
+                _resource_admission_diagnostics(
+                    devices,
+                    admitted=admitted,
+                    blocked=blocked,
+                    pending=len(queued),
+                    max_parallel=policy.max_parallel,
+                    configured_runs_per_gpu=policy.runs_per_gpu,
+                    user_minimum_bytes=required,
+                    exploration_evaluations=planner.last_exploration_evaluations,
+                    granted_slots=granted_slots,
+                    allocation_probe_available=visibility_probe_available,
+                    requested_gpu_count=resources.gpu_count,
+                    launch_waits=launch_waits,
+                )
+            )
+
         _rebalance_host_cpu_leases(
             [value for value, _slot, _pool in pending.values()], resources, parallelism
         )
@@ -6748,6 +6802,11 @@ def _execute_gpu_admitted_runs(
             )
             leading = blocked[0] if blocked else None
             cause = f"; leading blocked trial={leading.trial}: {leading.reason}" if leading else ""
+            if launch_waits:
+                cause = (
+                    f"; launch blocked trial={launch_waits[0]['trial']}: "
+                    f"{launch_waits[0]['reason']}"
+                )
             exploration = next(
                 (
                     value
@@ -6843,28 +6902,118 @@ def _launch_gpu_run(
     action: CandidateResourceAction,
     device: GPUResourceState,
     model: ResourceDemandModel,
+    planner: GPUPlacementPlanner | None = None,
+    decision: AdmissionDecision | None = None,
+    devices: Sequence[GPUResourceState] = (),
 ) -> tuple[Any, ProcessPoolExecutor] | None:
     """Start one fresh worker, coordinating shared-host admission across Studies."""
+    value.pop("resource_launch_block", None)
     raw_root = os.environ.get("LAMBDAFORGE_GPU_ADMISSION_ROOT")
+    peer_startup_bytes = 0
+
+    def capacity_check(extra: int) -> bool:
+        nonlocal peer_startup_bytes
+        peer_startup_bytes = extra
+        return True  # The same native planner performs the fresh recheck inside launch().
 
     def launch() -> tuple[Any, ProcessPoolExecutor] | None:
+        from lambdaforge.runtime.HostObservation import observe_host, process_tree_memory
+
+        try:
+            host = observe_host()
+            run_resources = value.get("definition", {}).get("resources", {})
+            required_ram = int(run_resources.get("ram_bytes", 0) or 0)
+            available_ram = host["effective_available_bytes"]
+            if available_ram is None or available_ram <= 0 or required_ram > available_ram:
+                value["resource_launch_block"] = "host_ram_pressure_or_unavailable"
+                return None
+            if resources.ram_bytes:
+                import psutil
+
+                own_memory = process_tree_memory(os.getpid(), psutil.Process().create_time())
+                resident = own_memory.get("pss_bytes")
+                if resident is None:
+                    # RSS is an explicitly conservative upper bound here, not unique RAM or
+                    # a number to subtract from physical availability for another Job.
+                    resident = own_memory.get("rss_bytes")
+                native_lease = value.get("host_resource_lease")
+                if (
+                    resident is not None
+                    and isinstance(native_lease, Mapping)
+                    and native_lease.get("policy_version") == "elastic-host-lease-v1"
+                    and native_lease.get("aggregate")
+                    == {
+                        "cpu": resources.cpu_cores,
+                        "ram_bytes": resources.ram_bytes,
+                        "storage_bytes": resources.storage_bytes,
+                    }
+                ):
+                    # Derive and validate against the same fresh whole-tree observation.
+                    # Only the native elastic share can shrink; an explicit independent
+                    # per-Run RAM requirement must still fail closed below.
+                    lease = HostResourceLease.allocate(
+                        resources,
+                        active_runs=int(native_lease["active_runs_at_dispatch"]),
+                        hard_concurrency_ceiling=int(native_lease["hard_concurrency_ceiling"]),
+                        controller_memory_bytes=int(native_lease["controller_memory_bytes"]),
+                        resident_memory_bytes=resident,
+                    )
+                    required_ram = min(required_ram, lease.ram_commitment_bytes)
+                    lease = replace(lease, ram_commitment_bytes=required_ram)
+                    value["definition"] = {
+                        **value["definition"],
+                        "resources": {**run_resources, "ram_bytes": required_ram},
+                    }
+                    value["host_resource_lease"] = {**native_lease, **lease.to_dict()}
+                if (
+                    resident is None
+                    or resident >= resources.ram_bytes
+                    or required_ram <= 0
+                    or resident + required_ram > resources.ram_bytes
+                ):
+                    value["resource_launch_block"] = "study_ram_allocation_headroom_or_unknown"
+                    return None
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            value["resource_launch_block"] = "host_memory_observation_unavailable"
+            return None
         if raw_root:
             try:
-                free, total = _gpu_memory_inventory(resources.gpu_count)[slot]
+                from lambdaforge.runtime.GPUObservation import GPUObservationCache
+
+                sample = GPUObservationCache().read(admission=True)
+                row = _gpu_observation_slot(sample, resources.gpu_count, slot)
+                if sample.get("quality") != "measured" or row.get("quality") != "measured":
+                    raise RuntimeError("GPU memory observation unavailable.")
+                free, total = int(row["free_bytes"]), int(row["total_bytes"])
             except RuntimeError:
+                value["resource_launch_block"] = "gpu_observation_unavailable"
                 return None  # Observation failure is not permission to start a Run.
             fresh = replace(
                 device,
                 free_bytes=free,
                 total_bytes=total,
+                peer_startup_bytes=peer_startup_bytes,
                 external_bytes=max(
                     0, total - free - sum(item.current_bytes for item in device.active)
                 ),
             )
-            admitted, _blocked = GPUPlacementPlanner(model).place(
-                (action,), (fresh,), max_launches=1, now=time.monotonic()
-            )
-            if not admitted:
+            if planner is not None and decision is not None:
+                allowed, reason = planner.recheck_launch(action, fresh, decision, devices=devices)
+            else:
+                # Standalone helper callers have no authorization for an exploratory step.
+                admitted, blocked = GPUPlacementPlanner(model).place(
+                    (action,), (fresh,), max_launches=1, now=time.monotonic()
+                )
+                allowed = bool(admitted) and admitted[0].admission_mode != "EXPLORATORY_ADMISSION"
+                reason = (
+                    "missing-native-exploration-approval"
+                    if admitted and not allowed
+                    else blocked[0].reason
+                    if blocked
+                    else "fresh-device-placement-unavailable"
+                )
+            if not allowed:
+                value["resource_launch_block"] = reason
                 return None
         pool = ProcessPoolExecutor(
             max_workers=1,
@@ -6878,58 +7027,157 @@ def _launch_gpu_run(
             pool.shutdown(wait=True, cancel_futures=True)
             raise
 
-    return (
-        shared_gpu_launch(
-            Path(raw_root), token, launch, stagger_seconds=_GPU_LAUNCH_STAGGER_SECONDS
+    stable_token = token
+    observed_pids = {}
+    if raw_root:
+        from lambdaforge.runtime.GPUObservation import GPUObservationCache
+
+        try:
+            snapshot = GPUObservationCache().read(admission=True)
+            row = _gpu_observation_slot(snapshot, resources.gpu_count, slot)
+            stable_token = str(row["uuid"])
+            observed_pids = {
+                item["pid"]: item["used_bytes"]
+                for item in row.get("processes", ())
+                if item.get("used_bytes") is not None
+            }
+        except (OSError, RuntimeError, ValueError, KeyError):
+            return None
+    if not raw_root:
+        return launch()
+    try:
+        from lambdaforge.runtime.ResourceSafetyPolicy import ResourceSafetyPolicy
+
+        operational = ResourceSafetyPolicy.inherited()
+        learned_startup = action.prediction_for(device).predicted_time_to_envelope_seconds
+        startup_window = operational.startup_seconds
+        if (
+            isinstance(learned_startup, (int, float))
+            and math.isfinite(learned_startup)
+            and learned_startup > 0
+        ):
+            startup_window = min(3600.0, max(startup_window, learned_startup))
+
+        def coordination_wait(reason: str) -> None:
+            value["resource_launch_block"] = reason
+
+        return shared_gpu_launch(
+            Path(raw_root),
+            stable_token,
+            launch,
+            stagger_seconds=_GPU_LAUNCH_STAGGER_SECONDS,
+            startup_bytes=action.prediction_for(device).commitment_bytes,
+            metadata={
+                "job_state_path": str(
+                    Path(os.environ["LAMBDAFORGE_JOB_RESULT_PATH"]).with_name("state.json")
+                )
+                if os.environ.get("LAMBDAFORGE_JOB_RESULT_PATH")
+                else None,
+                "job": os.environ.get("LAMBDAFORGE_JOB_ID"),
+                "study": value.get("execution_id"),
+                "run": value.get("run_id"),
+                "attempt": value.get("attempt_number"),
+                "priority": operational.priority,
+                "expected_seconds": action.prediction_for(device).predicted_duration_seconds,
+                "startup_window_source": "compatible-time-to-envelope"
+                if startup_window > operational.startup_seconds
+                else "operational-default",
+                "worker_identity_path": str(value["hpo_worker_identity_path"])
+                if value.get("hpo_worker_identity_path") is not None
+                else None,
+            },
+            observed_pid_bytes=observed_pids,
+            capacity_check=capacity_check,
+            startup_seconds=startup_window,
+            fairness_wait_seconds=operational.fairness_wait_seconds,
+            waiter_ttl_seconds=operational.waiter_ttl_seconds,
+            physical_free_bytes=int(row["free_bytes"])
+            if row.get("quality") == "measured"
+            else None,
+            on_wait=coordination_wait,
         )
-        if raw_root
-        else launch()
-    )
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+        # A damaged/contended operational ledger cannot authorize a launch or kill healthy
+        # siblings. The controller exposes a deduplicated wait event and collects Futures.
+        value["resource_launch_block"] = f"shared_admission_unavailable:{type(error).__name__}"
+        return None
+
+
+_GPU_BOUND_IDENTITIES: dict[tuple[int, str | None, int], tuple[str, ...]] = {}
+
+
+def _gpu_observation_slot(snapshot: Mapping[str, Any], count: int, slot: int) -> Mapping[str, Any]:
+    """A failed sibling must not break this device's pinned original grant resolution."""
+    from lambdaforge.runtime.GPUDeviceIdentity import visible_devices
+
+    key = (os.getpid(), os.environ.get("CUDA_VISIBLE_DEVICES"), count)
+    bound = _GPU_BOUND_IDENTITIES.get(key)
+    if bound is None:
+        rows = visible_devices(snapshot["devices"], count)
+        _GPU_BOUND_IDENTITIES[key] = tuple(str(row["uuid"]) for row in rows)
+        return rows[slot]
+    matches = [row for row in snapshot.get("devices", ()) if row.get("uuid") == bound[slot]]
+    if len(matches) != 1:
+        raise RuntimeError("Pinned granted GPU disappeared; no remapping is permitted.")
+    return matches[0]
+
+
+def _refresh_gpu_memory_inventory(
+    gpu_count: int, previous: Sequence[tuple[int, int]]
+) -> tuple[tuple[tuple[int, int], ...], set[int]]:
+    """Retain labelled last-known capacity for failed slots, never admit using their numbers."""
+    try:
+        return _gpu_memory_inventory(gpu_count), set(range(gpu_count))
+    except RuntimeError as original:
+        from lambdaforge.runtime.GPUObservation import GPUObservationCache
+
+        key = (os.getpid(), os.environ.get("CUDA_VISIBLE_DEVICES"), gpu_count)
+        if key not in _GPU_BOUND_IDENTITIES or len(previous) != gpu_count:
+            raise
+        sample = GPUObservationCache().read(admission=True)
+        if sample.get("quality") != "measured":
+            raise original
+        values, observed = list(previous), set()
+        for slot in range(gpu_count):
+            try:
+                row = _gpu_observation_slot(sample, gpu_count, slot)
+                if row.get("quality") == "measured":
+                    values[slot] = (int(row["free_bytes"]), int(row["total_bytes"]))
+                    observed.add(slot)
+            except RuntimeError:
+                continue
+        if not observed:
+            raise original
+        return tuple(values), observed
 
 
 def _gpu_memory_inventory(gpu_count: int) -> tuple[tuple[int, int], ...]:
-    """Read VRAM in a short-lived probe so the controller retains no CUDA contexts.
+    """Read fresh shared NVML memory, never import Torch or allocate compute contexts."""
+    if gpu_count <= 0:
+        return ()
+    from lambdaforge.runtime.GPUDeviceIdentity import visible_devices
+    from lambdaforge.runtime.GPUObservation import GPUObservationCache
 
-    Calling ``torch.cuda.mem_get_info`` in the long-lived HPO controller creates one visible CUDA
-    process per device.  Besides confusing researchers, those otherwise idle contexts consume
-    memory that can prevent the last packed Run from satisfying its admission threshold.  The
-    child inherits the exact site grant and exits immediately after emitting bounded JSON.
-    """
-    script = (
-        "import json, torch; "
-        f"expected={gpu_count}; "
-        "count=torch.cuda.device_count(); "
-        "assert count >= expected, f'only {count} CUDA device(s) visible'; "
-        "print(json.dumps([list(map(int, torch.cuda.mem_get_info(i))) "
-        "for i in range(expected)]))"
-    )
     try:
-        completed = subprocess.run(  # noqa: S603
-            [sys.executable, "-c", script],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=20,
+        snapshot = GPUObservationCache().read(admission=True)
+        if snapshot.get("quality") != "measured":
+            raise RuntimeError(str(snapshot.get("error", "GPU observation unavailable/backoff")))
+        key = (os.getpid(), os.environ.get("CUDA_VISIBLE_DEVICES"), gpu_count)
+        devices = (
+            tuple(_gpu_observation_slot(snapshot, gpu_count, slot) for slot in range(gpu_count))
+            if key in _GPU_BOUND_IDENTITIES
+            else visible_devices(snapshot["devices"], gpu_count)
         )
-        decoded = json.loads(completed.stdout)
-        if not isinstance(decoded, list) or len(decoded) != gpu_count:
-            raise ValueError("CUDA probe returned an unexpected device count.")
-        observed = tuple(
-            (int(item[0]), int(item[1]))
-            for item in decoded
-            if isinstance(item, list) and len(item) == 2
+        if any(row.get("quality") != "measured" for row in devices):
+            raise RuntimeError("A granted GPU has unavailable memory evidence.")
+        _GPU_BOUND_IDENTITIES[(os.getpid(), os.environ.get("CUDA_VISIBLE_DEVICES"), gpu_count)] = (
+            tuple(str(row["uuid"]) for row in devices)
         )
-        if len(observed) != gpu_count:
-            raise ValueError("CUDA probe returned malformed memory records.")
-        return observed
+        return tuple((int(row["free_bytes"]), int(row["total_bytes"])) for row in devices)
     except Exception as error:
-        detail = ""
-        if isinstance(error, subprocess.CalledProcessError):
-            output = (error.stderr or error.stdout or "").strip()
-            if output:
-                detail = f" Probe output: {output[-1200:]}"
         raise RuntimeError(
-            f"CUDA GPU admission could not read current device memory safely.{detail}"
+            "GPU admission could not read fresh granted-device memory safely: "
+            f"{type(error).__name__}: {error}"
         ) from error
 
 
@@ -6939,27 +7187,15 @@ def _gpu_hardware_labels(
 ) -> tuple[str, ...]:
     """Read stable model labels once, retaining capacity-only compatibility as a safe fallback."""
     fallback = tuple(f"unknown-vram-{total}" for _free, total in memory)
-    script = (
-        "import json, torch; "
-        f"expected={gpu_count}; "
-        "assert torch.cuda.device_count() >= expected; "
-        "print(json.dumps([str(torch.cuda.get_device_properties(i).name) "
-        "for i in range(expected)]))"
-    )
     try:
-        completed = subprocess.run(  # noqa: S603
-            [sys.executable, "-c", script],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        decoded = json.loads(completed.stdout)
-        if not isinstance(decoded, list) or len(decoded) != gpu_count:
-            return fallback
+        from lambdaforge.runtime.GPUDeviceIdentity import visible_devices
+        from lambdaforge.runtime.GPUObservation import GPUObservationCache
+
+        snapshot = GPUObservationCache().read()
+        devices = visible_devices(snapshot["devices"], gpu_count)
         return tuple(
-            f"{str(name).strip() or 'unknown'}|vram-{memory[index][1]}"
-            for index, name in enumerate(decoded)
+            f"{str(row['name']).strip() or 'unknown'}|vram-{memory[index][1]}"
+            for index, row in enumerate(devices)
         )
     except Exception:
         # Model names improve transfer precision but are not admission authority.  The already
@@ -7174,31 +7410,21 @@ def _resource_device_states(
 
 def _gpu_compute_activity(visible_gpus: Sequence[str]) -> dict[str, bool]:
     """Observe compute occupancy without importing CUDA or expanding the permitted subset."""
+    from lambdaforge.runtime.GPUDeviceIdentity import visible_devices
+    from lambdaforge.runtime.GPUObservation import GPUObservationCache
+
     try:
-        inventory = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        )
-        processes = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
+        snapshot = GPUObservationCache().read()
+        if snapshot.get("quality") != "measured":
+            return {}
+        devices = visible_devices(snapshot["devices"], len(visible_gpus))
+        return {
+            token: row["compute_process_count"] > 0
+            for token, row in zip(visible_gpus, devices, strict=True)
+            if row.get("compute_process_count") is not None
+        }
+    except (OSError, RuntimeError, ValueError, KeyError):
         return {}
-    uuid_by_token: dict[str, str] = {}
-    for line in inventory.stdout.splitlines():
-        parts = [value.strip() for value in line.split(",")]
-        if len(parts) == 2:
-            uuid_by_token[parts[0]] = parts[1]
-            uuid_by_token[parts[1]] = parts[1]
-    busy = {line.split(",")[0].strip() for line in processes.stdout.splitlines() if "," in line}
-    return {token: uuid_by_token[token] in busy for token in visible_gpus if token in uuid_by_token}
 
 
 def _read_live_resource_snapshot(specification: Mapping[str, Any]) -> dict[str, Any]:
@@ -7216,6 +7442,21 @@ def _read_live_resource_snapshot(specification: Mapping[str, Any]) -> dict[str, 
     if not isinstance(declared, Mapping):
         return {}
     snapshot = dict(declared)
+    raw_worker = specification.get("hpo_worker_identity_path")
+    if raw_worker is not None:
+        worker_path = Path(str(raw_worker))
+        try:
+            if worker_path.is_symlink() or worker_path.stat().st_size > 65536:
+                return {}
+            worker_identity = json.loads(worker_path.read_text())
+            if (
+                worker_identity.get("pid") != snapshot.get("pid")
+                or worker_identity.get("controller_pid") != os.getpid()
+            ):
+                return {}
+            snapshot["create_time"] = worker_identity.get("create_time")
+        except (OSError, ValueError, TypeError, KeyError):
+            return {}
     heartbeat_path = declared.get("resource_heartbeat")
     if isinstance(heartbeat_path, str):
         heartbeat = Path(heartbeat_path)
@@ -7309,6 +7550,11 @@ def _process_tree_host_snapshot(specification: Mapping[str, Any]) -> dict[str, A
         import psutil
 
         parent = psutil.Process(pid)
+        if (
+            parent.create_time() != identity.get("create_time")
+            or identity.get("controller_pid") != os.getpid()
+        ):
+            return {}
         processes = [parent, *parent.children(recursive=True)]
         rss = 0
         cpu_seconds = 0.0
@@ -7450,6 +7696,14 @@ def _rebalance_host_cpu_leases(
             pid = int(identity["pid"])
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             continue
+        try:
+            if (
+                __import__("psutil").Process(pid).create_time() != identity.get("create_time")
+                or identity.get("controller_pid") != os.getpid()
+            ):
+                continue
+        except Exception:
+            continue
         for owned_pid in _descendant_pids(pid):
             guard.set_cpu_affinity(assigned, pid=owned_pid)
 
@@ -7463,36 +7717,41 @@ def _gpu_process_memory(
     for future, snapshot in snapshots.items():
         pid = snapshot.get("pid")
         if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            try:
+                if __import__("psutil").Process(pid).create_time() != snapshot.get("create_time"):
+                    continue
+            except Exception:
+                continue
             for child in _descendant_pids(pid):
                 pid_owner[child] = future
     if not pid_owner:
         return {}, "unavailable"
     try:
-        completed = subprocess.run(  # noqa: S603
-            [
-                "nvidia-smi",
-                "--query-compute-apps=pid,used_gpu_memory",
-                "--format=csv,noheader,nounits",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
+        from lambdaforge.runtime.GPUObservation import GPUObservationCache
+
+        snapshot = GPUObservationCache().read()
+        if snapshot.get("quality") != "measured":
+            return {}, "unavailable"
+    except (OSError, RuntimeError, ValueError):
         return {}, "unavailable"
     usage: dict[Any, int] = {}
-    for line in completed.stdout.splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 2:
-            continue
-        try:
-            pid, mib = int(parts[0]), int(parts[1])
-        except ValueError:
-            continue
-        owner = pid_owner.get(pid)
-        if owner is not None:
-            usage[owner] = usage.get(owner, 0) + mib * 1024**2
+    physical: dict[tuple[str, int, Any], int] = {}
+    for device in snapshot.get("devices", ()):
+        for observed in device.get("processes", ()):
+            owner = pid_owner.get(observed.get("pid"))
+            if owner is not None and type(observed.get("used_bytes")) is int:
+                try:
+                    if (
+                        __import__("psutil").Process(observed["pid"]).create_time()
+                        != observed["create_time"]
+                    ):
+                        continue
+                except Exception:
+                    continue
+                key = (str(device.get("parent_uuid") or device.get("uuid")), observed["pid"], owner)
+                physical[key] = max(physical.get(key, 0), observed["used_bytes"])
+    for (_device, _pid, owner), amount in physical.items():
+        usage[owner] = usage.get(owner, 0) + amount
     return usage, "nvml-process-exact" if usage else "unavailable"
 
 
@@ -7681,6 +7940,20 @@ def _update_active_resource_commitments(
                 for residual in analysis.residual_samples
             )
             state = analysis.state
+            commitment = max(current, max(future_samples, default=prediction.commitment_bytes))
+            if (
+                state in {"PROVISIONALLY_STABLE", "RESOURCE_STABLE"}
+                and not prediction.is_provisional
+                and (prediction.sampled_history_count > 0 or prediction.exact_history_count > 0)
+            ):
+                # A learned terminal envelope may bound a stable resident. The generic
+                # trajectory's rare full-device tail remains in samples/weights for joint
+                # fit risk; it must not become a permanent deterministic full-GPU reservation.
+                commitment = max(
+                    current,
+                    analysis.running_peak_bytes,
+                    min(commitment, prediction.commitment_bytes),
+                )
             previous_state = details.get("resource_state")
             remaining = commitments[future].remaining_seconds
             raw_prediction = details.get("prediction")
@@ -7708,7 +7981,7 @@ def _update_active_resource_commitments(
             )
             commitments[future] = ActiveResourceCommitment(
                 commitments[future].candidate_key,
-                max(current, max(future_samples, default=prediction.commitment_bytes)),
+                commitment,
                 current_bytes=current,
                 running_peak_bytes=analysis.running_peak_bytes,
                 future_peak_samples=future_samples,
@@ -8339,6 +8612,7 @@ def _resource_admission_diagnostics(
     granted_slots: set[int] | None = None,
     allocation_probe_available: bool = True,
     requested_gpu_count: int | None = None,
+    launch_waits: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Expose the exact backend placement read model without frontend inference."""
     currently_granted = tuple(
@@ -8346,6 +8620,10 @@ def _resource_admission_diagnostics(
     )
 
     def idle_reason(device: GPUResourceState) -> str | None:
+        if device.observation_quality != "measured":
+            return (
+                "GPU memory observation unavailable; only new admissions on this device are paused"
+            )
         if device.active:
             return None
         if granted_slots is not None and device.index not in granted_slots:
@@ -8354,6 +8632,9 @@ def _resource_admission_diagnostics(
                 if not allocation_probe_available
                 else "GPU token was removed from the authoritative site allocation"
             )
+        wait = next((row for row in launch_waits if row.get("gpu") == device.index), None)
+        if wait is not None:
+            return str(wait["reason"])
         if any(getattr(value, "target_gpu", None) == device.index for value in admitted):
             return "protected baseline admission selected; launch is pending"
         if user_minimum_bytes > 0 and device.free_bytes < user_minimum_bytes:
@@ -8370,9 +8651,15 @@ def _resource_admission_diagnostics(
             return "awaiting a scientifically useful admissible frontier action"
         return "no pending scientific action is currently available"
 
+    waiting = {(row.get("candidate"), row.get("gpu")) for row in launch_waits}
+    launchable = any(
+        (getattr(item, "candidate_key", None), getattr(item, "target_gpu", None)) not in waiting
+        for item in admitted
+    )
     return {
         "admission_version": 3,
-        "summary": "admissible" if admitted else "waiting_for_resources" if pending else "idle",
+        "summary": "admissible" if launchable else "waiting_for_resources" if pending else "idle",
+        "launch_waits": [dict(row) for row in launch_waits],
         "pending_runs": pending,
         "max_parallel": max_parallel if max_parallel is not None else "auto",
         "runs_per_gpu": (
@@ -8390,9 +8677,13 @@ def _resource_admission_diagnostics(
             ),
             "initial_cuda_visible_devices": [value.token for value in devices],
             "currently_granted_tokens": list(currently_granted),
-            "admission_slots": sorted(granted_slots or ())
-            if granted_slots is not None
-            else [value.index for value in devices],
+            "admission_slots": [
+                value.index
+                for value in devices
+                if value.observation_quality == "measured"
+                and allocation_probe_available
+                and (granted_slots is None or value.index in granted_slots)
+            ],
             "visibility_command": list(_configured_gpu_visibility_command() or ()),
             "visibility_probe_available": allocation_probe_available,
             "visibility_semantics": (
@@ -8407,7 +8698,10 @@ def _resource_admission_diagnostics(
                 "token": value.token,
                 "hardware": value.hardware,
                 "total_bytes": value.total_bytes,
-                "physical_free_bytes": value.free_bytes,
+                "physical_free_bytes": value.free_bytes
+                if value.observation_quality == "measured"
+                else None,
+                "observation_quality": value.observation_quality,
                 "external_bytes": value.external_bytes,
                 "lf_current_resident_bytes": sum(item.current_bytes for item in value.active),
                 "future_committed_bytes": value.future_committed_bytes,
@@ -8627,10 +8921,17 @@ def _visible_gpu_tokens(gpu_count: int) -> tuple[str, ...]:
     """
     raw = os.environ.get("CUDA_VISIBLE_DEVICES")
     mode = os.environ.get("LAMBDAFORGE_GPU_ACCESS_MODE", "")
+    if gpu_count <= 0:
+        return ()
     inherited = tuple(value.strip() for value in (raw or "").split(",") if value.strip())
     disabled = {"-1", "none", "nodevfiles", "void"}
     if inherited and any(value.lower() in disabled for value in inherited):
         inherited = ()
+    if raw is not None and not inherited:
+        raise RuntimeError(
+            "CUDA_VISIBLE_DEVICES is explicitly empty/disabled; refusing to invent or "
+            "broaden the allocation. Wait for an authorized GPU grant before retrying."
+        )
     if inherited:
         if len(set(inherited)) != len(inherited):
             raise RuntimeError("CUDA_VISIBLE_DEVICES contains duplicate allocated GPU tokens.")
@@ -8688,16 +8989,26 @@ def _current_gpu_grant(initial_tokens: Sequence[str]) -> frozenset[str] | None:
         return None
     if completed.returncode != 0:
         return None
-    line = next((value.strip() for value in completed.stdout.splitlines() if value.strip()), "")
-    disabled = {"-1", "none", "nodevfiles", "void"}
-    reported = {
-        value.strip()
-        for value in line.split(",")
-        if value.strip() and value.strip().lower() not in disabled
-    }
-    # A probe can shrink or restore the allocation inherited at launch, never introduce a token
-    # the Work was not originally granted.
-    return frozenset(value for value in initial_tokens if value in reported)
+    from lambdaforge.runtime.GPUGrant import intersect_visibility, parse_visibility
+
+    parsed = parse_visibility(completed.stdout)
+    if parsed is None:
+        return None
+    pinned: dict[str, str] = {}
+    aliases: dict[str, Sequence[str]] = {}
+    if parsed and any(not token.isdigit() for token in parsed):
+        try:
+            from lambdaforge.runtime.GPUObservation import GPUObservationCache
+
+            snapshot = GPUObservationCache().read()
+            for slot, token in enumerate(initial_tokens):
+                row = _gpu_observation_slot(snapshot, len(initial_tokens), slot)
+                pinned[token] = str(row["uuid"])
+                aliases[str(row["uuid"])] = row.get("aliases", ())
+        except (OSError, RuntimeError, ValueError, KeyError):
+            if any(token.isdigit() for token in initial_tokens):
+                return None
+    return intersect_visibility(initial_tokens, parsed, uuid_by_token=pinned, aliases=aliases)
 
 
 def _terminate_revoked_gpu_worker(specification: Mapping[str, Any]) -> None:
@@ -8719,6 +9030,8 @@ def _terminate_revoked_gpu_worker(specification: Mapping[str, Any]) -> None:
         if controller_pid != os.getpid():
             return
         process = psutil.Process(pid)
+        if process.create_time() != float(identity["create_time"]):
+            return
         ancestors = {parent.pid for parent in process.parents()}
         if controller_pid not in ancestors:
             return
@@ -8747,6 +9060,11 @@ def _initialize_gpu_worker(slot: str, identity_path: str, controller_pid: int) -
             {
                 "pid": os.getpid(),
                 "controller_pid": controller_pid,
+                "controller_create_time": __import__("psutil")
+                .Process(controller_pid)
+                .create_time(),
+                "create_time": __import__("psutil").Process().create_time(),
+                "process_group": os.getpgrp() if os.name == "posix" else os.getpid(),
                 "gpu_token": slot,
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
             },
@@ -8774,10 +9092,23 @@ def _apply_host_resource_lease(
     parallelism: int,
 ) -> dict[str, Any]:
     """Attach one dispatch-time host lease to an isolated Run specification."""
+    controller_ram = 0
+    if resources.ram_bytes:
+        try:
+            import psutil
+
+            current = psutil.Process()
+            try:
+                controller_ram = int(current.memory_full_info().pss)
+            except (psutil.Error, AttributeError):
+                controller_ram = int(current.memory_info().rss)
+        except (OSError, psutil.Error):
+            pass  # Unknown overhead remains labelled; physical/aggregate checks still apply.
     lease = HostResourceLease.allocate(
         resources,
         active_runs=max(1, active_runs),
         hard_concurrency_ceiling=parallelism,
+        controller_memory_bytes=controller_ram,
     )
     value = dict(specification)
     raw_definition = value.get("definition")

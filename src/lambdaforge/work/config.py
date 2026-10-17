@@ -36,6 +36,8 @@ from lambdaforge.work.design import (
 from lambdaforge.work.models import immutable_mapping
 from lambdaforge.work.Work import Work
 
+FIXED_SWEEP_POINTS_VERSION = 1
+
 _TOP_FIELDS = frozenset(
     {
         "name",
@@ -848,7 +850,10 @@ def _run_definition(
     design: StudyDesign | None
     if raw_sweep is not None:
         sweep_space, sweep_reference, sweep_alpha = _sweep(raw_sweep)
-        variants = _sweep_variants(sweep_space)
+        if "include" in raw_sweep or "candidates" in raw_sweep:
+            sweep_space, variants = _explicit_sweep_variants(sweep_space, raw_sweep)
+        else:
+            variants = _sweep_variants(sweep_space)
         _validate_sweep_reference(sweep_reference, variants)
         if sweep_alpha is not None and not automatic_sweep:
             raise ValueError(
@@ -1192,7 +1197,9 @@ def _search_space(value: Mapping[str, Any]) -> dict[str, Any]:
 def _sweep(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None, float | None]:
     if not isinstance(value, Mapping):
         raise TypeError("sweep must be a mapping containing space.")
-    unknown = set(value) - {"space", "reference", "replicates", "sequential_alpha"}
+    unknown = set(value) - {
+        "space", "reference", "replicates", "sequential_alpha", "include", "candidates"
+    }
     if unknown:
         forbidden = sorted(unknown)
         raise ValueError(
@@ -1223,7 +1230,8 @@ def _sweep(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None, float | N
     return space, reference, float(raw_alpha) if raw_alpha is not None else None
 
 
-def _sweep_variants(space: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+def _finite_sweep_space(space: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize finite domains once, retaining authored conditional geometry."""
     normalized: dict[str, Any] = {}
     for name, raw_descriptor in space.items():
         descriptor = dict(raw_descriptor)
@@ -1256,12 +1264,90 @@ def _sweep_variants(space: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
                 raise ValueError(f"sweep.space.{name}.scale must be linear or log.")
             descriptor = {
                 "values": values,
+                "scale": scale,
                 **({"when": descriptor["when"]} if "when" in descriptor else {}),
             }
         elif "points" in descriptor:
             raise ValueError(f"sweep.space.{name}.points is valid only with range.")
+        choices = descriptor.get("values")
+        if not isinstance(choices, Sequence) or isinstance(choices, str | bytes) or not choices:
+            raise ValueError(f"sweep.space.{name}.values must be a non-empty list.")
+        keys = [json.dumps(choice, sort_keys=True, allow_nan=False) for choice in choices]
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"sweep.space.{name}.values contains duplicate values.")
         normalized[name] = descriptor
-    return _exhaustive_variants(normalized)
+    return normalized
+
+
+def _sweep_variants(space: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    return _exhaustive_variants(_finite_sweep_space(space))
+
+
+def _explicit_sweep_variants(
+    space: Mapping[str, Any], sweep: Mapping[str, Any]
+) -> tuple[dict[str, Any], tuple[Mapping[str, Any], ...]]:
+    """Add exact points, or execute an exact sparse selection, through native geometry.
+
+    Include augments the base design without expanding its Cartesian domains. Candidates
+    instead selects only explicit points inside space (used by sparse extension deltas).
+    Neither mode completes partial dictionaries or fills inactive parameters with null.
+    """
+    if "include" in sweep and "candidates" in sweep:
+        raise ValueError("sweep.include and sweep.candidates are mutually exclusive.")
+    mode = "include" if "include" in sweep else "candidates"
+    authored = sweep[mode]
+    if not isinstance(authored, (list, tuple)) or not authored:
+        raise ValueError(f"sweep.{mode} must be a non-empty list of complete candidate mappings.")
+    geometry = _finite_sweep_space(space)
+    # Validate base descriptors/dependencies even when no Cartesian enumeration is needed.
+    ParameterSpace.from_schema(geometry)
+    points: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    for index, raw in enumerate(authored, 1):
+        if not isinstance(raw, Mapping) or not raw or set(raw) - set(geometry):
+            raise ValueError(f"sweep.{mode}[{index}] has missing/unknown candidate dimensions.")
+        point = dict(raw)
+        if any(
+            not (value is None or isinstance(value, (str, bool, int, float)))
+            or isinstance(value, float) and not math.isfinite(value)
+            for value in point.values()
+        ):
+            raise ValueError(f"sweep.{mode} candidate values must be finite JSON scalars.")
+        key = json.dumps(point, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if key in identities:
+            raise ValueError(f"sweep.{mode} contains duplicate exact candidates.")
+        identities.add(key)
+        points.append(point)
+        if mode == "include":
+            for name, value in point.items():
+                rule = geometry[name]
+                values = list(rule["values"])
+                if not any(
+                    json.dumps(item, sort_keys=True, allow_nan=False)
+                    == json.dumps(value, sort_keys=True, allow_nan=False)
+                    for item in values
+                ):
+                    values.append(value)
+                geometry[name] = {**rule, "values": values}
+    model = ParameterSpace.from_schema(geometry)
+    for index, point in enumerate(points, 1):
+        for name, value in point.items():
+            if not any(
+                json.dumps(item, sort_keys=True, allow_nan=False)
+                == json.dumps(value, sort_keys=True, allow_nan=False)
+                for item in model.descriptor(name).values
+            ):
+                raise ValueError(f"sweep.{mode}[{index}] is outside its exact authored domain.")
+        if not model.valid(point):
+            raise ValueError(
+                f"sweep.{mode}[{index}] must contain every active dimension and no inactive keys."
+            )
+    base = _sweep_variants(space) if mode == "include" else ()
+    unique = {
+        json.dumps(point, sort_keys=True, separators=(",", ":"), allow_nan=False): point
+        for point in (*base, *points)
+    }
+    return geometry, tuple(unique.values())
 
 
 def _validate_sweep_reference(

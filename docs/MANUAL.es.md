@@ -1,31 +1,156 @@
 # Manual de LambdaForge 0.19
 
-Resultados e informes de Work, dependencias históricas exactas y materialización comprimida explícita:
-[Guía de resultados](WORK_RESULTS.es.md). Reutilizan runner, ResultStore, registro de productos e
-import/export de Studies; no añaden entrenamiento ni inferencia estadística implícita a Works ordinarios.
+Este es el único manual público del framework; las guías detalladas son capítulos. En `ai/` solo quedan contratos internos y el registro histórico de aceptación.
 
-[English](MANUAL.md) · Español
+[English](MANUAL.md) · [Contratos internos](ai/FRAMEWORK_CONTRACTS.md)
 
 ## Índice
 
-1. [Modelo mental](#1-modelo-mental)
-2. [Instalación y estructura](#2-instalación-y-estructura)
-3. [API de Work](#3-api-de-work)
-4. [Ficheros gestionados, cache, map, outputs y herramientas](#4-ficheros-gestionados-cache-map-outputs-y-herramientas)
-5. [Referencia YAML](#5-referencia-yaml)
-6. [Ficheros y datasets](#6-ficheros-y-datasets)
-7. [Secuencia, paralelismo, seeds y búsqueda](#7-secuencia-paralelismo-seeds-y-búsqueda)
-8. [Ejecución, identidad y reutilización](#8-ejecución-identidad-y-reutilización)
-9. [Resultados y metadata](#9-resultados-y-metadata)
-10. [Clústeres y Jobs](#10-clústeres-y-jobs)
-11. [Limpieza y seguridad](#11-limpieza-y-seguridad)
-12. [Referencia CLI](#12-referencia-cli)
-13. [Clustering](#13-clustering)
-14. [Componentes neuronales reutilizables](#14-componentes-neuronales-reutilizables)
-15. [Arquitectura y extensiones](#15-arquitectura-y-extensiones)
-16. [Análisis de estudios](#16-análisis-de-estudios)
-17. [Consola de investigación](#17-consola-de-investigación)
-18. [Aislamiento por proyecto](#18-aislamiento-por-proyecto)
+- [1. Modelo mental](#1-modelo-mental)
+- [2. Instalación y estructura](#2-instalación-y-estructura)
+- [3. API de Work](#3-api-de-work)
+- [4. Ficheros gestionados, cache, map, outputs y herramientas](#4-ficheros-gestionados-cache-map-outputs-y-herramientas)
+  - [4.1 Elegir almacenamiento](#41-elegir-almacenamiento)
+  - [4.2 ManagedFile y cache](#42-managedfile-y-cache)
+  - [4.3 Map simple y reanudable](#43-map-simple-y-reanudable)
+  - [4.4 Outputs y checkpoints](#44-outputs-y-checkpoints)
+  - [4.5 Herramientas externas](#45-herramientas-externas)
+- [5. Referencia YAML](#5-referencia-yaml)
+- [6. Ficheros y datasets](#6-ficheros-y-datasets)
+  - [6.1 Reutilizar, reconstruir y recuperar publicación](#61-reutilizar-reconstruir-y-recuperar-publicación)
+  - [6.2 Réplica nativa comprimida](#62-réplica-nativa-comprimida)
+  - [6.3 Gestión explícita de conflictos](#63-gestión-explícita-de-conflictos)
+- [7. Secuencia, paralelismo, seeds y búsqueda](#7-secuencia-paralelismo-seeds-y-búsqueda)
+  - [7.1 Defaults por intención y autoridad resuelta](#71-defaults-por-intención-y-autoridad-resuelta)
+  - [Preguntas científicas, confianza y regiones prácticas](#preguntas-científicas-confianza-y-regiones-prácticas)
+  - [7.1 Sweeps exactos sin HPO](#71-sweeps-exactos-sin-hpo)
+  - [7.2 Entrenos independientes por GPU](#72-entrenos-independientes-por-gpu)
+  - [7.3 Continuación multi-fidelidad](#73-continuación-multi-fidelidad)
+  - [7.4 Contrato de early stopping](#74-contrato-de-early-stopping)
+  - [7.5 Observabilidad viva del estudio](#75-observabilidad-viva-del-estudio)
+- [8. Ejecución, identidad y reutilización](#8-ejecución-identidad-y-reutilización)
+  - [Recuperar un Study interrumpido](#recuperar-un-study-interrumpido)
+- [9. Resultados y metadata](#9-resultados-y-metadata)
+- [10. Clústeres y Jobs](#10-clústeres-y-jobs)
+  - [Paquetes nativos declarados por el proyecto](#paquetes-nativos-declarados-por-el-proyecto)
+- [11. Limpieza y seguridad](#11-limpieza-y-seguridad)
+- [12. Referencia CLI](#12-referencia-cli)
+- [13. Clustering](#13-clustering)
+- [14. Componentes neuronales reutilizables](#14-componentes-neuronales-reutilizables)
+- [15. Arquitectura y extensiones](#15-arquitectura-y-extensiones)
+- [16. Análisis de estudios](#16-análisis-de-estudios)
+  - [16.1 Semántica de evidencia](#161-semántica-de-evidencia)
+  - [16.2 Efectos, cobertura y fiabilidad](#162-efectos-cobertura-y-fiabilidad)
+  - [16.3 Evidencia de admisión](#163-evidencia-de-admisión)
+  - [16.4 Espacio de investigación y declaraciones](#164-espacio-de-investigación-y-declaraciones)
+- [17. Consola de investigación](#17-consola-de-investigación)
+- [18. Aislamiento por proyecto](#18-aislamiento-por-proyecto)
+- [19. Fiabilidad operativa](#19-fiabilidad-operativa)
+- [20. Distancia Fused Gromov–Wasserstein (FGW)](#20-distancia-fused-gromovwasserstein-fgw)
+  - [Entradas y ejemplo](#entradas-y-ejemplo)
+  - [Atributos estructurados y distancias precalculadas](#atributos-estructurados-y-distancias-precalculadas)
+  - [Objetivo y diagnóstico](#objetivo-y-diagnóstico)
+  - [Límites y comparación de varios objetos](#límites-y-comparación-de-varios-objetos)
+- [21. Resultados de Work, evidencia histórica y productos independientes](#guide-work-results)
+  - [Inspección e informes](#guide-work-results-inspección-e-informes)
+  - [Seleccionar dependencias históricas exactas](#guide-work-results-seleccionar-dependencias-históricas-exactas)
+  - [Promoción explícita desde un Work ordinario](#guide-work-results-promoción-explícita-desde-un-work-ordinario)
+  - [Portabilidad y disponibilidad remota](#guide-work-results-portabilidad-y-disponibilidad-remota)
+  - [Evidencia en ampliaciones de Studies fijos](#guide-work-results-evidencia-en-ampliaciones-de-studies-fijos)
+- [22. Productos científicos durables: base implementada](#guide-products)
+  - [Identidades y contratos](#guide-products-identidades-y-contratos)
+  - [API de publicación explícita](#guide-products-api-de-publicación-explícita)
+  - [CLI nativa](#guide-products-cli-nativa)
+  - [Selección post-Study de ModelSet](#guide-products-selección-post-study-de-modelset)
+  - [StudyDecision nativa](#guide-products-studydecision-nativa)
+  - [Publicación declarada y retry de publicación sin entrenar](#guide-products-publicación-declarada-y-retry-de-publicación-sin-entrenar)
+  - [Dependencias Work tipadas](#guide-products-dependencias-work-tipadas)
+  - [Export/import portable de productos](#guide-products-exportimport-portable-de-productos)
+  - [Importar un Study portable sin ejecutarlo](#guide-products-importar-un-study-portable-sin-ejecutarlo)
+- [23. Estudios científicos condicionales](#guide-conditional-studies)
+  - [1. Una pregunta, un Study](#guide-conditional-studies-1-una-pregunta-un-study)
+  - [2. Gramática de activación](#guide-conditional-studies-2-gramática-de-activación)
+  - [3. Validar y entender el plan](#guide-conditional-studies-3-validar-y-entender-el-plan)
+  - [4. Tiempo y capacidad del destino](#guide-conditional-studies-4-tiempo-y-capacidad-del-destino)
+  - [5. Identidad y evidencia existente](#guide-conditional-studies-5-identidad-y-evidencia-existente)
+- [24. Ampliaciones incrementales de Studies fijos](#guide-study-extensions)
+  - [CLI](#guide-study-extensions-cli)
+  - [Ejemplo de regularización](#guide-study-extensions-ejemplo-de-regularización)
+  - [Ampliaciones condicionales y selectivas](#guide-study-extensions-ampliaciones-condicionales-y-selectivas)
+  - [Identidad, compatibilidad y evidencia](#guide-study-extensions-identidad-compatibilidad-y-evidencia)
+  - [Ejecución admitida](#guide-study-extensions-ejecución-admitida)
+  - [Consola y análisis acumulado](#guide-study-extensions-consola-y-análisis-acumulado)
+  - [Presupuesto, fallos y durabilidad](#guide-study-extensions-presupuesto-fallos-y-durabilidad)
+  - [Verificación](#guide-study-extensions-verificación)
+- [25. Datasets publicados y reconstrucción científica](#guide-dataset-reconstruction)
+  - [Elegir la intención antes de calcular](#guide-dataset-reconstruction-elegir-la-intención-antes-de-calcular)
+  - [Publicar una vez, replicar el contenido exacto](#guide-dataset-reconstruction-publicar-una-vez-replicar-el-contenido-exacto)
+  - [Tres identidades separadas](#guide-dataset-reconstruction-tres-identidades-separadas)
+  - [Comparar reconstrucciones completas](#guide-dataset-reconstruction-comparar-reconstrucciones-completas)
+  - [Recuperar una publicación sin recalcular](#guide-dataset-reconstruction-recuperar-una-publicación-sin-recalcular)
+  - [Conflictos entre registros](#guide-dataset-reconstruction-conflictos-entre-registros)
+  - [Certificados de equivalencia durables](#guide-dataset-reconstruction-certificados-de-equivalencia-durables)
+  - [Cambios necesarios en WISDOM (no realizados aquí)](#guide-dataset-reconstruction-cambios-necesarios-en-wisdom-no-realizados-aquí)
+- [26. Admisión de almacenamiento y limpieza segura](#guide-storage)
+  - [Consultar y limpiar](#guide-storage-consultar-y-limpiar)
+  - [Admisión](#guide-storage-admisión)
+  - [Qué se puede eliminar](#guide-storage-qué-se-puede-eliminar)
+  - [Checkpoints y publicación](#guide-storage-checkpoints-y-publicación)
+  - [Límites actuales](#guide-storage-límites-actuales)
+- [27. Pestañas de informes con assets completos gestionados](#guide-managed-reports)
+  - [API del navegador](#guide-managed-reports-api-del-navegador)
+  - [Visor nativo remoto y offline](#guide-managed-reports-visor-nativo-remoto-y-offline)
+- [28. Espacio de investigación de Studies](#guide-research-analysis)
+  - [1. Abrir el espacio](#guide-research-analysis-1-abrir-el-espacio)
+  - [2. Declarar significado, no política de ejecución](#guide-research-analysis-2-declarar-significado-no-política-de-ejecución)
+  - [3. Familias y preguntas](#guide-research-analysis-3-familias-y-preguntas)
+  - [4. Cómo funciona el descubrimiento](#guide-research-analysis-4-cómo-funciona-el-descubrimiento)
+  - [5. Explorar y guardar](#guide-research-analysis-5-explorar-y-guardar)
+  - [6. Arquitectura, seguridad y límites](#guide-research-analysis-6-arquitectura-seguridad-y-límites)
+  - [7. Informe de implementación](#guide-research-analysis-7-informe-de-implementación)
+  - [8. Informe de la segunda simplificación](#guide-research-analysis-8-informe-de-la-segunda-simplificación)
+- [29. Studies coordinados: estado y contratos](#guide-coordinated-studies)
+  - [Estado: lanzamiento Fleet adaptativo nuevo y fijo; recovery/transferencia pendientes](#guide-coordinated-studies-estado-lanzamiento-fleet-adaptativo-nuevo-y-fijo-recoverytransferencia-pendientes)
+  - [Catálogo de Fleet](#guide-coordinated-studies-catálogo-de-fleet)
+  - [Propiedad y persistencia](#guide-coordinated-studies-propiedad-y-persistencia)
+  - [Pruebas reproducibles de esta base](#guide-coordinated-studies-pruebas-reproducibles-de-esta-base)
+- [30. Salud operativa, monitorización y recuperación deliberada](#guide-operational-reliability)
+  - [Inspección sin cómputo](#guide-operational-reliability-inspección-sin-cómputo)
+  - [Monitor independiente del proyecto](#guide-operational-reliability-monitor-independiente-del-proyecto)
+  - [Correo opcional e incidentes sin spam](#guide-operational-reliability-correo-opcional-e-incidentes-sin-spam)
+  - [Consola](#guide-operational-reliability-consola)
+  - [Recuperación y YAML trasladado](#guide-operational-reliability-recuperación-y-yaml-trasladado)
+  - [Política y evidencia de checkpoints gestionados](#guide-operational-reliability-política-y-evidencia-de-checkpoints-gestionados)
+  - [Emergencia](#guide-operational-reliability-emergencia)
+  - [Ampliación deliberada frente a recuperación](#guide-operational-reliability-ampliación-deliberada-frente-a-recuperación)
+- [31. Seguridad de recursos compartidos — implementación en curso](#guide-resource-safety)
+  - [Observar no concede GPU](#guide-resource-safety-observar-no-concede-gpu)
+  - [Startup entre Studies](#guide-resource-safety-startup-entre-studies)
+  - [RAM y CPU](#guide-resource-safety-ram-y-cpu)
+  - [Perfiles, circuitos e informes](#guide-resource-safety-perfiles-circuitos-e-informes)
+  - [Reservas del centro](#guide-resource-safety-reservas-del-centro)
+  - [Aceptación pendiente](#guide-resource-safety-aceptación-pendiente)
+- [32. Experiencia de desarrollo — implementación incremental](#guide-developer-experience)
+  - [Empezar y descubrir](#guide-developer-experience-empezar-y-descubrir)
+  - [Entender YAML](#guide-developer-experience-entender-yaml)
+  - [Inspección, diagnóstico y seguimiento](#guide-developer-experience-inspección-diagnóstico-y-seguimiento)
+  - [Tablas pequeñas sin exportar todo el experimento](#guide-developer-experience-tablas-pequeñas-sin-exportar-todo-el-experimento)
+  - [Agentes: registro no significa conexión](#guide-developer-experience-agentes-registro-no-significa-conexión)
+  - [Consola y Skills](#guide-developer-experience-consola-y-skills)
+  - [Pendiente](#guide-developer-experience-pendiente)
+- [33. Integración de agentes fijada al proyecto](#guide-integration)
+  - [Inicio rápido](#guide-integration-inicio-rápido)
+  - [MCP, clientes y permisos](#guide-integration-mcp-clientes-y-permisos)
+  - [Aprobación humana y dependencias](#guide-integration-aprobación-humana-y-dependencias)
+  - [HTTP local opcional](#guide-integration-http-local-opcional)
+  - [Memoria y sincronización](#guide-integration-memoria-y-sincronización)
+  - [Python y GUI](#guide-integration-python-y-gui)
+
+Resultados e informes de Work, dependencias históricas exactas y materialización comprimida explícita:
+[Guía de resultados](#guide-work-results). Reutilizan runner, ResultStore, registro de productos e
+import/export de Studies; no añaden entrenamiento ni inferencia estadística implícita a Works ordinarios.
+
+[English](MANUAL.md) · Español
 
 ## 1. Modelo mental
 
@@ -130,7 +255,7 @@ Los checkpoints son recuperación, no modelos permanentes. `checkpoints.pin(name
 protege estado propio nombrado; `unpin(name)` solo cambia metadata. Publica modelos con
 `outputs.from_checkpoint(name, checkpoint, release=True)` o datasets desde `source_checkpoint`.
 Liberar exige publicación independiente verificada y finalización correcta de Execution.
-La [guía de almacenamiento](STORAGE.es.md) contiene ejemplos y retención.
+La [guía de almacenamiento](#guide-storage) contiene ejemplos y retención.
 
 ### 4.2 ManagedFile y cache
 
@@ -393,7 +518,7 @@ registrado; checksums exactos intactos. `lf datasets compare RAIZ_A RAIZ_B --on 
 bytes antes del verificador científico. `lf datasets publish-candidate RAIZ --version NUEVA
 --on CLUSTER` previsualiza recuperación solo de publicación; `--apply` publica sin recalcular.
 La consola descubre todas las ubicaciones configuradas y señala conflictos de identidad.
-[Reconstrucción de datasets](DATASET_RECONSTRUCTION.es.md): contratos, seguridad, retención y WISDOM.
+[Reconstrucción de datasets](#guide-dataset-reconstruction): contratos, seguridad, retención y WISDOM.
 En 0.17.1, `publish-candidate` también acepta solicitudes guardadas antes de copiar: verifica
 inventario/declaración y `--apply` solo copia/registra, sin ejecutar Work. Para índices antiguos
 retenidos, `DatasetPublisher.prepare_publication` requiere la declaración original explícita;
@@ -409,7 +534,7 @@ Consola **Datasets → DatasetVersion → Replicate…** usa el mismo servicio, 
 en segundo plano. Mantén la sesión abierta hasta terminar. El destino requiere `storage.dataset_root`
 y runtime LambdaForge disponible, no Work científico/claim GPU. Checksums, staging seguro,
 admisión en destino e identidad inmutable siguen siendo obligatorios. Rechaza conflictos y reutiliza
-destinos idénticos. [Guía](DATASET_RECONSTRUCTION.es.md#publicar-una-vez-replicar-el-contenido-exacto).
+destinos idénticos. [Guía](#guide-dataset-reconstruction-publicar-una-vez-replicar-el-contenido-exacto).
 
 ### 6.3 Gestión explícita de conflictos
 
@@ -419,7 +544,7 @@ Gestión nativa de conflictos con preview/apply: `datasets adopt NOMBRE@VERSION 
 exacta incluso en conflicto. Delete borra bytes gestionados, remove los conserva; ambos bloquean
 consumidores activos y archivan índices previos. Consola **Datasets → identidad → Manage copies…**
 expone las mismas acciones confirmadas. No cambia otras copias/Runs antiguas; operaciones sin hash
-siguen rechazando ambigüedad. [Detalles](DATASET_RECONSTRUCTION.es.md#conflictos-entre-registros).
+siguen rechazando ambigüedad. [Detalles](#guide-dataset-reconstruction-conflictos-entre-registros).
 
 ## 7. Secuencia, paralelismo, seeds y búsqueda
 
@@ -428,7 +553,7 @@ Usa `when: {parent: {in: [a, b]}}` (AND entre padres) o la igualdad escalar anti
 claves inactivas, las dependencias no requieren orden en YAML y generación/análisis comparten
 geometría. Solo `resources` raíz se hereda por pasos; se rechaza `with`, seeds/replicates,
 search/sweep, execution, objective y analysis raíz en vez de ignorarlos. La
-[guía condicional numerada](CONDITIONAL_STUDIES.es.md) explica conteos exactos, referencias,
+[guía condicional numerada](#guide-conditional-studies) explica conteos exactos, referencias,
 identidad, capacidad y la diferencia entre tiempo del scheduler y presupuesto lógico.
 
 ### 7.1 Defaults por intención y autoridad resuelta
@@ -479,7 +604,7 @@ salta uno anterior incompleto. Recovery restaura el compromiso anticipado existe
 no lo modifica. Manifests/decisiones v1 históricos siguen consultables e inmutables. Hipótesis
 predictiva, soporte/estabilidad descriptivos y resolución formal son distintos: falta de soporte
 no hereda estabilidad del modelo y parar por bloque incompleto no es conclusión formal.
-Consulta la [auditoría de corrección y aceptación pendiente](SCIENTIFIC_AUDIT.es.md).
+Consulta la [auditoría de corrección y aceptación pendiente](ai/IMPLEMENTATION.es.md#history-scientific-audit).
 
 Los Studies largos conservan su inicialización científica inmutable en
 `study/controller.json` → `initialization`: objetivo completo, margen práctico, espacio declarado
@@ -850,7 +975,24 @@ global/host duro. CPU es elástico: límites Torch/BLAS/OpenMP y affinity del á
 rebalancean cuando entran o salen residentes, evitando dar a tres Runs reales
 `total_cpu / theoretical_max_parallel`. RAM/almacenamiento son compromisos para residentes actuales
 contrastados con RSS vivo del árbol, no reservas cold-start para toda Run futura posible. Cada
-dispatch persiste el lease exacto y su provenance. Las métricas con `step` de un Work
+dispatch persiste el lease exacto y su provenance.
+
+El lanzamiento final reconcilia la cuota elástica nativa de RAM con una medición **nueva del árbol
+completo de procesos**, incluidos auxiliares y workers existentes. Una cuota desactualizada puede
+reducirse al margen restante de la asignación agregada; no se reduce silenciosamente un requisito
+explícito independiente de una Run. Se mantienen los límites físicos/cgroup y del Job. La telemetría
+incluye `launch_waits` y el motivo real de inactividad si falla la comprobación final: una propuesta
+del planificador no demuestra que el worker haya arrancado.
+
+La rampa inicial no es permanente: avances reales de paso/fase sin mayor consumo cierran esa
+racha; sondear repetidamente el mismo estado no demuestra estabilidad. Un residente estable puede
+usar la envolvente terminal aprendida compatible como compromiso, conservando explícita la cola
+rara de consumo de toda la GPU en el riesgo conjunto. Sin historial válido no se inventa esa cota.
+La comprobación final GPU revalida la misma decisión segura/exploratoria aprobada, con protección
+de GPU hermanas y la comparación WAIT original; no reinicia un planificador aislado perdiendo
+evidencia acumulada. Esto no garantiza que quepan todos los procesos máximos configurados.
+
+Las métricas con `step` de un Work
 personalizado publican `metric-progress.json`: una proyección pequeña por Attempt, actualizada una
 vez por paso creciente. La admisión la lee sin recorrer el historial y conserva fases más precisas
 de los callbacks. Un epoch reportado no demuestra estabilidad de memoria ni un checkpoint durable;
@@ -1376,14 +1518,14 @@ terminal. `stopped / complete / degraded` conserva fallos físicos anteriores tr
 en espera son cola, no procesos activos. El historial visible está acotado pero conserva contadores
 acumulados; historias antiguas truncadas se señalan como incompletas. Los envelopes antiguos se
 pueden proyectar en memoria sin crear ficheros ni inventar Attempts ausentes. El
-[registro de reforma](ARCHITECTURAL_REFORM.es.md) detalla fronteras implementadas y migraciones
+[registro de reforma](ai/IMPLEMENTATION.es.md#history-architectural-reform) detalla fronteras implementadas y migraciones
 pendientes. No cambian ajuste de objetivos, censura de pruning, identidad exacta ni presupuestos.
 La finalización resuelve los últimos Attempts de cada celda lógica antes de calcular el estado
 terminal compatible: un fallo físico antiguo no invalida una Run recuperada. Fases y fidelidades
 permanecen separadas. Previews de storage/clean no crean cachés ni locks; apply revalida propiedad
 y objetivos bajo locks, no confía en un preview anterior.
 
-[Productos durables](PRODUCTS.es.md) documenta publicación `lf products`, selección ModelSet,
+[Productos durables](#guide-products) documenta publicación `lf products`, selección ModelSet,
 StudyDecision, bundles portables verificados e inputs product tipados en `with`. Resolver metadata
 es de solo lectura; Attempts reales registran consumidores y pesos se verifican al acceder
 explícitamente. Catálogos propios del proyecto, no de Jobs/cachés desechables. Espera/replanificación
@@ -1447,7 +1589,7 @@ Curvas/logs siguen siendo lazy; cancel/delete abarcan la familia propia. Streams
 y poda central exacta soportan HPO adaptativo nuevo. Offers GPU baseline; continuación de checkpoints/
 fidelity, co-location, recovery/adopción, expansión en vivo y export distribuido siguen bloqueados.
 Consulta
-[estado y contratos de implementación](COORDINATED_STUDIES.es.md) antes de usar fleets.
+[estado y contratos de implementación](#guide-coordinated-studies) antes de usar fleets.
 El ejecutor preparado común delega en ControlPlane/JobService y verifica identidades inmutables y
 reubicación canónica de inputs. La observación en el host va por lotes; nunca autoriza GPUs
 no concedidas.
@@ -1702,7 +1844,7 @@ anteriores tras actualizar. YAML es código confiable y puede importar Python ar
 LambdaForge no es sandbox.
 
 **Clear storage…** en el clúster usa la misma autoridad preview/apply, confirma categorías y muestra
-feedback en segundo plano. **Clear output** no limpia disco. La [guía](STORAGE.es.md) describe reservas
+feedback en segundo plano. **Clear output** no limpia disco. La [guía](#guide-storage) describe reservas
 por volumen, margen, presión, quotas/LRU, gracia/pins/publicación, Fleet/SLURM y límites actuales.
 Los sondeos normales solo leen filesystem/leases, nunca recorren datasets ni Runs.
 `lf storage status --on CLUSTER` inventaría uso explícitamente. `lf storage reconcile --on CLUSTER`
@@ -1733,6 +1875,9 @@ permanece aunque se recojan bytes reconstruibles del entorno.
 | `project` | mostrar raíz e identidad de almacenamiento del proyecto actual |
 | `seeds` | inspeccionar streams deterministas replicate/confirmation |
 | `config resolve` | mostrar la configuración versionada exacta sin ejecutar |
+| `config schema/explain/diff` | ayuda estática instalada y diferencias nativas descriptivas |
+| `help --search`, `completion` | descubrimiento por tareas y completion opt-in del parser nativo |
+| `inspect`, `diagnose`, `watch` | lectura compacta por identidad exacta y observación solo de cambios |
 | `validate` | validar configuración/clase/entradas localmente |
 | `explain` | explicar firma, defaults y recursos |
 | `run` | única ejecución científica |
@@ -1741,7 +1886,7 @@ permanece aunque se recojan bytes reconstruibles del entorno.
 | `jobs ...` | control de bajo nivel; `clear [--apply]` limpia historial terminal |
 | `clusters ...`, `doctor`, `resources` | configuración scriptable; bootstrap admite `--project` y `--dry-run` sin efectos |
 | `datasets ...` | inspección/verificación/placement/borrado de versiones |
-| `results list/show/compare/analyze/report` | consultar, analizar y exportar evidencia |
+| `results list/show/compare/analyze/report/table` | consultar/analizar evidencia; tablas derivadas JSON/CSV acotadas |
 | `clean` | preview/aplicación de GC reconstruible |
 | `storage status/reconcile` | uso/cambios explícitos; reconcile `--apply` solo actualiza el inventario diagnóstico |
 
@@ -1749,7 +1894,15 @@ permanece aunque se recojan bytes reconstruibles del entorno.
 Los fallos tienen categorías/códigos estables. `--json` es para tooling y `--debug` añade traceback.
 No existen comandos antiguos de authoring o dataset build: todo cálculo usa `lf run`.
 
+Véase [Experiencia de desarrollo](#guide-developer-experience) para ejemplos comprobados de
+authoring, shell, agentes, filtros de consola y tablas paginadas, con sus límites pendientes.
+
 ## 13. Clustering
+
+Cada estrategia tiene su propio módulo de clase en `clustering/algorithms/`; los contratos
+compartidos también están separados por clase. Las importaciones de `lambdaforge.clustering`
+se conservan. La [distancia FGW](#20-distancia-fused-gromovwasserstein-fgw) entre objetos
+completos es una API distinta, no otra estrategia de clustering.
 
 Se instala con `python -m pip install "lambdaforge[clustering]"`. Importar `lambdaforge` funciona
 sin el extra; usar un clusterer sin backend produce el comando de instalación. El backend es
@@ -1862,13 +2015,24 @@ planificación del investigador, no por un objeto interno que puede seguir en Py
 
 ## 16. Análisis de estudios
 
+Los sweeps fijos completos con seeds explícitas pueden ampliarse editando el YAML original:
+`lf studies extend JOB --config experiments/sweep.yaml --dry-run`, seguido del plan revisado
+`--apply --plan-hash HASH`. **Extend Study…** en consola comparte el servicio. Solo se ejecutan
+celdas nuevas; revisiones inmutables y Runs/análisis/historial acumulados usan un ID de serie.
+Se admite CPU local y CPU/GPU gestionada en el mismo destino. Por defecto, código cambiado o no
+verificable crea una nueva revisión de código/runtime revisada explícitamente: conserva evidencia
+previa, pero separa la inferencia estadística por revisión. `--code-policy strict` exige equivalencia
+acreditada. No es retry, recuperación del optimizador adaptativo, migración ni ampliación Fleet. Consulta
+[ampliaciones incrementales](#guide-study-extensions) para límites de compatibilidad, presupuesto,
+caídas, exportación y continuación desde checkpoints.
+
 Hay puntos individuales por Trial, curvas escalonadas/áreas, violines, barras horizontales,
 histogramas y CDF empíricas, con ejes compartidos identificados por métricas. El proyecto añade HTML
 autocontenido con `self.outputs.html_section("proteins", title="Proteins").write_text(html_text)`;
 generar informe lee artifacts finalizados verificados, nunca durante planificación. Varios Runs
 comparten selector de documento. Iframes aislados offline separan JavaScript del proyecto; incrusta
 recursos/datos (16 MiB/documento, 64 MiB/informe). Consulta el contrato y API directa en
-[pestañas HTML del proyecto](RESEARCH_ANALYSIS.es.md#pestañas-html-del-proyecto).
+[pestañas HTML del proyecto](#guide-research-analysis-pestañas-html-del-proyecto).
 
 El HTML de Study empieza en **Overview / Resumen**, con estados, importancia contextual y gráficos
 recomendados. Parámetros condicionales muestran rama/soporte aparte, nunca responsabilidad global.
@@ -1888,7 +2052,7 @@ explícitos quedan en **Advanced visualization options**. Las preguntas configur
 ampliables; Metrics & health ofrece categorías jerárquicas plegables. **Evidence** sustituye la
 pestaña duplicada de hallazgos y conserva conclusiones, diagnóstico, seeds, poda y JSON. Las
 interacciones observadas de cualquier métrica están separadas del modelo HPO persistido.
-Consulta [HTML de investigación](RESEARCH_ANALYSIS.es.md).
+Consulta [HTML de investigación](#guide-research-analysis).
 
 Es una capa determinista a posteriori sobre evidencia persistida; no propone Runs ni modifica el
 controlador. Un estudio terminal escribe `EXECUTION/analysis.json` automáticamente y estas rutas
@@ -2030,7 +2194,7 @@ discovery provisional; el análisis terminal sí permite inspeccionarlo. Semánt
 sigue explícita; discovery no es causalidad ni confianza nueva del HPO. Unidades Y diferentes
 usan gráficas separadas en Explore y ejes Y independientes del mismo gráfico en Parameters.
 Hay normalización visual opcional y vistas con notas/export/import JSON
-validado. La [guía completa](RESEARCH_ANALYSIS.es.md) reúne pasos numerados, YAML, límites de
+validado. La [guía completa](#guide-research-analysis) reúne pasos numerados, YAML, límites de
 algoritmos, cautelas estadísticas y comportamiento de Studies antiguos.
 
 ## 17. Consola de investigación
@@ -2248,7 +2412,7 @@ Bare `lf` ofrece **Operational health…** con los mismos servicios.
 `lf retry STUDY --config NUEVO_YAML --dry-run --json` compara el YAML trasladado con identidad
 original sin iniciar cómputo. Apply verifica de nuevo propiedad y fija el archivo elegido. Eventos
 Job conservan ID de petición y distinguen admisión, runtime y progreso científico. Consulta la
-[guía operativa y de emergencia](OPERATIONAL_RELIABILITY.es.md) para configuración, plataformas,
+[guía operativa y de emergencia](#guide-operational-reliability) para configuración, plataformas,
 correo, semántica de recovery y requisitos Fleet/checkpoints en vivo que siguen pendientes.
 Checkpoints gestionados ofrecen cadencia/retención optativas `configure/should_save` e inventario
 paginado `inventory(verify=True)` en host. Disponibilidad no prueba restauración del consumidor.
@@ -2259,3 +2423,3318 @@ Cargar Runs válidos reutilizados es una referencia, no progreso nuevo. `lf jobs
 Jobs enlazados y peticiones rechazadas incluso sin conexión. Validar en consola registra inspección
 operativa; CLI dry-run sigue sin mutaciones. El diálogo persistente conserva petición/fase y
 accesos a logs, historial y el mismo plan, sin avisos repetidos de sondeo.
+
+## 20. Distancia Fused Gromov–Wasserstein (FGW)
+
+FGW compara **dos objetos completos ponderados con atributos**, no nodos individuales ni clusters.
+Instalación opcional explícita: `python -m pip install 'lambdaforge[optimal-transport]'`.
+Importar esta API no carga ni instala POT, SciPy, sklearn o Torch. Se utiliza el solver de
+gradiente condicional y búsqueda de paso de Python Optimal Transport (POT), sin otro optimizador.
+
+### Entradas y ejemplo
+
+`lambdaforge.distances.StructuredMeasure(structure, features=None, weights=None)` representa
+un objeto. `structure` es una matriz N×N finita, simétrica, no negativa y con diagonal cero;
+no se verifica la desigualdad triangular. Admite geometría euclídea, caminos mínimos de grafos
+u otras relaciones intrínsecas no dirigidas elegidas explícitamente. Las distancias infinitas
+de componentes desconectados se rechazan, no se sustituyen por constantes arbitrarias.
+
+Los pesos relativos deben ser finitos, no negativos y sumar una masa positiva. Se normalizan
+a probabilidades y `total_mass` conserva la suma original. Es **transporte balanceado de
+probabilidades**, no comparación de masas absolutas. Se permiten pesos cero, cantidades de
+puntos distintas y geometrías con distinta dimensionalidad.
+
+```python
+from lambdaforge.distances import FusedGromovWassersteinDistance, StructuredMeasure
+
+a = StructuredMeasure.from_points(
+    [[0, 0], [1, 0]], features=[[0, 1], [1, 0]], weights=[1, 3],
+)
+b = StructuredMeasure.from_points(
+    [[0], [1.5], [3]], features=[[0, 1], [0.5, 0.5], [1, 0]], weights=[1, 1, 2],
+)
+solver = FusedGromovWassersteinDistance(alpha=0.5)
+result = solver.solve(a, b)
+value = solver(a, b)  # Solo escalar; solve() incluye acoplamiento y diagnóstico.
+```
+
+`from_points` construye distancias intrínsecas con SciPy (euclídeas por defecto); no convierte
+las coordenadas automáticamente en atributos. `features` se proporciona explícitamente.
+El [ejemplo ejecutable](../examples/fgw.py) comprueba también los marginales del transporte.
+
+### Atributos estructurados y distancias precalculadas
+
+Cada atributo puede ser un vector numérico o un objeto arbitrario del proyecto. Para objetos,
+use `FusedGromovWassersteinDistance(feature_metric=lambda a, b: ...)`, que recibe un atributo
+de cada objeto y devuelve su distancia escalar. Puede operar sobre diccionarios o estructuras
+sin que LambdaForge interprete proteínas ni significado científico específico.
+`solver.solve(a, b, feature_distances=D)` permite una matriz N×M finita y no negativa.
+Son **distancias sin elevar al cuadrado**: FGW q=2 las eleva exactamente una vez. Los nombres de
+métricas de SciPy tienen el mismo contrato; `sqeuclidean` produciría potencias cuartas y no suele
+ser adecuado. Los vectores numéricos deben ser finitos N×F/M×F, con la misma dimensión F.
+`alpha=1` compara solo estructura y no exige atributos; `alpha=0` usa solo atributos.
+No se infieren escalado, unidades ni imputación.
+
+### Objetivo y diagnóstico
+
+```text
+min_T (1-alpha) Σ_ij d_atributo(i,j)² T_ij
+    + alpha Σ_ijkl (C_origen(i,k)-C_destino(j,l))² T_ij T_kl
+sujeto a T >= 0, T 1 = origen.weights, Tᵀ 1 = destino.weights.
+```
+
+`FGWResult.value` es este objetivo q=2 **sin raíz**. `feature_cost` y `structure_cost` son
+componentes sin ponderar; `transport` es el acoplamiento N×M, no etiquetas de clustering.
+`alpha` está entre cero y uno. Las unidades cambian el balance; el proyecto debe normalizarlas
+explícitamente si procede. `iterations`, `objective_history`, `marginal_error`, `converged`
+y `backend` permiten inspeccionar el resultado. Un fallo del solver o marginales inválidos
+producen error; alcanzar `max_iter` puede devolver `converged=False`. Compruebe ese indicador.
+
+El cálculo es denso NumPy/CPU y no diferenciable. No implementa la distancia neuronal punto a
+punto `lambdaforge.nn.distances.Distance`, clustering, transporte no balanceado ni baricentros.
+Para alpha intermedio el problema no es convexo: convergencia local **no** certifica óptimo global
+ni una métrica matemática sobre disimilitudes arbitrarias. Distintos inicios pueden producir
+distintos mínimos. `initial_coupling` admite un acoplamiento factible N×M explícito. Por defecto
+se usa el producto determinista de marginales de POT; en autocomparación, el diagonal.
+
+### Límites y comparación de varios objetos
+
+`StructuredMeasure.from_points(..., max_structure_bytes=256*1024**2)` comprueba el espacio N²
+antes de construirlo. `FusedGromovWassersteinDistance(max_memory_bytes=512*1024**2)` comprueba
+una estimación conservadora antes de reservar distancias cruzadas, no impone un límite físico
+al proceso de POT. El término estructural se contrae sin reservar un tensor N×M×N×M.
+Los objetos enormes requieren reducción científicamente justificada en el proyecto, nunca
+submuestreo oculto. `solver.pairwise(objects)` devuelve una matriz objeto×objeto, sin clustering.
+Por defecto calcula ambas direcciones por separado, pues los mínimos locales pueden diferir.
+`symmetric=True` supone explícitamente distancias de atributos simétricas y refleja el triángulo.
+
+Referencias: [Vayer et al., ICML 2019](https://proceedings.mlr.press/v97/titouan19a.html),
+[API FGW de POT](https://pythonot.github.io/gen_modules/ot.gromov.html).
+
+
+<a id="guide-work-results"></a>
+
+## 21. Resultados de Work, evidencia histórica y productos independientes
+
+[English](MANUAL.md#guide-work-results) · [Manual](MANUAL.es.md) · [Productos](#guide-products)
+
+Un Work es una ejecución científica, no necesariamente un entrenamiento. Un Study añade un diseño
+de parámetros/semillas y coordinación científica. Comparten runner, Execution/Run/Attempt, outputs
+gestionados y las transacciones de exportación/importación. El informe de Work no inventa objetivos,
+ajusta modelos estadísticos ni mezcla evidencias de Attempts distintos.
+
+<a id="guide-work-results-inspección-e-informes"></a>
+
+### Inspección e informes
+
+Abre un Work en la consola y entra en **Results**. Selecciona un Run/Attempt para ver Overview, Metrics,
+Outputs, Visualizations, Products, Logs, Resources y Provenance. Cada pestaña carga únicamente su evidencia.
+Los listados usan índices compactos, sin descargar curvas, modelos ni HTML. Metrics trae curvas acotadas
+del Attempt seleccionado; Outputs muestra descriptores, valores y nombres de checkpoints, no sus bytes.
+Los checkpoints se identifican como estado actual compartido del Run, no como copias históricas de un Attempt.
+Las rutas no conservadas se identifican como tales. Para consultar evidencia en curso debe existir la
+atestación persistida del Execution del Job; durante la preparación siguen disponibles los logs y controles.
+
+Provenance incluye una tabla seleccionable de entradas históricas/productos exactos. Enter abre la
+fuente registrada si está en el catálogo local, nunca otra ejecución con el mismo nombre. Si falta,
+se explica que hay que exportar/importar la evidencia; no se ejecuta su productor.
+
+```bash
+lf results list --json
+lf results show EXECUTION --view overview --json
+lf results show EXECUTION --view metrics --run RUN_ID --attempt 1 --json
+lf results show EXECUTION --view outputs --run RUN_ID --json
+lf results preview-output EXECUTION OUTPUT_NAME --run RUN_ID --attempt 1 --json
+lf results report EXECUTION --output work-results.html
+```
+
+En Outputs, Enter solicita explícitamente una previsualización del archivo seleccionado solo si es
+regular, está retenido y ocupa como máximo 64 KiB. Verifica tamaño y checksum exactos; el UTF-8 se
+muestra como texto inerte, incluido el HTML. Para archivos mayores, directorios o contenido ausente
+se muestra metadata y una explicación sin descargar bytes. Las visualizaciones HTML registradas se
+ejecutan únicamente en el visor aislado del informe.
+
+**Open HTML report** genera explícitamente un informe offline desde registros persistidos: logs finales
+acotados, curvas reducidas, Attempts separados, outputs, errores, configuración y procedencia.
+La biblioteca gráfica se incluye una sola vez: cada Run/Attempt tiene su propio grupo de series y ejes
+de paso/observación. No se mezclan Attempts ni se atribuyen correlaciones medidas entre Attempts diferentes.
+El export conserva además los logs/escalares completos y checkpoints/artefactos retenidos. No se importa el antiguo
+código científico para visualizarlo. Un Work sin métricas o HTML también tiene informe. La evidencia
+parcial se identifica honestamente y no se reconstruyen artefactos eliminados por compactación.
+
+Para visualizaciones del proyecto usa la API existente:
+
+```python
+viewer = self.outputs.html_section("predictions", title="Predictions")
+viewer.write_text("<html><body><h1>Vista científica persistida</h1></body></html>")
+```
+
+El proyecto implementa su propia lógica. LambdaForge verifica el archivo y lo integra en un iframe
+con origen opaco y la misma política de seguridad de Study. El HTML debe ser autocontenido; utiliza
+assets incluidos/data URL. Siguen bloqueados las peticiones externas y el acceso privilegiado al sistema
+de archivos. Límites: 16 MiB/documento y 64 MiB/informe. Los listados nunca abren esos archivos.
+
+Para arrays completos mayores usa `html_bundle` y su loader lazy acotado. Consulta
+[pestañas gestionadas](#guide-managed-reports): API, visor remoto/offline, integridad de export/import
+y regeneración desde inferencia retenida sin repetir entreno ni forward passes.
+
+<a id="guide-work-results-seleccionar-dependencias-históricas-exactas"></a>
+
+### Seleccionar dependencias históricas exactas
+
+Los nombres son selectores, no identidades. Repetir un nombre es válido; con varias coincidencias hay
+que elegir el Execution exacto. La consola muestra sufijos locales `#n` deterministas; no son referencias
+científicas portables. Los imports conservan su identidad/procedencia y nunca se convierten en Jobs.
+
+```bash
+lf results reference previous-work --json
+lf results reference EXECUTION --run RUN_ID --attempt 1 --json
+lf results reference EXECUTION --product selected-models --json
+lf results reference EXECUTION --product selected-models --artifact model-1 --json
+```
+
+Estos comandos solo consultan metadata y devuelven un marcador tipado con identidades fijadas.
+Una ejecución posterior con el mismo nombre no lo modifica. En **Run Work**, introduce el nombre del
+parámetro consumidor, pulsa **Choose historical input…**, selecciona una fila exacta y confirma con
+**Use exact reference**. Submit valida, explica y prepara esa configuración sin editar el YAML original.
+El selector permite fijar además un Run/Attempt concreto y elegir un artefacto registrado del producto.
+CLI equivalente: `lf run CONFIG --input-ref 'PARAMETRO=MARCADOR_JSON'`. La selección al lanzar se aplica
+a un Work/Study simple; en composición o Fleet las dependencias se declaran en su YAML. Si la entrada
+cambia antes de preparar, se rechaza explícitamente en lugar de sustituir el productor.
+
+<a id="guide-work-results-resultinput-evidencia-de-un-execution"></a>
+
+#### ResultInput: evidencia de un Execution
+
+```yaml
+with:
+  previous:
+    result:
+      execution: previous-work
+      # run: run-...     # obligatorio para leer un Run individual de una ejecución con varios
+      # attempt: 1       # opcional; sin él, la identidad del envelope fija el último Attempt
+```
+
+El resolver incorpora `evidence_id`, SHA-256 canónico del resultado/configuración originales exactos.
+El Work recibe `lambdaforge.work.ResultInput`: metadata/configuration/metrics/result/outputs inmutables,
+`metric_curves()` acotado y `artifact(NOMBRE)` con verificación explícita. Es serializable para workers
+spawn. Su identidad participa en el fingerprint y la procedencia del consumidor. Acepta snapshots
+finalizados nativos/importados, incluidos fallidos, no resultados vivos mutables. Para leer un Run de una
+ejecución con varios hay que seleccionarlo. Eliminar su evidencia productora puede invalidar la entrada:
+no es un contrato de modelo autónomo.
+
+<a id="guide-work-results-productinput-contenido-científico-duradero"></a>
+
+#### ProductInput: contenido científico duradero
+
+La sintaxis existente sigue siendo válida:
+
+```yaml
+with:
+  model: {product: {name: selected-models, contract: example/models:v1}}
+```
+
+Para un producto publicado de una ejecución histórica concreta:
+
+```yaml
+with:
+  model:
+    product:
+      from: {execution: previous-study, output: selected-models}
+      artifact: model-1  # miembro registrado exacto opcional, no una ruta física
+      expect: {dataset: example-data@1}
+```
+
+Solo se puede omitir el contrato cuando el recibo exacto de publicación lo declara inequívocamente.
+Sigue validándose, y las expectativas son explícitas. La preparación fija el content ID sellado.
+Las referencias directas a productos funcionan incluso tras borrar su productor. Un output temporal
+no publicado no es un producto. DatasetInput y `from` entre steps conservan su semántica.
+
+Si declaras `artifact`, `ProductInput.selected_artifact` identifica la selección y `artifact()` verifica
+y abre ese miembro exacto. Solicitar otro se rechaza, no se sustituye. Sin selección, la API existente
+`artifact(NOMBRE)` no cambia. No es un subproducto inventado: mantiene contenido y contrato del
+producto sellado. El nombre lógico seleccionado participa en la identidad del consumidor y se conserva
+al fijar referencias, preparar destinos remotos/Fleet y exportar/importar.
+
+<a id="guide-work-results-promoción-explícita-desde-un-work-ordinario"></a>
+
+### Promoción explícita desde un Work ordinario
+
+```yaml
+products:
+  evaluation-report:
+    kind: ScientificReport
+    contract: example/evaluation:v1
+    scientific_meaning: {protocol: evaluated-on-fixed-test-v1}
+    outputs: [report, counts]
+```
+
+Tipos ordinarios: ScientificReport, AnalysisResult, ModelArtifact y Selection. El significado es una
+declaración del publicador, no una equivalencia demostrada. Enumera valores y archivos retenidos
+registrados; los miembros de directorios deben registrarse individualmente. La promoción requiere
+un único Run lógico cuyo último Attempt sea exitoso. Para selección entre Runs se conserva ModelSet.
+
+La finalización usa el registro y locks nativos para publicar bytes independientes e inmutables.
+Primero se persiste el resultado científico. Un fallo operativo de publicación no modifica su éxito
+y conserva los outputs para `lf products finalize EXECUTION --apply`, que repite solo la publicación.
+Reintentos concurrentes reutilizan la publicación exacta. Borrar el productor no elimina el producto.
+
+<a id="guide-work-results-portabilidad-y-disponibilidad-remota"></a>
+
+### Portabilidad y disponibilidad remota
+
+```bash
+lf export WORK_OR_EXECUTION --output ./exports
+lf import ./exports/PAQUETE_EXPORTADO --json
+lf import ./exports/PAQUETE_EXPORTADO --apply
+```
+
+Se reutiliza el formato nativo versión 2, añadiendo metadata opcional `execution_kind`; los anteriores
+paquetes Study siguen siendo legibles. Los originales permanecen en `portable/`, separados de la
+ubicación e índices locales. Results y los Works importados abren el mismo visor sin contactar al
+cluster original. Reexportar un import verifica y conserva su paquete/procedencia originales.
+
+Resolver una identidad no materializa sus bytes en otro equipo:
+
+```bash
+lf products materialize EXACT_CONTENT_ID --on cluster
+lf products materialize EXACT_CONTENT_ID --on cluster --apply
+lf results materialize EXECUTION --on cluster
+lf results materialize EXECUTION --on cluster --apply
+```
+
+**Materialize…** ofrece destino, preview y confirmación. Preview solo lee metadata del origen. Apply
+transfiere ZIP64 comprimido, reutiliza extracción/importación seguras y verifica contenido/evidencia
+exactos; reutiliza copias idénticas existentes sin ejecutar al productor. Cada destino, incluidos los
+miembros Fleet soportados, debe disponer previamente de sus dependencias. La preparación Fleet incorpora
+las dependencias históricas exactas al estrato nativo de inputs; cada miembro las revalida antes de sus Runs.
+Las restricciones existentes para datasets distribuidos y continuación permanecen intactas. Un origen solo remoto
+debe exportarse/importarse explícitamente al catálogo controlador; esto no es orquestación automática
+entre clusters. El Python destino necesita el runtime actual y espacio de staging/almacenamiento.
+El scratch está en el proyecto, no en la partición temporal del sistema. SSH, permisos y conectividad
+son requisitos externos.
+
+Consulta [el ejemplo ejecutable](../examples/work_results/README.md): Study → ModelSet seleccionado →
+Work de visualización → HTML → export/import, sin repetir entrenamiento.
+
+<a id="guide-work-results-evidencia-en-ampliaciones-de-studies-fijos"></a>
+
+### Evidencia en ampliaciones de Studies fijos
+
+Una serie opt-in referencia Execution/Run/Attempt nativos entre revisiones inmutables; no clona
+resultados antiguos dentro del delta. `studies show/analyze/report` y la consola presentan evidencia
+acumulada exploratoria post hoc. Borrado/GC protegen referencias. Exportar una serie conserva paquetes
+nativos independientes, JSON/HTML acumulado y journal; importar cada paquete sigue produciendo
+evidencia de lectura, no una serie ejecutable. Consulta [ampliaciones](#guide-study-extensions).
+
+
+<a id="guide-products"></a>
+
+## 22. Productos científicos durables: base implementada
+
+Promoción desde Works ordinarios, referencias históricas exactas, ResultInput frente a ProductInput,
+selección en consola y materialización comprimida explícita: [Resultados de Work](#guide-work-results).
+
+[English](MANUAL.md#guide-products)
+
+Esta es la capa funcional de **modelo/registro/transporte e inputs Work explícitos**, no el sistema
+completo de orquestación de Studies. Hay decisiones nativas, selección local de modelos,
+dependencias Work tipadas y registros de consumo real. Un Study nativo individual puede declarar
+publicación automática de decisiones/modelos al finalizar. Import/export nativo de Study de un host
+incluye productos publicados. La consola incluye un navegador de metadata/auditorías e import de
+Study con confirmación. Siguen pendientes espera/replanificación y export Fleet completo.
+Véase el [registro de reforma](ai/IMPLEMENTATION.es.md#history-architectural-reform). Ejecución,
+recovery y publicación exacta de datasets actuales no cambian.
+
+<a id="guide-products-identidades-y-contratos"></a>
+
+### Identidades y contratos
+
+`lambdaforge.products` exporta `ProductContract`, `ProductArtifact`, `StudyProduct`,
+`ProductRegistry`, `ProductBundle`, `SelectionPolicy`, `ModelSelection`, `select_models`,
+`build_study_decision`, `ProductRequirement`, `ProductInput`, `ProductPublication` y
+`publish_declared_products`. Un producto separa:
+
+- contrato explícito versionado, como `project/report:v1`, con campos científicos exactos;
+- `scientific_id`: kind, declaración del contrato y significados científicos declarados;
+- `content_id`: payload/significado canónico y manifiestos exactos de artifacts;
+- provenance original inmutable y attestations independientes de productores posteriores;
+- ubicación física del catálogo, que no cambia esas identidades.
+
+La configuración completa del productor puede formar parte de provenance, **no** de la clave de
+compatibilidad del consumidor. Los nombres son aliases inmutables. Cambiar la declaración de un
+contrato requiere otra versión. Objetivo científico, identidad/etiquetas de inputs, diseño y regla
+de selección relevantes deben estar declarados. No se adivinan exclusiones dentro de NPZ,
+checkpoints ni formatos arbitrarios. Igual significado declarado no certifica equivalencia entre
+bytes distintos.
+
+Cada artifact es un fichero regular independiente con SHA-256 crudo y tamaño. Publicación copia y
+verifica antes de commit, sin enlazar a Attempts desechables, borrar originales ni recorrer archivos
+no seleccionados. Cada metadata tiene límite de 512 KiB. Listar/mostrar no abre artifacts pesados;
+`verify` es explícito. Lecturas ausentes y previews no crean carpetas ni locks.
+
+<a id="guide-products-api-de-publicación-explícita"></a>
+
+### API de publicación explícita
+
+Usarla desde un script de operador/postprocesado, no como runner alternativo oculto. Declaración
+nativa y selección post-Study explícita de modelos
+ya está disponible abajo.
+
+```python
+from lambdaforge.products import ProductContract, ProductRegistry, StudyProduct
+
+contract = ProductContract("my_project/count-report:v1", ("sources", "labels", "method"))
+report = StudyProduct(
+    name="benchmark-counts-v1",
+    kind="ScientificReport",
+    contract=contract,
+    payload={"train": 317, "validation": 272},
+    scientific_meaning={
+        "sources": {"dataset": "sha256:<contenido-publicado-exacto>"},
+        "labels": {"positive": "binding", "partitions": "audited-v1"},
+        "method": "count-audited-members-v1",
+    },
+    producer={
+        "execution_id": "<execution-original-real>",
+        "evidence_fingerprint": "<fingerprint-real-de-evidencia-persistida>",
+    },
+)
+registry = ProductRegistry()  # Proyecto pyproject actual/.lambdaforge/products
+plan = registry.publish(report)  # Preview sin publicar.
+registry.publish(report, apply=True)
+resolved = registry.resolve(
+    "benchmark-counts-v1", contract=contract,
+    scientific_expectations={"method": "count-audited-members-v1"},
+)
+```
+
+Sustituir los placeholders por evidencia real; el envelope genérico no calcula ni certifica esa
+evidencia. Etiquetas de kind como `StudyDecision`/`ModelSet` no seleccionan modelos ni demuestran la
+semántica del payload automáticamente. El proyecto es dueño de su declaración explícita.
+
+Para artifacts, pasar descriptores `ProductArtifact(nombre, ruta_relativa, sha256_crudo, tamaño, rol)`
+y `files={nombre_artifact: ruta_origen}` a `publish`. `artifact_path(selector, nombre)` verifica los
+bytes promovidos por defecto antes de devolver la ruta. No sustituir el SHA-256 crudo por el
+fingerprint histórico de ficheros gestionados, que también incorpora su nombre.
+
+<a id="guide-products-cli-nativa"></a>
+
+### CLI nativa
+
+```bash
+lf products list --json
+lf products show benchmark-counts-v1 --json
+lf products provenance benchmark-counts-v1 --json
+lf products consumers benchmark-counts-v1 --json
+lf products verify benchmark-counts-v1 --json
+```
+
+Todas aceptan `--root DIR`; por defecto catálogo del proyecto actual o `LAMBDAFORGE_PRODUCT_ROOT`.
+List/provenance/consumers permiten paginar con `--offset`/`--limit`. No adivinar rutas de Jobs remotos.
+El control plane existente propaga a workers una raíz de productos propia del proyecto, separada
+de Jobs y cachés desechables: `STATE_ROOT/products` remoto y `PROJECT/.lambdaforge/products` local.
+Raíces remotas dentro de cache/Jobs se rechazan.
+
+Un operador puede serializar `product.to_dict()` y publicarlo mediante
+`lf products publish MANIFEST.json --file ARTIFACT=SOURCE [--apply]`. Es declaración avanzada
+explícita, no selección automática ni workaround específico de aplicación. Preview verifica
+forma/tamaño del origen; apply verifica bytes exactos. Un origen corrupto nunca se publica como
+válido. Un nombre inmutable conflictivo exige otro nombre/versión, nunca un flag de sobrescritura.
+
+<a id="guide-products-selección-post-study-de-modelset"></a>
+
+### Selección post-Study de ModelSet
+
+Registrar un snapshot evaluado desde el ciclo de vida Work normal:
+
+```python
+self.outputs.from_checkpoint(
+    "model", "best.ckpt", role="model",
+    metadata={"metrics": {"auprc": measured_auprc, "accuracy": measured_accuracy}, "step": epoch},
+)
+```
+
+El proyecto aporta valores evaluados para **esos pesos exactos**, no la última época de otro modelo.
+Es un artifact independiente normal del Attempt. Promoverlo al catálogo durable es deliberado.
+También admite `outputs.file` con rol model y metadata explícita equivalente. El selector local
+todavía no admite modelos directorio ni artifacts publicados externamente.
+
+Crear un YAML normal de selección, por ejemplo `selection.yaml`:
+
+```yaml
+artifact: model
+rank_by: auprc
+mode: max
+group_by: [hidden_dim]  # Omitir para top_k global.
+top_k: 1
+constraints:
+  accuracy: {min: 0.6}  # Mismo snapshot registrado, no últimas métricas de la Run.
+tie_policy: stable
+```
+
+```bash
+lf products select EXECUTION_ID --name best-per-width --contract my_project/models:v1 \
+  --policy selection.yaml
+# Revisar y repetir con --apply.
+```
+
+`--results-root DIR` selecciona ResultStore local y `--root DIR` el catálogo de productos. La API
+equivalente es `select_models(source, execution_dir, policy, name=..., contract=...)`. Usa últimos
+Attempts, excluye failed/pruned/fidelidad parcial, aplica constraints del snapshot y ordena cada
+grupo condicional exacto determinísticamente. Parámetro inactivo y valor null explícito son distintos.
+`tie_policy: include_equivalent` incluye opcionalmente modelos dentro de un `practical_margin`
+autorizado desde el límite top-k; no expresa confianza estadística.
+
+Lee/calcula hash **solo de modelos seleccionados**; incluso preview puede tener E/S local importante
+si sus pesos son grandes, pero no crea carpetas/locks. Apply promueve copias exactas independientes.
+Evidencia e historial originales no cambian. ModelSet registra Runs lógicas, Attempts, seeds,
+parámetros, métricas/step del snapshot, grupos, razón, checksums y provenance. Una Run auxiliar
+fallida no invalida snapshots elegibles correctos. Ranking es **entre snapshots observados
+elegibles**, no óptimo global, confirmación nueva ni nueva decisión HPO. Si faltan métricas asociadas
+al modelo, explica cómo registrarlas; nunca atribuye best/last de una Run a pesos arbitrarios.
+
+Siguen pendientes selección remota/Fleet y publicación dentro de `steps` compuestos.
+El selector local no busca modelos fuera de la Execution propia verificada.
+
+<a id="guide-products-studydecision-nativa"></a>
+
+### StudyDecision nativa
+
+```bash
+lf products decide EXECUTION_ID --name pooling-decision --contract my_project/pooling:v1
+# Revisar la decisión nativa y repetir con --apply.
+```
+
+Sella la selección nativa del Study finalizado, objetivo/diseño/significado de inputs, referencias
+Run/Attempt y fingerprint de evidencia. No vuelve a ordenar candidatos ni ajusta HPO. Selección y
+resolución científica son distintas: si falta Analysis final quedan preguntas explícitamente
+pendientes; confirmación incompleta no permite una selección basada solo en supervivientes.
+Una Run auxiliar fallida no invalida una selección elegible completa.
+
+Si existe `analysis.json`, debe coincidir con Execution/evidencia finalizadas: conclusiones
+provisionales, antiguas o de otra Execution se rechazan y se indica cómo recalcular explícitamente.
+Esta operación de metadata no lee historiales escalares, checkpoints ni pesos. APIs equivalentes:
+`ResultStore.decision(...)` y `build_study_decision(...)`.
+
+<a id="guide-products-publicación-declarada-y-retry-de-publicación-sin-entrenar"></a>
+
+### Publicación declarada y retry de publicación sin entrenar
+
+Un Study individual (`search`, `sweep` o `seeds` repetidas) puede declarar productos junto a los
+campos normales del Work:
+
+```yaml
+products:
+  pooling-decision:
+    kind: StudyDecision
+    contract: my_project/pooling:v1
+  best-per-width:
+    kind: ModelSet
+    contract: my_project/models:v1
+    select:
+      artifact: model
+      rank_by: auprc
+      mode: max
+      group_by: [hidden_dim]
+      top_k: 1
+```
+
+Validación comprueba esta declaración cerrada antes del cálculo. `lf explain` la muestra y la
+Execution registra productos esperados antes de iniciar Runs. Finalización guarda primero evidencia
+de entrenamiento, después publica mediante los mismos servicios nativos antes de compactar.
+StudyDecision requiere objetivo; ModelSet requiere artifacts evaluados explícitamente. No hay
+constructores arbitrarios, callbacks ejecutables ni otro runner.
+
+Un fallo de publicación conserva resultados/checkpoints. `products.json` registra pending/published/
+failed con causa/fase; `product-publication-history.jsonl` conserva intentos de publicación. No se
+transforma en un fallo científico ni se alteran objetivos. Consultar publicación por separado:
+
+```bash
+lf products status EXECUTION_ID --json       # Metadata acotada; no lee pesos.
+lf products finalize EXECUTION_ID --json     # Preview sin mutación.
+lf products finalize EXECUTION_ID --apply    # Solo publicación; no ejecuta Runs.
+```
+
+Apply adquiere lock de propiedad de Execution y después locks de publicación/catálogo. Recibos
+correctos se reutilizan aunque ya no estén los artifacts originales; apply verifica los bytes
+promovidos. Repetición concurrente idempotente; corrupción/cambio de declaración se rechazan.
+Conflictos de nombre inmutable requieren otro nombre/versión, no sobrescribir. `--results-root` y
+`--root` seleccionan evidencia/catálogo locales. La CLI todavía no envía recovery de publicación a
+remoto: ejecutar en el host dueño de Execution/catálogo. Promoción automática Fleet no implementada.
+
+<a id="guide-products-dependencias-work-tipadas"></a>
+
+### Dependencias Work tipadas
+
+Declarar el producto como argumento normal de Work, no como condición sobre el estado del productor:
+
+```yaml
+name: model-visualization
+run: my_project.Visualize
+with:
+  models:
+    product:
+      name: best-per-width
+      contract: my_project/models:v1
+```
+
+El proyecto puede añadir `expect: {CAMPO: VALOR_EXACTO}` para exigir significados científicos
+explícitos. El resolver comprueba contrato/expectativas y entrega un `ProductInput` pickle-safe:
+
+```python
+import lambdaforge as lf
+from lambdaforge.products import ProductInput
+
+class Visualize(lf.Work):
+    def run(self, models: ProductInput) -> dict[str, int]:
+        for model in models.payload["models"]:
+            weights = models.artifact(model["artifact"])
+            # Leer los pesos verificados y registrar outputs de visualización gestionados normales.
+        return {"models": len(models.payload["models"])}
+```
+
+Consultar metadata no lee/descarga pesos. `artifact(nombre)` verifica ese fichero promovido exacto
+antes de entregar su ruta de input de solo lectura. Compatibilidad e identidad del input usan
+contrato/significado/contenido sellados, no hash completo de YAML ni estado actual del productor.
+Validación/preview no crean nada; Attempts ejecutados añaden registros inmutables de consumidores
+consultables con `lf products consumers`. Reutilizar una Execution cacheada no inventa otro consumo.
+
+Bundles remotos fijan aliases por identidad de contenido y verifican materialización en el catálogo
+del proyecto destino antes de staging. Importar allí el bundle explícito primero: no se transfieren
+pesos grandes implícitamente ni se usa un catálogo dentro del Job como fallback. Productos ausentes/
+incompatibles fallan con diagnóstico; espera automática o replanificación del productor siguen pendientes.
+
+<a id="guide-products-exportimport-portable-de-productos"></a>
+
+### Export/import portable de productos
+
+```bash
+lf products export benchmark-counts-v1 --output ./report-export
+lf products export benchmark-counts-v1 --output ./report-export --apply
+lf products import ./report-export --root ./independent-products
+lf products import ./report-export --root ./independent-products --apply
+```
+
+Transportan **un producto**, no el Study entero. Export escribe un directorio verificado con
+`bundle.json`, `product.json`, bytes seleccionados y attestations completas del productor (no los
+registros de consumo downstream). Destinos existentes
+quedan protegidos. Import comprueba SHA/identidad del manifiesto, bytes de artifacts e inventario de
+provenance; conserva productor original y nunca lanza cómputo. Repetir/importar concurrentemente
+el mismo producto es idempotente. Un origen corrupto se rechaza incluso si el destino ya lo tiene.
+
+Publicación/import se serializan con el lock nativo existente. Copias interrumpidas limpian solo su
+directorio exacto de transacción no publicado, conservando originales. Un crash tras commit del
+objeto pero antes del alias puede dejar un objeto inmutable sin registrar: repetir verifica y
+completa el alias, sin iniciar otro experimento.
+
+Un producto portable sobrevive al borrado de su Study original. Esto no implementa DAG de dependencias,
+autenticidad criptográfica de provenance, certificados de datasets ni export completo de Fleet.
+
+<a id="guide-products-importar-un-study-portable-sin-ejecutarlo"></a>
+
+### Importar un Study portable sin ejecutarlo
+
+```bash
+lf import ./portable-study--execution-ID --json
+lf import ./portable-study--execution-ID --apply --json
+lf results list --json
+lf products show models --json
+```
+
+Por defecto verifica/preview; `--apply` registra evidencia en ResultStore del proyecto y productos
+sellados en ProductRegistry nativo. `--results-root`/`--products-root` cambian opcionalmente ubicación,
+nunca identidad científica. Admite exports nativos versión 2: finales, fallidos/cancelados y snapshots
+en ejecución conservan estado capturado. Un snapshot no pasa a ser evidencia completada. Paquetes
+de Job previo a ejecución sin Execution propio no se importan como Study.
+
+Verifica todos los archivos, SHA-256/tamaño/cantidad, ausencia de extras, versiones de metadata,
+identidad/ownership de Execution/Run/Attempt y productos/atestaciones del productor. Rechaza traversal,
+contenido simbólico, especial o hard-linked, inventarios duplicados y corrupción entrante/existente.
+Imports concurrentes son serializados/idempotentes. Nunca sobrescribe Execution nativo ni otro
+snapshot con igual ID: usar otra raíz de resultados para conservar varias capturas. Checksums no
+demuestran autenticidad criptográfica de afirmaciones científicas de un autor no confiable.
+
+Archivos/provenance originales quedan intactos en `portable/`; `import.json` registra nueva ubicación.
+ResultStore lista la entrada, relocaliza rutas lógicas solo en su lector de logs y lee Analysis incluido
+sin refit. No importa código del proyecto, ejecuta, continúa epochs ni abre HTML automáticamente.
+Configuración importada no sirve como recovery nativo. `portable/` ya es el paquete reutilizable;
+no necesita generar otra procedencia de export.
+
+En la consola, **Studies → Import Study…** (también desde Products y Ctrl+P) permite seleccionar
+una carpeta, verificarla en un worker, revisar su identidad y confirmar el registro. Aparece como
+snapshot read-only en Studies/Overview del proyecto actual. Trials/seeds usan proyecciones locales
+jerárquicas y el dashboard compartido de Run; métricas/logs/artifacts conservados se leen localmente,
+no del cluster original. Un snapshot running no es un controlador vivo. Cancel, retry, borrado de
+historial y export del productor quedan ocultos; eliminar el archivo importado sigue siendo una
+acción explícita de Results. Los HTML incluidos siguen disponibles en `portable/reports/`.
+
+El agregado nativo `execution/result.json` puede superar 64 MiB en un Study válido grande.
+Import verifica primero tamaño declarado y SHA-256 exactos de todos los archivos y después valida
+estrictamente el agregado sin aplicarle el límite de metadata individual. Siguen intactas las
+comprobaciones de checksum, rutas/propiedad, claves duplicadas y valores no finitos. El refresco
+raíz solo lee `import-study.json` pequeños, no el agregado. Reaplica un import antiguo para crear
+`import-view/` bajo su lock: registros científicos y recibo original permanecen intactos.
+Import copia los bytes conservados y necesita espacio local para el paquete y su índice;
+nunca vuelve a descargar artifacts.
+
+Export incluye productos de la declaración/recibo nativo, sus bytes independientes e historial del
+productor. Transferencia trae solo esos objetos, no todo el catálogo; muestreo de telemetría nunca
+altera bytes de productos. Ausencias fallan explícitamente. Publicaciones de operador no declaradas
+usan `products export`, sin recorrer catálogos ajenos para descubrirlas.
+
+Registro del archivo hace commit atómico antes de aliases de productos con locks independientes.
+Un fallo posterior deja el archivo verificado disponible: repetir import completa aliases. No es
+transacción distribuida entre stores. Borrar evidencia importada conserva productos independientes.
+
+
+<a id="guide-conditional-studies"></a>
+
+## 23. Estudios científicos condicionales
+
+[English](MANUAL.md#guide-conditional-studies) · [HTML de investigación](#guide-research-analysis)
+
+<a id="guide-conditional-studies-1-una-pregunta-un-study"></a>
+
+### 1. Una pregunta, un Study
+
+Usa un único `sweep.space` para comparar alternativas que tienen distintos parámetros aplicables.
+Todas las celdas pertenecen al mismo Study y comparten las seeds declaradas. Usa `steps` para un
+flujo real de trabajo, no para separar artificialmente ramas comparables: siguen siendo
+invocaciones independientes, no estudios fusionados.
+
+```yaml
+name: optimizer-comparison
+run: my_project.Compare
+seeds: [4, 7, 32, 54]
+sweep:
+  reference: {optimizer: baseline}
+  space:
+    momentum:
+      values: [0.8, 0.9]
+      when: {optimizer: {in: [sgd, accelerated]}}
+    optimizer: [baseline, sgd, accelerated]
+resources: {gpu: 2, time: 24h}
+execution: {max_parallel: 4, max_time: 12h}
+```
+
+Son cinco candidatos y veinte Runs obligatorios, no doce candidatos ni un Study por optimizador.
+`baseline` no recibe `momentum`; se aplica el valor por defecto de la firma Python. La referencia
+debe seleccionar exactamente un candidato activo. Cero coincidencias o varias son errores.
+
+<a id="guide-conditional-studies-2-gramática-de-activación"></a>
+
+### 2. Gramática de activación
+
+Un descriptor admite `when` opcional. Varios padres se combinan con AND:
+
+```yaml
+when:
+  optimizer: {in: [sgd, accelerated]}
+  use_momentum: true
+```
+
+`{parent: valor}` conserva la igualdad antigua; `{parent: {eq: valor}}` significa lo mismo. La
+pertenencia es explícita: `{parent: {in: [valor1, valor2]}}`. La lista debe contener escalares JSON
+únicos, no estar vacía y pertenecer al dominio finito del padre. Se rechazan listas sin operador,
+operadores desconocidos, padres inexistentes, ciclos y valores ajenos al dominio. No hay
+expresiones, `or`, `not` ni lenguaje recursivo. La igualdad antigua sobre rangos numéricos sigue
+funcionando; `in` requiere un dominio finito.
+
+Los hijos pueden escribirse antes que sus padres. `ActivationCondition` y `ParameterSpace`
+comparten validación y ordenación de dependencias entre sweeps, generación aleatoria/Sobol/
+adaptativa, codificación y análisis. Las claves inactivas se omiten: no son `null` ni multiplican
+el diseño para deduplicarlo después. Se rechazan valores repetidos del sweep. El dominio mantiene
+el orden declarado; ordenar de otra forma los miembros de `in` no cambia la identidad científica.
+La cobertura condicional usa valores observados activos, no una categoría inactiva inventada.
+
+<a id="guide-conditional-studies-3-validar-y-entender-el-plan"></a>
+
+### 3. Validar y entender el plan
+
+```bash
+lf validate comparison.yaml
+lf explain comparison.yaml
+lf run comparison.yaml --on CLUSTER --dry-run --json
+```
+
+Validación y explicación incluyen `preflight` acotado: candidatos, seeds compartidas, Runs
+obligatorios, conteos de la primera rama categórica independiente, referencia, GPUs solicitadas,
+límite paralelo, presupuesto del Study y tiempo del scheduler. La salida humana no enumera cientos
+de identidades. `--json` conserva el plan completo para automatización. La validación local indica
+que no se ha comprobado la capacidad del destino; un plan remoto de solo lectura también puede
+necesitar un entorno/runtime ya preparado. El resumen de ramas no es una API de familias de dominio.
+En búsqueda adaptativa, los conteos describen la ventana de propuestas actual (limitada por el
+techo de candidatos), no prometen ejecutar todas las propuestas. La replicación se vuelve
+obligatoria al proponer el candidato. En un sweep fijo, los conteos cubren todo el diseño declarado.
+
+Para combinaciones extra selectivas, `sweep.include` añade puntos escalares activos completos sin
+ampliar los productos de los dominios base. `sweep.candidates` selecciona solo puntos explícitos
+dentro del espacio. Ambos usan la misma autoridad de activación, rechazando claves inactivas o
+ausentes. Un punto include ya presente en la base no se duplica. Ejemplos y ampliación incremental
+de Studies completados: [ampliaciones](#guide-study-extensions). Editar el YAML por sí solo no amplía
+una Execution existente: revisa y confirma **Extend Study…**, no Resume.
+
+Solo `resources` raíz se hereda por los pasos salvo sobrescritura. En una composición con `steps`
+se rechazan `with`, `seeds`, `replicates`, `search`, `sweep`, `execution`, `objective` y `analysis`
+raíz: deben declararse en el paso correspondiente. Nunca se ignora silenciosamente una política.
+Preflight comprueba herencia y firmas sin construir un Work ni ejecutar ciencia; no puede detectar
+errores semánticos arbitrarios dentro del `run()` del proyecto consumidor.
+
+<a id="guide-conditional-studies-4-tiempo-y-capacidad-del-destino"></a>
+
+### 4. Tiempo y capacidad del destino
+
+`resources.time` es el techo de tiempo del scheduler para la unidad planificable. Los niveles
+secuenciales suman; un nivel paralelo aporta el máximo de sus miembros. Seis pasos secuenciales
+de 168 h solicitan 1008 h (42 días); tres de 24 h, 72 h. Es un techo, no una predicción del tiempo
+de entrenamiento. `execution.max_time` es el presupuesto lógico de despacho del Study; se informa
+por separado y no sustituye al límite del scheduler.
+
+En un host directo, un inventario UUID vivo y correcto junto con la restricción heredada de
+visibilidad, cuando sea inequívoca, permite rechazar una solicitud superior a la capacidad antes
+de preparar el bundle, también en dry-run. Ocupación no es capacidad. Una sonda fallida/ambigua
+queda como desconocida, nunca inventa un número. El nodo de login de un scheduler no es su
+inventario de asignaciones. Los launchers del centro conservan la comprobación existente en
+runtime: un Study adaptativo puede reducirse a menos tokens otorgados, nunca ampliar el grant ni
+reservar otras GPUs durante preflight. La validación local no contacta destinos remotos.
+
+<a id="guide-conditional-studies-5-identidad-y-evidencia-existente"></a>
+
+### 5. Identidad y evidencia existente
+
+La igualdad normalizada mantiene serialización e identidad antiguas. `in` amplía el schema actual
+sin nueva versión YAML ni runner de compatibilidad. Los predicados permanecen en diseño e
+inicialización del Study y viajan por análisis, exportación y retry. Los registros históricos de
+igualdad se leen, no se reescriben. Cambiar condiciones, dominios, seeds u objetivo sigue siendo
+un cambio científico, no una excepción automática a las garantías de retry. Un sweep fijo sigue
+ejecutando cada celda/seed obligatoria sin poda adaptativa ni replanteamiento científico.
+
+La prueba genérica `tests/work/test_conditional_membership.py` produce ramas de 1, 2, 10, 16, 9 y
+18 candidatos: 56 × cuatro seeds = 224 Runs obligatorios. Compara el diseño unido con el conjunto
+previsto de ramas independientes, sin importar ni modificar ningún proyecto consumidor.
+
+
+<a id="guide-study-extensions"></a>
+
+## 24. Ampliaciones incrementales de Studies fijos
+
+[English](MANUAL.md#guide-study-extensions)
+
+Edita el **YAML original** y pulsa **Extend Study… → Review changes → Extend Study**.
+El diálogo muestra Runs conservados, celdas nuevas, destino, revisión y recuentos. Tras confirmar
+se envía solo el delta y se abre la serie acumulada. No necesitas escribir otro YAML.
+
+El origen debe ser un **sweep fijo propio, finalizado correctamente y con seeds explícitas**,
+también condicional. Amplía sus candidatos **o** añade seeds; completa cada revisión antes de
+ampliar otra vez. En un diseño rectangular sin puntos explícitos, añade valores a una dimensión
+existente cada vez. En diseños condicionales/selectivos se comparan candidatos activos exactos.
+Reordenar/insertar se admite. Quitar candidatos, cambiar ciencia o añadir valores
+y seeds simultáneamente se rechaza. Una reordenación sin celdas nuevas es un no-op.
+
+<a id="guide-study-extensions-cli"></a>
+
+### CLI
+
+```bash
+# Remoto: Job exacto del origen; se deduce su cluster.
+lf studies extend job-ID_EXACTO --config experiments/regularization.yaml --dry-run
+lf studies extend job-ID_EXACTO --config experiments/regularization.yaml --dry-run --json
+lf studies extend job-ID_EXACTO --config experiments/regularization.yaml --apply --plan-hash sha256:PLAN_REVISADO
+
+# Opcional: exigir equivalencia en lugar de crear una revisión de código/entorno.
+lf studies extend job-ID_EXACTO --config experiments/regularization.yaml --dry-run --code-policy strict
+
+# Origen local directo: también admite Execution exacta.
+lf studies extend execution-ID_EXACTO --config experiments/regularization.yaml --dry-run
+
+lf studies show series-ID_EXACTO --json
+lf studies refresh series-ID_EXACTO
+lf studies history series-ID_EXACTO
+lf studies analyze series-ID_EXACTO --json
+lf studies report series-ID_EXACTO --output regularization.html
+lf studies export series-ID_EXACTO --destination ./exports
+lf studies extend series-ID_EXACTO --config experiments/regularization.yaml --dry-run
+```
+
+Sin `--dry-run` también se hace solo preview. Este no escribe revisiones, reserva Jobs, consume
+seeds ni descarga modelos/checkpoints/artefactos/historial de epochs. Verificar inputs tipados puede
+calcular hashes de su contenido. Validar importa la Work real; una sesión de agente READ/PLAN no
+autoriza esa importación por sí sola. No se expone apply libre por MCP.
+
+<a id="guide-study-extensions-ejemplo-de-regularización"></a>
+
+### Ejemplo de regularización
+
+Para λ utiliza un argumento Python válido como `lambda_`:
+
+```yaml
+name: regularization
+run: project.Training
+seeds: [11, 23, 47, 59, 71]
+sweep:
+  space:
+    lambda_: [0.0, 0.1, 0.2, 0.3]
+objective: {metric: score, mode: max}
+```
+
+Tras 20 Runs correctos, cambia esa lista a `[0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]`:
+**20 conservados + 15 nuevos = 35**. Después añade tres seeds:
+**35 conservados + 21 nuevos = 56**. Añadir tres seeds directamente al diseño inicial produce
+**20 conservados + 12 nuevos = 32**.
+
+SubmissionService ejecuta un delta nativo exacto, rectangular o disperso, no otro runner ni recovery.
+LF conserva un snapshot de solo lectura `.lf-extension-UUID.yaml` junto al YAML original para
+mantener rutas relativas/contexto. No lo edites ni borres. Preparación asíncrona fija sus bytes
+e identidad científica real; recientes sigue mostrando el YAML authored.
+
+<a id="guide-study-extensions-ampliaciones-condicionales-y-selectivas"></a>
+
+### Ampliaciones condicionales y selectivas
+
+Añadir valores a una dimensión condicional existente amplía solo sus ramas activas. Para añadir
+valores únicamente a determinadas combinaciones, **mantén el espacio base intacto** y añade
+puntos completos mediante `sweep.include` en el mismo YAML:
+
+```yaml
+sweep:
+  reference: {pooling: max}
+  space:
+    pooling: [max, mean, lse]
+    heat: {values: [false, true], when: {pooling: {in: [mean, lse]}}}
+    lambda_: {values: [0.0, 0.1], when: {pooling: {in: [mean, lse]}}}
+  include:
+    - {pooling: lse, heat: true, lambda_: 0.2}
+    - {pooling: mean, heat: false, lambda_: 0.3}
+```
+
+Esto añade exactamente dos candidatos, no todas las combinaciones con λ=0.2/0.3. Con cuatro seeds
+sin cambios son ocho Runs nuevos. Usa los nombres reales de argumentos de tu Work. Cada punto debe
+incluir **todas las dimensiones activas y ninguna inactiva**: el control `max` no tiene `heat`
+ni `lambda_`. Include es una unión: un punto ya presente en la base no se ejecuta dos veces;
+entradas duplicadas dentro de `include` se rechazan. Los valores son escalares JSON finitos, no
+listas ni abreviaturas de dominios por rama. Conserva los include anteriores en próximas revisiones.
+
+La opción avanzada `sweep.candidates` ejecuta **solo** los puntos completos enumerados dentro del
+`space` declarado, sin recorrer su producto. Es incompatible con `include`. El delta disperso
+nativo usa esta forma para ejecutar la diferencia exacta, sin añadir controles, productos cruzados,
+dimensiones ficticias, nulls para claves ausentes ni seeds extra. Space sigue siendo la geometría
+condicional declarada; no implica que todos los puntos posibles se hayan medido o sean obligatorios.
+Quitar candidatos anteriores o cambiar condiciones sigue rechazándose. Añade seeds en otra revisión.
+Nunca se reescriben identidades ni registros históricos.
+
+Un parser conservado debe admitir candidatos dispersos. Por defecto, si falta o es incompatible
+en un cluster gestionado, se propone desplegar normalmente el proyecto/framework actuales como
+una nueva revisión de entorno. No se modifica el prefijo antiguo. Con `--code-policy strict`
+se exige compatibilidad del entorno conservado y se bloquea antes de enviar si no se acredita.
+
+<a id="guide-study-extensions-identidad-compatibilidad-y-evidencia"></a>
+
+### Identidad, compatibilidad y evidencia
+
+Serie, revisión, Execution, Job, Run y Attempt tienen identidades distintas. La evidencia antigua
+se referencia: no se copia a otra Execution ni se renumera en disco. Candidato se identifica por
+parámetros normalizados exactos; `true`, `1` y `1.0` no se confunden. Se conservan Trial original,
+Execution/Run/Attempt, seed, identidad de inputs y checksum. No cambian CodeIdentity ni IDs globales.
+
+La política predeterminada `--code-policy revisioned` no exige que el repositorio original estuviera
+limpio. Identidad exacta o prueba de HEAD limpio idéntico con solo el YAML cambiado permiten
+análisis compatible acumulado. En otro caso el plan propone explícitamente **el código actual como
+nueva revisión de código/entorno**. Cambios de código, documentación, dependencias, HEAD u origen
+dirty no impiden por sí solos añadir celdas. La consola lo avisa y confirma con **Extend · current
+code**. Aprobar ese plan autoriza la nueva revisión, no demuestra equivalencia de código.
+
+Los Runs antiguos conservan código, Execution, Run y Attempt originales. Los nuevos reciben su
+propia identidad científica mediante despliegue nativo normal; no se atribuyen al código antiguo.
+El código e inputs de preparación revisados se fijan y comprueban al crear el snapshot y en el
+worker desacoplado. Un cambio entre revisión y envío exige revisar de nuevo. Solo se excluyen del
+pin snapshots internos propios y acreditados por checksum.
+Tras preparar remotamente, LF valida la Work **realmente desplegada**, contenido de inputs,
+candidatos/seeds exactos, objetivo, semántica de métricas y diseño antes de enviarla al proveedor.
+Registra su identidad científica nativa del host separada del pin de envío del controlador;
+el worker vuelve a comprobar checksums de configuración e identidad de código embebida.
+Recogida/retry usan esa identidad Execution acreditada, no rutas ni namespace del controlador.
+Los lectores de metadatos usan el Python científico registrado, incluidos los preflights nativos.
+El argv SSH solo transporta compromisos SHA-256 canónicos por cada campo completo del contrato;
+el host los recalcula desde la configuración nativa. Descripciones extensas de métricas no generan
+comandos enormes. No se truncan/ignoran metadatos, inputs, seeds ni campos del diseño; un cambio
+sigue identificando los campos afectados. No cambia el algoritmo de identidad científica nativo.
+Rutas inseguras y evidencia científica
+corrupta/ausente siguen bloqueando; Work fuera del proyecto no está admitida. La política
+`--code-policy strict` conserva la exigencia anterior de equivalencia.
+
+Se reutilizan checks nativos de configuración/Run para conservar clase, parámetros fijos, contenido
+exacto de inputs/datasets/productos, objetivo/dirección, semántica de métricas, seeds y contratos de
+publicación. Agregado y últimos Attempts autoritativos deben coincidir. Celdas requeridas
+failed/pruned/incompletas se reparan antes con retry; no se convierten en evidencia completa.
+
+El orden histórico de Trials se reconstruye desde el snapshot `authored.yaml` propio de la
+Execution, no desde el YAML original ya editado. Sus valores JSON exactos deben coincidir con
+`configuration.json`; se mantienen huella científica y checks por Attempt. Así se evita que ordenar
+alfabéticamente las claves JSON cambie los ordinales de un sweep condicional/cartesiano. El transporte
+paginado conserva ese orden explícitamente. Evidencia de orden ausente/corrupta/insegura no exime
+de verificar identidad. Reconstruir el orden no convierte versiones científicas distintas en
+equivalentes.
+
+<a id="guide-study-extensions-ejecución-admitida"></a>
+
+### Ejecución admitida
+
+- CPU local: mismo intérprete existente y contrato registrado de Python/framework/paquetes/
+  plataforma; sin cambiar entorno ni command prefix.
+- CPU/GPU en un cluster: mismo destino y **entorno inmutable nativo gestionado original conservado**.
+  Se comprueban en el host prefijo propio, identidad del entorno, marcador listo y Python/paquetes/
+  plataforma. No se resuelven otras dependencias. Un preflight pequeño llama al CLI/WorkRunner
+  intacto dentro del scheduler/lanzador habitual. Antes de ciencia comprueba tipo/modelo, capacidad
+  y memoria de GPU concedida y entorno numérico. Ordinales/cantidad de GPUs no son identidad de
+  hardware. Admisión/grants siguen siendo nativos; nunca se amplía CUDA visibility.
+- Con código no equivalente o runtime conservado incompatible: el mismo cluster **gestionado**
+  usa bundle, resolución de runtime, entorno, scheduler y grants nativos del proyecto actual.
+  Preview no construye/instala/envía nada. No se reescribe el entorno viejo ni se usa silenciosamente
+  para ejecutar código distinto. Entornos remotos existing/no gestionados no despliegan nuevo código.
+
+No se acredita cada byte de binarios arbitrarios instalados. El modo estricto rechaza otro framework,
+entorno o tipo de GPU conservados. Entornos remotos no gestionados, ampliación GPU local, migración,
+Fleet, HPO adaptativo, replicación secuencial automática, dimensiones estructuradas y
+Works compuestos quedan fuera del contrato inicial; no se simulan mediante reinicio completo.
+
+<a id="guide-study-extensions-consola-y-análisis-acumulado"></a>
+
+### Consola y análisis acumulado
+
+El catálogo científico agrupa revisiones opt-in bajo una serie, con Runs/métricas/gráficas acumulados,
+revisiones, Jobs nativos e historial. Cada Job mantiene logs, cancelación y Resume. Los Jobs físicos
+siguen en Advanced Jobs y `lf jobs`; no cambian Studies normales ni selectores existentes.
+
+`StudyExtensionService.overview()` proyecta metadatos y `.analysis()` reutiliza StudyAnalysis,
+seeds emparejadas y fingerprint acumulado independiente, sin sobrescribir el análisis original.
+Elegir candidatos tras ver resultados genera evidencia **exploratoria post hoc**, no confirmación
+retroactiva. No se muestran medias finales de supervivientes cuando faltan seeds. Diagnósticos
+nativos de cobertura/extremos no demuestran óptimos fuera de los datos ni autorizan ampliaciones
+automáticas. No hay otro motor estadístico.
+
+Si alguna revisión no tiene equivalencia acreditada de código/runtime, sigue habiendo una única
+serie navegable, pero el análisis se **separa por revisión**. Por defecto se analiza la última;
+JSON conserva `code_cohort_analyses` y el HTML añade pestañas **Code · revision-N**. Se mantienen
+semánticas originales de métricas. No se mezclan tests, intervalos, efectos de parámetros ni medias
+de seeds entre revisiones. Un candidato con seeds de dos códigos no tiene una media final combinada
+ficticia; sus Runs siguen correctos y sus métricas visibles. Logs, export y retry nativos siguen
+disponibles. Evidencia histórica de un parámetro/seed no demuestra su resultado bajo código nuevo.
+Para evaluar *todo el diseño* con código nuevo, envía un Study nativo completo separado: Extend
+ejecuta deliberadamente solo las celdas adicionales. Rigen los límites nativos de tamaño de HTML.
+
+<a id="guide-study-extensions-presupuesto-fallos-y-durabilidad"></a>
+
+### Presupuesto, fallos y durabilidad
+
+Attempts/tiempo históricos de todas las revisiones, incluidos fallos reparados, no se devuelven.
+El límite global deja su remanente al delta; obligaciones imposibles se rechazan. Cambiar el
+ganador no promociona automáticamente productos.
+
+El journal propio `.lambdaforge/study-series/` tiene checksums, revisiones inmutables y eventos
+encadenados. El hash revisado vincula ciencia, evidencia, código, inputs, destino y presupuesto.
+Apply lo revalida. Repetir el plan aceptado devuelve el mismo Job; revisiones incompatibles se
+serializan y series diferentes pueden enviarse independientemente. No-op no escribe nada.
+
+Se preasigna ID de Job antes del handoff. Una caída acreditada anterior a crear Job/request/estado
+del proveedor se reconcilia con **ese mismo ID**. Preparación existente no se relanza a ciegas.
+Autoridad ausente/corrupta/incierta bloquea. Refresh sella celdas nativas comprobadas, no solo un
+éxito del scheduler. La consola actualiza la serie seleccionada. Preview sucesivo puede leer un
+Job terminado sin sellar sin escribir; apply reconcilia esa finalización operativa.
+
+Si falla un delta, abre su Job y pulsa **Resume Study…**, o `lf retry JOB --dry-run` seguido del
+retry explícito normal. Solo se recupera la Execution del delta; las revisiones anteriores quedan
+intactas. La serie sigue genealogía exacta, coste e historial y cuenta cada celda una vez.
+Continuar desde una epoch requiere soporte explícito de checkpoints en la Work.
+EXTEND no es RETRY, RERUN ni editar resultados antiguos.
+
+Si la preparación falló **antes de existir una Execution nueva**, Resume/retry reintenta solo
+la preparación del delta revisado. El nuevo Job conserva vínculo con la serie y pin de envío;
+no repite revisiones anteriores correctas. Aquí `resumable: false` indica que todavía no hay
+Execution/checkpoint de entrenamiento que continuar, no que haya que reiniciar el Study completo.
+La búsqueda de recuperación descarta Executions locales ajenas al Job exacto.
+
+Jobs/Executions referenciados y entornos se protegen de borrado/GC. Exportar la serie genera una
+colección de paquetes nativos independientes, journal y JSON/HTML acumulados de solo lectura.
+Un fallo conserva el parcial y su diagnóstico. Se pueden importar paquetes individualmente como
+evidencia; adoptar/migrar una serie ejecutable no está soportado. Exportar una Execution no finge
+contener toda su serie.
+
+<a id="guide-study-extensions-verificación"></a>
+
+### Verificación
+
+Fixtures CPU cubren 20→35→56, 20→32, origen intacto, incompatibilidad, concurrencia/idempotencia,
+autoridad corrupta/ausente, reconciliación anterior al Job, retry del delta y análisis acumulado.
+Un proveedor loopback crea un intérprete aislado sin instalar dependencias, valida evidencia
+en el host y ejecuta solo el delta con entrypoint/procesos nativos. Contratos GPU usan metadatos
+sintéticos. No se afirma aceptación en SSH/SLURM/GPU reales ni ampliación de WISDOM.
+
+
+<a id="guide-dataset-reconstruction"></a>
+
+## 25. Datasets publicados y reconstrucción científica
+
+Español · [English](MANUAL.md#guide-dataset-reconstruction)
+
+`NOMBRE@VERSION` identifica un único content ID inmutable. Una validación científica **PASS** no
+demuestra igualdad de bytes ni equivalencia de todos los miembros. LambdaForge nunca sobrescribe
+esta versión, relaja checksums de transporte, redondea arrays o adivina qué campos internos de un
+NPZ u otro formato son operativos.
+
+<a id="guide-dataset-reconstruction-elegir-la-intención-antes-de-calcular"></a>
+
+### Elegir la intención antes de calcular
+
+```bash
+lf datasets preflight corpus@6 --intent publish --on gpu12 --json
+lf datasets preflight corpus@6 --intent reuse --on local --json
+lf datasets preflight corpus@6 --intent rebuild --on gpu16 --json
+```
+
+El preflight lee el índice del controlador y de todos los clústeres configurados sin modificarlos,
+descargar assets ni lanzar Works. Devuelve ubicaciones, identidades exactas, errores de descubrimiento
+y `allowed`. Publicar se rechaza si la versión existe; reuse/rebuild exige una referencia no
+ambigua. Un descubrimiento incompleto no prueba ausencia. No reserva la versión: la publicación
+final sigue comprobando identidad bajo el lock del registro.
+
+1. **Reutilizar**: `lf datasets materialize corpus@6 --on DESTINO` previsualiza la colocación exacta;
+   revisar y añadir `--apply`. `replicate` elige origen/destino explícitos. Copia y verifica el
+   contenido publicado, no reconstruye arrays. La réplica nativa comprimida admite ubicaciones
+   locales/remotas y prefiere SSH directo entre clústeres; véase abajo.
+2. **Reconstruir**: calcular un candidato independiente, sellado y no registrado para compararlo.
+3. **Publicar**: usar una versión nueva para bytes distintos, incluso con equivalencia científica.
+   No se admiten representaciones alternativas bajo la misma versión ni placements con otro hash.
+
+<a id="guide-dataset-reconstruction-publicar-una-vez-replicar-el-contenido-exacto"></a>
+
+### Publicar una vez, replicar el contenido exacto
+
+```bash
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --json
+# Revisar ruta, tamaño y destino; después aplicar:
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --apply
+```
+
+En `lf`, abre **Datasets → DatasetVersion → Replicate…**, elige origen/destino, revisa el plan nativo
+y confirma. La consola sigue respondiendo y muestra fases/tiempo transcurrido y bytes comprimidos
+en la ruta retransmitida. Mantén la sesión abierta hasta terminar. Locations se actualiza tras el
+registro. El destino requiere `storage.dataset_root` y runtime LambdaForge disponible (existente o
+preparado mediante bootstrap); no ejecuta Work científico/claim GPU. Mantiene el scope del proyecto.
+
+`--route auto` comprueba SSH desde origen a destino con clave de host fiable, sin prompts ni
+forwarding de agente/credenciales. Si funciona, los bytes viajan directamente entre hosts. Configura
+en el origen autenticación no interactiva autorizada por el centro y claves de host fiables para
+habilitarlo; LambdaForge no instala claves ni copia credenciales locales. `--route direct` exige esa
+conexión. `--route relay` usa los transportes autenticados del controlador con un **stream comprimido
+en memoria acotada**, no un archivo intermedio en tu equipo ni en `/tmp`.
+
+Tar/gzip en streaming (nivel 3) verifica el origen completo, rechaza enlaces/entradas especiales y
+rutas peligrosas, usa staging/admisión de almacenamiento en destino y comprueba contenido exacto
+antes de promocionar/registrar atómicamente bajo lock. Ambos índices exponen el mismo content ID
+a entradas Dataset tipadas. Un destino idéntico se verifica/reutiliza; otro contenido se rechaza.
+Las copias interrumpidas no registran contenido parcial. Reintentar reutiliza una colocación exacta
+ya publicada o transfiere de nuevo; no es reanudación por offset de bytes. Admite rutas antiguas
+registradas de origen. Nunca reconstruye/cambia identidades/borra origen ni reconcilia versiones
+conflictivas automáticamente: inspecciona divergencias o publica una versión nueva primero.
+
+LambdaForge no puede inferir la versión de salida desde Python arbitrario antes de `Work.run()`.
+El proyecto productor debe usar el preflight público como primera operación:
+
+```python
+def run(self, version: str, intent: str = "publish"):
+    self.outputs.dataset_preflight(name="corpus", version=version, intent=intent)
+    # El cálculo costoso empieza después. Guardar resultados en checkpoints.
+    rows = self.compute_members()
+    return self.outputs.dataset(
+        name="corpus", version=version, members=rows, intent=intent,
+        scientific_identity={
+            "sources": {"source-id": "sha256:<checksum exacto de la fuente>"},
+            "selection": ["member-id"],
+            "labels": {"member-id": 1},
+            "configuration": {"modes": 64},
+            "algorithm": "my-project/spectral-contract-v1",
+        },
+    )
+```
+
+El preflight del Work consulta el registro de su host de ejecución. El comando anterior también
+detecta divergencia entre hosts antes del envío. `intent="rebuild"` guarda el candidato en una
+colección nombrada y fijada de checkpoints y devuelve su content ID y ruta como valor ordinario
+(`publication_status="reconstructed-unregistered"`), nunca como DatasetVersion registrada.
+`reuse` sirve para preflight/materialización, no como opción de publicación de `members`.
+
+<a id="guide-dataset-reconstruction-tres-identidades-separadas"></a>
+
+### Tres identidades separadas
+
+- **Científica**: `scientific_identity` explícita del proyecto; exige fuentes, selección, etiquetas,
+  configuración y contrato del algoritmo. Manifiesto/registro exponen `scientific_id`. Es una
+  declaración, no prueba de reproducibilidad. Los manifiestos históricos sin declaración siguen
+  siendo legibles; para bytes diferentes su equivalencia queda sin resolver.
+- **Contenido**: `dataset_id == content_id`, checksums exactos de assets, tamaños e índice lógico
+  canónico. No cambia transporte ni verificación. Una versión existente tampoco puede adquirir
+  silenciosamente otra declaración científica aunque tenga los mismos bytes.
+- **Operativa**: procedencia de construcción, rutas, Execution/Run/Attempt, hardware y fechas del
+  manifiesto. No pertenecen a content ID. Meterlas dentro de un asset sí cambia sus bytes.
+
+<a id="guide-dataset-reconstruction-comparar-reconstrucciones-completas"></a>
+
+### Comparar reconstrucciones completas
+
+```bash
+lf datasets compare /raiz/referencia /raiz/candidato --on gpu16 \
+  --verifier my_project.dataset_checks:compare_member --policy comparison-policy.json \
+  --output comparison-report.json --json
+```
+
+Ambas raíces deben estar en el host seleccionado. El fichero de política y la ruta del informe
+son locales al controlador; solo política/JSON cruzan el transporte, no assets. El verificador es
+código explícitamente confiado del proyecto, importable en ese host; nunca se ejecuta un módulo
+elegido por un manifiesto de datos.
+
+API: `from lambdaforge.data import DatasetComparison, DatasetComparisonContext`;
+`DatasetComparison.compare(left, right, verifier=callback, verifier_id="project/check-v1", policy=policy)`.
+El callback recibe un contexto por miembro con raíces validadas, ambos `DatasetMember` y política.
+Devuelve JSON estricto con `equivalent: bool`, `checked_assets: [nombres_logicos]` y `details`
+opcional. Debe cubrir cada asset modificado. Usa las rutas relativas de los descriptores, no rutas
+inferidas de la procedencia de máquina.
+
+Para una referencia histórica sin contrato usa `--contracts contracts.json` (Python:
+`scientific_contracts={content_id_exacto: declaracion, ...}`). Cada declaración explícita del proyecto
+queda ligada al content ID verificado; debe proceder de evidencia fuente/selección/labels/algoritmo
+comprobada independientemente, no de asumir equivalencia. El informe conserva `scientific_id` ausente,
+registra estas declaraciones y `comparison_scientific_id` separado; sigue exigiendo verificador de
+todos los miembros. No se edita manifiesto ni registro histórico. Nunca sustituye una declaración
+persistida incompatible.
+
+Ejemplo ilustrativo; las tolerancias deben justificarse desde el contrato real:
+
+```json
+{
+  "diffusion_eigenvectors": {"method": "spectral-projector", "atol": 1e-8, "rtol": 0.0},
+  "metadata_json": {"method": "exact-scientific-fields-operational-differences-reported"}
+}
+```
+
+LambdaForge valida forma de política y tolerancias finitas/no negativas, no formatos numéricos.
+El verificador implementa cada método y documenta diferencias operativas. Debe comparar
+identificadores, etiquetas, particiones y bytes fuente internos **exactamente**, nunca con
+tolerancias. Cambios de signo o bases en subespacios degenerados pueden exigir proyectores,
+residuos y agrupación apropiada de autovalores, no redondeo ni `allclose` global.
+
+Antes del callback se verifican ambos datasets completos con sus hashes exactos y se exige igualdad
+de contratos científicos, identificadores, particiones, targets/metadata de miembros, nombres de
+assets, schema y assets globales. Los URI cambiados necesitan materialización local. Corrupción
+produce `invalid`; falta de declaración/verificador, `unresolved`; cambios científicos, `different`.
+Una comparación completa aceptada produce `equivalent` conservando ambos content IDs distintos y
+`byte_equal=false`. Nunca registra ni sustituye contenido. Bytes idénticos producen `exact` salvo
+conflicto en contratos declarados. Comparar una proteína no demuestra equivalencia de todo el dataset.
+
+<a id="guide-dataset-reconstruction-recuperar-una-publicación-sin-recalcular"></a>
+
+### Recuperar una publicación sin recalcular
+
+`outputs.dataset` conserva un candidato sellado rechazado e informa de su ruta exacta. Una
+publicación fallida/interrumpida también protege artifacts de Attempt, métricas/logs/resultados y
+checkpoints frente a compactación automática. Si el volumen de recuperación no admite una copia,
+se conserva el árbol sellado en su volumen original y se informa de la ruta. Estos bytes retenidos
+consumen espacio intencionadamente; inspeccionarlos antes de una eliminación explícita.
+
+```bash
+lf datasets publish-candidate /candidato/conservado --on gpu16 --version 7 --json
+# Revisar origen exacto, identidades, destino y versión; después:
+lf datasets publish-candidate /candidato/conservado --on gpu16 --version 7 --apply
+```
+
+Solo verifica/publica/registra bytes guardados, nunca ejecuta el Work. Omitir `--version` únicamente
+si falta el registro original o ya tiene contenido/declaración exactos. Repetir apply es idempotente;
+candidatos corruptos o inseguros se rechazan. El historial del Attempt original sigue fallido:
+recuperar publicación no fabrica un cálculo correcto. No se borran candidato, versión original ni
+checkpoints. `lf retry` ordinario sí invoca código del Work; no equivale a esta recuperación.
+Local usa `storage.dataset_root` configurado o `datasets/published` junto al índice local; remoto
+exige raíz permanente configurada.
+
+<a id="guide-dataset-reconstruction-fallos-antes-del-sellado-0171"></a>
+
+#### Fallos antes del sellado (0.17.1)
+
+Antes de copiar, `outputs.dataset` guarda `publication-request.json` y un `members.jsonl` streaming
+con checksums exactos de las fuentes en su colección de checkpoints de publicación. Si ese volumen
+no acepta los metadatos iniciales, usa `.publication-requests` en el volumen de publicación.
+El fallo informa de la ruta exacta. El mismo
+`lf datasets publish-candidate DIRECTORIO_SOLICITUD [--on CLUSTER] [--apply]` acepta la solicitud:
+preview verifica bytes/declaración y apply solo copia/sella/registra bajo los locks existentes.
+Fuentes modificadas, rutas inseguras y conflictos de versión inmutable se rechazan. No se invoca
+ningún Work ni se convierte el Attempt fallido en correcto.
+
+Un fallo antiguo puede conservar fuentes validadas y su índice, pero no una solicitud completa.
+No inventar metadatos científicos ausentes: restituir explícitamente la declaración original de
+miembros/assets, schema, metadata y procedencia mediante la API pública de preparación:
+
+```python
+from lambdaforge.data import DatasetIndex, DatasetPublisher
+
+# Debe coincidir con la declaración del productor, incluidos assets adicionales de diseño.
+original_members = (member.to_dict() for member in DatasetIndex(source / "members.jsonl"))
+request = DatasetPublisher().prepare_publication(
+    name, version, original_members,
+    source_root=source, request_root=recovery_directory,
+    build_provenance=original_provenance,
+    metadata=original_metadata, target_schema=original_target_schema,
+    scientific_identity=original_scientific_identity,
+)
+print(request)  # publish-candidate sobre esta ruta, primero preview.
+```
+
+En el preprocessing antiguo de WISDOM, las evidencias de partida son
+`attempt-0001/dataset/members.jsonl` y `dna-validation/dna-validation-report.json` retenidos.
+También se debe mantener el asset `dataset_design` del primer miembro y la declaración original;
+no inferirlas del interior de los NPZ. Solo se repite verificación/publicación, no geometría/anotación.
+
+<a id="guide-dataset-reconstruction-conflictos-entre-registros"></a>
+
+### Conflictos entre registros
+
+`lf datasets list --all` y Datasets en la consola descubren los índices pequeños de todos los
+clústeres configurados. Mismo nombre/versión/content fusiona ubicaciones; contenido distinto sigue
+en filas separadas y marcadas **CONFLICT**. Listar no modifica registros y el descubrimiento
+incompleto queda visible. Lectura de miembros y borrado global nunca adivinan una identidad en conflicto.
+**Datasets → fila de identidad exacta → Manage copies…** sigue habilitado: selecciona destino y
+**Keep as project reference**, **Remove registration · keep files** o **Delete managed copy**.
+Cada acción previsualiza el hash/ruta y exige confirmación. REFERENCE marca la referencia del
+controlador; las otras filas siguen CONFLICT hasta retirarlas explícitamente.
+
+Los mismos comandos nativos solo previsualizan salvo que se añada `--apply`:
+
+```bash
+lf datasets list --on gpu16 --json  # obtener el content ID completo
+lf datasets adopt corpus@6 --on gpu16 --content-id sha256:ID_COMPLETO_16
+lf datasets adopt corpus@6 --on gpu16 --content-id sha256:ID_COMPLETO_16 --apply
+lf datasets delete corpus@6 --on gpu12 --content-id sha256:ID_COMPLETO_12  # previsualizar
+lf datasets delete corpus@6 --on gpu12 --content-id sha256:ID_COMPLETO_12 --apply
+# Alternativa: retirar solo el índice, incluso copia rota/ausente o ruta externa antigua:
+lf datasets remove corpus@6 --on gpu12 --content-id sha256:ID_COMPLETO_12 --apply
+```
+
+Sustituye los IDs de ejemplo por hashes completos observados. Adoptar verifica todos los checksums
+en origen antes de archivar/sustituir la declaración del controlador. Elige la **resolución futura**,
+no certifica equivalencia científica: no reescribe otros registros, cambia identidad de bytes,
+sobrescribe publicaciones ni modifica Runs previas, inputs fijados, checkpoints o procedencia.
+Para conservar una representación divergente como publicación usa otra versión explícita.
+
+Borrar exactamente selecciona la identidad del índice de destino aunque el controlador apunte a otra.
+Exige manifiesto coincidente, ruta gestionada y ningún consumidor activo. Retirar registro no borra
+bytes ni libera espacio y permite retirar copias físicas corruptas/ausentes; el índice debe ser legible
+y válido. Se retiran entradas vacías para que no reaparezcan. Ambas operaciones rechazan cambios de
+hash/ruta, bloquean el registro y archivan la declaración previa en `dataset-registry-history/change-*.json`
+antes de modificarlo. Ese archivo registra estado previo/solicitado, no prueba éxito de la escritura.
+Registros inaccesibles/corruptos no se consideran ausentes. Si la retirada remota termina pero falla la
+limpieza del controlador, inspecciona ambos índices de nuevo; nunca reintentes suponiendo una identidad.
+No se borra evidencia histórica. Las operaciones sin hash siguen rechazando ambigüedad;
+`reconcile` sigue conservando identidad.
+
+<a id="guide-dataset-reconstruction-certificados-de-equivalencia-durables"></a>
+
+### Certificados de equivalencia durables
+
+`DatasetEquivalenceCertificate` reutiliza ProductRegistry inmutable como `ScientificReport` con
+contrato reservado `lambdaforge/dataset-equivalence:v1`. Ejecuta la comparación existente de todo
+el dataset antes de sellar la aprobación; no acepta un JSON arbitrario como prueba. Fija ambos
+content IDs exactos, declaración científica completa, verificador, política por variable y evidencia.
+Raíces operativas, fecha de comparación y procedencia de la Execution/operación productora quedan
+separadas de identidad científica/contenido.
+
+```python
+from lambdaforge.data import DatasetEquivalenceCertificate
+from lambdaforge.products import ProductRegistry
+from my_project.dataset_checks import verify_member
+
+certificate = DatasetEquivalenceCertificate.build(
+    "/published/reference", "/sealed/reconstruction",
+    name="corpus-reconstruction-check-v1",
+    scientific_contract=science_declaration,  # Contrato completo explícito del dataset.
+    verifier=verify_member,
+    verifier_id="my_project.verify_member:v1",
+    policy=variable_specific_policy,
+    producer={
+        "execution_id": "<Execution u operación de comparación productora registrada>",
+        "evidence_fingerprint": "<identidad registrada de fuentes/comparación>",
+    },
+)
+registry = ProductRegistry()
+preview = certificate.publish(registry)  # No crea locks/archivos ni cambia registros.
+certificate.publish(registry, apply=True)
+restored = DatasetEquivalenceCertificate.load(registry, certificate.product.name)
+```
+
+Comparaciones no resueltas, científicamente distintas o corruptas no se certifican. Incluso bytes
+idénticos necesitan declaración científica explícita para obtener certificado científico. Los
+manifiestos antiguos requieren las mismas assertions `scientific_contracts` ligadas a content IDs
+que `compare`. Informes mayores que los 512 KiB de metadata del catálogo fallan explícitamente;
+nunca se recorta evidencia. `lf products show/provenance/export/import` y Products de la consola
+consultan/transportan estos registros. Leer/importar no ejecuta el verificador registrado.
+
+Son assertions de un proyecto de confianza, no autenticidad criptográfica ni igualdad transitiva.
+`accepts(reference_content_id=..., candidate_content_id=..., scientific_contract=...)` solo consulta
+el par y contrato exactos registrados; no verifica integridad actual. Antes de usar el candidato
+materializado comprueba por separado `DatasetOperations.verify(root, candidate_content_id)`.
+Nunca le atribuyas el content ID de referencia ni sobrescribas una versión inmutable.
+La resolución automática Work YAML por contrato **todavía no está implementada**: inputs dataset
+tipados ordinarios siguen exigiendo contenido exacto. Ningún certificado cambia eso implícitamente.
+
+<a id="guide-dataset-reconstruction-cambios-necesarios-en-wisdom-no-realizados-aquí"></a>
+
+### Cambios necesarios en WISDOM (no realizados aquí)
+
+Los tres hashes comunicados para `wisdom-dna-reduced@6` representan contenido exacto distinto.
+Coincidir en 45/47 entradas y tener 27 diferencias pequeñas de autovectores en `10FI_Y` no demuestra
+equivalencia de 589 proteínas. WISDOM debe llamar al preflight antes de geometrías/anotaciones,
+exponer intención publish/rebuild, checkpointar resultados costosos, declarar fuentes/diseño/labels
+exactos y contrato del algoritmo, y mover rutas absolutas/versiones operativas del framework fuera
+del NPZ científico a procedencia del manifiesto/sidecars. Los cambios relevantes del algoritmo
+siguen formando parte del contrato. Debe aportar un verificador versionado de todas las variables,
+con labels/splits/fuentes exactas, tolerancias justificadas por variable e invariantes espectrales.
+Comparar todos los miembros, guardar informe y publicar versión nueva si cambian bytes. Nunca
+modificar NPZ históricos registrados en sitio, reutilizar `@6` conflictivo ni inferir una tolerancia
+universal desde una proteína.
+
+
+<a id="guide-storage"></a>
+
+## 26. Admisión de almacenamiento y limpieza segura
+
+Español · [English](MANUAL.md#guide-storage)
+
+<a id="guide-storage-consultar-y-limpiar"></a>
+
+### Consultar y limpiar
+
+```bash
+lf clusters storage CLUSTER --json
+lf storage status --on CLUSTER --json
+lf storage reconcile --on CLUSTER --json         # mide; no modifica metadatos
+lf storage reconcile --on CLUSTER --apply       # actualiza solo el inventario diagnóstico
+lf clean --on CLUSTER              # previsualización; no elimina
+lf clean --on CLUSTER --apply      # comprueba de nuevo y limpia candidatos seguros
+```
+
+En la consola, abre **Clusters → tu clúster → Clear storage…**. La acción muestra categorías
+recuperables y referencias protegidas, pide confirmación, trabaja fuera del bucle de interfaz y
+comunica espera/éxito/error en el panel de actividad. **Clear output** solo limpia el texto visible.
+Ninguna olvida el historial científico. Usa `lf delete` o `lf jobs clear` para borrarlo expresamente.
+
+La consulta explícita de almacenamiento inventaría directorios propios. Los sondeos habituales
+solo consultan capacidad del filesystem y pequeños registros de leases, sin recorrer checkpoints
+ni assets de datasets. Los informes separan categorías y volúmenes físicos; los bytes aparentes
+no equivalen al espacio físico libre.
+`reconcile` compara medidas profundas con `state/storage-ledger.json`, informa cambios de bytes/
+archivos y permite actualizar atómicamente ese inventario versionado. Nunca elimina archivos ni
+cambia registros científicos. Las categorías solapadas no se suman. El inventario no sustituye
+al espacio físico ni a las referencias; si está corrupto se informa sin sobrescribirlo en silencio.
+
+<a id="guide-storage-admisión"></a>
+
+### Admisión
+
+```yaml
+resources:
+  storage: 100GiB
+```
+
+Declara un compromiso futuro para la asignación externa del Job, no una cuota del filesystem ni
+su ocupación medida actual. No impide que código consumidor arbitrario escriba más. Los Jobs de
+LambdaForge que cooperan en el mismo host comparten leases específicos por filesystem. Nunca
+se suman capacidades libres de volúmenes diferentes.
+
+Se exige `libre físico - otros compromisos activos - nuevo compromiso >= seguridad` y disponibilidad
+de inodos cuando el filesystem los informa. El consumo medido no reduce el compromiso declarado;
+se libera al terminar el supervisor o al verificar positivamente la muerte del propietario.
+Propiedad ilegible, corrupta o ambigua bloquea nuevos compromisos. La existencia de un PID por sí
+sola no demuestra que su propietario siga vivo. Se compara el nacimiento registrado: uno distinto prueba
+que el propietario original ya no tiene ese PID; un proceso zombi/muerto no puede usar su compromiso.
+Esas leases antiguas del mismo host se retiran solo durante admisión bajo lock, nunca al consultar
+estado. Un proceso vivo del mismo nacimiento conserva su compromiso aunque cambie argv (exec);
+autorizar señales sigue exigiendo el match estricto de nacimiento/comando. Propietarios inaccesibles
+o de otro host siguen protegidos. Workers y ofertas Fleet no duplican una asignación propia.
+
+Un bloqueo de ownership genera `StorageOwnershipError`, no ENOSPC. El diagnóstico incluye lease,
+host y propietario; `lf storage status --json` muestra incidencias de ownership acotadas. Inspeccionar
+el host registrado, restaurar permisos de inspección o esperar a salida verificada antes de
+reintentar publicación. No borrar leases vivas/remotas ni resetear historial científico. Incluso
+un reflink de cero bytes verifica propiedad, margen físico e inodos; las transacciones anidadas
+tienen identidades independientes de liberación exacta.
+
+Si falta espacio, los Jobs directos esperan antes de adquirir CPU/GPU. El estado informa bytes
+solicitados/libres/reservados/de seguridad y motivo. La misma autoridad puede ejecutarse dentro de
+workers nativos gestionados por scheduler. Antes de seguir esperando se intenta GC automático
+seguro; no se mata ciencia sana para liberar disco ni se reinician Runs mediante limpieza.
+
+Ejemplo de perfil de clúster compartido, antes de aplicar el ámbito de proyecto:
+
+```yaml
+storage:
+  state_root: /durable/lambdaforge/state
+  cache_root: /scratch/lambdaforge/cache
+  run_root: /scratch/lambdaforge/jobs
+  dataset_root: /durable/lambdaforge/datasets
+  lease_root: /durable/lambdaforge/host-leases
+  cache_max_size: 500GiB
+  cache_max_age: 30d
+  safety:
+    min_free: 20GiB
+    min_free_percent: 5
+  terminal_jobs:
+    grace_period: 2d
+```
+
+Se aplica el mayor margen absoluto/porcentual. Por defecto se conserva un 5% libre; la retención
+de checkpoints exitosos es de dos días. El ámbito de proyecto cambia las raíces operativas,
+no la raíz de leases del host. El editor de la consola y `clusters set/unset` exponen estos campos.
+
+La presión se informa como NORMAL, SOFT_PRESSURE, HARD_PRESSURE o CRITICAL a partir del espacio
+físico, margen, leases e inodos. Las reservas son cooperativas: no impiden escrituras de otros
+usuarios ni representan las cuotas externas de disco.
+
+SLURM no tiene una directiva de scratch portable asumida. Las solicitudes positivas generan un
+aviso de omisión salvo que se configure `resource_mapping.storage` para el sitio, por ejemplo
+`{option: tmp, value: "{storage_mib}"}`. La admisión del worker no significa que SLURM haya reservado
+ese espacio. Fleet exige una capacidad de almacenamiento reciente y conocida para solicitudes
+positivas; una capacidad desconocida no autoriza el despacho.
+
+<a id="guide-storage-qué-se-puede-eliminar"></a>
+
+### Qué se puede eliminar
+
+La limpieza respeta referencias a Jobs activos, entornos exactos, runtimes, bundles y cachés Work.
+Un build protege su propio prefijo y categorías de paquetes en mutación, no cachés Work ajenas.
+La propiedad desconocida se conserva. Solo propietarios de build del mismo host, muertos y
+obsoletos positivamente identificados permiten limpiar temporales huérfanos; los marcadores
+históricos o de otro host permanecen protegidos.
+Un controlador local muerto no basta si pip/Conda aún referencia el prefijo temporal exacto.
+La evidencia de procesos ilegible también lo conserva. Bootstrap usa un intérprete existente del
+host para metadatos de propiedad; no tiene que cumplir la versión Python del Work científico.
+
+La limpieza automática aplica cuota/edad, presión y orfandad comprobada; sin cuota explícita usa
+un techo del 10% de la capacidad del filesystem de caché. Primero selecciona categorías
+reconstruibles más baratas y después por último uso. Si las referencias protegidas impiden
+cumplir la cuota, informa del exceso pendiente en vez de eliminarlas. `lf clean` incluye además
+cachés Work inactivas reconstruibles. Abarca paquetes pip/Conda/nativos/runtime, managers,
+entornos, runtimes, bundles y temporales.
+
+La eliminación de caché registra intención, renombra la entrada exacta a basura propia y reanuda
+idempotentemente su eliminación interrumpida. Nunca aplica una intención sin confirmar a contenido
+original que ahora podría estar referenciado. `state/storage-gc.jsonl` audita las limpiezas.
+Resultados, logs, métricas, procedencia, datasets publicados, réplicas del investigador, artifacts
+exitosos no publicados y Jobs activos/desconocidos no son candidatos de caché.
+
+<a id="guide-storage-checkpoints-y-publicación"></a>
+
+### Checkpoints y publicación
+
+Las ejecuciones fallidas/interrumpidas conservan checkpoints de recuperación. La compactación de
+artifacts sigue eliminando artifacts parciales fallidos y duplicados publicados verificados.
+Una ejecución **exitosa** puede liberar checkpoints no fijados tras su retención. Guarda modelos
+científicos duraderos como outputs; fija expresamente el estado resumible que deba conservarse:
+
+```python
+self.checkpoints.pin("best/model.ckpt", reason="retain-for-follow-up")
+self.checkpoints.unpin("best/model.ckpt")  # solo metadatos; no elimina inmediatamente
+model = self.outputs.from_checkpoint("model", "best/model.ckpt", release=True)
+```
+
+`from_checkpoint` sella un artifact registrado independiente y comprueba su identidad. La publicación
+de datasets puede leer directamente de un directorio propio de checkpoints, sin una copia intermedia
+en el Attempt:
+
+```python
+self.outputs.dataset(
+    name="example", version="1", members=members,
+    source_checkpoint="prepared-records",
+    release_checkpoints=["prepared-records"],
+)
+```
+
+Las rutas de assets son relativas a ese directorio. La liberación expresa solo es elegible después
+de finalizar correctamente la ejecución y verificar una publicación independiente. Un destino
+cambiado o desaparecido invalida la prueba. Las copias usan copy-on-write si está disponible y
+copias regulares independientes si no; nunca hard links modificables. No se garantiza zero-copy.
+Las copias de snapshots gestionados reservan bytes adicionales en el filesystem de **destino**,
+incluidos `publish_to` externos y assets de datasets. Si falta margen se intenta una limpieza segura
+de caché en el mismo volumen antes de mostrar un diagnóstico compacto; GC nunca recorre ni elimina
+ese directorio externo. Una copia no comprometida conserva los checkpoints originales. Estos leases
+incrementales se liberan tras éxito/error y no reducen el compromiso declarado del Job. Un reflink
+comprueba margen/inodes sin contar dos veces el payload físico; si no es posible, la copia normal
+debe reservar primero todos los bytes.
+
+La limpieza toma el lock de escritura de Execution, comprueba otra vez pins/identidad y registra
+la eliminación de checkpoints; no compite con un escritor de recuperación activo.
+`checkpoint-retention.json` audita eliminaciones sin perder resultados, logs, métricas ni historial
+de Attempts. Los metadatos de retención ausentes/corruptos se tratan conservadoramente.
+
+<a id="guide-storage-límites-actuales"></a>
+
+### Límites actuales
+
+Están implementadas la admisión de run_root y las reservas de copias de publicación gestionadas.
+Staging de bundles y preparación de dependencias todavía no tienen reservas independientes de bytes
+en sus volúmenes de destino. Generar índices/manifests de datasets no es una cuota de disco.
+Los entornos managed siguen usando identidad v2 con hashes exactos de wheels: **todavía
+no se han separado** el entorno de dependencias y las capas de código. Los marcadores de build se
+protegen conservadoramente y la orfandad entre hosts sigue sin inferirse. Los markers de runtime Python
+y entorno comparten la adquisición atómica con GC y heartbeat acotado, también al verificar reuse.
+Un prefijo completo inválido se conserva, no se reemplaza bajo Jobs que podrían referenciarlo.
+`lf storage reconcile` ofrece un inventario diagnóstico de medidas, no contabilidad completa de cada
+escritura. Esta guía no promete protección frente a todo ENOSPC durante preparación.
+
+
+<a id="guide-managed-reports"></a>
+
+## 27. Pestañas de informes con assets completos gestionados
+
+[English](MANUAL.md#guide-managed-reports) · [Resultados de Work](#guide-work-results)
+
+`html_section` sigue disponible para HTML autocontenido (16 MiB/documento y 64 MiB/informe).
+Para visualizaciones mayores usa `self.outputs.html_bundle`: un directorio artifact gestionado
+nativo, sin otro almacén científico ni runner. LF no elige proteínas, seeds, checkpoints,
+ganadores, puntos o canales del proyecto.
+
+```python
+bundle = self.outputs.html_bundle("predictions", section="proteins", title="Proteins")
+bundle.entry.write_text(inspector_html)
+bundle.asset("catalogue", filename="catalogue.json", media_type="application/json").write_json(rows)
+bundle.asset("surface", filename="surface.f32", metadata={
+    "dtype": "float32", "byte_order": "little", "shape": [point_count, 3],
+}).build(write_full_surface)
+```
+
+Declara cada asset explícitamente. Son bytes opacos completos: float32, NaN/Inf y máscaras de
+validez no se convierten a JSON ni se redondean. IDs ASCII estables y nombres relativos NFC
+únicos, también ignorando mayúsculas. Rutas absolutas, traversal, symlinks, archivos especiales,
+IDs duplicados y archivos no declarados se rechazan.
+
+Al finalizar se sella `lambdaforge-report.json`: versión, entrada, IDs, nombres relativos,
+tamaños, checksum gestionado, SHA-256 del contenido, tipos MIME y metadata del proyecto.
+El artifact original del Run atestigua el manifiesto; esquema público empaquetado:
+[`report-bundle-v1.json`](../src/lambdaforge/schemas/report-bundle-v1.json).
+Entrada limitada a 16 MiB y manifiesto a 8 MiB; estos límites no afectan a los arrays.
+El directorio íntegro se conserva/exporta como evidencia gestionada normal.
+
+<a id="guide-managed-reports-api-del-navegador"></a>
+
+### API del navegador
+
+```javascript
+await lambdaforgeReport.ready;
+const controller = new AbortController();
+const bytes = await lambdaforgeReport.load('surface', {signal: controller.signal});
+const positions = new Float32Array(bytes);
+// Al cambiar selección: controller.abort(); liberar renderer/buffers/referencias.
+// Al cerrar definitivamente: lambdaforgeReport.dispose();
+```
+
+`assets` expone IDs, tamaños, MIME y metadata; versión pública `1`. `load` devuelve ArrayBuffer
+o error explícito; cancelar produce `AbortError`. Máximo dos cargas simultáneas, sin cola
+ilimitada. El padre transfiere los buffers, sin guardar una caché completa. Cambiar pestaña o
+documento aborta peticiones, cierra el puerto y descarga el iframe. El proyecto debe liberar
+su renderer y no acumular arrays antiguos.
+
+Se mantiene origen opaco y `connect-src 'none'`: sin URLs externas, DOM padre, rutas ni
+credenciales. Un MessagePort se entrega solo al iframe seleccionado. El padre comprueba
+tamaño/checksum; el servidor vuelve a verificar el artifact del Run y el manifiesto atestiguado
+antes de abrir un archivo. Assets ausentes/corruptos son errores de presentación. Un fallo
+al sellar queda visible como `presentation_error`, conservando otros resultados científicos.
+Una excepción del consumidor anterior a la finalización sigue siendo una excepción científica
+normal, no se oculta.
+
+<a id="guide-managed-reports-visor-nativo-remoto-y-offline"></a>
+
+### Visor nativo remoto y offline
+
+**Open HTML report** en consola inicia automáticamente el lector loopback para bundles.
+Listas/HPO/heartbeat no descargan arrays. Abrir informe lee entrada/manifiesto; seleccionar
+un asset trae solo sus bytes por transporte nativo, comprimidos gzip y verificados. Sin servidor
+del proyecto, CUDA ni entreno. Peticiones remotas tienen cancelación/plazo y spool temporal
+junto al informe, no en `/tmp`.
+
+```bash
+lf reports serve ./reports/study-analysis.html --open
+# Si un único asset supera el límite de visualización de 256 MiB:
+lf reports serve ./reports/work-results.html --max-asset-mib 1024 --open
+```
+
+Solo evidencia declarada, en `127.0.0.1`, URL privada, Host y origen exactos. No es explorador
+de archivos general. Dos lecturas binarias, ocho conexiones, 256 MiB por asset y cierre tras
+30 minutos inactivo. Ctrl-C cierra solo el lector. Nunca se recortan puntos/proteínas en silencio.
+
+`file://` no admite lazy fetch seguro de archivos hermanos: muestra cómo abrir el visor nativo.
+Export/import conserva bundle completo, informe y sidecar con referencias relocatables. Mantén
+todo el paquete; moverlo y ejecutar el visor no necesita cluster ni modelo originales. El sidecar
+es metadata de despliegue descartable, no resultado científico.
+
+Para regenerar desde inferencia retenida usa ResultInput y Work públicos: fija Run/Attempt
+con `lf results reference`, enlázalo como input `result` y lee `previous.artifact(NAME)`.
+Construye el bundle desde predicciones guardadas, sin cargar modelo ni hacer forward passes.
+Ejemplo: [`managed_report.py`](../examples/managed_report.py). Si faltan predicciones no se inventan,
+no se cambia seed/checkpoint ni se repite inferencia. Pruebas del navegador incluyen asset de
+70 MiB y catálogo de 206 registros; selección/razón/procedencia son autoría del proyecto.
+
+
+<a id="guide-research-analysis"></a>
+
+## 28. Espacio de investigación de Studies
+
+[English](MANUAL.md#guide-research-analysis) · [Manual](MANUAL.es.md#16-análisis-de-estudios)
+
+Versión actual de la aplicación: **0.19.0**. Análisis v8 y vistas guardadas v1 siguen compatibles;
+los informes siguientes conservan el contexto histórico de su implementación.
+
+<a id="guide-research-analysis-1-abrir-el-espacio"></a>
+
+### 1. Abrir el espacio
+
+```bash
+lf results analyze EXECUTION --recompute --json
+lf results report EXECUTION --output research.html
+```
+
+El HTML necesita `lambdaforge[analysis-report]`; el análisis numérico no necesita Plotly. Para un
+Study remoto usa `lf export STUDY --output ./exports` o Export en la consola. El informe funciona
+sin conexión: es una captura, no una conexión viva al clúster. Regenera para incluir nuevas Runs.
+
+**Overview / Resumen** es la primera pestaña y la vista inicial de un informe nuevo. Muestra
+estados con recuentos exactos, contexto de selección/confirmación, asociaciones predictivas no
+condicionales y recomendaciones que abren el gráfico concreto. El score por número de candidato
+queda plegado en **Trials**, no domina el resumen. Al reabrir se conserva la última pestaña.
+
+Los parámetros condicionales no entran en el gráfico de importancia global. Su tabla muestra la
+regla de activación, candidatos activos/total, soporte completo, score modelado guardado y
+fiabilidad. El score puede mezclar activación de la rama con variación interna; no es un porcentaje
+causal, una cuota aditiva de responsabilidad ni una justificación para elegir esa rama.
+Interpretation usa un carrusel horizontal desplazable con ratón/teclado. **ⓘ** reúne explicaciones
+comunes de estabilidad y ruido; los detalles conservan la conclusión original exacta.
+
+**Language / Idioma** en la cabecera cambia inglés/español inmediatamente y guarda la elección
+para ese HTML. Cambian controles, ayudas, estados y etiquetas de gráficos compatibles. Los nombres
+declarados y las afirmaciones científicas guardadas conservan su idioma original: ningún servicio
+remoto traduce ni modifica la evidencia.
+
+**Research** conserva las tarjetas de salud. Preguntas e inbox exploratorio usan carruseles;
+la lista completa está paginada de seis en seis.
+**Inspect** explica evidencia, método, soporte, ranking y límites;
+**Explore these observations** abre los valores registrados. Una asociación exploratoria no es
+una nueva conclusión del HPO ni un efecto causal.
+
+**Metrics & health** busca etiquetas, claves estables, descripciones, alias y tags. Filtra por
+categoría y ordena por prioridad, cobertura o dispersión. Las métricas constantes, ausentes u
+ocultas se omiten al principio, no se borran: activa **Show constants / missing / hidden**.
+El inspector muestra unidades, dirección, agregación y ausencias explícitas. Los grupos de
+redundancia son descriptivos; sus miembros siguen accesibles. **Ctrl/⌘ K** busca métricas,
+parámetros, familias, hallazgos, Trials y vistas guardadas. Los controles de métrica, parámetro,
+ejes, tipo, paleta y filtros usan un desplegable buscable junto al botón, no una modal. El buscador
+global **Ctrl/⌘ K** conserva su diálogo con favoritos/recientes. **Categories** es un árbol desplegable: seleccionar
+`validation` incluye descendientes como `validation/global` y `validation/surface/quality`.
+
+<a id="guide-research-analysis-2-declarar-significado-no-política-de-ejecución"></a>
+
+### 2. Declarar significado, no política de ejecución
+
+Sin declaraciones todo sigue funcionando. Las direcciones/rangos estándar y prefijos simples
+identifican parte de la semántica; lo demás sigue desconocido. Añade `analysis` al YAML de un Work,
+o un mapping de clase `Work.analysis_profile` con la misma estructura:
+
+```yaml
+analysis:
+  defaults:
+    - pattern: val_*
+      metadata: {category: validation, split: validation, unit: ratio}
+  metrics:
+    val_accuracy:
+      label: Accuracy
+      description: Fracción de ejemplos de validación clasificados correctamente.
+      category: validation/quality
+      direction: max
+      range: [0, 1]
+      aggregation: latest
+      visibility: primary
+      aliases: [accuracy]
+      priority: 10
+    rejected_fraction:
+      category: integrity
+      expected_to_vary: true
+      unit: ratio
+      range: [0, 1]
+    transformed_accuracy:
+      derived_from: [val_accuracy]
+      transformation: Transformación explícita definida por el proyecto.
+```
+
+Las etiquetas no renombran claves. Las unidades no convierten valores automáticamente.
+`aggregation` describe evidencia real: `latest`, `best`, `selected_epoch`, `terminal`, `mean` o
+`unspecified`. Declarar `best` **no** calcula un óptimo inexistente. La selección conserva su
+semántica checkpoint/seed y los diagnósticos conservan sus valores reales; la agregación
+desconocida se advierte, no se adivina.
+
+También existen `tags`, `role`, `phase`, `scale`, `notes`, `discovery: false`, `practical_scale` y
+`visibility: normal|advanced|hidden`. La escala práctica afecta a la salud visual, no al margen de
+equivalencia científica del objetivo. Precedencia: inferencia, reglas de patrón por orden,
+declaraciones de clase y overrides YAML. Los campos individuales de una métrica se combinan;
+questions/defaults YAML sustituyen esas colecciones de la clase. Familias se combinan por nombre:
+la definición YAML sustituye la familia homónima; campos individuales de métricas se combinan.
+En una composición
+`steps`, declara `analysis` en cada Work o clase, no en la raíz. Las métricas personalizadas pueden
+pasar `metadata=` al constructor base de `Metric` y reutilizar `.metadata` en el perfil; no se
+construye un Work para descubrir métricas transitorias.
+
+Se validan localmente campos, rangos, categorías, direcciones, alias, coordenadas de familias,
+referencias y ciclos de derivación. Métricas de test, incluso derivadas, no pueden gobernar el
+objetivo ni restricciones, tampoco dentro de una utilidad compuesta. Siguen disponibles para
+análisis final a posteriori, pero se excluyen del descubrimiento automático provisional. El
+análisis no inventa restricciones, pesos del objetivo ni reglas de poda.
+
+<a id="guide-research-analysis-3-familias-y-preguntas"></a>
+
+### 3. Familias y preguntas
+
+Agrupa mediciones repetidas por su significado:
+
+```yaml
+analysis:
+  families:
+    efficiency:
+      label: Calidad por fracción de datos y estrategia
+      dimensions:
+        strategy: {kind: categorical, values: [uniform, balanced]}
+        fraction: {kind: ordered, values: [10, 25, 100]}
+      template: quality_{strategy}_{fraction}
+  questions:
+    - {id: efficiency-view, kind: metric_family, family: efficiency}
+    - id: capacity-quality
+      kind: parameter_screen
+      parameters: [width]
+      metrics: [val_accuracy]
+    - id: expected-agreement
+      label: Acuerdo con la accuracy transformada
+      priority: 10
+      kind: relationship
+      x: val_accuracy
+      y: transformed_accuracy
+      expected: positive
+```
+
+Dimensiones numéricas, ordenadas o categóricas. `members` puede asignar explícitamente claves a
+coordenadas en vez de usar template. Las plantillas admiten hasta 4096 miembros únicos. Las
+gráficas conservan orden, etiquetas, valores ausentes y soporte. Su SD es dispersión entre
+candidatos, no confianza entre seeds; soporte desigual no representa una intervención pareada.
+Los miembros de familias no se colapsan automáticamente como redundantes.
+
+Tipos de pregunta: `relationship`, `consistency`, `parameter_screen`, `metric_family`,
+`category_summary` y `tradeoff`. Relaciones/consistencia necesitan métricas `x`/`y` y admiten
+`expected: positive|negative|equal`; tradeoff enumera al menos dos métricas y category_summary una
+categoría. Referencias requeridas desconocidas fallan; `optional: true` admite una métrica ausente
+y registra la pregunta no disponible. `label` y `priority` no negativa son opcionales y nombran/
+ordenan tarjetas, no ponderan HPO. Las preguntas enfocan la exploración, no planifican Runs ni
+crean un protocolo de contraste formal. Resúmenes de familia/categoría y Pareto de recursos ya
+existente siguen siendo descriptivos.
+
+<a id="guide-research-analysis-4-cómo-funciona-el-descubrimiento"></a>
+
+### 4. Cómo funciona el descubrimiento
+
+1. Matriz por candidato sobre evidencia **completa comparable**, sin fabricar scores finales de
+   candidatos censurados. Screening y confirmación siguen separados; no se mezclan fidelidades.
+   Los alias se mapean a claves canónicas de análisis.
+2. Perfil de todas las métricas: soporte finito/ausente, valores únicos, rango, media, mediana, SD,
+   dispersión robusta y soporte registrado de Runs/seeds. Constancia exige igualdad repetida.
+   Las métricas presentes en menos de la mitad de los candidatos muestran `low_coverage`;
+   conservan cobertura de candidatos/Runs y soporte de seeds numéricos. El ranking penaliza
+   también la cobertura pareada real, sin equiparar unos pocos ejemplos con evidencia completa.
+   La clasificación casi constante compara dispersión con rango/escala declarada o magnitud (`1e-6`),
+   nunca un epsilon absoluto que destruya señales de unidades pequeñas.
+3. Conjunto acotado y determinista, priorizado por la declaración. Grupos de respuestas casi
+   redundantes: Spearman absoluto al menos `.995` y seis candidatos pareados, excluyendo familias.
+   Es una ayuda de navegación, no prueba de equivalencia científica.
+4. Screening acotado parámetro/métrica y métrica/métrica, intercalando ambos tipos y rotando
+   parámetros para que el primero no monopolice el presupuesto. Los parámetros numéricos reutilizan
+   `ParameterSpace`, incluidas escalas log, categorías y condiciones. Se comparan correlación de
+   rangos y respuesta cuadrática de rangos con leave-one-out; categorías usan eta-cuadrado.
+   Ninguna de estas relaciones es un nuevo modelo causal multivariante.
+5. Hasta 32 relaciones preseleccionadas reciben permutaciones deterministas y bootstrap de signo.
+   Se reutilizan matrices pequeñas, sin matrices cuadráticas de candidatos ni productos completos
+   de métricas. Tests sin confirmar cuentan como `p=1` en el ajuste Benjamini–Yekutieli. Valores
+   por defecto: 64 métricas, 128 relaciones y 256 permutaciones; `analysis.discovery` permite
+   ajustar `max_metrics`, `max_pairs`, `resamples` dentro de límites validados o desactivar discovery.
+6. Hallazgos priorizados con efecto, soporte y estabilidad separados. La derivación directa,
+   transitiva o compartida reduce novedad. También hay invariancia, outliers descriptivos por
+   1.5-IQR, cambios de signo en contextos categóricos acotados y hallazgos del análisis existente.
+   Persisten componentes del ranking y penalizaciones por redundancia. El inbox muestra hasta
+   ocho grupos de evidencia distintos; los equivalentes permanecen en la lista completa.
+
+Efecto, soporte, estabilidad, p ajustado y confianza científica no son lo mismo. **Supported
+exploration** exige soporte y p diagnóstico ajustado pequeño; **preliminary** no está confirmado.
+La selección adaptativa, comparaciones múltiples, reutilización de datos y ruido de seeds limitan
+estos diagnósticos. BY no transforma un Study adaptativo en experimento aleatorizado formal.
+El acuerdo del bootstrap no es la probabilidad de que una conclusión sea verdadera. Outliers y
+contextos son explícitamente inspection-only, sin confianza inventada. Métodos basados en la
+[guía de permutaciones de SciPy](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.spearmanr.html)
+y el [ajuste de FDR con dependencia](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.false_discovery_control.html).
+
+<a id="guide-research-analysis-5-explorar-y-guardar"></a>
+
+### 5. Explorar y guardar
+
+En **Explore**, elige **Analyze** (métrica), **By** (chips de parámetros), **Compare with** opcional
+(chips de métricas) y el conjunto completo/parcial. **Explore observations** usa el renderer
+existente: un parámetro produce scatter, dos heatmap y más coordenadas paralelas. Elimina chips
+con ×. Métricas y controles avanzados conservan su preview inmediato. **Advanced visualization
+options** agrupa tipo/ejes X/Y/Z explícitos, agregación, paleta/inversión y normalización visual;
+tipo/paleta/filtros usan el mismo desplegable buscable. Nombre, notas y guardado quedan visibles.
+
+- Varias Y comparten escala solo con unidades declaradas iguales. Unidades distintas/desconocidas
+  usan gráficos separados; **Visual 0–1 normalization only** es opcional y no cambia evidencia.
+- En **Parameters**, abre **Analyze metric**, busca `mean`, marca una métrica, busca `auroc` y
+  marca otra sin cerrar el desplegable. La selección se conserva entre búsquedas; desmarcar elimina
+  la curva y ninguna selección muestra un estado vacío explícito. Flechas navegan, Espacio marca,
+  Escape/Listo/clic exterior cierra. **Estilo del gráfico** permite líneas/puntos, barras agrupadas,
+  distribuciones de candidatos por X o mapas de calor para muchas métricas. No hay sectores:
+  métricas independientes no son partes aditivas de un total. **Distribución** ofrece gráfico
+  combinado o un panel por métrica. **Escalas Y → Automáticas** agrupa rangos con al menos un 50%
+  de solapamiento del intervalo más estrecho (incluye contención), compatible entre todos los pares
+  del grupo. Una constante puede compartir un rango que la contenga. Nunca agrupa unidades conocidas
+  distintas; unidades desconocidas pueden compartir escala visual, no significado científico.
+  Puedes forzar escalas independientes o compartidas; los paneles separados respetan esa elección.
+  También hay puntos por Trial sin promediar, curvas escalonadas y áreas, violines con puntos reales,
+  barras horizontales, histogramas y CDF empíricas. Histogramas/CDF agrupan todos los resúmenes
+  candidatos coincidentes; cajas/violines permiten comparar valores exactos del parámetro.
+  Unir puntos es descriptivo, no un ajuste de respuesta. Los ejes automáticos muestran los nombres
+  de sus métricas, no números de escala anónimos.
+  No compares alturas entre ejes independientes. **Dispersión** permite ocultar desviación típica,
+  usar bigotes o banda ±SD en líneas con X numérico; otros estilos usan bigotes. Las distribuciones
+  ya muestran observaciones. La SD es entre candidatos, no confianza entre semillas, y falta para
+  una observación. El mapa normaliza colores por métrica (color neutro para constantes); el hover
+  muestra medias originales y lo no observado queda vacío. Los ajustes persisten en este HTML en
+  el navegador; regenerarlo los reinicia. Explore conserva gráficos separados por defecto y
+  normalización visual opcional.
+  La selección no modifica agregación, objetivo ni respuesta modelada persistida.
+- Heatmaps/superficies numéricas observadas dejan vacías las combinaciones no probadas. Las
+  superficies del surrogate permanecen separadas y etiquetadas. Scatter 3D admite categorías.
+- Coordenadas paralelas usan los parámetros elegidos (o el default de ocho en vistas antiguas)
+  y una métrica; excluyen coordenadas ausentes explícitamente y no ajustan modelos nuevos.
+- Trials conserva marcas de poda/parcialidad. Busca en el ledger y compara dos candidatos en una
+  tabla por categorías con valores/diferencias. Hay filtro por rama condicional raíz cuando aplica.
+  La comparación empieza con métricas principales/prioritarias; buscar o **Show all recorded
+  metrics** la amplía. Dirección desconocida no significa mejora.
+
+**Interactions** tiene un panel observado para cualquier métrica con los selectores compartidos
+y heatmap/3D/superficie. El modelo predictivo del objetivo permanece separado. **Evidence**
+(antes Findings & evidence) conserva conclusiones científicas, diagnóstico del surrogate, evidencia
+de seeds/poda, metodología y snapshot estructurado en secciones plegables. Los hallazgos exploratorios aparecen solo en
+Research; el dashboard individual de Run no cambia y sigue usando epochs.
+El snapshot completo de auditoría se formatea al desplegarlo y reutiliza el catálogo de métricas,
+serializado una sola vez. Todos los paneles comparten el catálogo leído, sin selectores independientes.
+
+Guarda vistas con nombre y notas. Exporta/importa **research-views.json**, que transporta
+configuración visual, no evidencia. Se validan versión, campos, referencias, tamaño y cantidad.
+Las preferencias del mismo HTML conservan vistas, paletas, tamaños, favoritos y búsquedas;
+regenerarlo crea un ámbito nuevo. No hay servicios cloud ni LLM necesarios.
+
+<a id="guide-research-analysis-pestañas-html-del-proyecto"></a>
+
+#### Pestañas HTML del proyecto
+
+La visualización de dominio pertenece al consumidor. Dentro de `Work.run`, declara un HTML
+gestionado y escribe el documento completo de tu aplicación:
+
+```python
+viewer = self.outputs.html_section("predictions", section="proteins", title="Proteins")
+viewer.write_text(render_predictions_html())
+```
+
+La acción HTML interactiva del Study, `lf results report SELECTOR --output report.html` y la
+exportación portable leen estos archivos solo bajo petición explícita. Una sección crea una pestaña
+junto a Explore/Evidence/Resources. Varios outputs o Runs comparten pestaña con selector buscable
+etiquetado por Trial/seed/output. Los títulos de una sección deben coincidir. Overview, HPO,
+paneles Analysis y sondeos ordinarios no descargan HTML. La lectura remota se pagina y cachea en
+su propio host, fuera del heartbeat del planificador.
+
+El documento es HTML UTF-8 autocontenido: incluye JavaScript/CSS, visualizaciones y datos de
+predicciones; no funcionan rutas relativas a recursos ni peticiones externas. LambdaForge no
+programa lógica de dominio, lee NPZ ni expone callbacks Python al navegador. Cada documento usa un
+iframe de origen opaco `sandbox="allow-scripts allow-downloads"` y CSP restrictiva; sus scripts no
+acceden al dashboard padre, archivos locales, otros sitios ni credenciales. Esto aísla presentación,
+no el Python confiable del Work. Dentro del iframe el HTML sigue siendo interactivo; preferencias
+y navegación del dashboard son independientes. Antes de incrustarlo se verifican ownership,
+tamaño exacto y fingerprint persistido. Symlinks, contenido ausente/modificado o exceso de límites
+(16 MiB/documento, 64 MiB/informe) dan error explícito, no pestañas vacías. Se usa el lifecycle y
+retención del output ordinario, sin otro registro, runner o sistema de plugins.
+
+También se pueden aportar documentos directamente sin ejecutar un Work:
+
+```python
+from lambdaforge.analysis.Report import write_html
+
+write_html(analysis, "report.html", sections=[
+    {"name": "proteins", "title": "Proteins", "label": "Trial 3 · seed 7", "html": html_text},
+])
+```
+
+<a id="guide-research-analysis-6-arquitectura-seguridad-y-límites"></a>
+
+### 6. Arquitectura, seguridad y límites
+
+`MetricCatalog` posee significado; `AnalysisProfile` valida declaraciones inmutables;
+`ResearchAnalysis`/`ResearchDiagnostics` calculan read models deterministas; assets offline
+modulares los muestran. `StudyAnalysis` conserva efectos, cobertura, seeds, ganador/confirmación
+y recursos. El documento versión **8** añade `research` sin eliminar campos. Se elimina el viejo
+renderer lineal sin uso, no se mantiene una segunda ruta.
+
+Antes de ejecutar, `analysis-semantics.json` guarda declaraciones resueltas, defaults conocidos
+del registro, identidad y versiones. Las especificaciones hijas referencian ese fichero, sin
+copiar el catálogo por Run. Finalización, recarga, recuperación y export usan evidencia congelada;
+cambiar etiquetas no cambia el fingerprint científico previo ni decisiones HPO. La caché de
+análisis verifica además la identidad semántica. Studies antiguos reciben metadata inferida;
+documentos HTML antiguos obtienen navegación de nombres, no hallazgos retrospectivos inventados.
+
+Límites deliberados: discovery acotado, no exhaustivo; semántica desconocida permanece así;
+señales no lineales/contextuales son herramientas aproximadas de inspección, no un modelo
+universal de interacciones; no causalidad ni pesos nuevos; no nueva confianza shared-seed;
+sin imputación, datos fabricados ni fitting científico en navegador. HPO y análisis multivariante
+previos siguen siendo autoridades. Export/import transporta vistas, no un workspace vivo ni
+actualización automática del HTML. Las conclusiones acopladas rendimiento/recursos necesitan
+evidencia comparable suficiente de recursos y seeds.
+
+<a id="guide-research-analysis-7-informe-de-implementación"></a>
+
+### 7. Informe de implementación
+
+Este informe recoge la implementación y verificación local del 2026-10-03.
+
+1. **Arquitectura previa:** Study Analysis ya normalizaba evidencia y gestionaba ganador/seeds,
+   cobertura, efectos multivariantes y recursos. El HTML era principalmente una colección de gráficas.
+2. **Causas de usabilidad:** nombres/selectores planos, poca semántica, métricas ausentes/constantes
+   compitiendo por atención, navegación monométrica y falta de priorización para investigación.
+3. **Estructuras nuevas:** `MetricCatalog`, `AnalysisProfile` inmutable, `ResearchAnalysis` acotado,
+   helpers de inspección/ranking y presentación offline modular integrada en el análisis existente.
+4. **Catálogo:** `analysis.metrics/defaults` opcional o `Work.analysis_profile`; se reutiliza
+   `Metric.metadata` sin construir objetos Work científicos.
+5. **Perfil:** declaraciones, familias y preguntas/discovery validados; combina clase/YAML y se
+   congela de forma independiente del objetivo y política de ejecución.
+6. **Familias:** coordenadas explícitas o plantillas acotadas con placeholders simples; orden,
+   categorías y soporte incompleto aparecen juntos sin inventar mediciones.
+7. **Salud:** igualdad repetida, casi constancia relativa, ausencias, cobertura de candidatos/Runs/
+   seeds, rangos y variación esperada; no borra ni imputa evidencia.
+8. **Redundancia:** agrupación determinista por similitud de rangos, representante y miembros
+   desplegables; protege familias. Ranking/inbox reducen repetición, no eliminan valores.
+9. **Discovery:** screening intercalado parámetro/métrica y métrica/métrica, respuesta de rangos/
+   cuadrática, asociaciones categóricas, relaciones declaradas y señales baratas de inspección.
+10. **Multiplicidad:** permutaciones deterministas acotadas y ajuste BY sobre hipótesis examinadas;
+    tests sin confirmar cuentan como `p=1`. La resolución limitada sigue siendo conservadora.
+11. **Fiabilidad:** soporte, efecto, cobertura, estabilidad de signo, p diagnóstico ajustado y
+    novedad son componentes separados; ninguno es probabilidad de verdad.
+12. **Derivadas:** linaje acíclico validado; relaciones estructurales directas/transitivas/compartidas
+    pierden novedad. No se infiere dirección ni equivalencia práctica de una fórmula derivada.
+13. **Test:** se rechaza evidencia de test/derivada para objetivo/componentes/restricciones antes
+    de ejecutar. Discovery provisional la excluye; análisis terminal conserva sus valores registrados.
+14. **Persistencia:** `analysis-semantics.json`, identidad semántica separada y referencias hijas;
+    defaults congelados al finalizar, recargar, recuperar y exportar.
+15. **HTML:** inbox Research, salud/catálogo, inspectores semánticos, hallazgos diversos y Explore
+    progresivo; se retira el renderer lineal viejo sin uso.
+16. **Búsqueda:** palabras/subsecuencias sobre claves, etiquetas, alias, descripciones/categorías,
+    parámetros, familias, hallazgos, Trials y vistas; teclado, favoritos y recientes.
+17. **Parameters multimétrica:** renderer observado compartido; añade métricas, separa escalas
+    desconocidas/distintas y normaliza visualmente solo cuando se solicita.
+18. **Pares/3D:** scatter/heatmap/superficie observados con categorías y huecos; superficies modeladas
+    del objetivo siguen separadas. Coordenadas paralelas acotadas, sin otro modelo científico.
+19. **Explore:** preview inmediato, X/Y/Z, varias Y, tipo, agregación, paleta, evidencia parcial y
+    normalización explícita; Advanced no domina la experiencia inicial.
+20. **Research Views:** especificaciones guardadas con nombre/notas y preferencias por HTML;
+    import/export JSON validado/acotado transporta presentación, no datos científicos.
+21. **Regresiones añadidas:** precedencia/validación, leakage/linaje, recarga congelada, namespaces,
+    censura/ausencias, salud, familias, discovery determinista/no lineal, catálogos grandes y navegador:
+    búsqueda, inspectores, unidades, comparaciones y persistencia/import de vistas.
+22. **Verificación:** Ruff/mypy correctos; pytest completo: **1118 passed**, cuatro avisos Lightning
+    no fatales sobre uso CPU/loaders. Pasan análisis/CUDA/documentación focalizados, smoke de wheel
+    instalada con CLI/scaffold/validación/HTML e interacción/capturas Chromium. Matriz sintética de
+    500 candidatos, 300 métricas, 15 parámetros y 15 seeds: **9,424 s**, **4.809.115 bytes** y solo
+    32 relaciones con remuestreo costoso por defecto. El tiempo depende de la máquina.
+23. **Versiones/esquema al implementar:** release era **0.16.0**; documento de análisis pasó a **8**;
+    documentos research/semánticos comienzan en **1**. YAML añade declaraciones explícitas opcionales.
+24. **Evidencia anterior:** no exige declaraciones; ausencia de semántica se infiere explícitamente.
+    Se conservan campos científicos. HTML legado obtiene navegación, no hallazgos inventados.
+25. **Límites reales:** discovery acotado/observacional puede seguir preliminar; no se afirman modelos
+    genéricos de saturación, fairness/subgrupos ni causalidad de alto orden. Se reutilizan análisis
+    previos de top-region/recursos/seeds, no se generalizan a toda métrica. No se añade ingestión de
+    baselines externos ni color/tamaño/faceting arbitrario de candidatos: la referencia es el Trial
+    seleccionado en comparación de dos Trials. Las vistas guardadas no son un workspace vivo.
+
+No se modificó WISDOM ni se contactó ningún clúster real durante la verificación.
+
+<a id="guide-research-analysis-8-informe-de-la-segunda-simplificación"></a>
+
+### 8. Informe de la segunda simplificación
+
+Este apartado recoge la segunda ronda focalizada del 2026-10-03; el apartado 7 describe la base previa.
+La [guía de Studies condicionales](#guide-conditional-studies) contiene gramática y ejemplos de planificación.
+
+1. **Controles retirados:** selects estáticos largos de métricas/parámetros en ranking, Parameters y
+   X/Y/Z; segundo catálogo de checkboxes/búsqueda para métricas adicionales; select plano de categorías.
+   Los valores ocultos solo adaptan el renderer: no quedan listas gigantes de opciones ocultas.
+2. **Capacidades conservadas:** ranking, varias métricas/unidades, heatmaps/3D/superficies observadas,
+   coordenadas paralelas, marcas parciales/pruned, familias, comparación de candidatos, modelos
+   persistidos, vistas/import/export, notas, favoritos/recientes y dashboard individual de Run.
+3. **Pestañas:** Findings & evidence pasa a Evidence. Conserva conclusiones/auditoría de seeds/poda/
+   surrogate; los hallazgos exploratorios quedan en Research. Las otras pestañas mantienen su finalidad.
+4. **Selector:** un catálogo y diálogo dinámico, resultados acotados, búsqueda semántica/aproximada,
+   teclado, favoritos/recientes. Los parámetros muestran tipo/dominio/activación, no solo nombres.
+5. **Explore:** Analyze / By / Compare with / subconjunto, chips eliminables y elección de gráfica.
+   Ejes X/Y/Z, tipo, agregación, paleta y normalización siguen disponibles en Advanced.
+6. **Preguntas:** tarjetas con etiqueta/prioridad, estado legible, soporte/motivo e Inspect antes de
+   los hallazgos exploratorios. label/priority afectan presentación, no política científica.
+7. **Jerarquía:** árbol de categorías desplegable; seleccionar un padre incluye descendientes.
+   Las dimensiones de familias de métricas no se confunden con categorías o condiciones de parámetros.
+8. **Gramática:** `when: {parent: scalar}`, `{parent: {eq: scalar}}` o
+   `{parent: {in: [scalar, ...]}}`; varios padres significan AND. Listas ambiguas/operadores ajenos fallan.
+9. **Representación:** predicados ActivationCondition inmutables dentro de ParameterDescriptor;
+   orden canónico de padres/miembros, serialización escalar histórica y persistencia JSON.
+10. **Autoridad:** normalización Work, sweep exhaustivo, RandomSearch, geometría ParameterSpace/
+    Sobol/adaptativa, codificación/decodificación/validez y activación en análisis comparten predicados.
+11. **Pertenencia:** valores finitos, únicos y no vacíos comprobados contra el dominio del padre;
+    sin OR implícito, expresiones recursivas, expansión del dominio ni API específica de un consumidor.
+12. **Igualdad:** eq explícito se normaliza al escalar antiguo. Igualdad sobre rangos numéricos y
+    orden declarado de dominios independientes conservan comportamiento; las regresiones protegen identidad.
+13. **Inactivos:** claves ausentes de candidatos/argumentos; se aplican defaults de la firma. Sin
+    null, categoría inactiva inventada o serialización de valores irrelevantes de hijos.
+14. **Duplicados:** enumeración topológica activa evita multiplicar ramas inactivas; valores repetidos
+    del sweep fallan en vez de duplicar identidades de evidencia silenciosamente.
+15. **Fixture:** seis ramas genéricas dan 1+2+10+16+9+18 = **56 candidatos únicos** × cuatro seeds
+    compartidas = **224 Runs obligatorios**, iguales a la unión pretendida de ramas independientes.
+16. **Referencia:** el selector existente debe identificar exactamente un candidato generado; cero/
+    varios resultados fallan. No se inventan referencias a valores inactivos.
+17. **Preflight:** validate/explain/dry-run muestran diseño/seeds/Runs/ramas/referencia, paralelismo,
+    GPUs y presupuestos. Dry-run humano no enumera cientos de Runs; JSON conserva el plan completo
+    y la observación de capacidad del destino.
+18. **Tiempo:** wall-time del scheduler y presupuesto lógico de dispatch siguen separados. Los
+    niveles secuenciales suman; los paralelos usan el máximo. Pruebas de 1008 h/42 días y composición mixta.
+19. **Capacidad:** sondeo directo UUID/visibilidad acotado rechaza peticiones GPU imposibles conocidas
+    antes de empaquetar/enviar. Fallo/ambigüedad permanecen desconocidos; ocupación no es capacidad.
+    Scheduler/site-command mantienen su concesión existente; preflight nunca reserva ni amplía GPUs.
+20. **Steps:** with/seeds/replicates/search/sweep/execution/objective/analysis raíz fallan explícitamente
+    en vez de ignorarse. resources raíz mantiene su herencia documentada.
+21. **Hook consumidor:** no se añade. Se reutiliza validación de clase/firma/tipos/marcadores sin
+    construir Work. Semántica arbitraria necesita validación del consumidor; no era necesario crear
+    otro contrato de callbacks para este cambio focalizado.
+22. **Esquema/versión:** condiciones y label/priority opcionales añadidos; se rechaza política raíz
+    sin efecto. Implementado sobre 0.16.0; análisis v8 y vistas v1 compatibles. Sin otra versión YAML,
+    runner, política científica o DSL paralela de condiciones.
+23. **Compatibilidad:** no se reescribe evidencia histórica congelada. Identidad escalar, seeds,
+    objetivo/HPO/recursos, retry/export y HTML/vistas antiguos se conservan. Las condiciones viajan
+    por StudyDesign, inicialización e identidad de recuperación existentes.
+24. **Pruebas:** gramática/AND/dominio/ciclos/orden, inmutabilidad/pickle/esquema/identidad, sweep/
+    referencia, geometría Sobol/random/análisis, steps/raíz/tiempos y capacidad previa al submit sintética.
+    Chromium cubre 300 métricas/15 parámetros, jerarquía, preguntas, selector/chips, gráficas nuevas y
+    previas, comparación y recarga de vistas. Ruff/mypy pasan; pytest completo: **1136 passed**,
+    cuatro avisos no fatales de Lightning. Revisión final análisis/navegador/config/docs: **63 passed**;
+    política GPU/config/docs/smoke de entrenamiento: **34 passed**. Wheel, instalación aislada y
+    scaffold/validate/dry-run también pasan reutilizando dependencias instaladas del entorno local.
+    Integración CUDA local explícita: **1 passed**. La regresión de padre numérico comprueba que
+    las observaciones no transforman un rango declarado en dominio finito.
+25. **Límites:** sin DSL de expresiones, nuevo fitting, fusión automática de pasos, lint heurístico de
+    particiones o reglas de consumidor. Capacidad incierta permanece desconocida; in necesita dominio
+    finito. Conteos adaptativos describen una ventana, no garantizan ejecución. HTML sigue offline;
+    los controles no programan/podan Runs ni modifican evidencia.
+
+Verificación local/sintética. No se editó ningún proyecto consumidor ni se envió ningún Work remoto.
+
+
+<a id="guide-coordinated-studies"></a>
+
+## 29. Studies coordinados: estado y contratos
+
+[English](MANUAL.md#guide-coordinated-studies)
+
+<a id="guide-coordinated-studies-estado-lanzamiento-fleet-adaptativo-nuevo-y-fijo-recoverytransferencia-pendientes"></a>
+
+### Estado: lanzamiento Fleet adaptativo nuevo y fijo; recovery/transferencia pendientes
+
+`lf run CONFIG --on-fleet FLEET` encola un coordinador local durable para Runs repetidas,
+sweeps fijos, sweeps pareados automáticos y HPO adaptativo nuevo sin continuación de fidelity.
+El selector de destino de Run Work en la Consola ofrece
+la misma ruta `fleet:NAME`. El YAML científico no cambia. Es una **capacidad pública limitada**,
+no la finalización de la petición completa de HPO adaptativo coordinado.
+
+La ruta de un clúster y `MultiClusterSubmissionService` independiente se conservan.
+Los envíos independientes no son HPO coordinado.
+
+<a id="guide-coordinated-studies-implementado"></a>
+
+#### Implementado
+
+- Un único `WorkRunner` nativo con los planners adaptive, fixed y `PairedSweepSequentialAnalyzer` originales.
+  El dispatcher ejecuta propuestas exactas y los callbacks de resultado/refill existentes; no crea
+  candidatos, seeds ni otro optimizer en los workers. Una Execution y un análisis final.
+- Un Job de proveedor persistente por miembro, preparado por `ControlPlane`/`JobService`.
+  El runtime de miembro recibe oleadas finitas con leases, reutiliza procesos Run aislados y ARI,
+  y deja terminar lo aceptado antes de liberar su allocation. No crea otro claim GPU ni otro Job
+  del scheduler por cada oleada.
+- Heartbeats frescos del Job propio acreditan código/entorno/inputs file/numerics y hardware
+  homogéneo real. Las cinco identidades deben coincidir entre miembros antes de crear leases
+  científicas. Los placeholders de preparación nunca son evidencia de placement.
+- Admisión GPU baseline con tokens opacos heredados, probes nativos de vida corta, límites por
+  miembro y memoria física libre. Nunca amplía grants. Una oleada ocupada ofrece cero slots:
+  **faltan co-location GPU y refill ARI incremental dentro del miembro Fleet**.
+  Los offers caducan; las observaciones físicas de `lf fleets offers` no autorizan despacho.
+- La ruta preparada conserva políticas direct/site-command/SLURM, TLS, bundles y entornos managed
+  inmutables. Hay aceptación CPU loopback y CUDA real mínima; no acredita aún SSH, site-command
+  ni SLURM de extremo a extremo.
+- Los markers file conservan parámetros científicos authored y verifican bytes/tamaño canónicos
+  durante preparación y binding del worker. Los grandes siguen usando el espejo del proyecto.
+  La acreditación distribuida de datasets se rechaza: NAME@VERSION igual no basta.
+- Leases v2, fences de envío, propietario unknown, cuarentena, límites, reloj/presupuestos originales
+  y reconciliación siguen siendo autoridad. El tamaño global de oleada respeta el paralelismo
+  nativo. Una pérdida de conexión por sí sola nunca autoriza otro Attempt.
+- Jobs miembros visibles en `lf jobs`, pero no como Works semánticos independientes. El padre
+  aparece como `fleet:NAME`; Runs activos y terminados incluyen clúster/Job/shard/lease/Attempt
+  exactos. Los registros nativos del worker proyectan los últimos/mejores escalares acotados en
+  la vista Study existente del coordinador. `lf show STUDY --run KEY --json` y
+  `lf logs STUDY --run KEY` leen curvas/logs vivos o terminales en su miembro verificado,
+  bajo demanda. Nunca se abre localmente una ruta remota. Los resúmenes visuales no sustituyen
+  al stream científico durable descrito a continuación.
+- `metrics.jsonl` y `training-metrics.jsonl` nativos se transportan incrementalmente como registros
+  completos verificados con SHA-256: máximo 32 KiB por canal/Run/lectura y compresión sin pérdida
+  opcional. Cada lectura acredita Study/Run/Attempt/lease/miembro/shard exactos; los offsets preservan
+  orden y deduplican retransmisiones. El cursor durable recupera appends no confirmados tras una
+  interrupción; pérdida/corrupción de bytes confirmados, saltos y replay contradictorio fallan cerrado.
+  El worker conserva evidencia durante desconexiones. No se transportan logs ni artifacts pesados
+  por este stream. El planner recibe resultados terminales solo tras completar sus escalares.
+- El mismo planner adaptativo central consume evidencia terminada y todas las propuestas leased/
+  queued/running entre miembros. Conserva adquisición pending-aware nativa: qLogNEI de BoTorch si
+  está disponible y fallback mixed-kNN determinista. Capacidad admisible libre invoca la frontera
+  científica nativa acotada, nunca propuestas aleatorias de otro optimizer. Repriorizar Runs aún
+  sin lease conserva identidad científica y registra la invocación/prioridad anterior.
+- La poda central reutiliza utility/historial/calibración nativos y envía solicitudes de parada
+  idempotentes con lease exacto. Evidencia required/startup/confirmation sigue protegida. La parada
+  es cooperativa; desconexión no significa ACK ni evidencia pruned. Espejos escalares locales
+  verificados alimentan calibración histórica sin abrir rutas remotas localmente. Continuación/
+  recovery de checkpoints sigue bloqueado, no se deduce de rutas locales con nombres similares.
+- `lf cancel STUDY` detiene primero el coordinador y después sus miembros propios. El borrado
+  semántico previsualiza la familia completa y rechaza miembros activos. La limpieza individual
+  protege evidencia referenciada por la familia. La compactación pesada se hace en su host,
+  nunca escribiendo rutas remotas sobre el coordinador.
+
+<a id="guide-coordinated-studies-comandos-disponibles"></a>
+
+#### Comandos disponibles
+
+```bash
+lf run study.yaml --on-fleet research --dry-run --json  # Sin grant, upload ni Job.
+lf run study.yaml --on-fleet research                  # Envío asíncrono durable.
+lf show STUDY --json
+lf show STUDY --run trial-00001-seed-4 --json
+lf logs STUDY --run trial-00001-seed-4
+lf cancel STUDY --dry-run
+lf cancel STUDY --apply
+lf delete STUDY                                       # Preview de familia terminal.
+lf delete STUDY --apply
+```
+
+Coordinador `local`; miembros managed, distintos del destino local incorporado. Dry-run valida
+fuente/firma/diseño, roles/credenciales, muestra caps y verificaciones diferidas sin consultar ni
+adquirir GPU. El request durable captura perfiles y referencias de credenciales, no sus valores.
+`--on`/`--on-fleet` son excluyentes. Se rechazan `--rerun`, `--restart`, flags de recovery internos
+y `--wait-for-submit` para esta ruta.
+
+<a id="guide-coordinated-studies-pendientes"></a>
+
+#### Pendientes
+
+Stream de checkpoints/continuación y recovery distribuido; predictive/lookahead;
+co-location; pause/resume/reconcile públicos y adopción; recovery tras reinicio del coordinador;
+expansión/drain de miembros en vivo; equivalencia de datasets; transferencia de checkpoints/
+artifacts, compresión/reanudación y export distribuido; TUI/HTML completos de placement/utilización;
+StudyDecision y dependencias. Los controles internos de lifecycle/catálogo no sustituyen esas
+operaciones públicas. Retry Fleet rechaza reiniciar como un solo clúster; export rechaza generar
+un paquete del coordinador que omita silenciosamente la evidencia de los miembros.
+
+La petición **no está terminada**. Esta ruta limitada no es HPO adaptativo distribuido listo para
+producción completo; las pruebas loopback/fake no acreditan todos los proveedores.
+
+<a id="guide-coordinated-studies-validación-incremental-2026-10-05"></a>
+
+#### Validación incremental (2026-10-05)
+
+Regresiones del stream cubren lecturas acotadas de varios chunks, compresión, replay, registros
+incompletos, interrupción del receptor, leases ajenas y symlinks. Regresiones del miembro cubren
+poda dirigida, idempotencia, órdenes inmutables y evidencia protegida. La integración pública CPU
+loopback ejecuta el planner adaptativo nativo sobre dos allocations con un único estado HPO/análisis.
+La poda histórica se prueba con espejos verificados y rutas del propietario deliberadamente ausentes.
+No acredita aceptación adaptativa remota/GPU real ni recovery tras reinicio del coordinador.
+
+<a id="guide-coordinated-studies-validación-de-esta-implementación-2026-10-04"></a>
+
+#### Validación de esta implementación (2026-10-04)
+
+- `ruff check .`: correcto.
+- `mypy src/lambdaforge`: correcto, 558 archivos fuente.
+- `pytest` completo: 1.246 pruebas correctas; cuatro avisos de Lightning en pruebas CPU.
+- Una wheel recién construida e instalada pasó los smoke tests de packaging, la verificación
+  del import instalado, `run --help`, scaffolding, validación y dry-run de solo lectura.
+- La integración pública Fleet probó dos miembros CPU loopback, incluidas métricas/logs Run en
+  vivo; pruebas separadas del proveedor preparado ejecutaron cargas CUDA locales reales mínimas.
+  No son pruebas de aceptación SSH/site-command/SLURM reales. No se modificó ni ejecutó WISDOM
+  ni clústeres reales.
+- No se ejecutó CI en GitHub. Las comprobaciones locales no acreditan las capacidades pendientes
+  enumeradas arriba.
+
+<a id="guide-coordinated-studies-catálogo-de-fleet"></a>
+
+### Catálogo de Fleet
+
+Configuración operacional en `lambdaforge.clusters.yaml`, nunca en el YAML científico:
+
+```yaml
+clusters:
+  a: {transport: ssh, host: a-login, user: USER, scheduler: local}
+  b: {transport: ssh, host: b-login, user: USER, scheduler: local}
+  queue: {transport: ssh, host: queue-login, user: USER, scheduler: slurm}
+fleets:
+  research:
+    coordinator: local
+    members:
+      - {cluster: a, max_gpus: 2, max_runs: 4}
+      - {cluster: b, max_gpus: 4}
+      - {cluster: queue, max_inflight_jobs: 2, required: false}
+```
+
+Los perfiles conservan launcher/claim, espejo del proyecto y data environment. Todas las
+referencias deben resolverse antes de sondear. Precedencia usuario < proyecto < explícito; un
+override sustituye la lista completa de miembros, no mezcla listas accidentalmente. Se mantienen
+perfiles de cluster, referencias de credenciales y execution profiles. Límites: enteros positivos
+o null. online/draining/disabled son controles del operador, no resultados de un sondeo.
+
+```bash
+lf fleets list --json
+lf fleets show research --json
+lf fleets offers research --json         # Solo observación explícita, no allocation.
+lf fleets drain research b               # Preview del cambio de catálogo.
+lf fleets drain research b --apply
+lf fleets disable research b --apply     # No envía señales a Jobs activos.
+lf fleets enable research b --apply
+```
+
+`lf fleets --catalog RUTA ...` selecciona un catálogo explícito; sin esa opción los cambios se
+guardan en el proyecto. No se guardan secretos ni se cambia identidad científica del Work.
+
+<a id="guide-coordinated-studies-propiedad-y-persistencia"></a>
+
+### Propiedad y persistencia
+
+El driver local posee un coordinador del proyecto bajo `fleets/PARENT_JOB/coordinator` del
+JobStore durable, junto a metadata Execution nativa con rutas propias.
+`coordinator.json` versión 2 (con lector v1) se publica atómicamente con fsync usando el publicador JSON y lock
+cross-process existentes. `leadership()` protege el bucle de planificación. Las transacciones
+cortas no mantienen locks durante E/S remota. El estado contiene inicialización/presupuestos,
+Runs, leases/historial de Attempts, motivos de placement, shards, controles y cuarentena.
+`results/` guarda envelopes inmutables con nombre por digest; `quarantine/` contradicciones.
+Un estado ausente/corrupto/de versión no soportada falla cerrado, nunca comienza de cero.
+Un reinicio no puede cambiar silenciosamente la autoridad coordinadora. Las acreditaciones de
+preparación requieren booleanos explícitos y las propuestas científicas son JSON estricto y finito
+antes de persistirlas.
+
+La clave global usa `(study_identity, candidate, seed, phase, fidelity)` y la primitiva existente
+de identidad científica. La lease añade Attempt, ID opaco y cluster. Dos drivers no reservan
+el mismo Attempt. Las offers excluyen residentes ya reconocidos localmente; el coordinator
+resta leases adicionales no reconocidas para evitar sobreasignación entre preparación y envío.
+
+El fence de intención se persiste **antes** de llamar al proveedor. Si se pierde la respuesta,
+se consulta por ID inmutable de shard, no se vuelve a enviar ni se crea otro Attempt. El contrato
+del executor también exige envío idempotente. Los shards nunca contienen credenciales.
+Las confirmaciones tardías se vinculan al Attempt exacto: no sobrescriben resultados terminados,
+no devuelven una Run activa a queued ni asignan el Job ID antiguo a un Attempt sustituto.
+
+Offers frescas pueden permitir trabajo nuevo; las caducadas no. Un fallo de transporte marca
+leases activas `unknown_remote`, con backoff exponencial limitado a cinco minutos: no cancela
+workers, no fabrica fallos y no libera identidades. Una observación ausente también es desconocida.
+Retry requiere prueba positiva del scheduler/registro de procesos/shards propios que identifique
+la lease y confirme que no queda owner vivo, y está limitado. Una excepción del consumidor no se
+reintenta automáticamente. Shards antiguos no consumen el límite de Jobs del Attempt sustituto.
+
+El resultado debe coincidir en Study/Run/Attempt/lease/target/parámetros/equivalencia. Duplicados
+exactos son inocuos; contradicciones y resultados tardíos de una lease liberada van a cuarentena
+con diagnóstico compacto sin sobrescribir evidencia válida. Reentrega repara una caída entre
+publicación del resultado e índice. Lecturas comprueban el digest. Se rechazan symlinks de raíz
+y evidencia. Los snapshots muestran recuentos, no descargan todos los resultados.
+
+La reserva consume conservadoramente el límite de dispatch `max_runs`; si el operador la retira
+antes del fence de envío se devuelve esa reserva no gastada, conservando el historial del Attempt.
+El wall-time parte de
+la creación inmutable y atraviesa reinicios. La contabilidad física y liberación reversible de
+reservas no iniciadas necesitan aún la integración con el dispatcher de producción.
+
+<a id="guide-coordinated-studies-pruebas-reproducibles-de-esta-base"></a>
+
+### Pruebas reproducibles de esta base
+
+No ejecutan WISDOM ni contactan clusters reales:
+
+```bash
+python -m pytest -q tests/controlplane/test_coordinated_study.py tests/controlplane/test_fleets.py
+python -m pytest -q tests/work/test_concrete_shard.py
+python -m pytest -q tests/work/test_study_dispatch_boundary.py tests/controlplane/test_coordinator_pause.py
+python -m pytest -q tests/work/test_coordinated_cpu_dispatch.py
+python -m pytest -q tests/controlplane/test_shard_preparation.py tests/controlplane/test_prepared_provider_dispatch.py
+python -m pytest -q tests/controlplane/test_fleet_study_service.py tests/controlplane/test_member_allocation.py
+```
+
+El diseño fijo simulado tiene 56 candidatos × 4 seeds = 224 Runs y capacidades A=2, B=3, C=1.
+Toda la evidencia entra una vez y los objetivos sintéticos coinciden exactamente con una
+referencia serial. La partición desconecta B, carga otra instancia del coordinator, dirige trabajo
+nuevo a A/C y reconcilia un residente, un completado y una pérdida confirmada de B: solo esta
+última crea Attempt 2. También se prueban drivers concurrentes, acknowledgements ambiguos,
+frescura, límites, checkpoint local, incompatibilidad de entorno/hardware, procedencia,
+presupuestos, drain e identidades inmutables. No son aún pruebas de ejecución distribuida
+end-to-end ni calidad del optimizer predictive.
+La prueba del shard CPU ejecuta cuatro Work reales en subprocesos a concurrencia dos, conserva
+evidencia y rutas nativas de los éxitos/fallos y verifica que reentregar no crea otro Attempt.
+No envía un Job a un proveedor, no otorga una GPU y no arranca un optimizer.
+
+La aceptación preparada también prueba staging real, JobService, supervisor directo desacoplado,
+workers CPU y una operación CUDA mínima con ARI nativo. Resolver/instalar el entorno son fixtures;
+el transporte es loopback, no SSH. El test GPU utiliza acceso local shared explícito e hereda el
+grant del supervisor; se omite sin CUDA. No acredita SLURM/gpu exec ni instalación managed real.
+Los casos persistentes verifican offers baseline frescos, Job exacto reutilizado y drain sin
+liberar el grant entre oleadas. Inputs/grants opacos tienen regresiones separadas.
+
+Las pruebas del proveedor preparado ejecutan cuatro identidades fijas o tres bloques pareados
+completos de dos candidatos en dos destinos CPU directos con Jobs desacoplados; ingieren evidencia
+centralmente y producen un análisis final único.
+Usa ProcessScheduler real local. `test_fleet_study_service.py` prueba además el servicio público con
+dos allocations reales, análisis único, lectura de Run en su propietario, cancelación semántica,
+request asíncrono capturado y gramática/preflight read-only. Instalar/resolver sigue siendo un
+fixture: no acredita SSH real ni aceptación Fleet adaptativa completa. Un fixture vivo mantiene
+abierto el Run hasta que el coordinador lee su log aislado y métrica del step 7 en su propietario
+exacto. Rechaza seeds/Trials/Attempts/rutas ajenos; los escalares visuales remotos no se convierten
+en evidencia completada ni provocan lecturas locales. Las pruebas de inyección
+ejercitan el planner adaptativo nativo sin crear otro optimizer. La pausa cubre particiones,
+ingestión al terminar, carreras previas al envío, reinicio y presupuestos inmutables.
+
+Los sweeps authored fijos mantendrán desactivada la poda de rendimiento. Los automáticos
+mantendrán bloques pareados completos; el HPO adaptativo podrá podar según su contrato actual.
+El trabajo predictive futuro pertenece al Study y a sus presupuestos: capacidad libre no autoriza
+dependencias downstream no resueltas ni propuestas aleatorias sin información útil.
+
+
+<a id="guide-operational-reliability"></a>
+
+## 30. Salud operativa, monitorización y recuperación deliberada
+
+Español · [English](MANUAL.md#guide-operational-reliability)
+
+Estado lógico, evidencia científica y salud operativa son conceptos distintos. Un registro antiguo
+`running` no demuestra que hoy existan sus procesos. `UNKNOWN` expresa propiedad u observación
+sin resolver: no demuestra fallo científico ni autoriza duplicar el cálculo. Se reutilizan el
+JobStore del proyecto, los proveedores y el runner nativo. El
+[registro de aceptación](ai/IMPLEMENTATION.md#history-operational-reliability-progress) detalla la reforma aún pendiente.
+La [guía de recursos](#guide-resource-safety) documenta observación compartida, coordinación
+GPU/MIG, RAM cgroup y los límites conservadores de propiedad de reservas externas.
+
+<a id="guide-operational-reliability-inspección-sin-cómputo"></a>
+
+### Inspección sin cómputo
+
+```sh
+lf health --json
+lf health JOB --refresh --json
+lf incidents --json
+lf jobs show JOB --json
+lf jobs logs JOB --tail 100
+lf monitor diagnose --json
+```
+
+Sin `--refresh`, health lee observaciones guardadas. Con él consulta al proveedor. Los tiempos de
+intento/éxito del observador permanecen separados del reloj remoto y del progreso científico.
+Un fallo conserva estado/fecha de última confirmación y aumenta su contador. Leer caché o escribir
+metadata no renueva confirmación. Salida 2 indica incertidumbre/degradación/pérdida operativa, no
+el resultado científico. Salud: `healthy`, `degraded`, `unreachable`, `stale`, `lost_confirmed`
+o `unknown`. Un fallo de consulta nunca equivale a un inventario vacío válido.
+
+Una entrada ausente sigue desconocida hasta verificar propiedad. En ejecución directa se comprueba
+identidad de vida y marcadores de Job del mismo usuario, también en hijos reparentados. Propiedad
+inaccesible impide inferir muerte. Observar no envía señales ni modifica state.json del host.
+El inventario directo aísla registros individuales corruptos/inaccesibles: los otros Jobs mantienen
+su estado y salud actualizados. Sólo el Job conocido afectado queda degradado, conservando un
+resultado terminal ya guardado. Las entradas de error no crean Jobs ni acreditan pérdida o permiso
+de recovery. Fallos de raíz/transporte siguen invalidando la consulta del host. La siguiente
+observación válida limpia el error anterior sin editar historial ni reiniciar ciencia.
+Las sondas enviadas seleccionan definiciones/auxiliares por nombre en una sola lectura de fuentes,
+no por posiciones de funciones cargadas que pueden quedar obsoletas al actualizar una instalación
+editable. Tras actualizar LF reinicia la consola/monitor abierto para cargar la implementación
+corregida: no reinicia Jobs científicos ni exige cambiar sus entornos worker inmutables.
+SLURM conserva origen queue/accounting, estado bruto, motivo, exit code, nodo y fechas disponibles.
+Retraso de contabilidad no es fallo confirmado; `NODE_FAIL` es infraestructura y `OUT_OF_MEMORY`
+recursos. Referencias oficiales: [sacct](https://slurm.schedmd.com/sacct.html),
+[estados](https://slurm.schedmd.com/job_state_codes.html).
+Si `squeue` agota el timeout, una consulta acotada a accounting aún puede aportar evidencia positiva.
+Accounting vacío/fallido nunca acredita un RUNNING de caché; se descartan detalles de consultas previas.
+
+<a id="guide-operational-reliability-monitor-independiente-del-proyecto"></a>
+
+### Monitor independiente del proyecto
+
+```sh
+lf monitor config --file monitor.json
+lf monitor start
+lf monitor status --json
+lf monitor once --json
+lf monitor stop
+```
+
+Start separa de la terminal un observador del catálogo nativo, no otro runner científico. Un lock
+de propietario evita duplicados. Stop sólo termina ese monitor, no cancela Works. Status verifica
+identidad y edad de heartbeat por separado, mostrando degradación ante fallos repetidos. Reiniciar
+conserva incidentes e intentos de notificación. No descarga epochs/artefactos, ajusta HPO, reserva
+GPUs ni modifica YAML. Configuración/estado/log están en `.operational/monitor/` del JobStore e
+incidentes compactos en `.operational/incidents/`; no son otro almacén científico.
+
+Ejemplo distribuido: [monitor.json](../examples/monitor.json).
+
+```json
+{
+  "interval_seconds": 60,
+  "observation": {
+    "freshness_seconds": 180,
+    "heartbeat_seconds": 45,
+    "grace_seconds": 120,
+    "progress_seconds": null,
+    "unreachable_failures": 2
+  },
+  "smtp": {"enabled": false}
+}
+```
+
+Umbrales en segundos, salvo el contador. Progreso se desactiva por defecto: algunos Works válidos
+no emiten métricas durante horas. Frescura, gracia y progreso son independientes. Un fallo muestra
+conectividad perdida; los repetidos escalan salud sin emergentes en cada sondeo.
+
+Cerrar Textual no detiene el monitor separado. Logout/reinicio requiere servicio del SO:
+
+```sh
+lf monitor install --json
+lf monitor install --apply
+```
+
+El instalador Linux systemd-user no sobrescribe unidades ajenas ni activa lingering ni cambia
+políticas administrativas. Revisa unidad y `loginctl show-user "$USER"`. La
+[vida del servicio](https://github.com/systemd/systemd/blob/main/man/org.freedesktop.login1.xml)
+depende de sesiones/lingering; separar un proceso no garantiza sobrevivir a limpieza del centro.
+En macOS/Windows usa `lf monitor run` con launchd/Task Scheduler u otro gestor. Activación real y
+supervivencia a logout/reinicio no están certificadas por las regresiones CPU locales.
+
+<a id="guide-operational-reliability-correo-opcional-e-incidentes-sin-spam"></a>
+
+### Correo opcional e incidentes sin spam
+
+SMTP está desactivado inicialmente. Exige host, remitente, destinatarios y TLS `starttls` o `ssl`.
+Credenciales: `env:NOMBRE` o `keyring:CLAVE`, nunca contraseña en configuración. Deben estar
+disponibles sin preguntas para el servicio. Un relay TLS sin autenticación también requiere
+configuración y autorización explícitas del operador.
+
+```json
+{
+  "interval_seconds": 60,
+  "smtp": {
+    "enabled": true,
+    "host": "smtp.example.org",
+    "port": 587,
+    "tls": "starttls",
+    "sender": "research@example.org",
+    "recipients": ["research@example.org"],
+    "username": "research@example.org",
+    "credential": "env:LF_SMTP_PASSWORD",
+    "cooldown_seconds": 900
+  }
+}
+```
+
+```sh
+lf monitor test-alert --json
+lf incidents --json
+```
+
+Se marca envío tras aceptación SMTP, no al intentarlo. Correo fallido no cambia el Job. Máximo
+tres intentos automáticos por transición, con espera persistida. IDs estables deduplican sondeos;
+reapertura, escalado y resolución quedan en eventos nativos. Resolver exige observación positiva,
+no desaparición. Aceptación SMTP no demuestra entrega en bandeja; una interrupción durante el envío
+impide garantizar exactamente una entrega y Message-ID ayuda al receptor a deduplicar.
+Un retry auditado resuelve incidentes del origen solo tras progreso científico fresco del Job exacto
+aceptado y posterior a su petición. Aceptación, preparación, admisión y heartbeat no bastan. El
+resultado original no cambia; `recovered_by` enlaza nuevo Job/petición/progreso. Recovery fallido no
+resuelve el origen. SMTP no mantiene el lock de incidentes; una confirmación antigua no marca como
+enviada una transición de escalado o resolución ocurrida durante el envío.
+
+<a id="guide-operational-reliability-consola"></a>
+
+### Consola
+
+Bare `lf` → **Operational health…**, o Ctrl+P → Operational Health System: salud guardada,
+detalle de incidentes y configuración. Refresh providers es explícito; Start/Stop sólo controlan
+el observador. Save settings comparte validador CLI. Send test email muestra aceptación o fallo.
+Durante una petición se impide repetirla. Cerrar el panel no cancela ciencia. Overview/Work/Studies
+separan salud y estado; los imports son históricos de sólo lectura, sin proveedor activo esperado.
+
+Monitor y consola coordinan sondas por proyecto/proveedor sin espera larga. Una consulta concurrente
+conserva registros nativos y relojes originales; receipts no prueban frescura del proveedor. Jobs
+SLURM distintos mantienen carriles independientes. Morir el observador libera el lock del SO y no
+deja una barrera permanente para consultar.
+
+<a id="guide-operational-reliability-recuperación-y-yaml-trasladado"></a>
+
+### Recuperación y YAML trasladado
+
+```sh
+lf retry STUDY --dry-run --json
+lf retry STUDY --config experiments/trasladado.yaml --dry-run --json
+lf retry STUDY --config experiments/trasladado.yaml
+# Sólo tras revisar validez de métricas/checkpoints anteriores:
+lf retry STUDY --config experiments/trasladado.yaml --accept-code-change
+```
+
+**Resume Study…** ofrece ruta histórica, explorador YAML y Validate recovery plan. Falta de YAML
+original no provoca replay completo. Se compara identidad científica persistida tras restaurar
+namespace de seeds. Comentarios/formato/orden de claves no la definen. Deben coincidir parámetros,
+bytes de inputs, datasets, seeds, objetivos, diseño y contratos. Inputs relativos se resuelven
+respecto al YAML elegido: conservar sus bindings exactos es imprescindible. Aceptar código nuevo
+no permite saltarse identidad.
+
+Para Studies de un solo host lanzados mediante `gpu exec`, recovery usa la concesión nueva de
+`CUDA_VISIBLE_DEVICES`, no la lista del Job anterior. Si el mismo YAML pide tres GPU pero
+el proveedor concede una, los estudios adaptativos, seeds repetidas y sweeps fijos trabajan
+solo en esa GPU: `runs_per_gpu` se aplica al número actual y `max_parallel` sigue siendo un
+techo. Se conservan Runs completados, checkpoints, decisiones, costes y registro original de
+recursos pedidos. No necesitas editar YAML solo porque ahora tengas menos GPU. Una visibilidad
+CUDA explícitamente vacía/deshabilitada nunca se convierte en índices físicos: un Study GPU
+falla de forma segura con un diagnóstico de concesión. Esto no reescribe una topología DDP/
+multi-GPU programada por el consumidor. SLURM/asignaciones exclusivas mantienen el contrato
+exacto: la capacidad insuficiente espera o se rechaza de forma segura, nunca se usan GPU ajenas.
+
+La modal conserva la casilla de compatibilidad, el motivo de bloqueo y la confirmación fuera
+del plan desplazable. Pulsar Resume sin la aprobación exigida o un YAML validado explica por
+qué no se envió nada; no implica aprobación. Validar deshabilita el envío hasta recibir respuesta,
+aunque se cambie la casilla mientras tanto. Tras confirmar explícitamente se envía como máximo
+una recuperación y el resultado aparece en el workspace o en un diálogo persistente de fallo.
+
+Se fija hash entre preview y preparación; editar el archivo invalida el plan. Preview no crea
+Jobs, consume seeds/presupuesto, reserva GPUs ni descarga checkpoints. Apply verifica de nuevo
+propiedad dentro del lock. Propiedad inaccesible o procesos potencialmente vivos bloquean
+duplicación. Pérdida verificada reciente permite recuperar sin inventar un resultado failed.
+
+La verificación directa acota los procesos inaccesibles al Job exacto: una denegación de acceso
+del mismo usuario no provoca incertidumbre global en el host. La fecha de creación permite
+descartar procesos anteriores al Job; en POSIX, evidencia de sesión/UID/vida puede demostrar
+una sesión de acceso independiente de propietario distinto. El nombre del proceso no basta.
+Supervisor, proceso científico o huérfanos marcados vivos siguen bloqueando recovery, al igual
+que propietarios inaccesibles y procesos cuya independencia no se puede demostrar. Inventario
+sondea una vez y evalúa esa evidencia para cada Job, sin señales ni cambios en registros
+científicos. Reinicia una consola ya abierta tras actualizar LF local. La sonda de lectura
+también aplica a entornos remotos inmutables antiguos sin instalar nada dentro de ellos.
+
+Tras reiniciar el host, la sonda compara las fechas de creación de los propietarios con
+el arranque del SO. Un propietario verificado anterior al arranque no puede sobrevivirlo;
+procesos de acceso fechados en el nuevo arranque no son descendientes suyos. No se cambia
+el resultado cancelado/fallido ni se autoriza recovery por un `htop` vacío: una marca viva
+del Job, fechas/arranque desconocidos o un propietario posterior inaccesible siguen
+bloqueándolo. CLI y consola usan la misma sonda nativa. Reinicia una consola ya abierta
+para cargar la sonda actualizada.
+
+La aceptación genera `recovery_request_id`, enlazado desde eventos del original y metadata/eventos
+del nuevo Job. `lf jobs show NEW_JOB --json` expone fase: aceptada, preparación, admisión, runtime
+observado, progreso científico observado o resultado terminal. Admisión/epoch cero no son progreso.
+Fallos conservan fase/categoría/log. Consola muestra ID y fase observada.
+
+<a id="guide-operational-reliability-historial-guardado-incluidos-rechazos"></a>
+
+#### Historial guardado, incluidos rechazos
+
+```sh
+lf jobs recovery JOB --json
+lf jobs recovery JOB --offset 100 --limit 100 --json
+```
+
+La consulta lee únicamente Jobs y eventos nativos guardados: no contacta al cluster ni descarga
+checkpoints/artefactos. Funciona durante una desconexión. Enlaza identidades exactas de retry,
+dependencia y ciencia, nunca nombres visibles; muestra dependencias ausentes sin inventarlas.
+Los eventos se paginan desde los más recientes; `next_offset` permite consultar los anteriores.
+
+En el Study, **Recovery history** abre la misma vista con Jobs relacionados, IDs, fases y detalles.
+Apply y **Validate recovery plan** de consola registran un ID antes de validar: rechazos por
+propiedad, estado ausente o configuración incompatible permanecen auditados aunque no exista un
+nuevo Job. No cambian Runs válidos ni evidencia científica. Si falla escribir la auditoría, se
+informa sin afirmar que quedó registrada. CLI `--dry-run` no modifica ni siquiera esta auditoría.
+
+Un fallo de recovery abre un diálogo persistente con fase, ID, causa acotada y accesos a Logs,
+Saved history y Back to plan. Cerrarlo no reintenta y el sondeo no genera notificaciones repetidas.
+Un preview válido no es admisión; apply vuelve a comprobar el plan bajo el lock nativo.
+
+Cargar Runs reutilizados establece una referencia, no progreso nuevo. Cambiar totales, reiniciar
+contadores o repetir sondeos tampoco resuelve incidentes. Después debe avanzar un contador común
+de completados/pasos/epochs con runtime positivamente observado; pérdida o fallo no lo certifican.
+El preview nativo conserva el número de Runs lógicos válidos: una primera observación que lo supera
+puede acreditar una finalización nueva. Releer el mismo contador nunca renueva la fecha de progreso.
+
+Fixed/repeated recuperan diseño/Run/Attempt propios; adaptive exige estado real de controlador.
+Runs válidos se reutilizan, fallidos/interrumpidos crean Attempts, y lo gastado no se devuelve.
+No se sobrescriben Execution/Attempts originales. Recuperar Study no garantiza retomar epoch: el
+Work debe implementar restauración compatible. Checkpoints gestionados, pins de retención y
+transporte exacto siguen siendo autoridad nativa. Recovery Fleet sigue pendiente; no se convierte
+silenciosamente a un host.
+
+<a id="guide-operational-reliability-política-y-evidencia-de-checkpoints-gestionados"></a>
+
+### Política y evidencia de checkpoints gestionados
+
+En un límite seguro del algoritmo, el Work puede declarar cadencia y retención terminal:
+
+```python
+self.checkpoints.configure(
+    interval_steps=5,
+    interval_seconds=1800,
+    retention_seconds=7 * 86400,
+    storage_durability="shared",
+)
+if self.checkpoints.should_save(step=epoch):
+    self.checkpoints.save_json("state.json", algorithm_state, step=epoch)
+```
+
+No se impone frecuencia ni se serializan algoritmos automáticamente. Cualquiera de los intervalos
+declarados puede pedir guardado; avanzan por escritura confirmada, no lecturas/sondeos. JSON y
+`checkpoints.file(..., step=...)` registran checksum, propietario Execution/Run/Attempt/identidad,
+fecha y paso opcional. `file` reutiliza contenido válido: usa nombres versionados o validación para
+reconstruirlo. Escritos mediante `path()` son avanzados y no se registran automáticamente.
+
+`inventory()` pagina metadata; `inventory(verify=True)` comprueba bytes en el host propietario,
+sin certificar deserialización. JSON registrado corrupto rechaza carga; legado sigue legible sin
+certificado inventado. Antes de cargar/sustituir estado registrado se comprueba Execution/Run
+propietario: registro corrupto o propietario ajeno se rechazan sin modificar bytes. Attempts
+anteriores del mismo Run siguen permitidos. Compatibilidad científica/código sigue exigiendo
+validación nativa y reconocimiento explícito si procede; comprobar propietario no permite saltársela.
+Preview/consola muestran último descriptor con integridad **no comprobada**,
+sin descargar pesos ni prometer continuar epoch. El campo histórico `resumed_from_checkpoint`
+expresa disponibilidad al iniciar Attempt, no restauración confirmada; progreso es otra señal.
+
+Durabilidad (`unspecified`, `ephemeral`, `persistent`, `shared`) es una declaración del operador/
+proyecto, no garantía del montaje. Bytes locales al nodo no protegen de su pérdida. Retención se
+integra con cleanup preview/apply; fallidos/interrumpidos y pins quedan protegidos. Aumentarla
+después del preview se comprueba antes de borrar. Rotación en vivo, deserialización específica y
+aceptación Fleet/entre hosts siguen pendientes.
+
+Diagnósticos conservan categoría nativa, fuente, confirmación, momento, impacto y recomendación.
+OOM de SLURM no prueba CUDA OOM, ni exit 137 prueba OOM del host. CUDA/dtype genéricos siguen siendo
+consumidor. Respuesta malformada es observación degradada, no host desconectado. Una excepción
+genérica de consulta conserva conexión desconocida aunque se repita; tipos de conexión/autenticación
+se distinguen mediante la autoridad diagnóstica compartida. Un terminal legado
+sin request sigue visible, pero no acredita propiedad ni recovery seguro.
+
+<a id="guide-operational-reliability-emergencia"></a>
+
+### Emergencia
+
+1. Conserva Job ID. Inspecciona health actualizado, detalles, logs acotados e incidentes. No borres
+   checkpoints/historial ni mates procesos para ocultar una fila desactualizada.
+2. Distingue conexión perdida, procesos perdidos confirmados, scheduler y fallo del consumidor.
+   Un host inaccesible puede seguir calculando; retry no autoriza duplicarlo.
+3. Restablece conectividad, inspecciona/reconcilia evidencia y pide preview. Elige YAML trasladado
+   si procede; revisa reuse/retry/pending y compatibilidad de código.
+4. Confirma con propiedad e identidad verificadas. Sigue preparación, admisión, heartbeat y
+   progreso del **nuevo** Job conservando el ID original.
+5. Conserva diagnósticos/eventos; para infraestructura contacta al centro. Éxitos históricos se
+   reutilizan; excepciones arbitrarias del consumidor no se reintentan automáticamente.
+
+El registro de aceptación distingue lo probado de lo pendiente. No acredita SMTP real, CUDA,
+un sitio SLURM ni activación systemd. La prueba local nativa de dos Studies/Textual pasa con fallos
+simulados del proveedor/admisión; preparación desacoplada real y caos multi-host completo siguen
+fuera de esa aceptación demostrada.
+
+<a id="guide-operational-reliability-ampliación-deliberada-frente-a-recuperación"></a>
+
+### Ampliación deliberada frente a recuperación
+
+Añadir valores/seeds a un sweep fijo utiliza **Extend Study**, no Resume. El delta tiene su propia
+Execution/Job; revisiones anteriores y gasto físico de Attempts/tiempo permanecen intactos.
+Si falla, su Job admite `lf retry` / **Resume Study…**, conservando Execution y Runs correctos.
+La serie sigue la genealogía exacta sin duplicar evidencia. Job ausente con preparación/estado
+del proveedor existente es incertidumbre, no permiso para reenviar. Solo un hueco acreditado
+anterior al Job puede recuperar el ID preasignado. Continuar una epoch requiere soporte explícito
+de checkpoints de la Work. Consulta [ampliaciones](#guide-study-extensions).
+
+El preview utiliza por defecto `--code-policy revisioned`: código modificado/dirty puede añadir
+celdas mediante el despliegue nativo gestionado, con procedencia de código/runtime e inferencia
+separadas por revisión. No atribuye resultados anteriores al código nuevo. `--code-policy strict`
+mantiene la equivalencia obligatoria. El código revisado queda fijado durante la preparación, y se
+verifica el contrato semántico y la identidad Execution del host antes de enviar al proveedor.
+
+
+<a id="guide-resource-safety"></a>
+
+## 31. Seguridad de recursos compartidos — implementación en curso
+
+Español · [English](MANUAL.md#guide-resource-safety)
+
+Trabajo sin publicar sobre 0.19.0: no constituye aceptación de la reforma completa ni explica
+el reinicio de un servidor. No se ha conectado a CiTIUS, cambiado reservas, ejecutado estrés
+ni lanzado cómputo científico para esta implementación. Véanse la
+[auditoría y tareas pendientes](ai/IMPLEMENTATION.md#history-resource-robustness-audit).
+
+<a id="guide-resource-safety-observar-no-concede-gpu"></a>
+
+### Observar no concede GPU
+
+Runner, supervisor y servicio directo de recursos reutilizan una caché del mismo usuario/host.
+La medición ordinaria usa el binding oficial opcional `nvidia-ml-py` (importa `pynvml`), sin
+PyTorch, tensores, asignaciones ni contextos CUDA de cómputo. Los proyectos CPU no adquieren
+dependencias GPU obligatorias. Sin el binding se agrupan consultas acotadas a `nvidia-smi`
+dentro del mismo observador aislado; atribución ausente no significa GPU sin procesos. MIG
+requiere la capacidad medida de la instancia: nunca se sustituye por la de su tarjeta padre.
+
+Por defecto: TTL informativo de 5 s, de admisión de 0,5 s, intervalo mínimo de 0,25 s, timeout
+del helper de 5 s y backoff de 2 a 60 s. Solo un proceso refresca ante misses concurrentes;
+los hits no crean helpers. Se registran consultas, hits, fallos, timeouts y latencia. El timeout
+termina exclusivamente el grupo privado del helper y verifica su salida; propiedad incierta
+impide crear otro. La caché está limitada a 1 MiB. Fallos de escritura/propiedad no autorizan
+arranques. Los valores antiguos son informativos, no evidencia fresca para admitir.
+
+Raíz privada del UID, por host/arranque e independiente del Project y entorno virtual:
+`$HOME/.cache/lambdaforge/hosts/<hash-host>/`. El operador puede elegir la base con
+`LAMBDAFORGE_HOST_COORDINATION_ROOT`; los proyectos deben usar la misma. Se rechazan enlaces,
+propietarios ajenos y permisos inseguros. Es metadata operativa, no identidad científica ni
+un segundo almacén de resultados. No debe editarse manualmente durante ejecución.
+
+Una concesión UUID GPU/MIG completa no necesita CUDA. Los tokens numéricos antiguos requieren
+**una enumeración inicial acotada de identidad mediante el driver** (`cuInit` y
+`cuDeviceGetUuid_v2`, sin crear contextos de cómputo). Inicializa el driver, pero no es el
+sondeo periódico de memoria. Se fija por vida del controlador, arranque, visibilidad original
+y orden CUDA. No se equiparan índices CUDA con NVML ni se sustituye una GPU desaparecida.
+Tras establecer el baseline, un dispositivo sin medición no bloquea los arranques de otro
+concedido y sano; sus valores antiguos se excluyen de admisión/actualización predictiva y
+se marcan no disponibles.
+
+<a id="guide-resource-safety-startup-entre-studies"></a>
+
+### Startup entre Studies
+
+`shared` y `command` coordinan arranques mediante locks cortos por UUID GPU/MIG. La autoridad
+sigue siendo `GPUPlacementPlanner`, que comprueba memoria física fresca bajo el lock. El
+compromiso temporal se persiste **antes** de crear el worker e incluye las identidades nativas
+disponibles de controlador, worker, Job, Execution, Run y Attempt. Un error de escritura no
+puede ocultar un Future ya arrancado. Otras GPU conservan admisión independiente.
+
+Demanda pendiente de otro Study: `max(compromiso de startup - consumo observado, 0)`. La VRAM
+libre ya excluye el consumo residente; no se resta otra vez. El controlador ya contempla sus
+propias Runs con sus envelopes. Se reconcilian vidas de worker verificadas como ausentes;
+propietarios inciertos siguen protegidos y un fichero de PID ausente no demuestra muerte.
+Para huérfanos se puede reutilizar la observación nativa de propiedad del Job; la edad no es
+prueba. La ventana de startup de un worker vivo atestiguado es por defecto 60 s, finita, no
+una reserva permanente de `gpu_memory` por residentes. Evidencia compatible de tiempo hasta
+el envelope puede extenderla, con límite de una hora. Baseline y exploración no pueden ignorar
+startup pendiente de otro Study. No cambian techos ni decisiones científicas. Waiters acotados
+por dispositivo incluyen vida nativa, prioridad, antigüedad y arranques servidos: un Study
+antiguo factible tiene oportunidad, sin alternancia obligatoria ni bloquear trabajo ligero
+tras otro que no cabe. Los waiters caducan; los compromisos requieren reconciliación más fuerte.
+No se comparan objetivos de Studies diferentes. La equidad entre usuarios pertenece al proveedor.
+
+<a id="guide-resource-safety-ram-y-cpu"></a>
+
+### RAM y CPU
+
+Se observa RAM física y límites legibles de ancestros cgroup v2 mediante `memory.max` y
+`memory.current`, junto con presión y eventos OOM disponibles. No se escriben controles
+cgroup. Evidencia inválida queda no disponible, no consumo cero. Se usa capacidad efectiva
+para admitir Jobs y se rechazan peticiones imposibles antes de calcular. Antes de iniciar
+una Run GPU se comprueba otra vez disponibilidad frente a su share RAM nativo de dispatch.
+
+La atribución verifica nacimiento del PID y UID. RSS, PSS y USS son distintos: sumar RSS
+puede duplicar páginas compartidas. Solo PSS cualificado reduce el compromiso RAM todavía
+no materializado; si falta, se conserva conservadoramente. `ram_bytes=0` se señala como
+demanda desconocida. Propietarios inaccesibles o con argv cambiado retienen protección CPU/RAM;
+un exec no demuestra muerte. Se mantienen afinidad y límites nativos de threads existentes.
+
+Los leases directos guardan host/boot bajo `hosts/<host-id>` en la raíz de leases configurada.
+Las claves GPU y la visibilidad del hijo usan UUID GPU/MIG exactos, no ordinales CUDA/NVML.
+Un lease exclusivo del dispositivo padre bloquea sus instancias MIG; las instancias independientes
+siguen siendo independientes. El descubrimiento queda fuera del lock y la liberación usa
+propiedad retenida, no una topología que puede haber cambiado. Se conserva el namespace del lock
+exterior para coordinar supervisores antiguos y nuevos. Los registros antiguos sin host/boot o
+con índices ambiguos quedan protegidos aunque un PID local parezca muerto: el archivo puede ser
+de otro host con home compartido. El Job en cola explica esa espera. Un supervisor antiguo activo
+normalmente libera su lease al salir; un resto tras un crash sin evidencia de host/boot necesita
+reconciliación explícita, no borrado ciego.
+
+No cambian DataLoader, fidelidad, seeds, checkpoints ni resultados. `cpu.max` y
+`cpuset.cpus.effective` legibles estrechan capacidad, sin ampliar afinidad. Las cuotas fraccionarias
+se explicitan y se acotan por su techo. Se descuenta overhead del controlador antes de repartir
+RAM agregada. Predictor RAM online y backpressure por presión de procesos siguen pendientes.
+
+<a id="guide-resource-safety-perfiles-circuitos-e-informes"></a>
+
+### Perfiles, circuitos e informes
+
+Errores de memoria/desaparición de UUID abren circuitos de observación por dispositivo que
+caducan (5–120 s por defecto). Se suprimen consultas NVML de memoria/actividad hasta recuperación;
+sigue siendo necesario enumerar identidades. Una lectura cualificada nueva del mismo UUID cierra
+el circuito. La dominancia OOM por candidato/placement sigue separada: un OOM no impone techo
+permanente. CUDA genérico no demuestra ECC, Xid, reset ni autorización para reintentar.
+
+Ajustes operativos del cluster, no YAML científico:
+
+```sh
+lf clusters set CLUSTER resource_safety shared-host
+lf clusters set CLUSTER resource_safety.priority 2
+lf clusters set CLUSTER resource_safety.probe_timeout 3
+lf resources --report --on CLUSTER --since 2026-10-13T00:00:00Z --until 2026-10-14T00:00:00Z --json
+```
+
+`balanced` conserva defaults; `throughput` usa TTL informativo 3 s/espera fairness 20 s;
+`shared-host`, TTL 10 s/espera 15 s; `conservative`, startup 120 s y mayor backoff inicial.
+Ninguno modifica parámetros científicos ni techos. Overrides se validan y se propagan por submit
+directo/remoto nativo; `resource_safety` se edita en el YAML Advanced de la consola. Los perfiles
+existentes usan balanced sin migrar el paralelismo.
+
+Los heartbeats CPU no crean helpers GPU. Nuevos samples `usage.jsonl` rotan a partir de 2 MiB
+a cuatro ventanas comprimidas, con muestras recientes y picos acumulados en `usage-summary.json`.
+No se compactan métricas, logs científicos ni checkpoints. Un historial antiguo excesivo no se
+lee sin límite ni se borra: el estado actual permanece disponible y la limpieza es deliberada.
+Los temporales de compresión interrumpidos no bloquean la compactación posterior y no se
+adoptan ni eliminan como si fueran evidencia propia de esta operación.
+
+El informe sanitizado de evidencia guardada aparece en cluster **Resources → Saved resource report**
+y en `get_resource_report` (`clusters.resource_report`) para sesiones de agentes fijadas al proyecto.
+Lee metadata propia acotada, sin consultar proveedor, assets ni logs completos. Excluye comandos,
+rutas, errores arbitrarios, credenciales y PID ajenos. Funciona offline/tras reinicio si sobrevivió
+metadata. Lo desconocido no se convierte en cero. Los picos son máximos muestreados de toda la
+vida del Job, no máximos exactos del intervalo. No fabrica timeline completo, diagnóstico de
+driver ni causa de reinicio.
+
+<a id="guide-resource-safety-reservas-del-centro"></a>
+
+### Reservas del centro
+
+En CiTIUS se usa `command_prefix: [gpu, exec]`, con claim persistente manual cuando corresponda.
+Dentro del wrapper se pasa Python gestionado absoluto, sin depender de activación Conda.
+LambdaForge no ejecuta `gpu release` tras éxito, fallo o cancelación. El proveedor gestiona
+las reservas propias del wrapper; las manuales pertenecen al usuario.
+
+Los pares genéricos `claim_command`/`release_command` no aportan un recibo acotado de propiedad.
+Su ejecución automática se rechaza **antes del claim**, también en preview. Los perfiles
+guardados se leen pero deben retirar el par. Es una limitación conservadora explícita, no
+un protocolo inventado de gpuctl. Una integración por reserva necesita verificación real
+autorizada; actividad o UUID coincidente no prueban propiedad.
+
+Exactamente `[gpu, exec]` deriva `[gpu, env, --shell]`; comandos personalizados explícitos
+no se cambian. El parser admite una línea CSV o asignación explícita `CUDA_VISIBLE_DEVICES`,
+nunca ejecuta su contenido y rechaza ambigüedad/salida excesiva. Una concesión vacía confirmada
+es distinta de sondeo fallido. Comparar formatos requiere identidades fijadas; no se revoca
+por confusión numérico/UUID. Solo se retiran/restauran tokens originales. Los entrenos sanos
+no se cancelan por un fallo del observador.
+
+El resume del Study establece una concesión nueva para el nuevo Job. En modo `command`
+(`gpu exec`), un Study cuyo YAML pide tres GPU puede continuar con una sola concedida ahora,
+sin editar YAML, reutilizar la lista antigua ni repetir evidencia completada. `runs_per_gpu`
+numérico se aplica al número actual; siguen activos los controles de memoria física/recursos.
+Hay regresiones nativas de recovery adaptativo, seeds repetidas y sweep fijo con hardware
+simulado. `CUDA_VISIBLE_DEVICES` explícitamente vacío/deshabilitado falla de forma segura en
+cualquier modo, sin inventar índices físicos. Una ejecución CPU sigue siendo válida con GPU
+deshabilitada. Las asignaciones del scheduler son contratos exactos; no se reescribe de forma
+automática la topología distribuida/DDP de una aplicación.
+
+<a id="guide-resource-safety-aceptación-pendiente"></a>
+
+### Aceptación pendiente
+
+Faltan reconciliación por fases más allá de la ventana startup aprendida, predictor RAM sin
+presupuesto declarado, backpressure por presión de procesos, informes históricos completos/
+eventos hardware confirmados, reconciliación nativa de leases antiguos ambiguos y aceptación
+extendida de proveedores. Los leases exteriores ya tienen scoping host/UUID con regresiones
+locales; eso no certifica un despliegue real en el centro/home compartido. Se mantiene
+ARI/throughput, no FIFO ni una Run por GPU. Establecer el
+baseline inicial todavía requiere todas las identidades solicitadas. NVML/MIG real y la
+preempción/limpieza del centro requieren comprobación explícita.
+Las pruebas CPU comparan packing estático/dinámico y cold start terminal/en vivo. El microbenchmark
+de caché mide overhead local con backend simulado, no latencia NVML ni throughput científico real.
+Las pruebas de competencia usan procesos nativos independientes.
+
+Fuentes primarias: [binding NVIDIA](https://pypi.org/project/nvidia-ml-py/),
+[orden/visibilidad CUDA](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html),
+[NVIDIA SMI](https://docs.nvidia.com/deploy/nvidia-smi/index.html),
+[manual CiTIUS](https://wiki.citius.gal/en:centro:servizos:servidores_de_computacion_gpgpu).
+
+
+<a id="guide-developer-experience"></a>
+
+## 32. Experiencia de desarrollo — implementación incremental
+
+[English](MANUAL.md#guide-developer-experience)
+
+Este bloque mejora ergonomía nativa sin cambiar identidad científica, YAML, recovery, scheduling
+GPU ni las ampliaciones de Studies sin commitear. **La reforma completa no está terminada**.
+No se aumenta versión. El registro de aceptación distingue lo probado de lo pendiente.
+
+<a id="guide-developer-experience-empezar-y-descubrir"></a>
+
+### Empezar y descubrir
+
+```bash
+lf init my-research --template minimal
+cd my-research
+python -m pip install -e .
+lf validate experiments/work.yaml
+lf explain experiments/work.yaml
+lf run experiments/work.yaml --dry-run
+lf help --search "recuperar estudio" --json
+```
+
+Init deriva distribución, paquete/imports, YAML, README y test ligero del nombre de carpeta.
+Translitera Unicode cuando es posible, sanea caracteres, prefija números y evita palabras
+reservadas y colisiones con stdlib/framework. Los proyectos antiguos no se migran. Sobrescribir
+requiere el `--force` existente; symlinks se rechazan. Agentes, memoria e instalaciones siguen
+opt-in. Dry-run no ejecuta Work.run. Las instrucciones usan los archivos reales, sin inventar
+una ruta al checkout. Pytest solo hace falta para ejecutar los tests generados.
+
+La ayuda por intención se deriva del parser instalado y reutiliza vocabulario bilingüe nativo.
+Los resultados son comandos/usage reales, no servicios inventados. `lf help`, `lf --help` y
+ayuda anidada siguen funcionando; las erratas sugieren opciones existentes.
+
+```bash
+source <(lf completion bash)
+source <(lf completion zsh)  # tras compinit habitual del shell
+lf completion fish | source
+```
+
+Usa solo la línea de tu shell. No se editan archivos de inicio. Completions cubren comandos,
+subcomandos, flags y enums del mismo parser, sin proyectos, secretos, Torch ni consultas remotas.
+Nombres dinámicos de clusters/datasets no se expanden; el shell conserva fallback de ficheros.
+Sintaxis Bash está probada; interacción real Zsh/Fish queda pendiente.
+
+<a id="guide-developer-experience-entender-yaml"></a>
+
+### Entender YAML
+
+```bash
+lf config schema
+lf config schema --output work.schema.json
+lf config explain experiments/work.yaml --field execution.max_parallel
+lf config diff experiments/previous.yaml experiments/work.yaml --json
+lf config resolve experiments/work.yaml --format json
+```
+
+Schema es el instalado, no otra gramática. `--output` crea un fichero nuevo, sin sobrescribir.
+Asócialo al YAML manualmente en el editor; no se cambia VS Code. Explicar un campo usa YAML/schema
+acotado y ExecutionPolicy nativo para límites, sin importar consumidor. Los parámetros `with`
+siguen perteneciendo a Work.run; para ellos usa validate/explain con imports de código confiable.
+Schema documenta concurrencia/presupuesto y admite null/auto sin distinguir mayúsculas como el
+normalizador. No se afirma paridad exhaustiva de cada alias legado de recursos.
+
+Diff usa WorkConfig y JSON canónico compartido del comparador puro existente, sin modificar su
+servicio de ampliación. Muestra cambios de parámetros, seeds, políticas, recursos, análisis y
+productos. **No** certifica compatibilidad de recovery/extension, dependencias o bytes de dos
+rutas. Importa código confiable pero no ejecuta Work.run. Explain distingue totales, asignación
+y techos de admisión; pedir concurrencia no garantiza disponibilidad física futura.
+
+<a id="guide-developer-experience-inspección-diagnóstico-y-seguimiento"></a>
+
+### Inspección, diagnóstico y seguimiento
+
+```bash
+lf inspect job-EXACT --json
+lf inspect execution-EXACT --kind execution
+lf inspect NAME --kind work
+lf diagnose job-EXACT --json
+lf watch job-EXACT --refresh --interval 2 --count 10 --json
+```
+
+Prefijos exactos seleccionan identidades nativas. Nombres ambiguos entre Work/Study/Execution/Job
+exigen `--kind` o ID exacto. No se incluyen selectores arbitrarios Run/product/dataset todavía.
+Se reutilizan catálogo compacto ResultStore, agrupación Work y JobService/OperationalHealth,
+sin abrir modelos/checkpoints/artifacts. `--refresh` pide metadata del proveedor a través del
+gate existente; sin él se muestra observación persistida y su edad, no frescura inventada.
+
+Diagnose reúne diagnóstico, fallo registrado confirmado e historial reciente nativo. No inventa
+causas posibles ni certifica recovery por FAILED/UNKNOWN. El comando sugerido
+`lf retry JOB --dry-run --json` comprueba elegibilidad/propiedad/checkpoint real; nunca se lanza
+automáticamente. Tracebacks y análisis profundo de Runs siguen siendo consultas explícitas.
+
+Watch observa en primer plano, no crea monitor permanente. JSON es **NDJSON**, un documento por
+snapshot cambiado. Si no cambia, backoff hasta 60s; la edad por sí sola no es evento. Ctrl-C sale
+solo del observador, sin cancelar Jobs. No transmite cuerpos de logs ni recursos detallados de
+cada Run: conserva `lf logs --follow` e informes existentes para ello.
+
+<a id="guide-developer-experience-tablas-pequeñas-sin-exportar-todo-el-experimento"></a>
+
+### Tablas pequeñas sin exportar todo el experimento
+
+```bash
+lf results table execution-EXACT --metric val_accuracy --metric val_loss --json
+lf results table execution-EXACT --trial 2 --columns seed,value,parameters --format csv --output scalars.csv
+lf results table execution-EXACT --offset 100 --limit 100 --fingerprint sha256:PAGINA_ANTERIOR
+lf results table execution-EXACT --attempts all --json
+```
+
+`ResultStore.table` proyecta metadata local retenida o importada. Por defecto incluye solo el último
+Attempt de cada Run lógico; `--attempts all` conserva también el historial físico. Métricas, IDs de
+Run y números de Trial son selectores exactos repetibles. Las columnas opcionales permiten acotar
+la tabla, pero las identidades, fingerprint, estado y tipo de evidencia permanecen obligatorios.
+Los valores ausentes siguen vacíos; un podado es `censored_snapshot`, no un score final inventado.
+Los valores son **snapshots escalares persistidos**, no se infiere mejor epoch ni agregación de
+selección. Se lee el agregado de metadata seleccionado, no series, logs, modelos, checkpoints ni
+bytes de artefactos. No se recalcula StudyAnalysis ni se descargan artefactos remotos.
+
+JSON contiene aviso descriptivo, número de filas, siguiente offset y fingerprint de evidencia.
+Pasarlo en la página siguiente rechaza cambios de evidencia en vez de mezclar snapshots. CSV
+conserva procedencia en cada fila y muestra paginación/aviso en stderr; escapa fórmulas de hoja de
+cálculo y aplica redacción nativa de secretos. Máximo 1000 filas por página y tamaño acotado: omite
+columnas voluminosas si una fila sola supera el límite. El destino explícito debe ser nuevo, sin
+symlinks y fuera de la raíz de evidencia Run; nunca sobrescribe. Son tablas derivadas, no autoridad
+científica importable. El export/import completo existente no cambia.
+
+<a id="guide-developer-experience-agentes-registro-no-significa-conexión"></a>
+
+### Agentes: registro no significa conexión
+
+```bash
+lf ai doctor
+lf ai context
+lf ai connect codex --json
+lf ai connect codex --apply --plan-hash sha256:PLAN_REVISADO
+lf ai launch codex
+```
+
+Context pagina YAML/Work AST local, clusters, estado de conocimiento/integración/SDK y permisos
+READ/PLAN reales. No importa consumidor, lee notas ni sondea clusters. Doctor añade versión/help/
+registro Codex instalado con consultas acotadas; ausencias/incompatibilidades son explícitas,
+sin instalar nada.
+
+Connect sigue la [CLI MCP oficial de Codex](https://developers.openai.com/codex/mcp/), comprueba
+gramática add/get/list y usa nombre propio del proyecto e intérprete invocante. Preview no escribe.
+Apply explícito requiere hash actual, SDK compatible y lock nativo; rechaza conflictos y es
+idempotente si coincide. Codex gestiona su configuración: LambdaForge no edita TOML directamente
+ni reemplaza servidores ajenos. Ediciones independientes de otros clientes no están protegidas
+por este lock de proyecto; aceptación real de configuración/comentarios sigue pendiente.
+
+**Verificar registro no es handshake MCP ni conversación con agente.** Se indica en la respuesta.
+Conserva `lf ai mcp test` para SDK y `/mcp` de Codex para descubrimiento real. Instalación,
+registro y launch son acciones separadas. Launch exige TTY/registro exacto, usa cwd del proyecto
+sin elevar sandbox/permisos ni lanzar ciencia. No se modificó configuración global Codex durante
+la implementación: registro se prueba con estado simulado desechable.
+
+<a id="guide-developer-experience-consola-y-skills"></a>
+
+### Consola y Skills
+
+Tablas principales Work/Study tienen filtros locales por nombre/estado/cluster/ID. Escribir no
+consulta proveedor. Filtrar, abrir y refrescar usan las mismas filas e identidad exacta. Un
+snapshot igual actualiza frescura sin vaciar tabla; al cambiar se conserva scroll y selección
+existente. Widgets desmontados descartan respuestas tardías sin parar ciencia. Otras pantallas
+mantienen sus layouts y controles propios.
+
+Skills empaquetadas Work/Study usan comandos reales, ejemplos completos y decisiones sobre
+diseño, evidencia ausente/censurada, imports e inputs explícitos. No autorizan submission ni
+prometen compatibilidad universal. La guía nativa define diseños fijos, GPU gestionada en el mismo
+destino y revisiones/análisis acumulados.
+
+<a id="guide-developer-experience-pendiente"></a>
+
+### Pendiente
+
+Búsqueda global paginada, sorting/paginación más amplia, elegibilidad recovery consolidada,
+comparaciones compatibles/emparejadas entre Executions, fusión guiada del editor,
+copiado de recetas, refinamientos HTML, extracción
+grande de Workspace, contratos MCP adicionales y resto de Skills prioritarias. No se afirma
+GPU/SLURM/SSH real, conversación externa o suite backend completa. Comandos/JSON públicos,
+autoridades de dominio y ampliaciones incrementales pendientes siguen intactos.
+
+
+<a id="guide-integration"></a>
+
+## 33. Integración de agentes fijada al proyecto
+
+[English](MANUAL.md#guide-integration). **La reforma integral todavía no está terminada**:
+consulta el [registro de aceptación](ai/IMPLEMENTATION.md). No cambia ciencia, identidades, HPO o GPU.
+
+<a id="guide-integration-inicio-rápido"></a>
+
+### Inicio rápido
+
+```bash
+lf init mi-investigacion --agents portable --knowledge markdown
+lf ai --project /ruta/absoluta init --agents codex --knowledge obsidian
+lf ai --project /ruta/absoluta init --agents codex --knowledge obsidian --apply
+lf ai --project /ruta/absoluta doctor
+lf ai skills list
+lf ai capabilities --json
+```
+
+Sin flags, init sigue creando únicamente el proyecto científico. `--interactive` pregunta en una
+TTY; no instala dependencias. **Agents / knowledge…** muestra estado, Skills, búsqueda y preparación
+con confirmación mediante el mismo backend. La guía consumidora enseña APIs públicas, no internals.
+AGENTS raíz inglés es canónico; los contratos detallados siguen en FRAMEWORK_CONTRACTS.md.
+
+<a id="guide-integration-mcp-clientes-y-permisos"></a>
+
+### MCP, clientes y permisos
+
+Instala expresamente `python -m pip install "lambdaforge[agents]"` en el entorno deseado.
+Arranca `python -m lambdaforge ai --project /ruta/absoluta mcp serve`. SDK oficial 2.3, stdio;
+stdout pertenece al protocolo. `mcp test` usa un cliente real en memoria; las pruebas además usan
+un proceso stdio desde otro directorio. Codex 0.162.0-alpha.17.2 ya ha descubierto herramientas y
+realizado llamadas reales con configuración temporal aislada y sin credenciales de modelo.
+Eso no acredita una conversación LLM ni un segundo cliente de proveedor, todavía pendientes.
+
+Codex genera `.lambdaforge/agents/codex-config.example.toml`; revisa y combina la entrada con
+la configuración existente, usando el Python absoluto correcto. No modifica archivos globales.
+Toolsets core/work/study/results/products/datasets/clusters/operations/knowledge, por defecto
+core/work/knowledge. El catálogo distingue disponible, habilitado en sesión y no soportado.
+Los detalles remotos se piden expresamente; listar no descarga todos los artifacts/epochs.
+
+READ/PLAN no autoriza enviar, cancelar, borrar ni escribir como agente. Envío/recovery/borrado
+siguen deshabilitados como acciones de agente. Cancelar un Job exacto exige OPERATE, toolset
+operations y aprobación humana separada. Notas aprobadas y HTTP local emparejado son opt-in.
+Validar importa Python del consumidor y requiere `--allow-project-code` del operador. MCP aísla
+planificación en un hijo con timeout/cancelación y sin prints en stdout del protocolo. **No es un
+sandbox** contra código confiado o agentes con shell propio. Texto recuperado no concede permisos.
+Las respuestas son tipadas, con origen/fecha de consulta/error; consultar ahora no demuestra
+observación fresca del proveedor. No ofrece shell ni lectura arbitraria de archivos.
+
+<a id="guide-integration-aprobación-humana-y-dependencias"></a>
+
+### Aprobación humana y dependencias
+
+Cancelación exacta: `prepare_job_cancellation(job_id)` inspecciona metadata sin consultar al
+proveedor; `request_job_cancellation(job_id)` crea una propuesta sin detener procesos.
+El operador stdio habilita `--toolsets core,operations --permissions READ,PLAN,OPERATE`.
+La persona revisa el Job, proyecto, cluster, binding de proveedor y alcance mediante el mismo
+CLI/Console de aprobaciones. Después `apply_job_cancellation(request_id, plan_hash)` revalida
+e invoca `JobService.cancel`. Solo afecta a ese Job, no a todos los Jobs del Work; preserva
+evidencia. Estado incierto o plan cambiado bloquean apply. Fleet se rechaza explícitamente.
+`job_cancellation_status(request_id)` permite consultar el resultado guardado. Fallo tras claim
+no permite replay; no hay herramienta MCP de aprobar. Permiso/revisión de notas no autoriza cancelar.
+
+Las respuestas mantienen el envelope v1, pero los payloads declarados tienen esquemas específicos
+que también anuncia el SDK. Errores de herramienta llevan `isError=true` y códigos distintos:
+`APPROVAL_REQUIRED`, `APPROVAL_EXPIRED`, `PLAN_STALE`, `OPERATION_CONFLICT`, incertidumbre/fallo
+de proveedor y error interno. `retryable` nunca concede permiso para repetir una mutación.
+`lf ai capabilities --search "recuperar estudio" --limit 20 --json` admite sinónimos técnicos
+deterministas EN/ES; relevancia de búsqueda no es confianza científica.
+
+El operador stdio puede habilitar `--permissions READ,PLAN,WRITE_PROJECT`. `agent_actions` descubre
+`knowledge.create/update/link/export`: export crea un ZIP de notas, nunca exportación científica.
+`preview_agent_action` y `request_agent_action` no editan notas ni crean archivos ZIP.
+Una persona revisa valores exactos en **Agents / knowledge… → Review agent requests…**, o usa:
+
+```bash
+lf ai approvals list
+lf ai approvals show approval-ID_EXACTO
+lf ai approvals approve approval-ID_EXACTO --plan-hash HASH_EXACTO
+lf ai dependencies check
+lf ai dependencies install                          # solo preview
+lf ai dependencies install --apply                  # virtualenv/Conda actual
+lf ai dependencies install --wheelhouse wheels --apply # sin red
+lf ai init --agents portable --apply --install-deps
+```
+
+CLI exige TTY local y escribir el ID completo; Console muestra todos los argumentos y exige
+confirmación equivalente. Aprobar no ejecuta: el agente debe aplicar el plan por separado antes
+de caducar (máximo 15 minutos). Proyecto, argumentos, revisiones y hash se revalidan; registros
+firmados, claim bajo lock y auditoría rechazan falsificación, cambios y replay/concurrencia.
+Un crash tras el claim no permite repetir. MCP no ofrece aprobar, ni admite `approved=true`.
+Esto no aísla agentes que dispongan de shell independiente bajo el mismo usuario.
+
+Solo se instala el extra declarado `agents`, con consentimiento y en el intérprete del operador;
+nunca Python de sistema, paquetes arbitrarios, aplicaciones de escritorio ni clusters.
+Fallos conservan archivos/notas, muestran diagnóstico acotado y exit code de error.
+
+<a id="guide-integration-http-local-opcional"></a>
+
+### HTTP local opcional
+
+`lf ai mcp token --apply` prepara un token privado y no muestra su contenido.
+`lf ai mcp serve --transport http --port 8765` usa el mismo SDK/backend, solo READ/PLAN y
+`127.0.0.1`. El cliente local autorizado lee `.lambdaforge/agents/http/token` y usa el header
+`Authorization: Bearer TOKEN`, nunca una URL. Navegadores requieren además un `--origin` exacto.
+Se verifica token/proyecto en cada petición, Host exacto, peer loopback, límites y Origin;
+no se confía en headers de proxy. Es emparejamiento local, **no un servidor OAuth** ni exposición
+de red. Stdio sigue siendo el transporte recomendado. Rotar el token invalida el anterior.
+
+<a id="guide-integration-memoria-y-sincronización"></a>
+
+### Memoria y sincronización
+
+```bash
+lf ai knowledge init --apply
+lf ai knowledge create hypothesis "¿Mejora width el score?" --author-type ai --apply
+lf ai knowledge search width --kind hypothesis
+lf ai knowledge read ID_EXACTO
+lf ai knowledge reindex --force
+lf ai knowledge reindex --rebuild
+lf ai knowledge audit --limit 20  # --cursor usa el next_cursor exacto, en bytes
+lf ai knowledge export notas.zip          # preview sin crear el ZIP
+lf ai knowledge export notas.zip --apply  # acción explícita del operador local
+lf ai knowledge obsidian                  # solo indicios, no arranca la app
+lf ai knowledge obsidian --probe-cli --apply # prueba explícita, puede arrancar Obsidian
+lf ai knowledge open --apply              # solicita abrir el README propio, sin cambiar ajustes
+lf ai sync
+lf ai sync --apply
+```
+
+Markdown canónico con once tipos de nota, autor humano/IA, fecha, tags, estado, enlaces y proyecto.
+Hipótesis IA son propuestas, no ciencia verificada. Enlaza Execution exacta o contenido SHA-256;
+un nombre ambiguo no sirve. Comprobar referencia no verifica interpretación. SQLite FTS es un
+índice reconstruible que reconoce ediciones externas; revisiones hash rechazan conflictos nativos.
+El editor externo no participa en el lock. `knowledge link` enlaza notas existentes con revisión
+actual. Un índice corrupto permite reconstrucción explícita y conserva su copia antigua sin tocar
+Markdown. IDs duplicados/corrupción de notas generan avisos sin borrarlas.
+Las consultas de notas relacionadas usan enlaces/tags/evidencia exacta, no confianza científica.
+Hipótesis, decisiones y preguntas abiertas tienen vistas acotadas; verificar referencias consulta
+registros nativos locales, sin descargar artifacts ni verificar la interpretación.
+Obsidian es opcional, usa los mismos Markdown y preserva preferencias: no necesita escritorio/plugins.
+La auditoría nativa guarda intención/finalización, ID y revisiones, no títulos/cuerpos. Intención
+interrumpida no significa éxito; la paginación por cursor no lee todo el historial. Ediciones de
+Obsidian no se atribuyen automáticamente a una persona ni se convierten en ciencia verificada.
+El journal `.lambdaforge/agents/knowledge-audit.jsonl` es independiente del índice FTS desechable:
+reindex no borra historia. Un journal corrupto bloquea nuevas ediciones hasta inspección explícita,
+sin eliminarlo ni fingir que su historial sigue siendo fiable.
+Export comprime solo notas canónicas y un manifiesto con checksums exactos: rechaza corrupción,
+duplicados, symlinks, planes obsoletos y sobrescrituras. Conserva los bytes originales; no incluye
+datos científicos, índices, plugins ni archivos ajenos. La ruta debe estar dentro del proyecto,
+fuera del vault y tener un directorio padre existente. No es `lf export STUDY` ni recovery.
+MCP `knowledge_export` solo revisa; aplicar usa `knowledge.export` con aprobación humana separada
+y hash del inventario completo. Vaults externos y búsqueda semántica siguen pendientes.
+
+Diagnóstico Obsidian consulta PATH/configuración/indicios de escritorio sin asumir instalación,
+versión ni aplicación abierta. La prueba explícita de la [CLI oficial](https://obsidian.md/help/cli)
+puede arrancar la aplicación, tiene timeout y salida acotada. Open utiliza la
+[URI oficial codificada](https://obsidian.md/help/uri) del README propio: antes hay que registrar
+manualmente esa carpeta como vault. Éxito significa `open_requested`, no ventana verificada;
+entorno headless, CLI ausente/deshabilitada y fallos dan indicaciones. No instala aplicaciones/
+plugins ni cambia ajustes, y MCP no expone abrir escritorio. Se probaron fixtures, no una sesión
+real de Obsidian instalada.
+
+MCP ofrece recursos acotados de contratos Work/Study instalados, estructura, recetas, resultados/
+productos exactos e índice de notas. Se registran según toolset, nunca para leer rutas arbitrarias.
+Trece prompts cortos orientan creación, modelos, checkpointing, comparación, HTML, publicación,
+diagnóstico, recovery, revisión de evidencia, decisiones y próximos experimentos, sin autorizarlos.
+
+Las 24 Skills proceden del paquete instalado. Sync preserva AGENTS/Skills personalizados y notas,
+usando manifiesto de hashes; rechaza planes modificados. Aplicar desde CLI como operador no sustituye
+el futuro protocolo de aprobación del agente. No guarda conversaciones automáticamente.
+
+<a id="guide-integration-python-y-gui"></a>
+
+### Python y GUI
+
+`lambdaforge.agents.AgentServices` da respuestas tipadas fijadas al proyecto; IntegrationService
+es el mismo backend de CLI/Console. `examples/agent_gui.py` muestra un cliente Tk opcional sin LLM.
+Se prueban protocolo real, aislamiento, sesiones/ediciones externas, conflictos, assets y Work CPU
+determinista con métricas, checkpoint, producto y HTML. La explicación inglesa detalla contratos,
+fuentes oficiales y límites. WISDOM, clusters y evidencia científica existente permanecen intactos.
+Los modelos exponen declaraciones y docstrings reales sin importar Torch; no se inventan shapes.
+Contratos/miembros/provenance/consumidores de productos son metadata. Runs/curvas/logs seleccionados
+y recursos de un cluster son consultas explícitas nativas; preview de texto verifica ownership e
+integridad con límite de 64 KiB. Resto de acciones científicas, semántica, vault externo, cobertura total
+de APIs y conversaciones completas siguen en el registro de pendientes.

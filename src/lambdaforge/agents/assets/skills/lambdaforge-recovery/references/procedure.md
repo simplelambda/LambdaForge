@@ -1,30 +1,37 @@
-# lambdaforge-recovery procedure reference
-
-## Native entry point
+# Recovery procedure and cases
 
 ```bash
+lf jobs show EXACT_JOB --json
+lf jobs logs EXACT_JOB --tail 80
+lf health EXACT_JOB --refresh --json
 lf retry EXACT_JOB --dry-run --json
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Placeholders are exact project-owned IDs. Health/log/retry inspection may query the selected
+provider; read-only science inspection is not necessarily offline. Facade tools are `get_job`,
+`get_work_logs`, `get_execution_health`, `prepare_recovery` and `get_recovery_history`;
+check installed signatures and availability. Native recovery validation imports project Python,
+so `prepare_recovery` needs separate trusted project-code consent.
 
-## Acceptance
+| Case | Correct recovery |
+|---|---|
+| Ten repeated seeds: nine succeeded, one OOM | Reuse nine exact Runs; new Attempt for the failed logical Run only. |
+| Fixed sweep partially interrupted | Preserve successful points; retry incomplete owned Runs. |
+| Valid adaptive controller | Restore original decisions, pending work and spent budgets. |
+| Adaptive controller missing/corrupt | Diagnose; never fabricate state or restart silently. |
+| Consumer bug fixed | Explicit compatible-code acknowledgement plus unchanged science identity. |
+| Owner possibly alive | Fresh native ownership checks block duplication. |
+| Imported evidence / unsupported Fleet | Read-only or unsupported, never single-host replay. |
 
-Inspect failure and health; request retry preview; compare reused/retried/pending Runs; human applies native retry after review.
-Do not restart the whole experiment, refund cost or retry arbitrary consumer exceptions.
+OOM is failed resource evidence, not an objective or permission for endless retry. Recovery
+accounts for physical costs. Compatible checkpoints reduce lost training only when the Work
+supports restoration. Otherwise restart the failed Run while preserving history and siblings.
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+Human apply uses installed `lf retry --help` options or Console **Resume Study**. Inspect any
+required code acknowledgement and validation feedback. Cancellation approval is not recovery.
 
-## Recovery of uncertainty
-
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+Acceptance: original Execution/identities retained, successful evidence not duplicated, new
+Attempts linked, aggregate state based on latest valid outcomes, cost/history preserved.
+If blocked, report exact missing evidence/ownership uncertainty and next safe read—not a
+hidden-directory edit, kill command or complete rerun.
 

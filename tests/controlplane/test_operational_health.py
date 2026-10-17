@@ -162,7 +162,7 @@ def test_legacy_terminal_file_is_visible_but_never_grants_owned_recovery(tmp_pat
     directory = tmp_path / "job-legacy"
     directory.mkdir()
     (directory / "state.json").write_text(json.dumps({"job_id": directory.name, "state": "failed"}))
-    observed = ProcessSupervisor.observe(directory, markers=({}, True))
+    observed = ProcessSupervisor.observe(directory, markers=({}, []))
     assert observed["state"] == "failed"
     assert observed["provider_observation"] == "unknown"
     assert observed["observation_reason"] == "LEGACY_TERMINAL_OWNERSHIP_UNVERIFIED"
@@ -172,7 +172,7 @@ def test_legacy_terminal_file_is_visible_but_never_grants_owned_recovery(tmp_pat
         json.dumps({"job_id": directory.name, "state": "running"})
     )
     with pytest.raises(ValueError, match="ownership request is missing"):
-        ProcessSupervisor.observe(directory, markers=({}, True))
+        ProcessSupervisor.observe(directory, markers=({}, []))
     assert not (directory / "request.json").exists()
 
 
@@ -222,17 +222,19 @@ def test_real_host_lifetime_lost_state_file_never_means_running(tmp_path: Path) 
         assert ProcessSupervisor.observe(directory)["provider_observation"] == "alive"
         child.terminate()
         child.wait(timeout=5)
-        observed = ProcessSupervisor.observe(directory, markers=({}, True))
+        observed = ProcessSupervisor.observe(directory, markers=({}, []))
         assert observed["provider_observation"] == "lost_confirmed"
         assert observed["state"] == "unknown"
         # Observation is read-only; original process failure evidence stays byte-for-byte.
         assert json.loads((directory / "state.json").read_text())["state"] == "running"
         assert (
-            ProcessSupervisor.observe(directory, markers=({}, False))["provider_observation"]
+            ProcessSupervisor.observe(directory, markers=({}, [{"pid": 123}]))[
+                "provider_observation"
+            ]
             == "unknown"
         )
         assert (
-            ProcessSupervisor.observe(directory, markers=({directory.name: [123]}, True))[
+            ProcessSupervisor.observe(directory, markers=({directory.name: [123]}, []))[
                 "provider_observation"
             ]
             == "unknown"
@@ -247,8 +249,7 @@ def test_legacy_and_corrupt_and_unsafe_process_records_are_not_healthy(tmp_path:
     directory = tmp_path / "job-health"
     host_record(directory, None)
     assert (
-        ProcessSupervisor.observe(directory, markers=({}, True))["provider_observation"]
-        == "unknown"
+        ProcessSupervisor.observe(directory, markers=({}, []))["provider_observation"] == "unknown"
     )
     (directory / "state.json").write_text("invalid")
     with pytest.raises(TypeError):

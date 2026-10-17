@@ -1,30 +1,30 @@
-# lambdaforge-checkpointing procedure reference
+# Restore explicit compatible Run state · procedure
 
-## Native entry point
+## Native discovery/example
 
 ```bash
 lf retry EXACT_JOB --dry-run --json
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Run in the intended project. Uppercase selectors/paths are placeholders, not a Work-name guess.
+Inspect installed help first. These commands are metadata/planning; parsing them does not execute science.
 
-## Acceptance
+Inspect the checkpoint use in packaged work.py and the native retry dry-run before deciding whether application restoration is implemented.
 
-Use checkpoint file/save_json/load_json; distinguish durable acknowledgement from a checkpoint request; implement explicit Work resuming behavior.
-Do not claim epoch continuation when only study recovery is implemented.
+## Decision cases
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+| Situation | Native interpretation / next step |
+|---|---|
+| Checkpoint exists but Work does not restore it | Restart only the failed logical Run; do not promise epoch continuation. |
+| Model or data identity changes | Reject incompatible state; code acknowledgement does not waive science checks. |
+| Resumable map dependency state includes machine paths | Use content/scientific identity, never pickle or host paths. |
+| Adaptive controller missing | Refuse silent restart; application checkpoint is not controller state. |
 
-## Recovery of uncertainty
+## Verification and handoff
 
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+A checkpoint reference alone never proves epoch-level resume. Incompatibility is explicit; failed Attempt history and original Execution remain intact.
+Do not open untrusted pickle/model bytes as metadata; continuation must be an explicit consumer capability.
+
+If a capability is missing, stale or unsupported, retain evidence and explain the exact blocker.
+Do not create a CLI subprocess adapter, a second runner/result store or an application-specific workaround.
 

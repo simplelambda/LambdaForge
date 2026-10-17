@@ -4,10 +4,20 @@ import json
 from pathlib import Path
 
 from benchmarks.resource_scheduling import (
+    benchmark_shared_observation,
     compare_static_and_dynamic,
     compare_terminal_and_live_cold_start,
     replay_execution,
 )
+
+
+def test_shared_observation_microbenchmark_has_no_per_request_probe_storm():
+    value = benchmark_shared_observation(50)
+    assert value["uncoordinated_query_count"] == 50
+    assert value["shared_real_query_count"] == 1
+    assert value["shared_helper_count"] == 0
+    assert value["local_coordination_seconds"] >= 0
+    assert "driver latency unmeasured" in value["evidence"]
 
 
 def test_dynamic_resource_planner_improves_useful_throughput_without_ooms() -> None:

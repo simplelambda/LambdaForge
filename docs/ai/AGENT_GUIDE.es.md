@@ -42,10 +42,10 @@ SSH real entre clústeres. Admite placements antiguos registrados.
 | Operar Work | `lf show/logs/cancel/retry/delete SELECTOR`; Run: `show/logs WORK --run CLAVE` |
 | Jobs de bajo nivel | `lf jobs list/show/logs/cancel/retry/delete/clear`; `lf doctor --on CLUSTER` |
 | Datasets | `lf datasets list/show/verify/stats/members/diff/materialize/replicate/delete` |
-| Reconstruir/publicar datasets | `lf datasets preflight/compare/publish-candidate`; `docs/DATASET_RECONSTRUCTION.es.md` |
-| Productos durables / decisiones / selección | `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`; `docs/PRODUCTS.es.md` |
-| Equivalencia durable explícita de datasets | `lambdaforge.data.DatasetEquivalenceCertificate`; `docs/DATASET_RECONSTRUCTION.es.md` |
-| Importar evidencia, no ejecutar | `lf import PACKAGE [--apply]`; `docs/PRODUCTS.es.md` |
+| Reconstruir/publicar datasets | `lf datasets preflight/compare/publish-candidate`; `docs/MANUAL.es.md#guide-dataset-reconstruction` |
+| Productos durables / decisiones / selección | `lf products list/show/provenance/consumers/verify/publish/export/import/select/decide/status/finalize`; `docs/MANUAL.es.md#guide-products` |
+| Equivalencia durable explícita de datasets | `lambdaforge.data.DatasetEquivalenceCertificate`; `docs/MANUAL.es.md#guide-dataset-reconstruction` |
+| Importar evidencia, no ejecutar | `lf import PACKAGE [--apply]`; `docs/MANUAL.es.md#guide-products` |
 | Resultados | `lf results list/show/compare/analyze/report/replay`; Study portable: `lf export SELECTOR --output DIR` |
 | Perfiles de clúster | Consola; `lf clusters add/set/unset/...` para automatización |
 | Consultar/reconciliar almacenamiento | `lf storage status/reconcile [--on CLUSTER]`; reconcile `--apply` solo actualiza inventario |
@@ -61,7 +61,7 @@ La evidencia de Work usa ResultStore.view/work_report y el import/export nativo,
 artificial. ResultInput fija evidencia de un Execution; ProductInput consume contenido sellado con
 contrato independiente. Los nombres ambiguos se rechazan. Las entradas elegidas al lanzar se fijan
 antes de encolar y no editan el YAML. La promoción ordinaria enumera outputs explícitos tras persistir
-la ciencia; sus fallos conservan bytes para reintentar solo publicación. Véase docs/WORK_RESULTS.es.md.
+la ciencia; sus fallos conservan bytes para reintentar solo publicación. Véase docs/MANUAL.es.md#guide-work-results.
 Los listados de metadata nunca deben abrir bytes de artefactos.
 Una entrada de producto puede fijar un miembro `artifact` registrado exacto: mantiene contrato y
 contenido sellados y añade esa elección a la identidad del consumidor. Nunca convertirla en selector
@@ -72,8 +72,8 @@ existentes. Elegibilidad de retry no evita ARI/headroom/presupuestos; EOFError/V
 consumidor y errores CUDA genéricos no autorizan retry por worker perdido/OOM. `work/state.py`
 deriva lifecycle y obligaciones; `work/attempt_history.py` conserva historial visible acotado y
 contadores físicos acumulados. Presentación consume `lifecycle`, no inventa recovery ni devuelve
-costes. Consultar `docs/ARCHITECTURAL_REFORM.es.md`. `lambdaforge.products` y `lf products`
-implementan contratos/registro/promoción/transporte/selección local explícitos (`docs/PRODUCTS.es.md`);
+costes. Consultar `docs/ai/IMPLEMENTATION.es.md#history-architectural-reform`. `lambdaforge.products` y `lf products`
+implementan contratos/registro/promoción/transporte/selección local explícitos (`docs/MANUAL.es.md#guide-products`);
 selección usa métricas del mismo snapshot y últimos Attempts. `products decide` conserva selección
 nativa sin refit. Inputs product tipados resuelven contrato/expectativas, workers reciben raíz propia
 del proyecto y Attempts reales registran consumo. Study individual declara `products`; primero
@@ -83,7 +83,7 @@ promoción compuesta/Fleet y lifecycle Fleet siguen pendientes,
 no están implementados por aparecer en el plan.
 `lf import PACKAGE [--apply]` verifica/registra exports nativos de un host y productos sellados.
 Originales en `portable/`, ubicación en `import.json`; evidencia importada es read-only, no recovery
-ejecutable. Export de provider nunca muestrea bytes de productos. Ver `docs/PRODUCTS.es.md`.
+ejecutable. Export de provider nunca muestrea bytes de productos. Ver `docs/MANUAL.es.md#guide-products`.
 Studies/Overview incluyen snapshots importados read-only mediante índices locales compactos;
 Studies → Import Study usa el mismo servicio preview/apply que CLI. Nunca crea Jobs ficticios ni
 contacta con el host original para leer imports. Trials/Runs reubican solo rutas propias verificadas.
@@ -104,7 +104,7 @@ Solo resources raíz se hereda en steps; rechaza with/seeds/replicates/search/sw
 objective/analysis raíz ignorados. Preflight distingue presupuesto del Study de techo del scheduler
 (suma secuencial, máximo paralelo). Solo un inventario GPU directo vivo/fiable puede rechazar
 solicitudes imposibles; los grants del scheduler/launcher siguen siendo autoridad del runtime.
-Guía: docs/CONDITIONAL_STUDIES.es.md.
+Guía: docs/MANUAL.es.md#guide-conditional-studies.
 
 Un Study adaptativo, de seeds repetidas o sweep fijo se recupera con `lf retry STUDY` o
 **Resume Study…** en su ventana. `--dry-run --json` explica Runs reutilizadas, reintentadas y
@@ -547,7 +547,7 @@ restaura el único compromiso anticipado de `sweep-blocks.json`; coordenadas aus
 fallan antes de escribir. Separa estabilidad predictiva si falta soporte descriptivo; estabilidad
 no resuelta es su propia masa de realizaciones, no el complemento de otra hipótesis. Ausencia de
 estado secuencial no es aprobación formal. Decisiones/manifests históricos v1 no se reescriben.
-Auditoría actual y aceptación pendiente: `docs/SCIENTIFIC_AUDIT.es.md` y su versión inglesa.
+Auditoría actual y aceptación pendiente: `docs/ai/IMPLEMENTATION.es.md#history-scientific-audit` y su versión inglesa.
 Los Studies terminales reconcilian toda identidad en cola y exponen `status`, `design_status`,
 `scientific_status` y `finish_reason`. Un diseño fijo puede estar completo y científicamente no
 resuelto; agotar tiempo/Runs con deuda obligatoria implica incompleto. Distingue candidatos
@@ -622,7 +622,7 @@ exploratorias ajustadas BY no son inferencia formal adaptativa ni confianza cien
 Conserva constantes, datos ausentes, dimensiones/linaje y unidades desconocidas. Métricas Y con
 unidades diferentes/desconocidas usan ejes separados salvo normalización visual explícita.
 Inbox, búsqueda, catálogo y vistas guardadas validadas consumen datos persistidos. Rutas y límites:
-`docs/RESEARCH_ANALYSIS.es.md` (con equivalente inglés).
+`docs/MANUAL.es.md#guide-research-analysis` (con equivalente inglés).
 
 La cobertura usa tarjetas/gráficas/tablas
 acotadas, no JSON crudo, y la ayuda
@@ -639,7 +639,7 @@ separada.
 La ruta pública `lf run CONFIG --on-fleet NAME` admite Studies adaptativos nuevos/fixed/repetidos/pareados
 automáticos, coordinador local y miembros managed. Run Work ofrece los mismos destinos.
 Continuación de checkpoints/fidelity, co-location, recovery/adopción, expansión y export distribuido siguen bloqueados:
-`docs/COORDINATED_STUDIES.es.md`. No llamar Study coordinado a JobGroups independientes ni crear
+`docs/MANUAL.es.md#guide-coordinated-studies`. No llamar Study coordinado a JobGroups independientes ni crear
 otro optimizer. Dry-run no adquiere grants; pruebas loopback no acreditan SSH/command/SLURM.
 
 `WorkRunner(dispatcher=...)`, `PreparedShardExecutor` y `CoordinatedDispatcher` conservan un único
@@ -694,7 +694,7 @@ Equivalencia conserva content IDs distintos, no sustituye versión. Publicación
 artifacts/checkpoints y candidato; `datasets publish-candidate` recupera solo publicación con
 preview/apply, sin recalcular ni reescribir historial. Inventario read-only fusiona solo
 (nombre, versión, content ID), descubre todas las ubicaciones y señala conflictos sin acciones
-ambiguas. Contrato y WISDOM: `docs/DATASET_RECONSTRUCTION.es.md`.
+ambiguas. Contrato y WISDOM: `docs/MANUAL.es.md#guide-dataset-reconstruction`.
 
 Filas conflictivas mantienen Manage copies: `datasets adopt --on ORIGEN --content-id ID` verifica
 bytes y archiva/elige solo la referencia futura del controlador. `datasets delete/remove --on
@@ -720,7 +720,7 @@ referencias de recuperación y leases independientes de caches Work.
 **Clear storage…** confirma limpieza nativa; **Clear output** solo limpia texto. Checkpoints correctos
 sin pin tienen gracia configurable; recuperación fallida/interrumpida se conserva.
 `checkpoints.pin/unpin`, `outputs.from_checkpoint` y dataset `source_checkpoint` declaran publicación/
-retención independientes, nunca hardlinks mutables. `docs/STORAGE.es.md` detalla alcance y garantías
+retención independientes, nunca hardlinks mutables. `docs/MANUAL.es.md#guide-storage` detalla alcance y garantías
 pendientes de provisioning/capas de código; no las afirmes implementadas.
 
 Las raíces de dataset con scope de proyecto solo afectan a publicaciones nuevas. Conserva una
@@ -791,4 +791,4 @@ metadata interna no es payload. Las sondas concurrentes del mismo proyecto/clust
 relojes originales, nunca fabrican frescura. Un incidente de origen solo se resuelve tras progreso
 reciente del Job de recuperación auditado, no al aceptar el retry. No deduzcas recovery Fleet,
 rotación en vivo ni continuación de epochs de la disponibilidad de un checkpoint.
-Consulta `docs/OPERATIONAL_RELIABILITY.es.md` y el registro de aceptación para requisitos pendientes.
+Consulta `docs/MANUAL.es.md#guide-operational-reliability` y el registro de aceptación para requisitos pendientes.

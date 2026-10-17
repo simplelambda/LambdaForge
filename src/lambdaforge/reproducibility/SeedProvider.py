@@ -52,9 +52,7 @@ class ProjectSeedStream:
             raise ValueError("Seed stream namespace cannot be empty.")
 
     @classmethod
-    def for_project(
-        cls, project: ProjectContext, *, role: str = "replicate"
-    ) -> ProjectSeedStream:
+    def for_project(cls, project: ProjectContext, *, role: str = "replicate") -> ProjectSeedStream:
         return cls(project.project_id, role)
 
     @classmethod

@@ -22,6 +22,23 @@ from lambdaforge.clustering import (
 from lambdaforge.nn.distances import ManhattanDistance
 
 
+def test_strategy_imports_resolve_to_single_class_modules():
+    import importlib
+
+    import lambdaforge.clustering as clustering
+    import lambdaforge.clustering.algorithms as algorithms
+
+    for name in ("KMeans", "MiniBatchKMeans", "DBSCAN", "HDBSCAN", "Agglomerative"):
+        implementation = importlib.import_module(f"lambdaforge.clustering.algorithms.{name}")
+        assert getattr(clustering, name) is getattr(implementation, name)
+        assert getattr(algorithms, name) is getattr(implementation, name)
+
+    from lambdaforge.clustering.base import Clusterer
+    from lambdaforge.clustering.Clusterer import Clusterer as Implementation
+
+    assert Clusterer is Implementation
+
+
 @pytest.fixture
 def separated() -> np.ndarray:
     return np.asarray([[0.0, 0.0], [0.0, 0.1], [0.1, 0.0], [5.0, 5.0], [5.0, 5.1], [5.1, 5.0]])

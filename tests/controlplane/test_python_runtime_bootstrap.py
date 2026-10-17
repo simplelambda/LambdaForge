@@ -261,7 +261,8 @@ def test_runtime_lease_can_bootstrap_when_configured_python_is_not_installed() -
     runtime = PythonRuntimeResolver().resolve(profile, transport)
     assert runtime.managed
     lease_commands = [
-        command for command in transport.commands
+        command
+        for command in transport.commands
         if "lambdaforge-environment-build-lease" in " ".join(command)
     ]
     assert lease_commands and lease_commands[0][0] == "python3"

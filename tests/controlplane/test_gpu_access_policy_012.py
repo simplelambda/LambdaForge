@@ -48,7 +48,7 @@ def test_shared_direct_access_and_external_claim_prefix_round_trip() -> None:
     assert restored.gpu_access.command_prefix == ("gpu", "exec")
     assert restored.gpu_access.claim(2) == ("gpu", "claim", "--numgpus", "2")
     assert restored.gpu_access.release() == ("gpu", "release")
-    assert restored.gpu_access.visibility_probe() == ("gpu", "env")
+    assert restored.gpu_access.visibility_probe() == ("gpu", "env", "--shell")
     assert restored.gpu_access.wrap(("/managed/bin/python", "train.py")) == (
         "gpu",
         "exec",
@@ -60,9 +60,7 @@ def test_shared_direct_access_and_external_claim_prefix_round_trip() -> None:
 def test_live_gpu_grant_probe_can_only_shrink_or_restore_inherited_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(
-        "LAMBDAFORGE_GPU_VISIBILITY_COMMAND", json.dumps(["gpu", "env"])
-    )
+    monkeypatch.setenv("LAMBDAFORGE_GPU_VISIBILITY_COMMAND", json.dumps(["gpu", "env"]))
     monkeypatch.setattr(
         "lambdaforge.work.runner.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="0,2,9\n", stderr=""),
@@ -72,9 +70,7 @@ def test_live_gpu_grant_probe_can_only_shrink_or_restore_inherited_tokens(
 
     monkeypatch.setattr(
         "lambdaforge.work.runner.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0, stdout="0,1,2\n", stderr=""
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="0,1,2\n", stderr=""),
     )
     assert _current_gpu_grant(("0", "1", "2")) == frozenset({"0", "1", "2"})
 
@@ -101,7 +97,19 @@ def test_shared_direct_admission_ignores_only_external_occupancy(
     identity = ProcessIdentity.create(
         os.getpid(), os.getpgrp(), ("pytest", "gpu-policy"), "job-shared"
     )
-    monkeypatch.setattr(ProcessSupervisor, "_gpu_indices", lambda: (0,))
+    monkeypatch.setattr(
+        ProcessSupervisor,
+        "_direct_gpu_devices",
+        lambda: {
+            0: {
+                "uuid": "GPU-0",
+                "quality": "measured",
+                "compute_process_count": 1,
+                "total_bytes": 100,
+                "free_bytes": 80,
+            }
+        },
+    )
     monkeypatch.setattr(ProcessSupervisor, "_externally_occupied_gpus", lambda: {0})
 
     assert ProcessSupervisor._acquire_gpus(tmp_path, identity, 1) is None
@@ -141,7 +149,7 @@ def test_direct_exclusive_mode_keeps_legacy_physical_discovery_without_a_wrapper
     assert _visible_gpu_tokens(2) == ("0", "1")
 
 
-def test_persistent_external_claim_has_a_finally_safe_release(
+def test_unscoped_external_claim_never_releases_manual_or_sibling_reservation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     job_dir = tmp_path / "job"
@@ -165,7 +173,15 @@ def test_persistent_external_claim_has_a_finally_safe_release(
         },
     )
 
-    assert calls == [("gpu", "release")]
+    assert calls == []
+    assert "no verified" in json.loads((job_dir / "state.json").read_text())["gpu_release_warning"]
+
+
+def test_automatic_claim_requires_an_owned_receipt_before_external_mutation():
+    policy = GpuAccessPolicy("command", ("gpu", "exec"), ("gpu", "claim"), ("gpu", "release"))
+    with pytest.raises(ValueError, match="No reservation command was executed"):
+        policy.require_owned_reservation_contract()
+    GpuAccessPolicy("command", ("gpu", "exec")).require_owned_reservation_contract()
 
 
 def test_cuda_environment_verification_uses_wrapper_and_absolute_python() -> None:

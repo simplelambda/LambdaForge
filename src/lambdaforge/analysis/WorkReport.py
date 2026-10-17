@@ -37,7 +37,7 @@ def write_work_html(
     attempts: Sequence[Mapping[str, Any]],
     output: str | Path,
     *,
-    sections: Sequence[Mapping[str, str]] = (),
+    sections: Sequence[Mapping[str, Any]] = (),
 ) -> Path:
     """Render exact Attempt evidence, with the mature metric dashboard and HTML sandbox.
 
@@ -143,4 +143,7 @@ document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!==b.dataset.target);
 document.querySelectorAll('button.tab').forEach(t=>t.setAttribute('aria-selected',String(t===b)));}}));</script>{script}</body></html>"""
     target = Path(output).expanduser().absolute()
     atomic_write_text(target, document)
+    from lambdaforge.analysis.report_assets import write_sources
+
+    write_sources(target, documents)
     return target

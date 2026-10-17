@@ -1,30 +1,30 @@
-# lambdaforge-obsidian procedure reference
+# Use optional Obsidian presentation, not another evidence store · procedure
 
-## Native entry point
+## Native discovery/example
 
 ```bash
 lf ai knowledge init --obsidian
 ```
 
-Run this in the intended project. Uppercase selectors/paths are placeholders:
-replace them with an exact owned identifier, not a historical display-name guess.
-Queries may contact a provider only when explicitly requested. Do not run mutations
-or science as a discovery step. Read each command's installed `--help` first.
+Run in the intended project. Uppercase selectors/paths are placeholders, not a Work-name guess.
+Inspect installed help first. These commands are metadata/planning; parsing them does not execute science.
 
-## Acceptance
+lf ai knowledge init --obsidian previews; --apply is separate local consent. Passive status is distinct from explicit --probe-cli --apply.
 
-Initialize headless Markdown with optional Obsidian marker; preserve existing .obsidian preferences and notes; use text search without desktop dependencies.
-Do not require desktop processes, plugins or put models/checkpoints in notes.
+## Decision cases
 
-The shared public-API examples installed with these Skills are in
-`lf ai skills examples`. The tiny Work demonstrates metrics, JSON checkpoints,
-managed outputs and a self-contained HTML section. The YAML fixtures demonstrate
-native repeated and adaptive studies. Native docs remain authoritative for product
-contracts, exact historical bindings and provider-specific operations.
+| Situation | Native interpretation / next step |
+|---|---|
+| Desktop app missing | Keep Markdown/FTS usable; do not auto-install. |
+| Existing .obsidian preferences | Preserve them rather than replacing settings. |
+| External vault requested | Discover actual capability; binding is currently pending, not arbitrary file access. |
+| Open command succeeds in headless session | Report open_requested only, not a verified visible window. |
 
-## Recovery of uncertainty
+## Verification and handoff
 
-If the installed operation is absent, report unsupported. Do not synthesize a shell
-workaround or a second result store. Preserve evidence and ask for the missing
-researcher decision. Distinguish observed behavior from hypotheses in the final report.
+Headless operation remains usable, no plugins/settings/secrets are copied, and scientific results stay in native evidence stores.
+No automatic app launch, plugin installation, arbitrary external vault binding or hidden Markdown mutation.
+
+If a capability is missing, stale or unsupported, retain evidence and explain the exact blocker.
+Do not create a CLI subprocess adapter, a second runner/result store or an application-specific workaround.
 

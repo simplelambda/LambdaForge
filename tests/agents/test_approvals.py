@@ -9,6 +9,7 @@ import pytest
 
 from lambdaforge.agents.approvals import ApprovalService
 from lambdaforge.agents.catalog import capabilities
+from lambdaforge.agents.errors import AgentApprovalError
 from lambdaforge.agents.knowledge import KnowledgeService
 from lambdaforge.agents.scope import ProjectScope
 from lambdaforge.agents.services import AgentServices
@@ -151,8 +152,9 @@ def test_expiry_changed_arguments_modified_evidence_and_non_tty_approval(workspa
     )
     approve(approvals, edit)
     knowledge.update(note["metadata"]["id"], revision=note["revision"], body="Human edit")
-    with pytest.raises(ValueError, match="conflict"):
+    with pytest.raises(AgentApprovalError) as changed:
         apply(approvals, edit)
+    assert changed.value.code == "PLAN_STALE"
     path = scope.root / approvals.directory / (proposal["request_id"] + ".json")
     record = json.loads(path.read_text())
     record["state"] = "approved"

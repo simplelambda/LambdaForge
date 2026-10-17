@@ -166,7 +166,11 @@ def test_configuration_rejection_keeps_selected_yaml_and_audited_failure_visible
             await pilot.pause()
             assert app.screen is dialog
             assert dialog.query_one("#retry-config", Input).value == "moved.yaml"
-            assert dialog.query_one("#retry-confirm", Button).disabled
+            assert not dialog.query_one("#retry-confirm", Button).disabled
+            await pilot.click("#retry-confirm")
+            await pilot.pause()
+            assert app.screen is dialog
+            assert "Not submitted" in str(dialog.query_one("#retry-submit-status").render())
             assert not dialog.query_one("#retry-config-validate", Button).disabled
 
     asyncio.run(exercise())
