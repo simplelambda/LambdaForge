@@ -1,0 +1,30 @@
+# Merge this table into the consumer pyproject.toml; do not replace its [project].
+# Reviewed CPU-only SLAE import/checkpoint-load recipe, not a CUDA or extraction claim.
+[tool.lambdaforge.tool_runtimes.slae_cpu]
+python = "3.11"
+requirements = [
+  "torch==2.6.0+cpu",
+  "torchvision==0.21.0+cpu",
+  "numpy==1.26.4",
+  "esm==3.2.1",
+  "transformers==4.48.1",
+  "torch-scatter==2.1.2+pt26cpu",
+  "torch-cluster==1.6.3+pt26cpu",
+  "torch-sparse==0.6.18+pt26cpu",
+  "antlr4-python3-runtime==4.9.3",
+  "SLAE @ git+https://github.com/ProteinDesignLab/SLAE.git@078b94e436b8eceb02251a254c3c224358ec6ee2",
+]
+torch_index = "https://download.pytorch.org/whl/cpu"
+torch_cuda = "cpu"
+extra_index_urls = ["https://download.pytorch.org/whl/cpu"]
+# This pure-Python dependency has no wheel; every other transitive defaults to binary-only.
+# The immutable reviewed VCS source is also an explicit source-build exception.
+source_packages = ["antlr4-python3-runtime"]
+imports = ["SLAE", "torch_cluster", "torch_scatter", "torch_sparse"]
+# WISDOM must supply a standalone entrypoint, then declare it here, e.g.:
+# entrypoints = {extract = "tools/slae_extract.py"}
+
+[[tool.lambdaforge.tool_runtimes.slae_cpu.wheel_sources]]
+url = "https://data.pyg.org/whl/torch-2.6.0+cpu.html"
+packages = ["torch-scatter", "torch-cluster", "torch-sparse"]
+build_tag = "pt26cpu"

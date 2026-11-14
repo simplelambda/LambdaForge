@@ -57,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true")
     commands = parser.add_subparsers(dest="command")
+    catalog = commands.add_parser(
+        "catalog", help="Metadata-only native scientific operation contracts."
+    )
+    catalog.add_argument("operation", nargs="?")
+    catalog.add_argument("--kind")
+    catalog.add_argument("--json", action="store_true")
     from lambdaforge.cli.ai import add_ai_parser
 
     add_ai_parser(commands)
@@ -113,9 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extension.add_argument("--plan-hash", help="Exact reviewed preview hash required with --apply.")
     extension.add_argument(
-        "--code-policy", choices=("revisioned", "strict"), default="revisioned",
+        "--code-policy",
+        choices=("revisioned", "strict"),
+        default="revisioned",
         help="Revisioned permits current code with separate inference cohorts; "
-             "strict requires equivalence.",
+        "strict requires equivalence.",
     )
     extension.add_argument("--json", action="store_true")
     _cluster_selector(extension)
@@ -205,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         "schema", help="Print/export the installed Work JSON Schema."
     )
     schema.add_argument("--output", type=Path)
+    schema.add_argument("--kind", choices=("work", "cluster"), default="work")
     schema.add_argument("--json", action="store_true")
     field_help = config_commands.add_parser(
         "explain", help="Static schema field help without Work imports."
@@ -276,6 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--clusters", type=Path)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--wait-for-submit", action="store_true")
+    run.add_argument(
+        "--queue",
+        action="store_true",
+        help="Prepare now; run sequentially after earlier Jobs on this direct cluster.",
+    )
     run.add_argument("--rerun", action="store_true")
     run.add_argument("--restart", action="store_true")
     run.add_argument("--resume-execution", type=Path, help=argparse.SUPPRESS)
@@ -295,6 +309,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--allow-duplicate", action="store_true")
     run.add_argument("--json", action="store_true")
+
+    queue = commands.add_parser("queue", help="Inspect persistent project/cluster execution FIFO.")
+    queue.add_argument("--on", default="local")
+    queue.add_argument("--clusters", type=Path)
+    queue.add_argument("--json", action="store_true")
+    queue.add_argument(
+        "--all", action="store_true", help="Include released/cancelled ticket history."
+    )
+    queue.add_argument(
+        "--remove-pending",
+        metavar="JOB_ID",
+        help="Remove only an unstarted admission ticket; never stop a running Job.",
+    )
+    queue.add_argument("--apply", action="store_true")
 
     export_study = commands.add_parser(
         "export", help="Export a portable evidence snapshot of any Work/Study state."
@@ -362,6 +390,11 @@ def build_parser() -> argparse.ArgumentParser:
     clean = commands.add_parser("clean", help="Preview removal of reconstructible cache.")
     clean.add_argument("--on", default="local")
     clean.add_argument("--apply", action="store_true")
+    clean.add_argument(
+        "--environments-only",
+        action="store_true",
+        help="Collect only obsolete environment caches; do not compact Jobs or checkpoints.",
+    )
     _cluster_selector(clean)
     clean.add_argument("--json", action="store_true")
 
@@ -378,6 +411,16 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="Update the diagnostic ledger; never delete data.",
             )
+    repair = storage_commands.add_parser(
+        "repair",
+        help="Preview retirement of exact abandoned cache references, preserving scientific files.",
+    )
+    repair.add_argument("--on", default="local")
+    _cluster_selector(repair)
+    repair.add_argument("--retire-job", action="append", default=[])
+    repair.add_argument("--release-build", action="append", default=[])
+    repair.add_argument("--apply", action="store_true")
+    repair.add_argument("--json", action="store_true")
 
     clusters = commands.add_parser("clusters", help="Manage execution targets.")
     clusters.add_argument("--catalog", type=Path)
@@ -515,6 +558,14 @@ def build_parser() -> argparse.ArgumentParser:
     recovery.add_argument("--offset", type=int, default=0)
     recovery.add_argument("--limit", type=int, default=100)
     recovery.add_argument("--json", action="store_true")
+    dependencies = job_commands.add_parser(
+        "recovery-dependencies",
+        help="Inspect retained source bytes and preview exact artifact repair; never re-download.",
+    )
+    dependencies.add_argument("job_id")
+    dependencies.add_argument("--apply", action="store_true")
+    dependencies.add_argument("--limit", type=int, default=100)
+    dependencies.add_argument("--json", action="store_true")
     retry = job_commands.add_parser("retry")
     retry.add_argument("job_id")
     retry.add_argument("--dry-run", action="store_true")
@@ -659,12 +710,49 @@ def build_parser() -> argparse.ArgumentParser:
     replicate.add_argument("--destination", required=True)
     replicate.add_argument("--apply", action="store_true")
     replicate.add_argument(
+        "--ask-password",
+        action="store_true",
+        help="Prompt privately for the destination password; send it to the source "
+        "only in memory. No credential is saved.",
+    )
+    replicate.add_argument(
         "--route",
         choices=("auto", "direct", "relay"),
         default="auto",
-        help="Prefer/require site SSH, or relay compressed bytes without local disk staging.",
+        help="auto probes push then pull; direct forbids PC relay; "
+        "relay explicitly accepts PC/network dependency.",
     )
     replicate.add_argument("--json", action="store_true")
+    trust = dataset_commands.add_parser(
+        "trust-ssh",
+        help="Review/explicitly trust first-use SSH host keys on an initiating cluster.",
+    )
+    trust.add_argument(
+        "--source", required=True, help="Cluster initiating SSH (trust is stored here)."
+    )
+    trust.add_argument(
+        "--destination", required=True, help="Peer cluster whose host keys are reviewed."
+    )
+    trust.add_argument(
+        "--fingerprint",
+        action="append",
+        default=[],
+        help="Verified SHA256 fingerprint; repeat for every offered key.",
+    )
+    trust.add_argument(
+        "--known-hosts-file",
+        help="Exact initiating-host file reported by preview; required for apply.",
+    )
+    trust.add_argument("--apply", action="store_true")
+    trust.add_argument("--json", action="store_true")
+    transfers = dataset_commands.add_parser("transfers", help="List durable Dataset transfer Jobs.")
+    transfers.add_argument("dataset", nargs="?")
+    transfers.add_argument("--json", action="store_true")
+    transfer_status = dataset_commands.add_parser(
+        "transfer-status", help="Reconnect to a Dataset transfer Job."
+    )
+    transfer_status.add_argument("job_id")
+    transfer_status.add_argument("--json", action="store_true")
 
     products = commands.add_parser(
         "products", help="Inspect and publish durable scientific products."

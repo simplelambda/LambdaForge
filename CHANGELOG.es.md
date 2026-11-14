@@ -11,6 +11,118 @@ metadata empaquetada.
 
 ### Añadido
 
+- Selección nativa de bibliotecas por proceso antes de arrancar Python, común a preparación,
+  reutilización, capas, supervisor e hijos. Verifica Torch/SciPy en ambos órdenes y bibliotecas
+  C++/GCC realmente cargadas; procedencia en bootstrap/Job/Run. Conserva concesiones GPU,
+  drivers y aislamiento de herramientas, sin cambiar imports, rebajar paquetes ni rutas globales.
+
+- Publicación gestionada en prefijo estable: Conda/venvs se instalan y verifican en destino y solo
+  después se publica atómicamente el recibo de listo. Otra identidad de publicación permite
+  reconstruir sin tocar entornos activos/recuperables, migrando recibos congelados en lectura.
+  Fallos con diagnóstico redactado y limpieza por GC con referencias; distingue herramienta
+  ausente, lanzador/intérprete roto y política de versión incompatible. Se mantiene APBS código 13.
+
+- Sondeo nativo común a bootstrap, envío y reutilización: APBS 3.4.1 `--version` admite código 13
+  solo con banner coincidente y paquete propietario verificado. Recibos con evidencia del sondeo
+  y errores con argumentos/códigos/diagnósticos acotados, sin omitir integridad ni inventario exacto.
+
+- Recuperación encadenada de Works con inputs acotados: valida propietario/bundle de cada Attempt
+  y su linaje aceptado, conservando bindings originales, Runs y archivos. Comprobación del helper
+  del worker antes del envío para evitar ejecutar con una implementación antigua tras un preview nuevo.
+
+- Recuperación versionada de inputs acotados renombrados por staging: verifica bytes/roles contra
+  recibos originales y reconstruye hashes históricos en preview, dependencias y worker, sin tocar
+  Runs/checkpoints ni aceptar cambios reales de contenido.
+
+- Referencias duraderas de recuperación entre fallos/cancelaciones y revisiones aceptadas;
+  preview/reparación exacta desde artifacts con `jobs recovery-dependencies`, fuentes/política
+  explícitas de mapas y bloqueo ante observaciones ausentes. GC distingue bytes/cadenas
+  protegidos. Cooldown HTTP compartido con Retry-After numérico/fecha y hints JSON declarados.
+
+- Recuperación nativa de Works secuenciales en CLI y consola: conserva pasos y outputs completados,
+  reintenta hijos pendientes con sus checkpoints originales y muestra planes por paso sin mutación,
+  manteniendo propiedad, presupuestos, reconocimiento de código y protección ante limpieza.
+
+- Contraseña de un solo uso para réplica directa de datasets: prompt CLI/modal ocultos,
+  host keys estrictas, transporte nativo opcional y entrada efímera por pipes del Job supervisado.
+  Sin persistir contraseñas ni probarlas en sentido inverso, reintentar automáticamente o cambiar
+  a relay; el Job del origen continúa sin controlador tras el acuse.
+
+- Recibos científicos compartidos con `Work.validate_dataset` y DatasetValidationCache: primera
+  verificación exacta, claves por contenido/código/contrato/runtime, reutilización entre semillas
+  solo con metadata, validación concurrente única y leases GC. Sin saltarse integridad ni
+  interceptar validadores del consumidor; POSIX y DatasetArtifact v2 local sellado.
+
+- Ejecución secuencial nativa opcional de Works/Studies con `lf run --queue`, tickets FIFO
+  persistentes en destino, consulta `lf queue` y selección/tabla de cola en consola. Supervisores
+  preparados ejecutan ciencia de uno en uno, conservan predecesores/GC, cancelación y límites/grants.
+  Los Trials/seeds de cada Study admitido mantienen su paralelismo normal; la cola no serializa Runs.
+  Solo clusters POSIX directos, sin fallback SLURM/Fleet ni promesa de renovar reservas. El PC
+  solo se necesita hasta terminar preparación y hand-off al proveedor.
+
+- Runtimes Python científicos aislados declarados en metadata del proyecto y preparados por
+  bootstrap/envío nativo, sin instalar allí LF ni dependencias consumidoras. Pins/fuentes/ABI
+  explícitos, bundles de scripts, preflight/argv público, grants GPU conservados, límite CPU,
+  cancelación, procedencia y protección GC/recuperación. La aceptación CPU temporal autorizada
+  carga el checkpoint base SLAE revisado; CUDA y el adaptador científico siguen pendientes.
+
+- Bases de dependencias inmutables reutilizables y capas de código exacto para entornos managed;
+  `clean --environments-only` sin exigir cuota, estimación física/enlaces duros y `storage repair`
+  explícito/auditado con selección y confirmación en consola. Referencias desconocidas acotadas,
+  prueba de controlador/instaladores en sus hosts, leases hasta el hand-off y refrescos de storage
+  solo de metadatos, conservando evidencia científica/recuperación y prefijos antiguos.
+
+- CSV/TSV configurable e incremental, prefijos gzip, columnas tipadas versionadas, operaciones
+  tabulares y presupuestos globales/raíces permitidas/staging temporal de preview. NPY mmap y
+  prefijos NPZ C-order sin materializar todo. SQLite nativo read-only/snapshot y escritura atómica
+  insert/upsert/replace validada; PostgreSQL/Psycopg opcional/perezoso con referencias de credenciales
+  del host/TLS/cursors de servidor. Autorización operador para escribir, procedencia honesta de
+  fuentes mutables/prefijos, contratos de efectos y auditoría de composición/modelos estructurados.
+  Schema instalado ClusterProfile y resolución efectiva nativa; sin cambiar concesiones/proveedores
+  GPU. Contratos bilingües, fixtures sintéticos y wheel instalado offline; sin editar consumidores.
+- Contratos públicos de operaciones científicas mediante `lf catalog`/OperationCatalog sin
+  importar modelos al descubrir, fábricas portables y exports neuronales perezosos selectivos.
+  Muestras multiactivo identificadas, lectura/preview acotados, padding/grafos disjuntos y scaler
+  aislado por train/fold. ETL Python con publicación/checkpoints nativos, descarga cancelable con
+  checksum/referencias de credenciales, estimadores sklearn opcionales y persistencia skops
+  revisada. Ejemplos CPU de dataset→dos entradas→sweep/HPO, contratos bilingües y wheel reproducible
+  del árbol local. Sin intérprete de grafos, otro registro/trainer ni cambios en proyectos consumidores.
+
+- Revisión explícita de huellas SSH de primer acceso entre clusters en consola Dataset y comando
+  nativo `datasets trust-ssh` preview/apply. Fija las claves SHA256 aprobadas en el host iniciador,
+  conserva confianza previa y rechaza claves cambiadas/revocadas; repite preview antes de confirmar copia.
+- Diagnóstico de rutas de datasets con sondas SSH efectivas/acotadas de envío y descarga directa,
+  Jobs alojados en destino, consentimiento explícito para relay y ruta aprobada fija. CLI/consola
+  separan estado confirmado, antigüedad de observación, avance de bytes y fases de verificación/
+  publicación; EOF/BrokenPipe y diagnóstico redactado del extremo sobreviven al cierre de streams.
+  La consola permite Direct only (predeterminado en origen remoto), Auto y Relay; un preview
+  bloqueado muestra diagnóstico legible y no acepta silenciosamente una copia alojada en el portátil.
+- Jobs persistentes de replicación Dataset en CLI y consola: copias directas supervisadas en origen
+  continúan sin controlador; relay local continúa al cerrar LF. Estado/progreso/logs e historial
+  Transfers, deduplicación exacta y reconciliación de colocaciones verificadas al reconectar.
+  Relay explicita dependencia de PC/red; sin Work científico, claim GPU ni motor de copia paralelo.
+- Composición pública de operadores: modulación firmada GCN/GraphSAGE sin cambiar grados;
+  etapas mensaje/agregación/actualización GIN/GINE/ECMP/PNA; cierre completo de fuentes radiales,
+  inyección de bases y control diferenciable de caminos tipados DimeNet. Constructores, ecuaciones
+  por defecto y claves de estado conservados; guardia de scores contempla promoción bajo autocast.
+  Sin políticas específicas de un consumidor.
+- Encoders/bloques genéricos GINE, NNConv completa/por bases, SchNet radial, estados polares
+  persistentes GVP/PaiNN, interacciones DimeNet bilineales y DimeNet++ factorizadas con bases
+  Bessel/armónicas, y atención estructural global acotada inspirada en Graphormer. Topología y
+  geometría explícitas, extra opcional `graph-directional`, contratos EN/ES y ejemplo sintético;
+  sin gates, datos ni política científica específicos de un proyecto.
+- Bloques FGW cuadrados/rectangulares acotados con recovery mediante Work.resume_map nativo,
+  identidades numéricas, comprobación de corrupción, diagnóstico y NaN/errores parciales explícitos.
+  Baricentros POT reales con pesos de soporte/objetos, multistart reproducible, medidas relacionales
+  de diagonal no nula y evidencia separada de cambios del backend y objetivo/acoplamientos finales.
+  Regresiones numéricas y de recovery nativo probadas con POT 0.9.6 y 0.9.7.post1 en destinos
+  temporales. Las fases científicas restantes no se presentan como terminadas.
+- Algoritmos científicos, primeras etapas verificadas: disimilitudes precalculadas públicas para
+  DBSCAN/HDBSCAN/Agglomerative compatible y silhouette; árboles H0 de superniveles con mesetas,
+  pertenencias exactas por umbral y selección explícita de regiones estables; calibración nula
+  empírica por objeto/grupo y bootstrap percentil agrupado/estratificado. APIs NumPy diferidas,
+  ejemplos sintéticos y benchmark. La ampliación completa de FGW/prototipos/mezclas sigue pendiente
+  en el registro de aceptación.
 - Distancia Fused Gromov–Wasserstein q=2 balanceada y genérica mediante POT opcional
   (`lambdaforge[optimal-transport]`): objetos ponderados, atributos vectoriales o definidos por el
   proyecto, distancias precalculadas, inicio factible y acoplamiento/diagnóstico de convergencia
@@ -59,6 +171,58 @@ metadata empaquetada.
 
 ### Corregido
 
+- Bootstrap/preflight de herramientas aisladas ya no importa pip en el intérprete científico,
+  evitando el conflicto distutils/setuptools al cargar Triton CUDA. Probe de metadata y validación
+  PEP 440 desde LF conservan checks de paquetes/VCS/inventario/ABI/grants sin sustituir entornos
+  inmutables, degradar paquetes ni modificar entradas consumidoras.
+
+- `lf retry` y **Recover Work…** conservan Execution/Run originales y checkpoints gestionados
+  de un Work único fallido/interrumpido, sin estado HPO ni una nueva Run científica. Preview de
+  metadata independiente de preparar entornos, con propietario/nuevo Attempt, archivos, código y
+  CPU/RAM/tiempo efectivos revisados. Normaliza nombres implícitos de staging sin omitir identidad
+  científica/entradas; mantiene hash del YAML, locks, referencias GC, Attempts y publicación completa.
+- La importación distingue la identidad original inmutable de la revisión de recuperación
+  auditada. Las huellas diferentes requieren current-code e historial nativo sellados
+  coherentes; la evidencia sigue siendo de solo lectura y no se reescribe su procedencia.
+
+
+- Entmax15 conserva su forward disperso exacto y usa el backward analítico del simplex sobre
+  el soporte, evitando gradientes NaN por raíces cero de umbrales no seleccionados y empates.
+  Sin sustituir por softmax, suavizar con epsilon ni reparar gradientes en silencio. Regresiones
+  CPU/CUDA de tipos mixtos, máscaras menos infinito, Jacobiano y diferencias finitas.
+- La inferencia GPU deja de realimentar pronósticos anteriores como historia independiente y de
+  aprender demanda de workers que todavía no asignaron CUDA. Resultados registrados y trayectorias
+  censuradas siguen separados; sondeos repetidos no alteran recursivamente la distribución y la
+  predicción puntual describe los prefijos medidos sin inventar picos completos. Admisión muestra
+  Runs materializadas/no materializadas, duración y motivo del planner; conserva memoria física,
+  límites OOM, exploración protegida y runtimes inmutables.
+- La preparación recupera locks de entorno/runtime huérfanos solo tras demostrar que murió/se
+  reutilizó el proceso del controlador y que no queda un instalador remoto del prefijo. CAS bajo
+  lock GC nativo, conservando propietarios vivos/ajenos/inciertos y todo contenido del entorno.
+- Streams SSH con contraseña usan lectores Paramiko realmente binarios: la cabecera ya no se
+  entrega como texto a un receptor de bytes. Diagnósticos separan la aceptación de fingerprints
+  de la autorización SSH no interactiva necesaria entre clusters.
+- Atribución GPU durante inicialización CPU: un inventario completo/reciente permite observar cero
+  sin asignar reserva del driver/memoria ajena a la Run. Inventarios incompletos/antiguos, PID
+  reutilizado y bytes desconocidos o contradictorios conservan tratamiento prudente; no cambia la
+  admisión física, las reservas futuras ni la política de vía protegida.
+- Telemetría de recursos acepta parámetros JSON inmutables anidados sin romper `persist_active`:
+  FrozenJsonMapping admite reconstrucción dict por iterable de pares y evidencia activa/terminal,
+  admisión, ledgers y trazas serializan campos portables sin reconstruir contenedores con asdict.
+  Inmutabilidad, valores e identidad intactos; sin eludir monitorización/admisión GPU ni recovery.
+- Rutas de solicitud/almacenamiento local fijadas antes de preparar replicaciones independientes:
+  raíces locales relativas funcionan tras cambiar el cwd del supervisor; rutas remotas intactas.
+  Estado/historial fallidos muestran causa del worker acotada/redactada y acceso al log incluso
+  sin progreso/resultado, manteniendo identidad y protección de reintentos.
+- Acotada la realimentación del posterior de memoria GPU y las entradas de convolución; el modelo
+  compartido recorre eventos CDF una vez, sin ordenar miles de puntos repetidamente. Los Studies
+  largos ya no atascan recogida/cierre y dejan un worker CUDA ocioso bloqueando una GPU libre.
+  Compresión conservadora hacia arriba conserva masas extremas y pesos residuales; se mantienen
+  controles de memoria física, permisos GPU, concurrencia y OOM.
+- Reconciliación de compromisos GPU de startup huérfanos tras eliminar el directorio del Job
+  antiguo: exige controlador muerto/reutilizado e inspección nativa completa sin procesos del Job.
+  Descendientes vivos, propiedad incierta y registros existentes corruptos mantienen protección.
+  Un Job eliminado ya no bloquea indefinidamente el primer entreno de una GPU vacía.
 - El dispatch ya no bloquea un Study totalmente inactivo por calcular la cuota elástica sin RAM
   de auxiliares y contarla después al lanzar. La medición fresca del árbol completo limita solo
   cuotas nativas derivadas, sin quitar controles físicos/cgroup ni agregados. Avance real plano
@@ -1291,3 +1455,15 @@ de experimentos, migraciones, seeds/grids/ablations, resultados y documentación
 ## [0.1.0] - 2026-07-16
 
 Versión inicial de infraestructura POO para entrenamiento PyTorch reproducible y experimentos YAML.
+
+### Publicación de Python administrado e inventarios de datasets
+
+- Los paquetes Conda resueltos se instalan en el prefijo permanente y se verifican
+  antes de publicar recibos. No se mueve un prefijo con rutas absolutas parcheadas;
+  la identidad de layout v2 mantiene separados los runtimes antiguos dañados.
+- El inventario remoto lee metadatos acotados con la biblioteca estándar del Python
+  de arranque, sin depender del entorno científico activo. Usa el validador nativo;
+  un error de acceso o corrupción nunca se interpreta como ausencia.
+- La semántica de métricas admite nombres explícitos de particiones de datasets,
+  además de train/validation/test; la definición de cálculo es independiente del
+  conjunto donde se evalúa.

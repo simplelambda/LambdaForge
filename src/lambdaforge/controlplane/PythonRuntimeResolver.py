@@ -385,22 +385,96 @@ class PythonRuntimeResolver:
                 package_fingerprint,
                 trust,
             )
-            marker = temporary / self.MARKER
-            self._write_json(transport, temporary_python, marker, runtime.to_dict())
-            published = transport.run(("mv", "-T", str(temporary), str(destination)))
-            if published.returncode:
+            # Conda prefixes contain patched absolute paths. Moving one can break
+            # CPython's stdlib lookup even when the executable itself still exists.
+            # Install the resolved packages at their permanent identity path and
+            # publish receipts only after probing that exact path.
+            publication_lock = cache_root / f".python-runtime-{actual_id}.lock"
+            acquired = self._acquire(
+                transport, publication_lock, destination / self.MARKER, python=lease_python
+            )
+            if not acquired:
                 self._cleanup(transport, temporary)
-                existing = self._read_runtime(transport, destination / self.MARKER)
-                if (
-                    existing is None
-                    or self._probe(profile, transport, existing.executable, trust=trust) is None
-                ):
-                    raise RuntimeError(
-                        f"Could not atomically publish managed runtime: {published.stderr.strip()}"
-                    )
-                runtime = self._with_action(existing, existing, "reuse", trust=trust)
-            self._publish_request(profile, transport, request_id, runtime)
-            return runtime
+                raise RuntimeError("Timed out waiting for managed runtime publication.")
+            with CacheBuildLease.maintain(transport, publication_lock, python=lease_python):
+                try:
+                    existing = self._read_runtime(transport, destination / self.MARKER)
+                    if existing is not None:
+                        checked = self._probe(profile, transport, existing.executable, trust=trust)
+                        if checked is None or existing.runtime_id != actual_id:
+                            raise RuntimeError(
+                                f"Immutable managed runtime failed verification; preserved {destination}."
+                            )
+                        runtime = self._with_action(checked, existing, "reuse", trust=trust)
+                    else:
+                        if transport.run(("test", "-d", str(destination))).returncode == 0:
+                            raise RuntimeError(
+                                f"Unsealed managed runtime prefix exists; preserved {destination}."
+                            )
+                        final_prefix = tuple(
+                            str(destination) if item == str(temporary) else item for item in prefix
+                        )
+                        if "--offline" not in final_prefix:
+                            final_prefix = (*final_prefix, "--offline")
+                        exact = []
+                        for item in package_inventory:
+                            build = item.get("build_string", item.get("build"))
+                            if not item.get("name") or not item.get("version") or not build:
+                                raise RuntimeError(
+                                    "Managed runtime package inventory lacks an exact name/version/build."
+                                )
+                            exact.append(f"{item['name']}={item['version']}={build}")
+                        installed = transport.run((*final_prefix, *exact))
+                        if installed.returncode:
+                            raise RuntimeError(
+                                f"Could not install managed Python at its permanent prefix; preserved {destination}: {installed.stderr.strip()}"
+                            )
+                        checked = self._probe(profile, transport, runtime.executable, trust=trust)
+                        inventory = transport.run(
+                            (
+                                *profile.command_prefix,
+                                *trust.prefix(),
+                                executable,
+                                "list",
+                                "--json",
+                                "--prefix",
+                                str(destination),
+                            )
+                        )
+                        if (
+                            checked is None
+                            or checked.version != probed.version
+                            or inventory.returncode
+                        ):
+                            raise RuntimeError(
+                                f"Managed Python verification failed at its permanent prefix; preserved {destination}."
+                            )
+                        actual_packages = json.loads(inventory.stdout)
+                        actual_packages.sort(
+                            key=lambda item: (
+                                str(item.get("name", "")),
+                                str(item.get("version", "")),
+                                str(item.get("build_string", item.get("build", ""))),
+                                json.dumps(item, sort_keys=True, separators=(",", ":")),
+                            )
+                        )
+                        if (
+                            json.dumps(actual_packages, sort_keys=True, separators=(",", ":"))
+                            != normalized_inventory
+                        ):
+                            raise RuntimeError(
+                                f"Managed runtime package resolution changed before publication; preserved {destination}."
+                            )
+                        self._write_json(
+                            transport,
+                            runtime.executable,
+                            destination / self.MARKER,
+                            runtime.to_dict(),
+                        )
+                    self._publish_request(profile, transport, request_id, runtime)
+                    return runtime
+                finally:
+                    self._cleanup(transport, temporary)
 
     def _install_manager(
         self, profile: ClusterProfile, transport: Transport, platform_tag: str
@@ -573,6 +647,8 @@ class PythonRuntimeResolver:
             "provider_version": provider_version,
             "package_fingerprint": package_fingerprint,
         }
+        if package_fingerprint is not None:
+            payload["prefix_layout"] = 2
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

@@ -2,10 +2,57 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import torch
 from torch import Tensor
 
 from lambdaforge.nn.activations.base import Activation
+
+
+class _Entmax15Function(torch.autograd.Function):
+    """Exact closed-form forward with the support-aware entmax Jacobian.
+
+    See Proposition 2 of Peters, Niculae and Martins (2019),
+    https://aclanthology.org/P19-1146/ . For alpha=1.5 the Jacobian is
+    diag(s) - outer(s, s) / sum(s), where s = sqrt(output).
+    """
+
+    @staticmethod
+    def forward(ctx: Any, x: Tensor, dim: int) -> Tensor:
+        work = x / 2.0
+        work = work - work.amax(dim=dim, keepdim=True)
+        sorted_work = torch.sort(work, dim=dim, descending=True).values
+        rank_shape = [1] * work.ndim
+        rank_shape[dim] = work.shape[dim]
+        ranks = torch.arange(1, work.shape[dim] + 1, dtype=work.dtype, device=work.device).view(
+            rank_shape
+        )
+        mean = sorted_work.cumsum(dim=dim) / ranks
+        mean_square = sorted_work.square().cumsum(dim=dim) / ranks
+        variance_sum = ranks * (mean_square - mean.square())
+        delta = (1.0 - variance_sum) / ranks
+        thresholds = mean - delta.clamp_min(0.0).sqrt()
+        support_size = (thresholds <= sorted_work).sum(dim=dim, keepdim=True).clamp_min(1)
+        threshold = thresholds.gather(dim, support_size - 1)
+        output = (work - threshold).clamp_min(0.0).square()
+        ctx.dim = dim
+        ctx.save_for_backward(output)
+        return output
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: Tensor) -> tuple[Tensor, None]:
+        (output,) = ctx.saved_tensors
+        # Differentiate the simplex map, not unused threshold candidates (sqrt(0)
+        # there gives 0/0 during backward). Mask before sqrt here as well so sparse
+        # zeros remain safe for higher derivatives on regions of fixed support.
+        # NaN/+inf inputs are not repaired; -inf masked logits retain zero weight.
+        inactive = output == 0.0
+        root = torch.where(inactive, torch.ones_like(output), output).sqrt()
+        sensitivity = torch.where(inactive, torch.zeros_like(root), root)
+        weighted_mean = (grad_output * sensitivity).sum(dim=ctx.dim, keepdim=True)
+        weighted_mean = weighted_mean / sensitivity.sum(dim=ctx.dim, keepdim=True)
+        return sensitivity * (grad_output - weighted_mean), None
 
 
 class Entmax15(Activation):
@@ -13,8 +60,9 @@ class Entmax15(Activation):
 
     This is a PyTorch-native implementation of the closed-form
     :math:`\alpha=1.5` entmax transformation used by NODE and GradTree.
-    The operation is differentiated through ordinary tensor operations; no
-    custom autograd state or optional dependency is required.
+    Its support-aware analytic backward avoids undefined derivatives in unused
+    threshold candidates, retaining exact sparse zeros. No optional dependency
+    is required; higher derivatives are supported away from support transitions.
 
     Parameters
     ----------
@@ -53,27 +101,7 @@ class Entmax15(Activation):
 
         input_dtype = x.dtype
         work = x.float() if self.force_float32 and x.dtype in (torch.float16, torch.bfloat16) else x
-        work = work / 2.0
-        work = work - work.amax(dim=dim, keepdim=True)
-
-        sorted_work = torch.sort(work, dim=dim, descending=True).values
-        rank_shape = [1] * work.ndim
-        rank_shape[dim] = work.shape[dim]
-        ranks = torch.arange(
-            1,
-            work.shape[dim] + 1,
-            dtype=work.dtype,
-            device=work.device,
-        ).view(rank_shape)
-
-        mean = sorted_work.cumsum(dim=dim) / ranks
-        mean_square = sorted_work.square().cumsum(dim=dim) / ranks
-        variance_sum = ranks * (mean_square - mean.square())
-        delta = (1.0 - variance_sum) / ranks
-        thresholds = mean - delta.clamp_min(0.0).sqrt()
-        support_size = (thresholds <= sorted_work).sum(dim=dim, keepdim=True).clamp_min(1)
-        threshold = thresholds.gather(dim, support_size - 1)
-        output = (work - threshold).clamp_min(0.0).square()
+        output = cast(Tensor, _Entmax15Function.apply(work, dim))
         return output.to(dtype=input_dtype)
 
     def extra_repr(self) -> str:

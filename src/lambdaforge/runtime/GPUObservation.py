@@ -99,6 +99,7 @@ def collect_nvml(
             "quality": "unavailable",
             "processes": [],
             "compute_process_count": None,
+            "process_inventory_complete": False,
             "utilization_percent": None,
         }
         if uuid in blocked:
@@ -126,6 +127,7 @@ def collect_nvml(
         try:
             processes = nvml.nvmlDeviceGetComputeRunningProcesses(handle)
             row["compute_process_count"] = len(processes)
+            row["process_inventory_complete"] = len(processes) <= 4096
             for process in processes[:4096]:
                 try:
                     owner = psutil.Process(process.pid)
@@ -142,9 +144,10 @@ def collect_nvml(
                         }
                     )
                 except (psutil.Error, OSError):
+                    row["process_inventory_complete"] = False
                     continue
         except Exception:
-            pass
+            row["process_inventory_complete"] = False
         rows.append(row)
 
     nvml.nvmlInit()
@@ -210,6 +213,7 @@ def collect_smi() -> list[dict[str, Any]]:
     # Process attribution is optional. Failure is unknown occupancy, never an empty device.
     processes: dict[str, list[dict[str, Any]]] = {}
     counts: dict[str, int] = {}
+    incomplete: set[str] = set()
     process_quality = False
     try:
         output = _smi_query("--query-compute-apps=gpu_uuid,pid,used_memory")
@@ -233,6 +237,7 @@ def collect_smi() -> list[dict[str, Any]]:
                     }
                 )
             except (psutil.Error, OSError):
+                incomplete.add(uuid)
                 continue
         process_quality = True
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -257,6 +262,7 @@ def collect_smi() -> list[dict[str, Any]]:
                 "source": "nvidia-smi",
                 "processes": processes.get(fields[1], []) if process_quality else [],
                 "compute_process_count": counts.get(fields[1], 0) if process_quality else None,
+                "process_inventory_complete": process_quality and fields[1] not in incomplete,
             }
         )
     return rows

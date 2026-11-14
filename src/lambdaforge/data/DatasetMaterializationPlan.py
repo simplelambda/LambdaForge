@@ -25,6 +25,10 @@ class DatasetMaterializationPlan:
     compression: str | None = None
     content_id: str | None = None
     applied: bool = False
+    route_diagnostics: tuple[dict[str, Any], ...] = ()
+    data_path: tuple[str, ...] = ()
+    execution_host: str | None = None
+    relay_consent_required: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,4 +47,8 @@ class DatasetMaterializationPlan:
             "compression": self.compression,
             "content_id": self.content_id,
             "applied": self.applied,
+            "route_diagnostics": [dict(value) for value in self.route_diagnostics],
+            "data_path": list(self.data_path),
+            "execution_host": self.execution_host,
+            "relay_consent_required": self.relay_consent_required,
         }

@@ -132,6 +132,7 @@ def test_supervisor_does_not_copy_an_already_staged_workspace_onto_itself(
                 "resources": {},
                 "lease_root": str(tmp_path / "gpu-leases"),
                 "resource_lease_root": str(tmp_path / "process-leases"),
+                "storage": scheduler(tmp_path).storage.to_dict(),
             }
         ),
         encoding="utf-8",
@@ -157,6 +158,7 @@ def test_prelaunch_failure_has_empty_stable_log_streams(tmp_path: Path) -> None:
                 "resources": {},
                 "lease_root": str(tmp_path / "gpu-leases"),
                 "resource_lease_root": str(tmp_path / "process-leases"),
+                "storage": scheduler(tmp_path).storage.to_dict(),
             }
         ),
         encoding="utf-8",
@@ -202,6 +204,7 @@ def test_external_gpu_wrapper_environment_is_preserved_without_local_leases(
                 },
                 "lease_root": str(tmp_path / "gpu-leases"),
                 "resource_lease_root": str(tmp_path / "process-leases"),
+                "storage": scheduler(tmp_path).storage.to_dict(),
             }
         ),
         encoding="utf-8",

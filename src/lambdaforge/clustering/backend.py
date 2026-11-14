@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from lambdaforge.distances.validation import pairwise_memory_guard, validate_dissimilarity
 from lambdaforge.nn.distances import (
     Distance,
     EuclideanDistance,
@@ -70,6 +71,22 @@ def canonical_distance(distance: str | Distance) -> str | Distance:
     return selected
 
 
+def clustering_array(
+    features: ArrayInput, distance: str | Distance, max_pairwise_bytes: int | None
+) -> np.ndarray:
+    """Validate precomputed inputs before copying, preserving the feature contract."""
+    if canonical_distance(distance) != "precomputed":
+        return feature_array(features)
+    if isinstance(features, torch.Tensor):
+        if features.ndim != 2 or features.shape[0] != features.shape[1]:
+            raise ValueError("Dissimilarities must be a square [N, N] matrix.")
+        pairwise_memory_guard(features.shape[0], max_pairwise_bytes)
+        features = features.detach().cpu().numpy()
+    if not isinstance(features, np.ndarray):
+        raise TypeError("Dissimilarities must be a numpy.ndarray or torch.Tensor.")
+    return validate_dissimilarity(features, max_pairwise_bytes=max_pairwise_bytes)
+
+
 def adapt_distance(
     distance: str | Distance,
     capabilities: ClusterCapabilities,
@@ -92,6 +109,8 @@ def adapt_distance(
             )
         return "euclidean", features
     if isinstance(selected, str):
+        if selected == "precomputed" and capabilities.supports_precomputed:
+            return selected, features
         if selected not in capabilities.native_metrics:
             supported = ", ".join(sorted(capabilities.native_metrics))
             raise ValueError(

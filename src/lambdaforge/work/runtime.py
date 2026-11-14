@@ -244,6 +244,7 @@ class WorkRuntime:
     log: WorkLog = field(init=False)
     tools: ToolService = field(init=False)
     map_counter: int = 0
+    code_identity: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.inputs = MappingProxyType(dict(self.inputs))
@@ -251,7 +252,12 @@ class WorkRuntime:
         self.metrics = MetricCollection(self.run_dir)
         self.progress = ProgressReporter(self.run_dir)
         self.log = WorkLog()
-        self.tools = ToolService(self.log)
+        self.tools = ToolService(
+            self.log,
+            max_threads=self.resources.cpu,
+            stop_check=lambda: self.stop_requested,
+            source_dir=self.source_dir,
+        )
 
     @property
     def stop_requested(self) -> bool:
@@ -332,9 +338,17 @@ class WorkRuntime:
         validate: Callable[[R], bool] | None = None,
         retries: int = 0,
         retry_backoff: float = 0.5,
+        scientific_policy: Mapping[str, Any] | None = None,
     ) -> list[R]:
         """Map with explicit stable keys and dependency-aware resumable checkpoints."""
         self._validate_map_options(workers, executor, retries, retry_backoff)
+        policy_identity = (
+            hashlib.sha256(
+                json.dumps(dict(scientific_policy), sort_keys=True, allow_nan=False).encode()
+            ).hexdigest()
+            if scientific_policy is not None
+            else None
+        )
         self.map_counter += 1
         # Preserve the historical anonymous checkpoint path for keyed map calls.
         operation = name or f"map-{self.map_counter:03d}"
@@ -350,6 +364,8 @@ class WorkRuntime:
         results: list[Any] = [None] * len(materialized)
         pending: list[tuple[int, T, str]] = []
         for index, (item, selected) in enumerate(zip(materialized, keys, strict=True)):
+            for managed in self._managed_files(item):
+                self._decode_map_value(self._encode_map_value(managed))
             path = root / f"{hashlib.sha256(selected.encode()).hexdigest()}.json"
             if resume and path.is_file() and not path.is_symlink():
                 try:
@@ -359,6 +375,9 @@ class WorkRuntime:
                     continue
                 if record.get("key") != selected:
                     raise RuntimeError(f"map checkpoint key collision for {selected!r}.")
+                if record.get("scientific_policy") != policy_identity:
+                    pending.append((index, item, selected))
+                    continue
                 try:
                     dependencies = record.get("dependencies", ())
                     if not isinstance(dependencies, list | tuple):
@@ -383,6 +402,10 @@ class WorkRuntime:
             else:
                 pending.append((index, item, selected))
         completed = len(materialized) - len(pending)
+        self.log.emit(
+            f"Map {operation}: restored={completed}, rebuild/misses={len(pending)}; "
+            "managed dependencies verified; unbound legacy results do not prove source identity"
+        )
         self.progress.update(completed=completed, total=len(materialized), message=operation)
         if not pending:
             return results
@@ -391,7 +414,13 @@ class WorkRuntime:
                 result, dependencies = self._call_map_item(
                     function, item, retries, float(retry_backoff)
                 )
-                self._save_map_result(root, selected, result, dependencies=dependencies)
+                self._save_map_result(
+                    root,
+                    selected,
+                    result,
+                    dependencies=(*dependencies, *self._managed_files(item)),
+                    scientific_policy=policy_identity,
+                )
                 results[index] = result
                 completed += 1
                 self.progress.update(
@@ -439,7 +468,8 @@ class WorkRuntime:
                         root,
                         selected,
                         result,
-                        dependencies=dependencies,
+                        dependencies=(*dependencies, *self._managed_files(materialized[index])),
+                        scientific_policy=policy_identity,
                     )
                     results[index] = result
                     completed += 1
@@ -490,6 +520,7 @@ class WorkRuntime:
         value: Any,
         *,
         dependencies: Iterable[ManagedFile] = (),
+        scientific_policy: str | None = None,
     ) -> None:
         encoded = self._encode_map_value(value)
         found = [*dependencies, *self._managed_files(value)]
@@ -497,6 +528,8 @@ class WorkRuntime:
             (managed.scope, managed.key, managed.sha256, managed.size_bytes): managed
             for managed in found
         }
+        for managed in unique.values():
+            self._decode_map_value(self._encode_map_value(managed))
         encoded_dependencies = [
             self._encode_map_value(managed)
             for managed in sorted(unique.values(), key=lambda item: (item.scope, item.key))
@@ -512,6 +545,7 @@ class WorkRuntime:
                 "key": key,
                 "result": encoded,
                 "dependencies": encoded_dependencies,
+                "scientific_policy": scientific_policy,
             },
         )
 
@@ -558,12 +592,29 @@ class WorkRuntime:
                     raise _InvalidManagedReference(
                         f"Unsupported managed-file scope {scope!r} in Work.map."
                     )
+                options = (
+                    {"namespace": str(reference["namespace"])}
+                    if scope == "cache" and reference.get("namespace")
+                    else {}
+                )
                 restored = resolver(
                     str(reference["key"]),
                     sha256=str(reference["sha256"]),
                     size_bytes=int(reference["size_bytes"]),
+                    **options,
                 )
                 if restored is None:
+                    if scope == "cache" and (
+                        reference.get("observed")
+                        or self.cache.recovering
+                        and "observed" not in reference
+                    ):
+                        raise RuntimeError(
+                            f"Missing original recovery input {reference.get('key')!r} "
+                            f"({reference.get('sha256')}); URL replay is not scientific recovery. "
+                            "Inspect recovery_dependency_preview; restore exact bytes "
+                            "or start a new acquisition."
+                        )
                     raise _InvalidManagedReference(str(reference.get("key")))
                 return restored
             return {str(key): self._decode_map_value(item) for key, item in value.items()}

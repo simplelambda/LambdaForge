@@ -1,0 +1,16 @@
+{
+  "schema_version": "table-preview-v1",
+  "rows": [{"id": "sample-a", "value": 1.25}],
+  "scope": "prefix",
+  "complete": false,
+  "content_identity": null,
+  "provenance": [{"source": "approved/table.csv", "physical_end_line": 2}],
+  "diagnostics": [],
+  "budget": {
+    "schema_version": "preview-budget-v1",
+    "rows": 1, "bytes": 23, "files": 1,
+    "retained_bytes_guard": 512,
+    "limits": {"rows": 1, "bytes": 1048576, "memory": 8388608, "files": 8},
+    "enforcement": "cooperative"
+  }
+}

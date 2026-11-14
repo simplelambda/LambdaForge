@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,22 @@ class StorageOperations:
         from lambdaforge.controlplane.StorageAdmission import StorageAdmission
 
         roots = cls._roots(descriptor)
-        result = {name: cls._usage(path) for name, path in roots.items()}
+        if descriptor.get("metadata_only"):
+            ledger = cls._read_json(roots["state"] / "storage-ledger.json") or {}
+            result = {
+                name: {
+                    **ledger.get("categories", {}).get(name, {}),
+                    "path": str(path),
+                    "exists": path.exists(),
+                    "measurement": "cached"
+                    if name in ledger.get("categories", {})
+                    else "not-measured",
+                    "measured_at": ledger.get("measured_at"),
+                }
+                for name, path in roots.items()
+            }
+        else:
+            result = {name: cls._usage(path) for name, path in roots.items()}
         result["filesystems"] = StorageAdmission.observe(descriptor)
         return result
 
@@ -191,6 +206,9 @@ class StorageOperations:
                         or child.name in keep
                         or "*" in keep
                         or not child.name.startswith(("env-", ".env-"))
+                        # Isolated tools are not obsolete main-environment replacements.
+                        # Native explicit GC owns their retention and use-lease checks.
+                        or child.name.startswith(("env-tool-", ".env-tool-"))
                         or not cls._complete("environments", child)
                     ):
                         continue
@@ -232,6 +250,11 @@ class StorageOperations:
         ):
             raise ValueError("Invalid LambdaForge job id.")
         root = cls._roots(descriptor)["job_workspaces"].resolve()
+        from lambdaforge.controlplane.ExecutionQueue import ExecutionQueue
+
+        for queue in ExecutionQueue.for_storage(cls._roots(descriptor)["state"], root):
+            if job_id in queue.retained_jobs():
+                raise ValueError("Job workspace is retained by a waiting execution queue ticket.")
         target = (root / job_id).resolve(strict=False)
         if target.parent != root or target.name != job_id:
             raise RuntimeError("Job cleanup target escaped the configured job root.")
@@ -290,6 +313,22 @@ class StorageOperations:
             }
         candidates: list[dict[str, Any]] = []
         reclaimed = 0
+        for manifest in work.glob(".lambdaforge/runs/*/execution-*/execution.json"):
+            origin = cls._read_json(manifest) or {}
+            aggregate = cls._read_json(manifest.parent / "result.json") or {}
+            if (
+                origin.get("ownership", {}).get("execution_dir") == "owned"
+                and aggregate.get("status") != "succeeded"
+                and any(manifest.parent.glob("runs/*/checkpoints/maps"))
+            ):
+                return {
+                    "job_id": job_id,
+                    "candidates": [],
+                    "reclaimable_bytes": 0,
+                    "reclaimed_bytes": 0,
+                    "applied": False,
+                    "blocked_reason": "retained-recovery-dependencies",
+                }
         if work.is_dir() and not work.is_symlink():
             from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
             from lambdaforge.work.checkpoint_retention import checkpoint_plan, compact_checkpoints
@@ -434,9 +473,23 @@ class StorageOperations:
 
         pressure_before = StorageAdmission.observe(descriptor)
         refs = {key: set(map(str, values)) for key, values in references.items()}
-        refs.setdefault("environments", set()).update(cls._active_environment_references(roots))
+        if apply and descriptor.get("reference_repair_preview"):
+            raise ValueError(
+                "A hypothetical post-repair plan cannot authorize deletion; "
+                "apply repairs and preview again."
+            )
+        preview = descriptor.get("reference_repair_preview") or {}
+        inventory = cls.environment_references(roots, repair_preview=preview)
+        from lambdaforge.work.recovery_dependencies import cache_recovery_references
+
+        cache_chains = cache_recovery_references(roots["job_workspaces"])
+        refs.setdefault("work_cache", set()).update(cache_chains)
+        refs.setdefault("environments", set()).update(inventory["environments"])
+        refs.setdefault("bundles", set()).update(inventory.get("tool_bundles", ()))
         terminal_jobs: set[str] = set(refs.get("terminal_jobs", ()))
-        protected_jobs = refs.get("protected_jobs", set())
+        protected_jobs = refs.get("protected_jobs", set()) | set(
+            inventory.get("protected_jobs", ())
+        )
         for job in roots["job_workspaces"].glob("job-*"):
             if job.is_symlink() or not job.is_dir():
                 continue
@@ -452,38 +505,108 @@ class StorageOperations:
                 terminal_jobs.add(job.name)
             elif terminal:
                 continue
-            elif request is None:
+            elif request is None and job.name not in inventory["retired_jobs"]:
                 # Missing ownership is uncertainty, not an orphan.
                 for category in ("bundles", "environments", "runtimes", "temporary"):
                     refs.setdefault(category, set()).add("*")
-            else:
+            elif request is not None:
                 bundle = request.get("bundle_id")
                 if bundle:
                     refs.setdefault("bundles", set()).add(str(bundle))
                 refs.setdefault("temporary", set()).add("*")
+        dependency_edges = []
+        for receipt in roots["environments"].glob("*/.lambdaforge-environment.json"):
+            record = cls._read_json(receipt) or {}
+            dependency = record.get("dependency_environment")
+            if isinstance(dependency, str):
+                dependency_edges.append((receipt.parent.name, dependency))
         candidates: list[dict[str, Any]] = []
         protected_items: list[dict[str, Any]] = []
         for job_id in sorted(terminal_jobs - protected_jobs):
+            if descriptor.get("environments_only"):
+                break
             result = cls.compact_job(descriptor, job_id, apply=apply)
             candidates.extend(result["candidates"])
         markers = (*cache.glob(".environment-build-*.lock"), *cache.glob(".python-runtime-*.lock"))
         builds: set[str] = set()
+        build_reasons: dict[str, str] = {}
         orphan_names: set[str] = set()
+        repairs = cls._read_json(roots["state"] / "storage-reference-repairs.json") or {}
+        for identity in repairs.get("retired_builds", {}):
+            marker = cache / f".environment-build-{identity}.lock"
+            if not marker.exists() and not cls._orphan_builder_process_present(marker):
+                orphan_names.add(identity)
         for marker in markers:
-            if cls._orphan_lease(marker):
+            owner = cls._read_json(marker / "owner.json" if marker.is_dir() else marker) or {}
+            for category in ("environments", "bundles", "runtimes"):
+                refs.setdefault(category, set()).update(
+                    owner.get("references", {}).get(category, ())
+                )
+            hypothetical = next(
+                (
+                    item
+                    for item in preview.get("released_builds", ())
+                    if item["name"] == marker.name
+                ),
+                None,
+            )
+            if hypothetical and hypothetical.get("owner") != cls._read_json(
+                marker / "owner.json" if marker.is_dir() else marker
+            ):
+                raise ValueError("Build evidence changed after repair preview; inspect again.")
+            if (
+                cls._orphan_lease(marker)
+                or hypothetical
+                and not cls._orphan_builder_process_present(marker)
+            ):
                 orphan_names.add(
                     marker.name.removeprefix(".environment-build-")
                     .removeprefix(".python-runtime-")
                     .removesuffix(".lock")
                 )
             else:
+                import math
+
+                heartbeat = owner.get("heartbeat")
+                recent = (
+                    isinstance(heartbeat, (int, float))
+                    and math.isfinite(heartbeat)
+                    and 0 <= time.time() - heartbeat < 60
+                )
+                build_reason = "environment-build" if recent else "unresolved-build-owner"
+                build_id = (
+                    marker.name.removeprefix(".environment-build-")
+                    .removeprefix(".python-runtime-")
+                    .removesuffix(".lock")
+                )
+                build_reasons[build_id] = build_reason
                 builds.add(
                     marker.name.removeprefix(".environment-build-")
                     .removeprefix(".python-runtime-")
                     .removesuffix(".lock")
                 )
+                inventory["issues"].append(
+                    {
+                        "path": str(marker),
+                        "reason": "unreadable-build-owner"
+                        if not owner
+                        else "build-owner-live-or-unresolved",
+                        "owner_host": owner.get("host"),
+                        "action": f"lf storage repair --release-build {marker.name}",
+                    }
+                )
         runtime_refs = cls._runtime_references(roots, tuple(refs.get("runtimes", ())))
-        categories = (
+        for code, dependency in dependency_edges:
+            # Automatic quota plans can retain unselected code layers; explicit clean
+            # selects all obsolete code layers and can collect their base in the same pass.
+            if (
+                descriptor.get("automatic_gc")
+                or "*" in refs["environments"]
+                or code in refs["environments"]
+                or code in builds
+            ):
+                refs["environments"].add(dependency)
+        categories: tuple[str, ...] = (
             "temporary",
             "work_cache",
             "package_cache",
@@ -496,6 +619,8 @@ class StorageOperations:
             "runtimes",
             "environments",
         )
+        if descriptor.get("environments_only"):
+            categories = ("environments",)
         all_cache: list[dict[str, Any]] = []
         now = time.time()
         maximum_age = descriptor.get("cache_max_age")
@@ -526,9 +651,24 @@ class StorageOperations:
                     if child.name in builds or any(
                         child.name.startswith(f".{value}.tmp-") for value in builds
                     ):
-                        reason = "environment-build"
+                        matched = next(
+                            value
+                            for value in builds
+                            if child.name == value or child.name.startswith(f".{value}.tmp-")
+                        )
+                        reason = build_reasons.get(matched, "unresolved-build-owner")
                     elif not cls._complete(category, child):
-                        if not any(
+                        publication = cls._read_json(child / ".lambdaforge-publication.json") or {}
+                        if (
+                            publication.get("contract") == "stable-prefix-v1"
+                            and publication.get("state") == "failed"
+                            and publication.get("prefix") == str(child)
+                            and isinstance(publication.get("token"), str)
+                            and len(publication["token"]) == 32
+                            and all(v in "0123456789abcdef" for v in publication["token"])
+                        ):
+                            item["reason"] = "failed-publication"
+                        elif not any(
                             child.name.startswith(f".{value}.tmp-") for value in orphan_names
                         ):
                             reason = "unresolved-temporary-owner"
@@ -552,6 +692,11 @@ class StorageOperations:
                     reason = "unresolved-temporary-owner"
                 if category == "work_cache" and cls._work_cache_busy(child):
                     reason = "active-work-cache"
+                if category == "work_cache" and child.name in cache_chains:
+                    reason = "retained-recovery-dependency"
+                    item["reference_chains"] = cache_chains[child.name]
+                if category in {"environments", "bundles"} and cls._tool_runtime_busy(child):
+                    reason = "isolated-tool-runtime-in-use"
                 if reason:
                     protected_items.append({**item, "reason": reason})
                 else:
@@ -563,6 +708,8 @@ class StorageOperations:
                 item.get("reason") == "orphaned-temporary"
                 or stale
                 or item["category"] == "work_cache"
+                and not descriptor.get("automatic_gc")
+                or item["category"] == "environments"
                 and not descriptor.get("automatic_gc")
             ):
                 candidates.append(
@@ -600,10 +747,14 @@ class StorageOperations:
                 candidates.append({**item, "reason": "storage-pressure"})
                 selected.add(item["path"])
                 removed_cache += int(item["bytes"])
+        physical_estimate = cls._reclaimable_allocation([Path(item["path"]) for item in candidates])
+        environment_usage = cls._usage(roots["environments"])
         reclaimed = cache_reclaimed = 0
         collected: list[dict[str, Any]] = []
         if apply:
-            for item in candidates:
+            for item in sorted(
+                candidates, key=lambda item: item.get("name", "").startswith("deps-")
+            ):
                 if item["category"] in {"attempt_artifacts", "checkpoints"}:
                     if not Path(item["path"]).exists():
                         reclaimed += int(item["bytes"])
@@ -613,10 +764,30 @@ class StorageOperations:
                     continue
                 path = Path(item["path"])
                 # Recheck the lifetime lease under an exclusive lock at mutation time.
-                lease = cls._work_cache_lock(path) if item["category"] == "work_cache" else None
+                lease = (
+                    cls._work_cache_lock(path)
+                    if item["category"] == "work_cache"
+                    else (
+                        cls._tool_runtime_lock(path, create=True)
+                        if item["category"] in {"environments", "bundles"}
+                        and path.name.startswith(("env-tool-", "tool-code-"))
+                        else None
+                    )
+                )
                 try:
                     if lease is not None:
                         lease.acquire()
+                    if item["category"] == "work_cache":
+                        fresh = cache_recovery_references(roots["job_workspaces"])
+                        if path.name in fresh:
+                            protected_items.append(
+                                {
+                                    **item,
+                                    "reason": "retained-recovery-dependency",
+                                    "reference_chains": fresh[path.name],
+                                }
+                            )
+                            continue
                     cls._delete_cache_entry(path, roots[item["category"]])
                     reclaimed += int(item["bytes"])
                     cache_reclaimed += int(item["bytes"])
@@ -637,10 +808,14 @@ class StorageOperations:
         payload = {
             "candidates": candidates,
             "protected_items": protected_items,
+            "protected_bytes": sum(int(item["bytes"]) for item in protected_items),
             "categories": grouped,
             "reclaimable_bytes": sum(int(item["bytes"]) for item in candidates),
+            "reclaimable_allocated_bytes": physical_estimate,
+            "environment_usage": environment_usage,
             "reclaimed_bytes": reclaimed,
             "cache_bytes": total_cache,
+            "quota_basis": "apparent-file-bytes",
             "quota_unresolved_bytes": max(
                 0,
                 total_cache - (cache_reclaimed if apply else removed_cache) - int(maximum_size),
@@ -649,9 +824,20 @@ class StorageOperations:
             else 0,
             "applied": apply,
             "blocked_reason": None,
+            "reference_issues": inventory["issues"],
+            "environment_count": sum(
+                1 for item in (*all_cache, *protected_items) if item["category"] == "environments"
+            ),
             "filesystems_before": pressure_before,
             "filesystems_after": StorageAdmission.observe(descriptor) if apply else pressure_before,
+            "hypothetical_after_repairs": bool(preview),
         }
+        if payload["quota_unresolved_bytes"] and cache_chains:
+            payload["blocked_reason"] = "retained-recovery-storage-pressure"
+            payload["next_action"] = (
+                "Add storage or review/delete exact owned recovery history explicitly; "
+                "automatic GC will not destroy retained acquisition dependencies."
+            )
         if apply:
             state_root = roots["state"]
             state_root.mkdir(parents=True, exist_ok=True)
@@ -678,7 +864,82 @@ class StorageOperations:
                     )
                     + "\n"
                 )
+        if not candidates:
+            payload["blocked_reason"] = (
+                "No eligible cache entries. Resolve the listed ownership/reference issues first."
+                if inventory["issues"] or protected_items
+                else "No obsolete cache entries found."
+            )
+        payload["outcome"] = ("removed" if collected else "no-change") if apply else "preview"
+        payload["observed_free_bytes_delta"] = (
+            {
+                key: int(value.get("free_bytes", 0))
+                - int(pressure_before.get(key, {}).get("free_bytes", 0))
+                for key, value in payload["filesystems_after"].items()
+            }
+            if apply
+            else {}
+        )
         return payload
+
+    @staticmethod
+    def _reclaimable_allocation(paths: Sequence[Path]) -> int:
+        """Count blocks once and only when every hard link will be removed by this plan."""
+        inodes: dict[tuple[int, int], dict[str, Any]] = {}
+        unique = 0
+        roots = sorted(set(paths), key=lambda path: len(path.parts))
+        selected: list[Path] = []
+        for root in roots:
+            if not any(root.is_relative_to(parent) for parent in selected):
+                selected.append(root)
+        for root in selected:
+            for stat in StorageOperations._file_stats(root):
+                if stat.st_nlink == 1:
+                    unique += getattr(stat, "st_blocks", 0) * 512
+                    continue
+                key = (stat.st_dev, stat.st_ino)
+                record = inodes.setdefault(
+                    key,
+                    {
+                        "links": stat.st_nlink,
+                        "selected": 0,
+                        "blocks": getattr(stat, "st_blocks", 0) * 512,
+                    },
+                )
+                record["selected"] += 1
+        return unique + sum(
+            value["blocks"] for value in inodes.values() if value["selected"] >= value["links"]
+        )
+
+    @staticmethod
+    def _file_stats(path: Path) -> Iterator[os.stat_result]:
+        """One stat per ordinary file; no symlink traversal or per-file path-object churn."""
+        import stat
+
+        if path.is_symlink() or not path.exists():
+            return
+        if path.is_file():
+            yield path.stat()
+            return
+        pending = [str(path)]
+        while pending:
+            directory = pending.pop()
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_symlink():
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(entry.path)
+                            else:
+                                metadata = entry.stat(follow_symlinks=False)
+                                if stat.S_ISREG(metadata.st_mode):
+                                    yield metadata
+                        except FileNotFoundError:
+                            continue
+            except FileNotFoundError:
+                continue
 
     @staticmethod
     def _work_cache_lock(path: Path, *, create: bool = True) -> CrossProcessFileLock:
@@ -705,26 +966,85 @@ class StorageOperations:
             lease.release()
         return False
 
+    @staticmethod
+    def _tool_runtime_lock(path: Path, *, create: bool = False) -> CrossProcessFileLock:
+        return CrossProcessFileLock(
+            path.parent.parent / f".tool-runtime-use-{path.name}.lock",
+            shared=False,
+            timeout_seconds=0.01,
+            poll_interval_seconds=0.005,
+            create=create,
+        )
+
+    @classmethod
+    def _tool_runtime_busy(cls, path: Path) -> bool:
+        if not path.name.startswith(("env-tool-", "tool-code-")):
+            return False
+        lock = cls._tool_runtime_lock(path)
+        try:
+            lock.acquire()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        finally:
+            lock.release()
+        return False
+
     @classmethod
     def _orphan_lease(cls, path: Path) -> bool:
         """Only positively dead local owners qualify; age/name alone never proves death."""
+        import math
         import os
         import socket
+
+        import psutil
 
         record = cls._read_json(path / "owner.json" if path.is_dir() else path)
         if not record or record.get("host") != socket.gethostname():
             return False
         try:
-            pid = int(record["pid"])
+            pid = record["pid"]
             heartbeat = float(record["heartbeat"])
-            if pid <= 0 or time.time() - heartbeat < 60:
+            if (
+                type(pid) is not int
+                or pid <= 0
+                or not math.isfinite(heartbeat)
+                or time.time() - heartbeat < 60
+            ):
                 return False
+            process = psutil.Process(pid)
+            birth = record.get("process_birth", record.get("created_at"))
+            if birth is not None and process.create_time() > float(birth) + 1:
+                return not cls._orphan_builder_process_present(path)
+            if process.status() in {psutil.STATUS_DEAD, psutil.STATUS_ZOMBIE}:
+                return not cls._orphan_builder_process_present(path)
             os.kill(pid, 0)
+        except psutil.NoSuchProcess:
+            return not cls._orphan_builder_process_present(path)
         except ProcessLookupError:
             return not cls._orphan_builder_process_present(path)
-        except (KeyError, TypeError, ValueError, PermissionError):
+        except (KeyError, TypeError, ValueError, PermissionError, psutil.AccessDenied):
             return False
         return False
+
+    @classmethod
+    def reference_report(cls, descriptor: Mapping[str, Any]) -> dict[str, Any]:
+        """Bounded metadata for explicit repair; never fetch scientific payloads."""
+        roots = cls._roots(descriptor)
+        inventory = cls.environment_references(roots)
+        locks = []
+        for path in sorted(roots["environments"].parent.glob(".environment-build-*.lock")):
+            record = cls._read_json(path / "owner.json" if path.is_dir() else path)
+            locks.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "owner": record,
+                    "orphan_on_build_host": cls._orphan_lease(path),
+                }
+            )
+        return {"issues": inventory["issues"], "builds": locks}
 
     @staticmethod
     def _orphan_builder_process_present(path: Path) -> bool:
@@ -749,6 +1069,11 @@ class StorageOperations:
             needles = (str(path.parent / "runtimes") + os.sep,)
         else:
             needles = (str(path.absolute()),)
+        owner = StorageOperations._read_json(path / "owner.json" if path.is_dir() else path) or {}
+        needles = (
+            *needles,
+            *(str(value) for value in owner.get("references", {}).get("paths", ())),
+        )
         try:
             for process in psutil.process_iter():
                 try:
@@ -858,8 +1183,6 @@ class StorageOperations:
 
     @staticmethod
     def _usage(path: Path) -> dict[str, Any]:
-        import os
-
         if not path.exists() or path.is_symlink():
             return {
                 "path": str(path),
@@ -868,32 +1191,16 @@ class StorageOperations:
                 "files": 0,
                 "exists": False,
             }
-        if path.is_file():
-            metadata = path.stat()
-            return {
-                "path": str(path),
-                "bytes": metadata.st_size,
-                "allocated_bytes": getattr(metadata, "st_blocks", 0) * 512,
-                "files": 1,
-                "exists": True,
-            }
         apparent = allocated = count = 0
         seen: set[tuple[int, int]] = set()
-        for parent, directories, names in os.walk(path, followlinks=False):
-            directories[:] = [
-                name for name in directories if not (Path(parent) / name).is_symlink()
-            ]
-            for name in names:
-                item = Path(parent) / name
-                if item.is_symlink() or not item.is_file():
-                    continue
-                stat = item.stat()
-                count += 1
-                apparent += stat.st_size
-                inode = (stat.st_dev, stat.st_ino)
-                if inode not in seen:
-                    allocated += getattr(stat, "st_blocks", 0) * 512
-                    seen.add(inode)
+        for metadata in StorageOperations._file_stats(path):
+            count += 1
+            apparent += metadata.st_size
+            inode = (metadata.st_dev, metadata.st_ino)
+            if metadata.st_nlink == 1 or inode not in seen:
+                allocated += getattr(metadata, "st_blocks", 0) * 512
+            if metadata.st_nlink > 1:
+                seen.add(inode)
         return {
             "path": str(path),
             "bytes": apparent,
@@ -941,8 +1248,137 @@ class StorageOperations:
     @classmethod
     def _active_environment_references(cls, roots: Mapping[str, Path]) -> set[str]:
         """Protect the active pointer and direct jobs visible in durable remote state."""
+        return set(cls.environment_references(roots)["environments"])
+
+    @staticmethod
+    def _reference_snapshot(job: Path) -> str:
+        import hashlib
+
+        stat = job.stat()
+        digest = hashlib.sha256(f"{stat.st_dev}:{stat.st_ino}".encode())
+        for name in ("state.json", "request.json"):
+            path = job / name
+            if path.is_symlink():
+                raise ValueError(f"Symbolic ownership evidence: {path}")
+            digest.update(name.encode())
+            if path.exists():
+                if path.stat().st_size > 4 * 1024**2:
+                    raise ValueError(f"Oversized ownership evidence: {path}")
+                digest.update(path.read_bytes())
+        return digest.hexdigest()
+
+    @staticmethod
+    def _process_references(roots: Mapping[str, Path]) -> dict[str, Any]:
+        """Observe same-user process lifetimes and exact paths, without exporting argv/secrets."""
+        import psutil
+
+        environments: set[str] = set()
+        jobs: set[str] = set()
+        inspectable = True
+        env_root, job_root = roots["environments"], roots["job_workspaces"]
+        try:
+            for process in psutil.process_iter():
+                try:
+                    if process.pid == os.getpid() or process.uids().real != os.getuid():
+                        continue
+                    values = list(process.cmdline())
+                    try:
+                        values.append(process.cwd())
+                    except psutil.AccessDenied:
+                        # Same-user protected desktop/credential helpers need not expose
+                        # cwd/environ. Their readable argv still bounds owned prefixes;
+                        # descendants are independently enumerated below.
+                        pass
+                    try:
+                        environment = process.environ()
+                    except psutil.AccessDenied:
+                        environment = {}
+                    job = environment.get("LAMBDAFORGE_JOB_ID")
+                    if job:
+                        jobs.add(job)
+                    values.extend(
+                        environment.get(key, "") for key in ("VIRTUAL_ENV", "CONDA_PREFIX")
+                    )
+                    for value in values:
+                        if not value.startswith("/"):
+                            continue
+                        path = Path(os.path.abspath(value))
+                        for root, found in ((env_root, environments), (job_root, jobs)):
+                            try:
+                                relative = path.relative_to(root)
+                            except ValueError:
+                                continue
+                            if relative.parts:
+                                found.add(relative.parts[0])
+                except psutil.NoSuchProcess:
+                    continue
+                except (psutil.AccessDenied, OSError):
+                    inspectable = False
+        except (psutil.Error, OSError):
+            inspectable = False
+        return {"environments": environments, "jobs": jobs, "inspectable": inspectable}
+
+    @classmethod
+    def environment_references(
+        cls, roots: Mapping[str, Path], *, repair_preview: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Scope uncertainty to recorded references; expose unresolvable Jobs explicitly."""
         environment_root = roots["environments"].resolve()
         protected: set[str] = set()
+        issues: list[dict[str, Any]] = []
+        repairs = cls._read_json(roots["state"] / "storage-reference-repairs.json") or {}
+        repairs = {**repairs, "retired_jobs": dict(repairs.get("retired_jobs", {}))}
+        for item in (repair_preview or {}).get("retired_jobs", ()):
+            repairs["retired_jobs"][item["job_id"]] = item
+        retired: set[str] = set()
+        recovery_jobs: set[str] = set()
+        # Waiting FIFO tickets need exact predecessor ownership records even when their
+        # terminal Jobs are otherwise eligible for automatic workspace cleanup.
+        from lambdaforge.controlplane.ExecutionQueue import ExecutionQueue
+
+        queue_jobs: set[str] = set()
+        for queue in ExecutionQueue.for_storage(roots["state"], roots["job_workspaces"]):
+            queue_jobs.update(queue.retained_jobs())
+        tool_bundles: set[str] = set()
+
+        def add_tools(path: Path, *, required: bool = False) -> None:
+            if not required and not path.exists() and not path.is_symlink():
+                return
+            document = cls._read_json(path)
+            bindings = document.get("runtimes") if document else None
+            valid = (
+                document is not None
+                and document.get("tool_registry_version") == 1
+                and isinstance(bindings, dict)
+            )
+            values = list(bindings.values()) if isinstance(bindings, dict) else []
+            for binding in values:
+                if not isinstance(binding, dict) or any(
+                    not isinstance(binding.get(key), str)
+                    or not binding[key].startswith(prefix)
+                    or Path(binding[key]).name != binding[key]
+                    for key, prefix in (
+                        ("environment_id", "env-tool-"),
+                        ("entrypoint_bundle_id", "tool-code-"),
+                    )
+                ):
+                    valid = False
+            if not valid:
+                protected.update(p.name for p in roots["environments"].glob("env-tool-*"))
+                tool_bundles.update(p.name for p in roots["bundles"].glob("tool-code-*"))
+                issues.append(
+                    {
+                        "reason": "missing-or-corrupt-tool-bindings",
+                        "path": str(path),
+                        "action": "Restore audited tool bindings before collecting isolated tools.",
+                    }
+                )
+                return
+            for binding in values:
+                protected.add(binding["environment_id"])
+                tool_bundles.add(binding["entrypoint_bundle_id"])
+
+        add_tools(roots["state"] / "tool-runtimes.json")
         pointer = roots["state"] / "active-environment"
         # A concurrent activation can change the pointer after this collector starts.
         # Keep its invoked interpreter alive until evidence reads finish.
@@ -962,12 +1398,68 @@ class StorageOperations:
                 request = cls._read_json(child / "request.json")
                 if state and str(state.get("state")) in terminal:
                     continue
-                if not state or not request:
+                snapshot = cls._reference_snapshot(child)
+                if repairs.get("retired_jobs", {}).get(child.name, {}).get("snapshot") == snapshot:
+                    retired.add(child.name)
+                    continue
+                if not request:
                     protected.add("*")
+                    issues.append(
+                        {
+                            "job_id": child.name,
+                            "path": str(child),
+                            "reason": "missing-or-corrupt-request",
+                            "action": f"lf storage repair --retire-job {child.name}",
+                        }
+                    )
                     continue
                 command = request.get("command", ())
                 if isinstance(command, list):
                     candidates.extend(str(value) for value in command)
+                    add_tools(
+                        child / "tool-runtimes.json",
+                        required=any(
+                            str(a).startswith("LAMBDAFORGE_TOOL_RUNTIMES_PATH=") for a in command
+                        ),
+                    )
+                    # Recovery argv identifies original owned Executions even when the
+                    # controller catalog no longer contains their terminal owner Jobs.
+                    for argument in command:
+                        try:
+                            relative = Path(str(argument)).relative_to(job_root)
+                        except ValueError:
+                            continue
+                        if relative.parts and relative.parts[0] != child.name:
+                            recovery_jobs.add(relative.parts[0])
+                if not state:
+                    issues.append(
+                        {
+                            "job_id": child.name,
+                            "path": str(child),
+                            "reason": "missing-or-corrupt-state-scoped-to-request",
+                            "action": f"lf storage repair --retire-job {child.name}",
+                        }
+                    )
+        for job_id in recovery_jobs | queue_jobs:
+            request = cls._read_json(job_root / job_id / "request.json")
+            if request is not None and isinstance(request.get("command"), list):
+                candidates.extend(str(value) for value in request["command"])
+                add_tools(
+                    job_root / job_id / "tool-runtimes.json",
+                    required=any(
+                        str(a).startswith("LAMBDAFORGE_TOOL_RUNTIMES_PATH=")
+                        for a in request["command"]
+                    ),
+                )
+            elif job_id in recovery_jobs:
+                protected.add("*")
+                issues.append(
+                    {
+                        "job_id": job_id,
+                        "reason": "recovery-owner-request-missing",
+                        "action": "Restore original recovery ownership evidence before cleanup.",
+                    }
+                )
         for candidate in candidates:
             try:
                 # venv interpreters link outside the invoked environment prefix.
@@ -977,7 +1469,176 @@ class StorageOperations:
                 continue
             if relative.parts:
                 protected.add(relative.parts[0])
-        return protected
+        processes = cls._process_references(roots)
+        protected.update(processes["environments"])
+        for job_id in retired & processes["jobs"]:
+            protected.add("*")
+            issues.append(
+                {
+                    "job_id": job_id,
+                    "reason": "retired-reference-has-live-process",
+                    "action": "Inspect the live owner; retirement is not permission to evict it.",
+                }
+            )
+        if not processes["inspectable"]:
+            protected.add("*")
+            issues.append(
+                {
+                    "reason": "process-inspection-incomplete",
+                    "action": "Restore same-user process inspection; no death was inferred.",
+                }
+            )
+        return {
+            "environments": protected,
+            "issues": issues,
+            "retired_jobs": retired,
+            "protected_jobs": recovery_jobs | queue_jobs,
+            "tool_bundles": tool_bundles,
+        }
+
+    @classmethod
+    def repair_references(
+        cls,
+        descriptor: Mapping[str, Any],
+        selections: Mapping[str, Any],
+        *,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Audit explicit retirement of abandoned operational references, not scientific Jobs."""
+        from contextlib import nullcontext
+
+        from lambdaforge.work.models import atomic_json
+
+        roots = cls._roots(descriptor)
+        cache, state = roots["environments"].parent, roots["state"]
+        if apply:
+            cache.mkdir(parents=True, exist_ok=True)
+            state.mkdir(parents=True, exist_ok=True)
+        lock = (
+            CrossProcessFileLock(
+                cache / ".gc.lock", shared=False, timeout_seconds=1, poll_interval_seconds=0.05
+            )
+            if apply
+            else nullcontext()
+        )
+        with lock:
+            path = state / "storage-reference-repairs.json"
+            audit = cls._read_json(path) or {"version": 1, "retired_jobs": {}}
+            if path.is_symlink() or path.exists() and cls._read_json(path) is None:
+                raise ValueError("Corrupt reference-repair audit; no changes made.")
+            processes = cls._process_references(roots)
+            if not processes["inspectable"]:
+                raise ValueError(
+                    "Cannot repair references: same-user process inspection is incomplete."
+                )
+            retired: list[dict[str, Any]] = []
+            for job_id in selections.get("retire_jobs", ()):
+                if (
+                    not isinstance(job_id, str)
+                    or not job_id.startswith("job-")
+                    or any(value not in "abcdefghijklmnopqrstuvwxyz0123456789-" for value in job_id)
+                ):
+                    raise ValueError("Invalid exact Job identity for reference repair.")
+                job = roots["job_workspaces"] / job_id
+                if job.is_symlink() or not job.is_dir():
+                    raise ValueError(f"Unsafe/missing Job reference: {job}")
+                request = cls._read_json(job / "request.json")
+                observed = cls._read_json(job / "state.json")
+                if (
+                    job_id in processes["jobs"]
+                    or observed
+                    and observed.get("state")
+                    not in {
+                        "failed",
+                        "succeeded",
+                        "cancelled",
+                        "timeout",
+                        "planned",
+                        None,
+                    }
+                ):
+                    raise ValueError(
+                        f"Job {job_id} remains active or unresolved; reference retained."
+                    )
+                if request and request.get("scheduler") not in (None, "direct", "process", "local"):
+                    raise ValueError(f"Job {job_id} requires scheduler reconciliation first.")
+                if not request and descriptor.get("reconciliation_scheduler") == "slurm":
+                    raise ValueError(
+                        f"Job {job_id} requires scheduler ownership evidence before repair."
+                    )
+                snapshot = cls._reference_snapshot(job)
+                record = {
+                    "job_id": job_id,
+                    "path": str(job),
+                    "snapshot": snapshot,
+                    "reason": "explicit-abandoned-reference-retirement",
+                    "checked_at": time.time(),
+                }
+                audit["retired_jobs"][job_id] = record
+                retired.append(record)
+            released: list[dict[str, Any]] = []
+            for selection in selections.get("release_builds", ()):
+                name = str(selection.get("name", ""))
+                if (
+                    "/" in name
+                    or not name.startswith(".environment-build-")
+                    or not name.endswith(".lock")
+                ):
+                    raise ValueError("Invalid exact build marker.")
+                marker = cache / name
+                owner = cls._read_json(marker / "owner.json" if marker.is_dir() else marker)
+                if owner is None or owner != selection.get("owner"):
+                    raise ValueError(f"Build {name} has unreadable/changed ownership; retained.")
+                proof = selection.get("controller_proof", {})
+                dead = cls._orphan_lease(marker) or (
+                    proof.get("status") == "dead-or-reused"
+                    and proof.get("host") == owner.get("host")
+                    and proof.get("pid") == owner.get("pid")
+                )
+                if not dead or cls._orphan_builder_process_present(marker):
+                    raise ValueError(
+                        f"Build {name} still has live or unverified owners/descendants."
+                    )
+                if marker.is_dir() and {value.name for value in marker.iterdir()} != {"owner.json"}:
+                    raise ValueError(f"Build {name} has unexpected content; retained.")
+                identity = name.removeprefix(".environment-build-").removesuffix(".lock")
+                released.append({"name": name, "path": str(marker), "owner": owner})
+                audit.setdefault("retired_builds", {})[identity] = {
+                    "owner": owner,
+                    "retired_at": time.time(),
+                    "controller_proof": proof,
+                }
+            if apply:
+                for item in retired:
+                    if cls._reference_snapshot(Path(item["path"])) != item["snapshot"]:
+                        raise ValueError("Job ownership changed during reference repair.")
+                # Audit intent first. A crash or changed marker before removal remains
+                # protected: GC only consumes retired-build entries with NO current marker.
+                atomic_json(path, audit)
+                for item in released:
+                    marker, owner = Path(item["path"]), item["owner"]
+                    if (
+                        cls._read_json(marker / "owner.json" if marker.is_dir() else marker)
+                        != owner
+                    ):
+                        raise ValueError(f"Build {item['name']} changed during repair; retained.")
+                    cls._remove_owned(marker, cache)
+            return {
+                "applied": apply,
+                "retired_jobs": retired,
+                "released_builds": released,
+                "audit_path": str(path),
+                "preserved": [
+                    "all Job files",
+                    "checkpoints",
+                    "datasets",
+                    "results",
+                    "failure history",
+                ],
+                "note": (
+                    "Changed ownership evidence invalidates retirement; GC rechecks live processes."
+                ),
+            }
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any] | None:
@@ -985,7 +1646,7 @@ class StorageOperations:
             return None
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return None
         return value if isinstance(value, dict) else None
 
@@ -1004,6 +1665,12 @@ class StorageOperations:
             payload = cls.status(descriptor)
         elif values[0] == "reconcile" and len(values) == 4:
             payload = cls.reconcile(descriptor, apply=values[3] == "true")
+        elif values[0] == "repair" and len(values) == 4:
+            payload = cls.repair_references(
+                descriptor, json.loads(values[2]), apply=values[3] == "true"
+            )
+        elif values[0] == "reference-report" and len(values) == 4:
+            payload = cls.reference_report(descriptor)
         elif values[0] == "gc" and len(values) == 4:
             payload = cls.gc(descriptor, json.loads(values[2]), apply=values[3] == "true")
         elif values[0] == "prune-environments" and len(values) == 4:

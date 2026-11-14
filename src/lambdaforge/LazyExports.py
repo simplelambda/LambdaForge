@@ -38,3 +38,8 @@ class LazyExports(ModuleType):
                 namespace[name] = current
             return current
         return ModuleType.__getattribute__(self, name)
+
+    def __dir__(self) -> list[str]:
+        """Keep lazy public exports discoverable without importing their implementations."""
+        namespace = ModuleType.__getattribute__(self, "__dict__")
+        return sorted(set(namespace) | set(namespace.get("_lazy_exports", {})))

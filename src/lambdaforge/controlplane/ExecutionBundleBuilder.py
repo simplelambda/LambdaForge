@@ -16,6 +16,7 @@ from uuid import uuid4
 import yaml
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
+from lambdaforge.controlplane.DependencyLayer import DependencyLayer
 from lambdaforge.controlplane.EnvironmentIdentity import EnvironmentIdentity
 from lambdaforge.controlplane.ExecutionBundle import ExecutionBundle
 from lambdaforge.controlplane.NativeEnvironment import NativeEnvironmentSpecification
@@ -79,6 +80,9 @@ class ExecutionBundleBuilder:
             source, profile, staged, dependency_policy=dependency_policy
         )
         code_identity = CodeIdentity.capture(project_root).to_dict()
+        from lambdaforge.controlplane.ToolRuntimeSpecification import ToolRuntimeSpecification
+
+        tools = ToolRuntimeSpecification.discover(project_root)
         identity_payload = {
             "bundle_version": 4,
             "lambdaforge_version": LambdaForgeVersion.CURRENT,
@@ -89,6 +93,11 @@ class ExecutionBundleBuilder:
             "staged": [(relative, self._fingerprint(path)) for path, relative in staged],
             "shared_inputs": shared_inputs,
             "path_context": path_context,
+            **(
+                {"tool_runtime_declarations": [spec.descriptor() for spec in tools]}
+                if tools
+                else {}
+            ),
             **({"product_inputs": product_inputs} if product_inputs else {}),
             **({"result_inputs": result_inputs} if result_inputs else {}),
         }
@@ -325,6 +334,14 @@ class ExecutionBundleBuilder:
         remote_python = (
             torch_policy.get("python_version") if isinstance(torch_policy, dict) else None
         )
+        policy = dict(dependency_policy or {})
+        policy["dependency_layer"] = DependencyLayer.policy(
+            wheels,
+            policy,
+            offline_wheels=[
+                item for item in descriptors if str(item["name"]).startswith("wheelhouse/")
+            ],
+        )
         return EnvironmentIdentity.create(
             descriptors,
             python_requirement=(
@@ -333,7 +350,7 @@ class ExecutionBundleBuilder:
                 else f">={sys.version_info.major}.{sys.version_info.minor}"
             ),
             offline=profile.wheelhouse is not None,
-            dependency_policy=dependency_policy,
+            dependency_policy=policy,
         )
 
     @staticmethod

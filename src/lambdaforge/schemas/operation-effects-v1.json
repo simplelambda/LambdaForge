@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.github.io/lambdaforge/schemas/operation-effects-v1.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "capabilities", "authorization"],
+  "properties": {
+    "schema_version": {"const": "operation-effects-v1"},
+    "capabilities": {"type": "array", "uniqueItems": true, "items": {
+      "enum": ["read-data", "read-metadata", "network", "network-conditional", "learn-state",
+               "instance-state", "write-cache", "write-staging", "modify-external-source", "ddl-conditional"]}},
+    "authorization": {"enum": ["operator-required", "scoped-inputs"]}
+  }
+}

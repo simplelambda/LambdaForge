@@ -351,7 +351,8 @@ def test_editable_distribution_resolves_direct_url_not_virtualenv_parent(tmp_pat
 def test_cluster_bootstrap_requests_the_installed_framework_distribution(tmp_path: Path) -> None:
     """Regress the former ``.venv/lib/pythonX/pyproject.toml`` source-root assumption."""
     wheel = tmp_path / "lambdaforge-0.7.2-py3-none-any.whl"
-    wheel.write_bytes(b"framework-wheel")
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("lambdaforge.dist-info/METADATA", "Name: lambdaforge\nVersion: 0.7.2\n")
     builder = RecordingWheelBuilder(wheel)
     profile = ClusterProfile(
         "gpu",
@@ -412,8 +413,9 @@ def test_cluster_bootstrap_dry_run_does_not_build_or_stage_wheels(tmp_path: Path
 def test_bootstrap_project_installs_consumer_wheel_and_native_plan(tmp_path: Path) -> None:
     framework = tmp_path / "lambdaforge-0.12.0-py3-none-any.whl"
     consumer = tmp_path / "wisdom-1.0-py3-none-any.whl"
-    framework.write_bytes(b"framework")
-    consumer.write_bytes(b"consumer")
+    for path, name in ((framework, "lambdaforge"), (consumer, "wisdom")):
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(f"{name}.dist-info/METADATA", f"Name: {name}\nVersion: 1.0\n")
     project = tmp_path / "wisdom"
     project.mkdir()
     (project / "pyproject.toml").write_text(

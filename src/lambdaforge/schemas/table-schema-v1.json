@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.github.io/lambdaforge/schemas/table-schema-v1.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "columns"],
+  "properties": {
+    "schema_version": {"const": "table-schema-v1"},
+    "keys": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "columns": {"type": "array", "minItems": 1, "items": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "type": {"enum": ["string", "integer", "number", "boolean", "datetime", "json"], "default": "string"},
+        "nullable": {"type": "boolean", "default": false},
+        "invalid": {"enum": ["error", "null"], "default": "error"},
+        "null_values": {"type": "array", "items": {"type": "string"}},
+        "categories": {"type": "array"},
+        "date_format": {"type": ["string", "null"]},
+        "timezone": {"type": ["string", "null"]}
+      },
+      "allOf": [{"if": {"properties": {"invalid": {"const": "null"}}, "required": ["invalid"]},
+                 "then": {"required": ["nullable"], "properties": {"nullable": {"const": true}}}}]
+    }}
+  }
+}

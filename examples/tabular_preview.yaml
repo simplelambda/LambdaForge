@@ -1,0 +1,7 @@
+name: table-preview
+run: tabular_preview.TableReport
+with:
+  source: {file: table.csv}
+  delimiter: ","
+  limit: 100
+resources: {cpu: 1}

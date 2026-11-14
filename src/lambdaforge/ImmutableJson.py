@@ -15,10 +15,13 @@ from uuid import uuid4
 class FrozenJsonMapping(dict[str, Any]):
     """Retain JSON object encoding while rejecting ordinary mutation."""
 
-    def __init__(self, values: Mapping[str, Any] | None = None) -> None:
+    def __init__(self, values: Mapping[str, Any] | Iterable[tuple[str, Any]] | None = None) -> None:
+        # dict's construction protocol also accepts an iterable of pairs. dataclasses.asdict
+        # reconstructs dict subclasses using exactly that protocol, not necessarily a Mapping.
+        pairs = values.items() if isinstance(values, Mapping) else values
         dict.__init__(
             self,
-            {str(key): self.freeze_value(value) for key, value in (values or {}).items()},
+            {str(key): self.freeze_value(value) for key, value in (() if pairs is None else pairs)},
         )
 
     @classmethod

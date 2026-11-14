@@ -1,0 +1,10 @@
+{
+  "schema_version": "sample-schema-v1",
+  "fields": [
+    {"name": "features", "asset": "sample", "format": "npz", "path": ["x"], "dtype": "float32", "shape": [2], "axes": ["feature"]},
+    {"name": "context", "asset": "sidecar", "format": "json", "path": ["context"], "shape": [2]},
+    {"name": "extra", "asset": "extra", "format": "npy", "required": false, "missing": "default", "default": [0.0], "shape": [1], "role": "metadata"},
+    {"name": "target", "source": "targets", "path": ["y"], "role": "target", "shape": []}
+  ],
+  "bindings": {"x": "features", "context": "context"}
+}

@@ -222,7 +222,10 @@ def aggregate_research_work(records: Sequence[JobRecord]) -> tuple[ResearchWork,
     """Derive semantic work groups while leaving JobStore as the sole authority."""
     grouped: dict[tuple[str, str, str], list[JobRecord]] = defaultdict(list)
     for record in records:
-        if record.metadata.get("fleet_role") == "member":
+        if (
+            record.metadata.get("fleet_role") == "member"
+            or record.job_type == "dataset-replication"
+        ):
             continue
         identity_key = str(
             record.metadata.get("recovery_work_identity")

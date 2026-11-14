@@ -333,7 +333,7 @@ def test_invalid_complete_environment_is_never_replaced_behind_live_jobs(
     monkeypatch.setattr(
         provider,
         "_verify_reusable",
-        lambda *_args: CommandResult(1, stderr="corrupt Python inventory"),
+        lambda *_args, **_kwargs: CommandResult(1, stderr="corrupt Python inventory"),
     )
     bundle = ExecutionBundle(
         "bundle",

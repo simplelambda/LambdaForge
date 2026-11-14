@@ -119,6 +119,20 @@ class PNALayer(nn.Module):
         edge_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return node features with shape `(N, out_channels)`."""
+        return self.update(
+            x,
+            self.aggregate(
+                self.messages(x, edge_index, edge_features),
+                edge_index,
+                len(x),
+                degree_dtype=x.dtype,
+            ),
+        )
+
+    def messages(
+        self, x: torch.Tensor, edge_index: torch.Tensor, edge_features: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Apply only the existing pre-MLP to receiver/sender/edge states (E,M)."""
         if not isinstance(x, torch.Tensor):
             raise TypeError("x must be a torch.Tensor.")
         if x.ndim != 2 or x.shape[1] != self.in_channels:
@@ -142,8 +156,35 @@ class PNALayer(nn.Module):
         message_parts = [x[destination], x[source]]
         if normalized_edges is not None:
             message_parts.append(normalized_edges)
-        messages = self.pre_mlp(torch.cat(message_parts, dim=-1))
-        degree = torch.bincount(destination, minlength=num_nodes).to(device=x.device, dtype=x.dtype)
+        return self.pre_mlp(torch.cat(message_parts, dim=-1))
+
+    def aggregate(
+        self,
+        messages: torch.Tensor,
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        *,
+        degree_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        """Return (N,M*aggregators*scalers), using original topological degrees.
+
+        Ordering is scaler-major then aggregator-major, as in forward. Scale each
+        complete relation aggregate afterwards: scaling before std/max/min is not
+        in general an equivalent relation control.
+        """
+        if (
+            messages.ndim != 2
+            or messages.shape[1] != self.message_channels
+            or not messages.is_floating_point()
+        ):
+            raise ValueError(f"messages must be floating (E,{self.message_channels}).")
+        edges = GraphEdgeIndex.normalize(edge_index, device=messages.device, num_nodes=num_nodes)
+        if edges.shape[1] != len(messages):
+            raise ValueError("messages must align with edge_index.")
+        destination = edges[1]
+        degree = torch.bincount(destination, minlength=num_nodes).to(
+            device=messages.device, dtype=messages.dtype if degree_dtype is None else degree_dtype
+        )
         aggregated_values = [
             aggregator.reduce(messages, destination, num_nodes) for aggregator in self.aggregators
         ]
@@ -159,7 +200,18 @@ class PNALayer(nn.Module):
                         epsilon=self.epsilon,
                     )
                 )
-        return self.dropout(self.post_mlp(torch.cat((x, *combined), dim=-1)))
+        return torch.cat(combined, dim=-1)
+
+    def update(self, x: torch.Tensor, aggregated: torch.Tensor) -> torch.Tensor:
+        """Fuse root x and one composed aggregate in the existing post-MLP/dropout."""
+        if x.ndim != 2 or x.shape[1] != self.in_channels or not x.is_floating_point():
+            raise ValueError(f"x must be floating (N,{self.in_channels}).")
+        width = self.message_channels * len(self.aggregators) * len(self.scalers)
+        combined = GraphEdgeData.normalize_features(
+            aggregated, edge_channels=width, edge_count=len(x), reference=x, name="aggregated"
+        )
+        assert combined is not None
+        return self.dropout(self.post_mlp(torch.cat((x, combined), dim=-1)))
 
     @staticmethod
     def _positive_integer(value: int, name: str) -> int:

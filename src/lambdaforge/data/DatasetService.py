@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib
 import json
 import os
@@ -1213,6 +1214,7 @@ class DatasetService:
         route: str = "auto",
         progress: Callable[[Mapping[str, Any]], None] | None = None,
         expected_content_id: str | None = None,
+        site_password: str | None = None,
     ) -> DatasetMaterializationPlan:
         if route not in {"auto", "direct", "relay"}:
             raise ValueError("Dataset transfer route must be auto, direct or relay.")
@@ -1290,7 +1292,25 @@ class DatasetService:
                     self._publish_remote(target_resolution.record, destination)
                 self.registry.register(target_resolution.record)
             return plan
-        selected_route = self._transfer_route(source, destination, route)
+        from lambdaforge.data.DatasetTransferRouting import select_route
+
+        target = self.clusters.get(destination)
+        assert target.storage is not None
+        selected_route, route_diagnostics = select_route(
+            self,
+            source,
+            destination,
+            route,
+            source_root=placement.root,
+            target_options={"root": target.storage.dataset_root, "record": record.to_dict()},
+            site_password=site_password,
+        )
+        needs_relay = selected_route == "controller-stream"
+        if apply and needs_relay and route != "relay":
+            raise UnsafeDatasetOperationError(
+                "Controller relay requires explicit consent. Review the route diagnostics and "
+                "keep your PC online; retry with --route relay only if accepted."
+            )
         plan = DatasetMaterializationPlan(
             record.key,
             destination,
@@ -1298,55 +1318,81 @@ class DatasetService:
             source,
             estimated_bytes=placement.size_bytes,
             reason="Explicit placement replication.",
-            requires_controller_online=True,
+            requires_controller_online=selected_route not in {"direct-ssh", "direct-ssh-pull"},
             transfer_route=selected_route,
             compression="tar-gzip-3",
             content_id=record.dataset_id,
             applied=apply,
+            route_diagnostics=route_diagnostics,
+            data_path=(source, "controller", destination) if needs_relay else (source, destination),
+            execution_host=destination
+            if selected_route == "direct-ssh-pull"
+            else source
+            if selected_route == "direct-ssh"
+            else "local",
+            relay_consent_required=needs_relay and route != "relay",
             stages=tuple(
                 {"phase": phase}
                 for phase in ("verify-source", "transfer", "verify-destination", "register")
             ),
         )
         if apply:
+            if site_password is not None:
+                raise ValueError(
+                    "Use enqueue_replication for password-authenticated direct transfers."
+                )
             self._replicate(record, placement, destination, route=selected_route, progress=progress)
         return plan
 
+    def replication_preview(self, selector: str, **options: Any) -> DatasetMaterializationPlan:
+        """Preview durable replication, including whether its host is the controller PC."""
+        from lambdaforge.data.DatasetReplicationService import DatasetReplicationService
+
+        return DatasetReplicationService(self).preview(selector, **options)
+
+    def replication_ssh_trust(
+        self,
+        initiator: str,
+        peer: str,
+        *,
+        apply: bool = False,
+        fingerprints: builtins.list[str] | None = None,
+        expected_file: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview first-use peer host keys; explicit approval adds only unchanged offered keys.
+
+        Keyscan is not authentication. Verify fingerprints through a trusted channel first.
+        This never replaces existing keys, grants login or launches a Dataset transfer.
+        """
+        from lambdaforge.controlplane.SiteSshTrustService import SiteSshTrustService
+
+        return SiteSshTrustService(self).inspect(
+            initiator, peer, apply=apply, fingerprints=fingerprints, expected_file=expected_file
+        )
+
+    def enqueue_replication(self, selector: str, **options: Any) -> DatasetMaterializationPlan:
+        """Start a durable operational Job; closing the UI does not stop replication."""
+        from lambdaforge.data.DatasetReplicationService import DatasetReplicationService
+
+        return DatasetReplicationService(self).enqueue(selector, **options)
+
+    def replications(self, selector: str | None = None) -> builtins.list[dict[str, Any]]:
+        """Read the bounded native replication Job history for this project."""
+        from lambdaforge.data.DatasetReplicationService import DatasetReplicationService
+
+        return DatasetReplicationService(self).list(selector)
+
+    def replication_status(self, job_id: str) -> dict[str, Any]:
+        """Reconnect to an exact replication Job and reconcile verified placement metadata."""
+        from lambdaforge.data.DatasetReplicationService import DatasetReplicationService
+
+        return DatasetReplicationService(self).status(job_id)
+
     def _transfer_route(self, source: str, destination: str, route: str) -> str:
         """Probe site SSH without credentials forwarding or any dataset mutation."""
-        origin, target = self.clusters.get(source), self.clusters.get(destination)
-        if target.storage is None or (
-            target.storage.dataset_root is None and destination != "local"
-        ):
-            raise ValueError(
-                "Configure storage.dataset_root on the destination before replication."
-            )
-        if origin.transport == "local" or target.transport == "local":
-            return "local-stream" if origin.transport == target.transport else "controller-stream"
-        if route == "relay":
-            return "controller-stream"
-        transport = self.factory.transport(origin)
-        python = self._python(destination, self.factory.transport(target))
-        try:
-            result = transport.run(
-                self._site_ssh(
-                    target,
-                    (*target.command_prefix, python, "-c", "print('LF_DATA_TRANSFER_READY')"),
-                ),
-                timeout=20,
-            )
-            ready = result.returncode == 0 and result.stdout.strip() == "LF_DATA_TRANSFER_READY"
-        except Exception:
-            ready = False
-        if ready:
-            return "direct-ssh"
-        if route == "direct":
-            raise UnsafeDatasetOperationError(
-                "Direct site SSH is unavailable. Configure host keys/site authentication between "
-                "the clusters, or use --route auto/relay for compressed streaming "
-                "without local disk."
-            )
-        return "controller-stream"
+        from lambdaforge.data.DatasetTransferRouting import select_route
+
+        return select_route(self, source, destination, route)[0]
 
     @staticmethod
     def _site_ssh(target: Any, command: tuple[str, ...]) -> tuple[str, ...]:
@@ -1525,7 +1571,7 @@ class DatasetService:
         if progress:
             progress(
                 {
-                    "phase": "transfer",
+                    "phase": "verify-source",
                     "route": selected_route,
                     "message": "Verifying source, then transferring compressed Dataset bytes.",
                 }
@@ -1547,6 +1593,35 @@ class DatasetService:
             if result.returncode:
                 raise RuntimeError("Direct Dataset replication failed: " + result.stderr[-3000:])
             response = json.loads(result.stdout)
+        elif selected_route == "direct-ssh-pull":
+            result = receiver.run(
+                (
+                    *target.command_prefix,
+                    target_python,
+                    "-c",
+                    helper,
+                    "pull",
+                    options,
+                    json.dumps(
+                        self._site_ssh(
+                            origin,
+                            (
+                                *origin.command_prefix,
+                                source_python,
+                                "-c",
+                                helper,
+                                "pack",
+                                source.root,
+                                record.dataset_id,
+                            ),
+                        )
+                    ),
+                ),
+                timeout=86400,
+            )
+            if result.returncode:
+                raise RuntimeError("Direct Dataset pull failed: " + result.stderr[-3000:])
+            response = json.loads(result.stdout)
         else:
             transferred = 0
             last_update = 0.0
@@ -1564,12 +1639,31 @@ class DatasetService:
                     )
                 ) as content,
             ):
+                # pack publishes its bounded header only *after* source verification. Until
+                # it arrives, zero transferred bytes is verification, not a fabricated stall.
+                header = content.stdout.readline(65537)
+                if not header or len(header) > 65536:
+                    content.wait()
+                    raise ValueError("Missing/oversized source transfer header.")
+                try:
+                    sink.stdin.write(header)
+                except (EOFError, OSError) as error:
+                    raise RuntimeError(
+                        f"Transfer receiver {destination} failed during transfer: "
+                        f"{type(error).__name__}: "
+                        f"{error}; receiver={sink.diagnostics()}; sender={content.diagnostics()}. "
+                        "SSH EOF alone cannot distinguish network loss from receiver exit."
+                    ) from error
                 while chunk := content.stdout.read(1024 * 1024):
                     try:
                         sink.stdin.write(chunk)
-                    except BrokenPipeError:
-                        sink.wait()
-                        raise
+                    except (EOFError, OSError) as error:
+                        raise RuntimeError(
+                            f"Transfer receiver {destination} failed during transfer after "
+                            f"{transferred} compressed bytes: {type(error).__name__}: {error}; "
+                            f"receiver={sink.diagnostics()}; sender={content.diagnostics()}. "
+                            "SSH EOF alone cannot distinguish network loss from receiver exit."
+                        ) from error
                     transferred += len(chunk)
                     now = time.monotonic()
                     if progress and now - last_update >= 1.0:
@@ -1609,6 +1703,14 @@ class DatasetService:
         ):
             raise ValueError("Dataset replication returned mismatched placement metadata.")
         updated = replace(record, placements=(*record.placements, placement))
+        if progress:
+            progress(
+                {
+                    "phase": "publication",
+                    "route": selected_route,
+                    "message": "Registering the exact verified destination placement.",
+                }
+            )
         self.registry.register(updated)
         if progress:
             progress(
@@ -1658,16 +1760,17 @@ class DatasetService:
         profile = self.clusters.get(cluster)
         assert profile.storage is not None
         transport = self.factory.transport(profile)
-        python = self._python(profile.name, transport)
+        python = profile.python
         registry_path = str(PurePosixPath(profile.storage.state_root) / "datasets.json")
         try:
             result = transport.run(
                 (
                     *profile.command_prefix,
                     python,
-                    "-m",
-                    "lambdaforge.data.DatasetRegistry",
-                    "inventory",
+                    "-I",
+                    "-S",
+                    "-c",
+                    DatasetRegistry.inventory_read_script(),
                     registry_path,
                 ),
                 timeout=30.0,
@@ -1684,27 +1787,13 @@ class DatasetService:
                 f"Reason: {result.stderr.strip()}"
             )
         try:
-            value = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError as error:
+            inventory = DatasetRegistry.decode_inventory(result.stdout, source=registry_path)
+        except DatasetRegistryCorruptionError as error:
             raise DatasetRegistryCorruptionError(
                 registry_path, str(error), cluster=cluster
             ) from error
-        if not isinstance(value, list):
-            raise DatasetRegistryCorruptionError(
-                registry_path, "inventory output is not a JSON list", cluster=cluster
-            )
         records = []
-        for item in value:
-            if not isinstance(item, Mapping):
-                raise DatasetRegistryCorruptionError(
-                    registry_path, "inventory contains a non-object entry", cluster=cluster
-                )
-            try:
-                record = DatasetRecord.from_mapping(item)
-            except (KeyError, TypeError, ValueError) as error:
-                raise DatasetRegistryCorruptionError(
-                    registry_path, f"invalid inventory record: {error}", cluster=cluster
-                ) from error
+        for record in inventory:
             placements = tuple(
                 placement for placement in record.placements if placement.cluster == cluster
             )
@@ -1847,9 +1936,15 @@ class DatasetService:
         return json.loads(result.stdout)
 
     def _active_consumers(self, record: DatasetRecord, cluster: str) -> tuple[str, ...]:
-        jobs = JobService(self.clusters, factory=self.factory).list(cluster=cluster, refresh=False)
+        jobs = JobService(self.clusters, factory=self.factory).list(refresh=False)
         active = []
         for job in jobs:
+            transfer = job.metadata.get("dataset_replication", {})
+            if job.cluster != cluster and cluster not in (
+                transfer.get("source"),
+                transfer.get("destination"),
+            ):
+                continue
             if job.state.terminal:
                 continue
             references = tuple(str(value) for value in job.metadata.get("datasets", ()))

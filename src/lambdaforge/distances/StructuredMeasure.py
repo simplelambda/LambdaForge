@@ -20,14 +20,19 @@ class StructuredMeasure:
     metric/precomputed cross-distance is supplied to FGW. Relative nonnegative weights
     are normalized explicitly here to probabilities; ``total_mass`` retains their sum.
     This is balanced probability FGW, not unbalanced transport of the original masses.
+    Explicit ``relational=True`` permits nonzero diagonal symmetric relationships
+    (for example a POT barycenter); it does not turn those relations into a metric.
     """
 
     structure: Any
     features: Any = None
     weights: Any = None
+    relational: bool = field(default=False, kw_only=True)
     total_mass: float = field(init=False)
 
     def __post_init__(self) -> None:
+        if np.iscomplexobj(self.structure) or np.iscomplexobj(self.weights):
+            raise ValueError("structure and weights must be real, not complex.")
         structure = np.array(self.structure, dtype=np.float64, copy=True)
         if structure.ndim != 2 or not len(structure) or structure.shape[0] != structure.shape[1]:
             raise ValueError("structure must be a nonempty square [N,N] matrix.")
@@ -37,7 +42,9 @@ class StructuredMeasure:
             )
         if not np.allclose(structure, structure.T, atol=1e-12, rtol=1e-10):
             raise ValueError("structure must be symmetric (undirected relationships).")
-        if not np.allclose(np.diag(structure), 0, atol=1e-12, rtol=0):
+        if not isinstance(self.relational, bool):
+            raise TypeError("relational must be an explicit boolean.")
+        if not self.relational and not np.allclose(np.diag(structure), 0, atol=1e-12, rtol=0):
             raise ValueError("structure must have a zero diagonal.")
         count = len(structure)
         weights = (
@@ -86,6 +93,8 @@ class StructuredMeasure:
         node attributes. A caller can instead supply shortest paths or any finite
         undirected dissimilarities to the constructor. SciPy is provided by the OT extra.
         """
+        if np.iscomplexobj(points):
+            raise ValueError("points must be real, not complex.")
         values = np.asarray(points, dtype=np.float64)
         if values.ndim != 2 or not all(values.shape) or not np.isfinite(values).all():
             raise ValueError("points must be a finite nonempty [N,D] array.")

@@ -28,6 +28,8 @@ from lambdaforge.data.DatasetTransfer import pack, receive
 
 @pytest.fixture
 def transfer(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
     source = tmp_path / "source"
     source.mkdir()
     (source / "payload.bin").write_bytes(b"deterministic scientific bytes\n" * 10000)
@@ -377,13 +379,16 @@ def test_direct_probe_is_read_only_secure_and_falls_back(transfer, monkeypatch):
 
     def probe(command, **_kwargs):
         commands.append(command)
+        if command[0] != "ssh":
+            return CommandResult(0, "LF_DATA_TRANSFER_READY\n", "")
         return CommandResult(255, "", "no site key")
 
     monkeypatch.setattr(transport, "run", probe)
     monkeypatch.setattr(service.factory, "transport", lambda _profile: transport)
     assert service._transfer_route("gpu12", "gpu16", "auto") == "controller-stream"
-    assert "StrictHostKeyChecking=yes" in commands[0] and "ForwardAgent=no" in commands[0]
-    assert "IdentityAgent=none" in commands[0]
+    ssh = next(command for command in commands if command[0] == "ssh")
+    assert "StrictHostKeyChecking=yes" in ssh and "ForwardAgent=no" in ssh
+    assert "IdentityAgent=none" in ssh
     with pytest.raises(Exception, match="site SSH is unavailable"):
         service._transfer_route("gpu12", "gpu16", "direct")
     monkeypatch.setattr(

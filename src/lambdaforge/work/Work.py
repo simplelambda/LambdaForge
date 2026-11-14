@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
@@ -99,6 +100,46 @@ class Work:
     def cache(self) -> WorkCache:
         """Reconstructible identity-scoped storage eligible for ``lf clean``."""
         return self._bound().cache
+
+    def validate_dataset(
+        self,
+        name: str,
+        *,
+        validator: Callable[[Path], bool | None],
+        contract: str,
+        version: str,
+        parameters: Mapping[str, Any] | None = None,
+        force: bool = False,
+        timeout_seconds: float = 3600,
+    ) -> Mapping[str, Any]:
+        """Reuse explicit scientific validation of an unchanged managed input across Runs.
+
+        Name an entry in ``self.inputs``. The callback validates immutable dataset content only,
+        not fitted training/normalization state. Declare all rule-dependent settings in parameters
+        and version the contract when its external dependencies change. The native code identity
+        is included automatically; seeds and unrelated training settings are not cache keys.
+        Returns a JSON receipt with ``reused``; never disables exact transport/publication checks.
+        """
+        from lambdaforge.data.DatasetValidationCache import DatasetValidationCache
+
+        runtime = self._bound()
+        root = Path(
+            os.environ.get("LAMBDAFORGE_CACHE_ROOT", runtime.source_dir / ".lambdaforge/cache")
+        )
+        self.log(f"Dataset validation {contract}: waiting for shared validation / checking receipt")
+        receipt = DatasetValidationCache(root / "work" / "dataset-validation").validate(
+            runtime.inputs[name],
+            validator=validator,
+            contract=contract,
+            version=version,
+            implementation=runtime.code_identity,
+            parameters=parameters,
+            force=force,
+            timeout_seconds=timeout_seconds,
+        )
+        status = "reused unchanged receipt" if receipt["reused"] else "validated and recorded"
+        self.log(f"Dataset validation {contract}: {status}")
+        return receipt
 
     @property
     def tools(self) -> ToolService:
@@ -224,6 +265,7 @@ class Work:
         validate: Callable[[R], bool] | None = None,
         retries: int = 0,
         retry_backoff: float = 0.5,
+        scientific_policy: Mapping[str, Any] | None = None,
     ) -> list[R]:
         """Apply with explicit stable keys and dependency-aware per-item resume."""
         return self._bound().resume_map(
@@ -237,6 +279,7 @@ class Work:
             validate=validate,
             retries=retries,
             retry_backoff=retry_backoff,
+            scientific_policy=scientific_policy,
         )
 
     def _bind(self, runtime: WorkRuntime) -> None:

@@ -6,7 +6,11 @@ import os
 import pytest
 
 from lambdaforge.controlplane.ProcessIdentity import ProcessIdentity
-from lambdaforge.runtime.SharedGPUAdmission import _fairness_peer, shared_gpu_launch
+from lambdaforge.runtime.SharedGPUAdmission import (
+    _fairness_peer,
+    _job_absence_proven,
+    shared_gpu_launch,
+)
 
 
 def launch(root, study, free, *, worker=None, observed=None, device="GPU-one"):
@@ -93,3 +97,83 @@ def test_unresolved_worker_owner_never_reclaims_commitment(tmp_path, monkeypatch
 def test_raw_ordinals_and_unsafe_roots_are_rejected(tmp_path):
     with pytest.raises(ValueError, match="UUID"):
         launch(tmp_path / "coord", "a", 100, device="0")
+
+
+@pytest.mark.parametrize("status", ["dead", "reused"])
+def test_deleted_job_reconciles_startup_and_admits_a_new_study(tmp_path, monkeypatch, status):
+    from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor
+
+    old_job = tmp_path / "jobs" / "job-old"
+    old_job.parent.mkdir()
+    root = tmp_path / "coord"
+    monkeypatch.setenv("LAMBDAFORGE_JOB_ID", old_job.name)
+    assert (
+        shared_gpu_launch(
+            root,
+            "GPU-one",
+            lambda: "old",
+            stagger_seconds=0,
+            startup_bytes=100,
+            metadata={
+                "study": "old",
+                "job_state_path": str(old_job / "state.json"),
+                "worker_identity_path": str(old_job / "worker.json"),
+            },
+        )
+        == "old"
+    )
+    monkeypatch.setenv("LAMBDAFORGE_JOB_ID", "job-new")
+    monkeypatch.setattr(
+        ProcessIdentity,
+        "storage_status",
+        lambda self: status if self.job_id == "job-old" else "alive",
+    )
+    monkeypatch.setattr(ProcessSupervisor, "_process_markers", lambda: ({"job-new": [123]}, []))
+    assert launch(root, "new", 100) == "new"
+    records = json.loads(next(root.glob("*.json")).read_text())["commitments"]
+    assert len(records) == 1
+    assert records[0]["metadata"]["study"] == "new"
+    assert not old_job.exists()  # No fabricated state or persisted scientific edits.
+
+
+@pytest.mark.parametrize("status", ["alive", "unresolved", "dead"])
+@pytest.mark.parametrize("evidence", ["clear", "orphan", "unknown"])
+def test_deleted_job_requires_native_absence_not_just_missing_files(
+    tmp_path, monkeypatch, status, evidence
+):
+    from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor
+
+    owner = ProcessIdentity(100, 100, 100.0, "digest", "job-old")
+    monkeypatch.setattr(ProcessIdentity, "storage_status", lambda self: status)
+    monkeypatch.setattr(ProcessSupervisor, "_host_boot_time", lambda: None)
+    monkeypatch.setattr(
+        ProcessSupervisor,
+        "_process_markers",
+        lambda: (
+            {"job-old": [101]} if evidence == "orphan" else {},
+            [{"pid": 102}] if evidence == "unknown" else [],
+        ),
+    )
+    metadata = {"job_state_path": str(tmp_path / "job-old" / "state.json")}
+    assert _job_absence_proven(metadata, owner) == (status == "dead" and evidence == "clear")
+
+
+def test_existing_corrupt_or_unsafe_job_does_not_use_detached_absence(tmp_path, monkeypatch):
+    from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor
+
+    owner = ProcessIdentity(100, 100, 100.0, "digest", "job-old")
+    job = tmp_path / owner.job_id
+    job.mkdir()
+    (job / "state.json").write_text("not-json")
+    (job / "request.json").write_text("{}")
+    monkeypatch.setattr(ProcessIdentity, "storage_status", lambda self: "dead")
+    monkeypatch.setattr(ProcessSupervisor, "_process_markers", lambda: ({}, []))
+    assert not _job_absence_proven({"job_state_path": str(job / "state.json")}, owner)
+    assert not _job_absence_proven(
+        {"job_state_path": str(tmp_path / "job-other" / "state.json")}, owner
+    )
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    assert not _job_absence_proven(
+        {"job_state_path": str(alias / owner.job_id / "state.json")}, owner
+    )

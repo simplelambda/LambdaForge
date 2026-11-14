@@ -83,6 +83,11 @@ class ClusterService:
         ):
             raise ValueError("Bootstrap from the consumer project's directory to select its scope.")
         native_specification = NativeEnvironmentSpecification.discover(project_root)
+        from lambdaforge.controlplane.ToolRuntimeService import ToolRuntimeService
+        from lambdaforge.controlplane.ToolRuntimeSpecification import ToolRuntimeSpecification
+
+        tool_specs = ToolRuntimeSpecification.discover(project_root)
+        tool_service = ToolRuntimeService(self.runtime_resolver)
         requirements = self._requirements(project_root, native_specification)
         assert profile.storage is not None
         if wheelhouse is not None:
@@ -111,6 +116,7 @@ class ClusterService:
                         else None
                     ),
                     planned=True,
+                    tool_runtimes=tool_service.plan(tool_specs),
                 )
             planned_runtime = self.runtime_resolver.resolve(
                 profile,
@@ -155,6 +161,7 @@ class ClusterService:
                 runtime=planned_runtime.to_dict(),
                 native_environment=native_summary,
                 planned=True,
+                tool_runtimes=tool_service.plan(tool_specs),
             )
             report("Dry-run complete; no remote state was changed.")
             return planned
@@ -219,7 +226,10 @@ class ClusterService:
                     f"release and project dependencies: {probe.stderr.strip()}"
                 )
             report("Bootstrap complete; the existing environment is ready.")
-            return ClusterBootstrapResult(cluster, "existing", profile.python, True)
+            tools = tool_service.prepare(tool_specs, profile, transport, progress=report)
+            return ClusterBootstrapResult(
+                cluster, "existing", profile.python, True, tool_runtimes=tools
+            )
 
         assert torch_plan is not None
         assert runtime is not None
@@ -268,6 +278,18 @@ class ClusterService:
                         "size_bytes": dependency.stat().st_size,
                     }
                 )
+        from lambdaforge.controlplane.DependencyLayer import DependencyLayer
+
+        dependency_policy = {
+            **dependency_policy,
+            "dependency_layer": DependencyLayer.policy(
+                package_wheels,
+                dependency_policy,
+                offline_wheels=[
+                    item for item in descriptors if str(item["name"]).startswith("wheelhouse/")
+                ],
+            ),
+        }
         identity = EnvironmentIdentity.create(
             descriptors,
             python_requirement=f"=={'.'.join(runtime.version.split('.')[:2])}.*",
@@ -319,6 +341,7 @@ class ClusterService:
         prepared = self.factory.environment_provider(effective_profile).prepare(
             effective_profile, transport, bundle, remote_bundle_dir=str(remote)
         )
+        tools = tool_service.prepare(tool_specs, profile, transport, progress=report)
         report("Activating the verified runtime and pruning superseded environments.")
         self.runtime_resolver.activate(profile, transport, runtime)
         cleanup = StorageService(self.catalog, self.factory).prune_environments(
@@ -334,7 +357,12 @@ class ClusterService:
             pytorch=torch_plan.to_dict(),
             runtime=runtime.to_dict(),
             native_environment=native_plan.to_dict() if native_plan is not None else None,
+            native_library_policy=prepared.library_policy.to_dict()
+            if prepared.library_policy
+            else None,
+            native_libraries=prepared.library_evidence,
             planned=False,
+            tool_runtimes=tools,
             pruned_environments=tuple(str(value) for value in cleanup.get("pruned", ())),
             cleanup_blocked_reason=(
                 str(cleanup["blocked_reason"]) if cleanup.get("blocked_reason") else None

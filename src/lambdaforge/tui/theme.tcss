@@ -306,6 +306,22 @@ ContextHelp, ExplanationDialog, ClusterEditor, WorkLaunchDialog, YamlFilePicker,
     width: 78;
 }
 
+#execution-queue-dialog {
+    width: 92;
+    height: 90%;
+}
+
+#execution-queue-table {
+    height: 1fr;
+    min-height: 3;
+    margin: 1 0;
+}
+
+#execution-queue-status {
+    max-height: 4;
+    overflow-y: auto;
+}
+
 #work-launch-dialog, #yaml-picker-dialog {
     width: 92;
     height: 90%;

@@ -27,6 +27,19 @@ from lambdaforge.work.atomic import _fsync_directory
 from lambdaforge.work.models import atomic_json
 
 
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"Duplicate Study metadata field {key!r}.")
+        value[key] = item
+    return value
+
+
+def _invalid(value: str) -> None:
+    raise ValueError(f"Non-finite Study metadata: {value}")
+
+
 def _mapping(path: Path, *, verified_aggregate: bool = False) -> dict[str, Any]:
     """Explicit import may inspect a large aggregate, never an unbounded individual document."""
     if (
@@ -36,19 +49,8 @@ def _mapping(path: Path, *, verified_aggregate: bool = False) -> dict[str, Any]:
     ):
         raise ValueError(f"Missing, symbolic or oversized Study import document: {path.name}")
 
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        value: dict[str, Any] = {}
-        for key, item in pairs:
-            if key in value:
-                raise ValueError(f"Duplicate Study metadata field {key!r}.")
-            value[key] = item
-        return value
-
-    def invalid(value: str) -> None:
-        raise ValueError(f"Non-finite Study metadata: {value}")
-
     with path.open(encoding="utf-8") as stream:
-        value = json.load(stream, object_pairs_hook=unique, parse_constant=invalid)
+        value = json.load(stream, object_pairs_hook=_unique, parse_constant=_invalid)
     if not isinstance(value, dict):
         raise ValueError(f"Study import metadata must be an object: {path.name}")
     return value
@@ -77,6 +79,52 @@ def _files(root: Path) -> dict[str, Path]:
                     raise ValueError("Study import requires independent files, not hard links.")
                 files[path.relative_to(root).as_posix()] = path
     return files
+
+
+def _active_fingerprint(root: Path, origin: Mapping[str, Any], expected: Any) -> str:
+    """Preserve immutable origin identity while verifying native recovery attestations."""
+    original = origin.get("scientific_fingerprint")
+    if not all(
+        isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+        for value in (original, expected)
+    ):
+        raise ValueError("Study recovery scientific identity is missing or malformed.")
+    if original == expected:
+        return original
+    revision = _mapping(root / "execution/current-code.json")
+    if revision.get("scientific_fingerprint") != expected:
+        raise ValueError("Study recovery revision differs from its export manifest.")
+    history = root / "execution/recovery-history.jsonl"
+    if not history.is_file() or history.stat().st_size > 64 * 1024 * 1024:
+        raise ValueError("Study recovery history is missing or oversized.")
+    last = None
+    with history.open(encoding="utf-8") as stream:
+        while line := stream.readline(1024 * 1024 + 1):
+            if len(line) > 1024 * 1024:
+                raise ValueError("Study recovery record exceeds its metadata bound.")
+            if not line.strip():
+                continue
+            record = json.loads(line, object_pairs_hook=_unique, parse_constant=_invalid)
+            if (
+                not isinstance(record, dict)
+                or record.get("compatible_evidence_reuse") is not True
+                or not isinstance(record.get("code_identity"), dict)
+                or not record["code_identity"]
+                or not isinstance(record.get("scientific_fingerprint"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", record["scientific_fingerprint"])
+            ):
+                raise ValueError("Study recovery history has an invalid native attestation.")
+            timestamp = record.get("timestamp_utc")
+            if not isinstance(timestamp, str) or datetime.fromisoformat(timestamp).tzinfo is None:
+                raise ValueError("Study recovery history requires a timezone-aware timestamp.")
+            last = record
+    if (
+        last is None
+        or last["scientific_fingerprint"] != expected
+        or last["code_identity"] != revision.get("code_identity")
+    ):
+        raise ValueError("Study recovery history differs from its current revision.")
+    return expected
 
 
 def _verify(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
@@ -137,10 +185,10 @@ def _verify(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
     if (
         origin.get("execution_id") != execution_id
         or origin.get("name") != manifest.get("name")
-        or origin.get("scientific_fingerprint") != manifest.get("scientific_fingerprint")
         or origin.get("ownership", {}).get("execution_dir") != "owned"
     ):
         raise ValueError("Study provenance identity/ownership differs from its manifest.")
+    active_fingerprint = _active_fingerprint(root, origin, manifest.get("scientific_fingerprint"))
     _mapping(root / "execution" / "configuration.json")
     finalized = manifest.get("finalized")
     if type(finalized) is not bool or manifest.get("export_kind") not in {"snapshot", "final"}:
@@ -154,7 +202,7 @@ def _verify(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
             type(result.get("execution_result_version")) is not int
             or result["execution_result_version"] != 1
             or result.get("execution_id") != execution_id
-            or result.get("scientific_fingerprint") != origin.get("scientific_fingerprint")
+            or result.get("scientific_fingerprint") != active_fingerprint
             or result.get("status") != manifest.get("execution_status")
             or result.get("name") != manifest.get("name")
             or not isinstance(result.get("runs"), list)
@@ -177,7 +225,7 @@ def _verify(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
         result = {
             "execution_result_version": 1,
             "execution_id": execution_id,
-            "scientific_fingerprint": origin["scientific_fingerprint"],
+            "scientific_fingerprint": active_fingerprint,
             "name": manifest["name"],
             "status": manifest.get("status", "unknown"),
             "runs": [],

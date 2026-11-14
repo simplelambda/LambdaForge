@@ -81,6 +81,8 @@ class InstallationTransport(Transport):
         self.commands.append(values)
         if values[:2] == ("test", "-f"):
             return CommandResult(0 if values[2] in self.files else 1)
+        if values[-4:] == ("-m", "pip", "list", "--format=json"):
+            return CommandResult(0, "[]")
         if "Path(sys.argv[1]).write_text" in " ".join(values):
             self.files.add(values[-2])
         return CommandResult(0, "0.6.0 2.12.1+cu126 12.6 True\n", "")

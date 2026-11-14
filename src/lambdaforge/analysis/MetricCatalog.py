@@ -86,10 +86,13 @@ def _metadata(value: Any, label: str) -> dict[str, Any]:
     choices = {
         "direction": {"min", "max", "unknown"},
         "scale": {"linear", "log"},
-        "split": {"train", "validation", "test", "unspecified"},
         "visibility": {"primary", "normal", "advanced", "hidden"},
         "aggregation": {"selected_epoch", "latest", "best", "terminal", "mean", "unspecified"},
     }
+    if "split" in data and (
+        not isinstance(data["split"], str) or not data["split"].strip() or len(data["split"]) > 160
+    ):
+        raise ValueError(f"{label}.split must be a nonempty dataset partition name.")
     for field, allowed in choices.items():
         if field in data and data[field] not in allowed:
             raise ValueError(f"{label}.{field} must be one of {sorted(allowed)}.")

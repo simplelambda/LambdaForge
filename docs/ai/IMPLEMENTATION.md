@@ -11,6 +11,565 @@ Release scope: LambdaForge 0.19.0 packages the implemented foundations and opera
 The original 0.18.0 baseline and verification history below remain historical; this version bump
 does not change the pending acceptance items or enable unsupported scientific mutations.
 
+## Selected native library resolution — 2026-11-14
+
+Managed Conda launch now binds `native-prefix-libraries-v1` to its selected dependency prefix,
+including code venvs. A stdlib-only `-I -S` bootstrap execs the target with scoped loader selection
+before imports/site hooks; no global export, dependency downgrade, import-order workaround or
+prefix/binary edit. Absolute inherited driver paths remain after the selected directory; empty
+or relative entries are omitted. GPU visibility/grants are copied unchanged. Direct supervisors
+also start under the native envelope, rather than importing Torch before it. SLURM receives that
+same scientific argv, and normal descendants inherit the environment. Named isolated runtimes
+detach consumer-injected paths; active-native `tools.run(env=...)` cannot replace loader variables.
+
+Readiness/reuse checks both import orders, small CPU Torch/KDTree operations and actual loaded
+C++/GCC origins. Bootstrap, Job, new receipts and Run provenance expose policy/loaded paths.
+Cached immutable prefixes/old evidence are never rewritten; compatible bases reuse a fresh
+attestation while current exact execution wheels carry the new framework code.
+
+Native regressions compile two local ELF runtimes with incompatible CXXABI versions and reproduce
+the first-load failure, then verify selection in either order. Installed Torch/SciPy are exercised
+in CPU-only subprocesses and a detached disposable supervisor/child; `/proc` confirms loaded paths.
+No dependency downloads/installations or WISDOM source/data/remote Job mutations were performed.
+Real ctgpgpu16 bootstrap/retry remains an operator action, not claimed cluster acceptance.
+An initial broad run hit an unrelated GPU fixture admission timeout; final verification restricts
+CUDA visibility to empty in the test invocation. Three manual supervisor fixtures now include the
+storage metadata already required by the native request contract; no queue/backend behavior was
+changed to mask their missing metadata. APBS exit-13 and stable-prefix PDB2PQR regressions remain.
+Final CPU-scoped verification: 236 pytest cases passed, 2 CUDA-only cases skipped; Ruff and
+focused mypy (12 files) passed. No claim is made about live GPU/ctgpgpu16 interoperability.
+
+## Stable-prefix managed publication — 2026-11-14
+
+Confirmed locally that renaming an installed prefix breaks both a pip-created absolute console
+script and shell/Python launchers (exit 127). Managed dependency and execution layers now install
+at their lifetime paths; only readiness is atomically published after final-path verification.
+No binary/text prefix substitutions or consumer-specific launcher patches. The native build/GC
+lease covers the entire transition, and micromamba receives an empty prefix. Readiness receipts
+attest the publication contract/path; failures retain redacted, owned diagnostics and are not active.
+
+Environment identity v4 and dependency contract v2 select distinct prefixes without mutating old
+Jobs' installations. A validated previous frozen resolution is read-only migration evidence and
+supplies exact pins; missing/bad authoritative receipts are not fabricated. Known failed unsealed
+builds are collectable only through native GC without active/recovery references. Unresolved
+interrupted builds remain protected. No release version is changed. Manual §10 documents native
+bootstrap/retry and optional preview/apply cleanup, not manual remote launcher edits.
+
+Acceptance uses real local fixture wheels, console/shell processes, native metadata/inventory
+checks, concurrent preparation and live build/GC locks; the heavyweight Conda download/solve and
+Torch import are fixture substitutes. APBS's strict version exception remains tested. The lease
+fresh-heartbeat regression now samples time at test execution instead of collection, preventing a
+long combined suite from accidentally turning its fresh heartbeat stale. Real micromamba/PDB2PQR
+bootstrap and the reported WISDOM retry are deliberately not run: they need operator authorization.
+No WISDOM source/data, remote prefixes, Jobs or scientific records were modified. Verification:
+202 targeted pytest cases passed across publication, probing, native/layered environments,
+bootstrap/runtime, storage and ownership suites; Ruff and focused mypy passed. Documented
+bootstrap/retry/cleanup commands were parser-checked without invoking any backend action.
+
+## Managed native version probing — 2026-11-14
+
+The common managed-prefix probe now verifies APBS's owning package and version banner, allowing
+only APBS 3.4.1 `--version` to return 13. Other nonzero exits remain failures. Bootstrap, submission
+and cache reuse use this same check; executable containment/ownership and exact Conda inventory
+verification remain in force. Probe receipts/failures include argv, status and bounded diagnostics.
+Native regressions execute disposable local binaries and check successful/failing probes, ordinary
+fallback, provenance, prefix escape and package build drift on reuse. No packages were installed,
+no WISDOM Job was launched, and no managed remote prefix was changed. Remote deployment and real
+APBS preparation remain operator actions after updating the controller's LambdaForge build.
+
+## Chained bounded Work recovery — 2026-11-12
+
+Corrected the current working-tree inspector: it previously checked every later Attempt's input
+path against the origin Job before applying any revision handling. Attempt 1 now exclusively
+anchors historical role bindings. Every later Attempt validates its exact Run/Attempt envelope,
+own Job/bundle/configuration, role set, raw bytes, compatible historical fingerprints/sizes and
+non-bounded scientific parameters. Different Job owners additionally require an owned request in
+the same placement, targeting the original Execution, and an accepted native recovery audit.
+No search for a convenient passing Attempt and no skip of contradictory/corrupt evidence.
+Diagnostics retain the cause and identify Attempt, actual/origin owners and input role where
+applicable; repair of infrastructure provenance is not a request to change scientific YAML.
+
+Legacy v3/v4 bundle/Attempt receipts and either recorded compatible historical/own-basename input
+fingerprints remain read-only. Missing origin evidence or unprovable later lineage is refused.
+The same helper serves CLI, Console and native recovery. A current metadata preview can run on
+an old host interpreter but does not upgrade/attest it: prepared-runtime capability
+`bounded-role-chain-v2` is required before scientific handoff. Managed preparation selects current
+exact LF wheels; old existing interpreters fail with an update/bootstrap diagnostic, not a late
+foreign-path exception. No historical prefix is patched.
+
+Offline native tests execute first failure, accepted-code recovery/failure, second recovery/failure
+and third recovery/success across distinct staged Job roots, including renamed files. Six role
+identities, original manifests/results and expensive producer checkpoints survive unchanged.
+Tests reject changed equal-length bytes, swapped/duplicate roles, forged owner/Execution/placement
+requests, missing/corrupt bundles/audit, symlinks, traversal and changed scientific parameters.
+Console tests use the actual native preview for both success and actionable failure, without a
+real submission. Runtime-capability tests reject old/missing helpers. Ruff and mypy check touched
+interfaces; targeted recovery/Console regressions are recorded with final verification below.
+
+Both real read-only commands, for origin `job-20261111182119-e5e63cda` and recovery
+`job-20261112091733-4cb30fdc`, pass using the current inspector: same Execution
+`execution-95fe53f00a13002a`, Run `run-3bed97f306afd66f7dbe`, next Attempt 3. This is a valid plan,
+not evidence that the next WISDOM scientific computation will complete. No Job launch, recovery
+apply, historical record/checkpoint rewrite, deletion or WISDOM edit performed. Researcher applies
+against the latest failed recovery Job after deploying current LF through native preparation.
+Current read-only inventory confirms 450 geometry NPZs, 450 Zn annotations and 449 surface-view
+NPZs; these are existence counts, not substitutes for native hashes or WISDOM validators.
+Verification: 82 targeted recovery/Console tests pass, plus 62 adaptive/fixed/Study-retry regressions
+(overlapping cases). Ruff and mypy pass on the three touched production interfaces. Built-wheel
+smoke imports `bounded-role-chain-v2` and inspection helpers without Torch.
+
+## Historical bounded-file recovery identity — 2026-11-12
+
+Implemented `bounded-role-v1`, a scoped compatibility contract from original bundle raw transport
+receipts, exact configuration roles and owned Attempt input evidence. Current local/staged bytes
+must match; only then reconstruct original filename-bound digests. WorkConfig carries immutable
+operational bindings (not authored scientific overrides), passed through preview, dependency
+inspection, fixed/single validation and actual native Run specifications. Origin manifests, Run
+IDs and checkpoint ownership remain untouched; code acknowledgement stays independent. No global
+legacy identity redefinition, prefix guessing, symlink/copy workaround or directory-name relaxation.
+Diagnostics identify role, historical basename and expected/observed raw digests.
+
+Read-only inspection of Job `job-20261111182119-e5e63cda` confirms all six TXT raw hashes match
+their exact original bounded bundle receipts and current local roles. Recovery preview verifies
+scientific identity `sha256:95fe53f00a13002a70b7af4bc6cc9b16a27e57ecc1a55781752d2dd3f687c81d`,
+retains Run `run-3bed97f306afd66f7dbe` and proposes Attempt 2 with explicit code-change acknowledgement.
+Native metadata inventory: 323 frozen sources (156,005,809 bytes), 450 geometry NPZs
+(5,945,229,037 bytes), 450 annotations (32,801,030 bytes), 4,301 structural files
+(17,253,625,402 bytes). Collection preview sees 5,398 registered files, no missing/size-invalid
+registered payloads; registration is not full payload hash/application validation. Dependency
+preview reports 323 present/unverified references, zero unavailable and 1,223 source-unbound
+records; these are not universal proofs of scientific compatibility. WISDOM validators must run.
+
+Disposable tests cover duplicate authored basenames across roles, relocated YAML, a second native
+staging prefix, exact unchanged origin manifests, accepted/rejected code changes, equal-size
+content changes, swapped roles, missing/corrupt bundle receipts, preserved producer bytes,
+native public retry/dependency preview and failed checkpoint GC protection. No scientific Job,
+recovery apply, environment deployment, checkpoint relocation or WISDOM edit performed.
+The exact public `lf jobs retry job-20261111182119-e5e63cda --accept-code-change --dry-run`
+completes with `state: planned` and the original Execution/Run. Targeted recovery/dependency suite:
+95 passed (including 10 staged-identity cases); Ruff and mypy pass on the five changed interfaces.
+Built-wheel smoke verifies the installed `bounded-role-v1` helper and exact renamed-file identity
+without importing Torch or installing dependencies.
+Pending: researcher-approved real retry through updated managed LF; no expensive payload downloads
+or promise that all application validators will pass. Existing scientific/runtime safeguards remain.
+
+## Retained acquisition dependencies and HTTP cooldown — 2026-11-11
+
+Implemented durable per-Attempt cache namespace provenance, retained-Run reachability (including
+accepted revisions and local Job result references), GC deletion-time rechecks and protected
+bytes/chains/pressure reasons. Failed mapped Works retain potentially recoverable artifacts.
+Retention is conservatively namespace-level, not exact per-file reclamation. Live leases still
+protect writers. Deleting exact owning history releases references through existing native guards.
+
+Managed map references carry namespace/content evidence; recovery resolves only owned historical
+namespaces with exact fingerprints. Observed fetch receipts pin first-request contract/digest
+in the original Run; missing observations fail instead of querying a changed URL. Map inputs
+are explicit dependencies also under spawn, with optional scientific_policy; thread collectors
+also capture cache access. Hidden subprocess I/O and scientific validity cannot be inferred from
+PDB IDs, plain strings or a code acknowledgement. Consumers must expose ManagedFile inputs/results,
+seal external acquisitions with checkpoints and supply validators/policy. No WISDOM source edits.
+
+Native `jobs recovery-dependencies JOB` and typed services inventory metadata and bounded output.
+Explicit apply holds the Execution controller lock and cache/key/GC leases, verifies candidates
+against original historical logical-basename fingerprints and atomically copies matching bytes
+from owned artifacts, without moving checkpoints, creating symlinks, replaying URLs or science.
+Size-only candidates are unverified; missing/unbound records do not become successful evidence.
+Fixed the existing temporary-basename validation mismatch in ManagedFileStore builders without
+changing persisted fingerprint defaults or published identities.
+
+HTTP service cooldowns use shared-filesystem locks/deadlines across threads/processes. Retry-After
+seconds/date and explicit HttpCooldownPolicy JSON hints apply even after local retry exhaustion;
+cancellation and permanent errors remain bounded. This is not cross-host coordination without
+shared cache storage and does not replace instance-local rate pacing.
+
+Acceptance uses disposable fixtures: terminal quota pressure, accepted-code recovery with zero
+new HTTP calls, URL replay refusal, exact legacy artifact repair, live controller refusal,
+deleted-history release, local/composed Runs, explicit spawn inputs, concurrent 429/503 cooldown,
+spawned HTTP clients, numeric/date/JSON hints, cancellation and permanent 400. Ruff and mypy cover
+the changed public sources; a built-wheel smoke imports the new lazy APIs without Torch.
+Verification: 114 targeted recovery/storage/HTTP/runtime tests pass, plus the 84-test
+single/sequential/adaptive/fixed recovery suite (overlapping tests, not 198 distinct cases).
+Ruff passes and mypy checks 13 touched interfaces. The native dependency CLI help and a
+metadata-only JobService probe are exercised without preparing a runtime or launching science.
+
+Real read-only preview of origin `job-20261110225702-865a3c13` found 28,727 unavailable cache
+references, 28,213 source-unbound records, zero present and zero artifact candidates in the owned
+inventory inspected. Both revision namespaces are absent. Prior counts/session preservation do
+NOT prove these lost inputs recoverable. No real repair, download, Job launch, registry edit or
+scientific mutation was performed. WISDOM's minimum-negative-sequence blocker is separate science.
+
+Pending operational acceptance: deploy current LF before new work/repair; existing immutable
+supervisors are not hot-upgraded and retain their old terminal-GC behavior. Full same-snapshot
+recovery of the reported lost bytes cannot be promised. Require original digest-matching bytes
+from a valid source, otherwise a researcher-authored new acquisition. Do not reuse source-unbound
+legacy inspections against new coordinates. No automatic third-party archive/digest reconstruction,
+cross-host throttle without shared storage, or detection of hidden subprocess dependencies is claimed.
+
+## Sequential Work recovery — 2026-11-11
+
+Implemented native `retry`/Console recovery for sequential unseeded single-Run steps. Persisted
+configuration and child Attempts establish topology and ownership without HPO state. Completed
+predecessors restore typed outputs; the worker verifies artifacts/inputs before writing recovery
+state. Failed/interrupted children reuse original Run checkpoints in a new Attempt; downstream
+steps wait. Root/step resources, scientific identity, spent budgets, controller/provider ownership,
+code acknowledgement and Job cleanup dependencies remain enforced. Parallel/composed Studies
+are explicitly unsupported. Old interrupted requests without step ownership remain blocked.
+
+Verified on disposable fixtures: first/later failure, resumable item/session reuse, typed files,
+repeated interruptions, corrupt/missing evidence, code acknowledgement, budget exhaustion,
+read-only native preview, live locks/provider, duplicate/concurrent retry, GC dependencies and
+Console confirmation. Targeted recovery/Console suite: 38 passed; existing adaptive/fixed,
+relocated-config and Study Console regressions: 80 passed. Ruff and mypy on four changed Python
+interfaces pass. No optional integration deployment is implied by those local tests.
+
+Read-only real inspection of WISDOM Job `job-20261110225702-865a3c13` confirms original
+Execution `execution-7ba21fa34368be0b`, discover Run `run-bb1f5dd43712f5987e08`, next Attempt 2,
+four pending steps and 234 registered checkpoint files with no missing/size-invalid payloads.
+Native canonical fingerprint/size of `discovery-session.json` verified; map record files:
+28,167 coordinate downloads, 28,167 discovery inspections, 13 functional metadata, 5 negative
+mapping. These counts are not proof that every dependency/application validator will pass.
+Preview verifies authored configuration identity and requires code acknowledgement.
+No real retry, environment deployment, checkpoint relocation or WISDOM source/data edits performed.
+Pending: researcher-reviewed live recovery and validation of all restored map dependencies.
+
+## Explicit direct-transfer passwords — 2026-11-09
+
+CLI --ask-password and masked Console input explicitly authorize source→destination password
+delivery over the existing encrypted control transport. Automatic key/Kerberos behavior remains;
+no saved controller secret or private key is forwarded implicitly. Native JobService/Scheduler/
+Supervisor accept bounded ephemeral stdin through anonymous pipes, never requests/argv/env/logs.
+Native PasswordSshTransport on the source supplies the same binary/archive/atomic Dataset engine;
+the acknowledged source-host Job does not depend on the laptop. Preview sends no asset bytes.
+Unknown/changed keys remain blocked, failed authentication never silently relays/reverses/retries,
+and generic retry refuses input-bearing Jobs because their credential is intentionally absent.
+
+Verification: real password-only loopback SSH, tiny temporary datasets and temporary trust keys:
+six tests passed using the existing optional-dependency test interpreter (no installation), including
+complete source-host replication, no secret persisted, failed/changed authentication, missing trust
+and CLI prompt behavior. Three native ephemeral-input tests passed; Console masking/confirmation/
+secret clearing passed. Existing transfer suites passed 86 tests / one optional skip; queue/provider/
+Console/CLI suite passed 47 / four skips; final native retry/input/Console suite passed 27 / three
+optional skips. Ruff, mypy on twelve interfaces, CLI help and built-wheel API/source checks passed.
+
+Read-only inspection of ctgpgpu16 confirmed Paramiko is available but the active immutable runtime
+lacks ephemeral-input capability. **Pending:** explicit authorization to bootstrap/deploy a new
+source runtime and a separate user-approved real transfer. No prefix was patched, dependency
+installed, live Job launched or dataset copied. No MFA/keyboard-interactive UI, password storage,
+automatic secret recovery or password-based reverse-pull policy is claimed. Controller connectivity
+is still required until the secret and Job acknowledgement reach the execution host.
+
+## Shared dataset validation receipts — 2026-11-09
+
+Implemented public Work.validate_dataset over DatasetValidationCache, separate from seed-scoped
+Work caches. Native runner binds its already computed consumer code identity without changing
+scientific fingerprints. Receipts pin exact dataset/placement, code, contract/version/settings
+and runtime. First/stale use verifies native bytes and runs the explicit consumer callback;
+reuse inventories bounded POSIX metadata only. Concurrent callers share a native lock and GC
+lease. Failures, changed content, unsafe paths/permissions and corrupt receipts cannot imply
+success; force revalidates rather than ignoring hashes. Local checksummed v2 assets only.
+
+Verification: 17 validation regressions passed, including native two-seed Work lifecycle reuse,
+concurrency, changed/restored-mtime corruption, contract/code changes, relocation, callback failure,
+GC leases, metadata bounds, unsafe paths and rejected URI/legacy content. Queue/fixed-recovery/
+validation suite passed 78 tests before final boundary additions; 26 Work runtime/lazy-storage/
+HTTP-cache regressions also passed. Ruff, mypy on five interfaces, diff checks and built-wheel
+public API imports (without Torch import) passed. Only disposable fixtures were used.
+
+Pending consumer acceptance: WISDOM must move deep structural validation into this callback and
+use a light binding path after receipt acceptance; LF cannot intercept its arbitrary Python
+calls. No consumer source/data, current runtime or live Job was modified. This does not accelerate
+the existing Study in place or prevent reservation expiry during a first long check. Receipts
+are trusted local change-detection cache, not hostile-filesystem cryptographic proof.
+
+## Sequential execution queues — 2026-11-08
+
+Implemented opt-in native `lf run --queue`, `lf queue` metadata inspection and Console submit
+selection/queue table. FIFO tickets persist on the project/placement host; ordinary detached
+preparation feeds the same ProcessScheduler/ProcessSupervisor, not a separate runner. Preparation
+order cannot overtake registration order. Admission precedes training-resource commitments, waits
+for released native ownership, advances on any terminal outcome and survives closing the Console
+after provider acknowledgement. Duplicate dispatch, unsupported old runtimes, unsafe/corrupt/missing
+metadata and unverified predecessors fail closed. Cleanup receipts and predecessor retention
+preserve ordering after native GC. Recovery does not replay original tickets. Queue release failure
+is operational evidence, not permission to rewrite completed science.
+
+Verified with disposable metadata, concurrent registrations, native detached local CPU commands,
+preparation failure/cancellation, reverse preparation order, nonzero exit followed by successful
+successor, no waiting CPU/GPU/storage commitments, CLI routing, Console selection/read-only view,
+runtime capability guards and retention tests. No real cluster, WISDOM or dataset was changed.
+Limits: POSIX direct hosts only, not SLURM/Fleet; controller needed during preparation; no automated
+recovery/priority changes/cross-project queue or site-reservation renewal. Root manifests are
+bounded; administrative history compaction is not implemented. See Manual §10 for precise use.
+
+Acceptance completed 2026-11-09: broad suite 161 passed / two real-CUDA cases skipped, then 90
+focused native queue/provider/recovery/storage/Console tests passed / two CUDA cases skipped after
+final hardening. Ruff, mypy on 13 changed interfaces, CLI help, wheel packaging/imports and shipped
+metadata RPC execution passed. Shared-storage fixtures prove separate cluster FIFO namespaces;
+release/GC tests do not conflate queued preparation with missing scientific recovery state.
+
+Queue-scope clarification 2026-11-09: Console labels and both manuals explicitly distinguish
+whole-Study FIFO ordering from concurrent internal Trials/seeds. A native detached CPU regression
+requires two seeded Runs to overlap before allowing the next queued Job to start; unchanged
+resource envelopes are asserted. The queue/Console/evidence-plan suite passed 42 tests. Read-only
+inspection of V14d confirmed no queue ticket, three active Runs and two still validating consumer
+inputs before CUDA allocation; no live Job, grant or consumer source was changed. Startup
+validation cost is not addressed by changing queue policy or bypassing unmeasured-Run admission.
+
+## Isolated-tool preflight import isolation — 2026-11-08
+
+The ctgpgpu16 SLAE bootstrap failure exposed a framework-induced pip/setuptools import-order bug,
+reproduced locally without CUDA or consumer code. The tool probe now uses only stdlib metadata
+before importing the declared scientific modules; LF parses requirements and validates their
+reported versions with full PEP 440 semantics outside that interpreter. Bootstrap and Work share
+the same checks. VCS revisions, sealed inventory, ABI imports, CUDA probes/grants and environment
+identities remain unchanged; no distutils environment override, dependency downgrade or cache
+rewrite is introduced. Added regressions cover real setuptools import without pip, root/local
+build pin checks, corrupt metadata and failed Work preflight not becoming verified. No remote
+bootstrap, SLAE reinstallation or scientific execution was performed for this correction.
+
+## Isolated scientific tool runtimes — 2026-11-07
+
+Native declarations, bootstrap/prepared submission and Work tools now support independent
+immutable Python tool prefixes without LF/consumer dependencies, shell hooks or another Work
+runner. Exact root/source/ABI policies, import preflight, explicit staged entrypoints and native
+resolution receipts are implemented. Tool execution inherits provider GPU tokens unchanged,
+streams logs, bounds thread requests and cancels only owned descendants. Native GC protects
+current aliases, Job snapshots, recovery owners, preparation and active environment/code leases.
+Main-prefix replacement pruning does not collect isolated tools. Dry-run reports unresolved tool
+package plans honestly; it does not solve by installing. POSIX provisioning is supported; Windows
+provisioning and hermetic/offline artifact availability are not acceptance claims.
+
+Authorized disposable Linux CPU validation: SLAE commit
+`078b94e436b8eceb02251a254c3c224358ec6ee2` imported and loaded the 882,525,854-byte base checkpoint
+after exact SHA-256 verification (`ac5bf9613209fc310145e58f1aa7ddc9111d833a131488fe30ea738d51f7bb99`).
+The reviewed recipe and observed versions are in Manual §4.5 / `examples/isolated_tools.toml`.
+This used no WISDOM environment install, source edit, dataset mutation or cluster submission.
+**Pending:** WISDOM's standalone extraction adapter, target CUDA recipe/driver acceptance and a
+coordinated small protein extraction with scientific output/checkpoint validation. LF provisioning
+alone does not repair the consumer's current in-process SLAE import. No such acceptance is claimed.
+
+Verification: 160 targeted tests passed, with two real-CUDA cases explicitly skipped; 111 focused
+tests passed again after source/TLS hardening. Ruff and mypy (12 changed interfaces) passed, as did
+wheel construction, packaged recipe/module byte checks and isolated wheel imports. The opt-in
+`test_slae_tool_acceptance.py` runs the real public tool API against an explicitly supplied disposable
+binding and checkpoint; normal CI skips it rather than downloading packages or weights implicitly.
+The local ignored acceptance receipt records all 115 resolved package versions. No extraction,
+cluster execution, WISDOM source/environment change or dataset/checkpoint mutation was performed.
+
+## Managed dependency layers and recoverable cache collection — 2026-11-06
+
+Implemented in the existing environment/provider/storage services, without another runner or
+consumer edits. New v3 execution prefixes install exact code wheels independently over a frozen
+dependency base; initial resolution/package inventory and immutable bootstrap wheels are retained.
+Dependency/runtime/native/Torch/offline contracts, not code/YAML/seed changes, select the heavy base.
+Sealed resolution receipts live outside GC, supply exact version constraints on reconstruction and
+reject drift before publication; prepared environments/Jobs record the actual resolution identity.
+Legacy prefixes are not rewritten. Native preparation-reference leases bridge staging to durable
+provider hand-off; active/recovery/series/process references retain code and its base.
+
+Explicit `clean --environments-only` selects obsolete complete prefixes without requiring an authored
+quota. `storage repair` audits exact abandoned operational references, checks controller death on its
+own host plus installer descendants on the build host, and never changes scientific state. Missing
+state with a readable request is scoped; unresolvable ownership stays protected and diagnosed.
+Preview can explain hypothetical post-repair collection but cannot authorize apply. Console adds
+exact selection/preview/confirmation and meaningful no-change feedback. Routine storage reads use
+cached measurements; deep collection measures unique file blocks and excludes surviving hard links.
+The retained quota remains apparent-file-byte based; observed filesystem free deltas are separate.
+
+Read-only case validation on citius-ctgpgpu16: 91 prefixes (87 complete), 793,224,586,015 apparent
+file bytes versus 695,754,940,416 unique allocated file bytes. Their declared policies/dependency
+metadata form 12 families (not a certificate of historical transitive/binary equality); 49 prefixes
+contain LF 0.19.0/WISDOM 0.13.0. Three missing-state/request Job references and three laptop-owned
+stale builds pass explicit repair preview with controller-host death and build-host inspection.
+Hypothetical environment-only plan: **82 candidates**, **631,804,428,288 releasable file-block bytes**,
+nine protected prefixes. The unreadable b0b58dcb build marker/temp remain protected. Original failed
+enrichment Job `job-20261106115040-ce45a8b3`, environment `env-31506119e900d58a32cd6e97`, bundle,
+all scientific/checkpoint bytes and published datasets are preserved. Full exact-path/byte JSON and
+public commands are delivered locally under `.lambdaforge/control/plans/` (ignored, not a new registry).
+**No real repair, deletion, cancellation, dependency installation or scientific launch was applied.**
+
+Regression owners: `test_environment_layers_and_reference_repair.py`, existing storage/build,
+native environment, CUDA/runtime/bootstrap/provider/staging suites and `test_storage_clear_console.py`.
+They use disposable tiny CPU wheel fixtures (no network installation) and loopback transports;
+native code layers/imports/entry points, immutable reuse, orphan/corrupt/foreign/PID-reused ownership,
+live staging hand-off, recovery references, hard links, read-only previews and Console confirmations
+are exercised. Ruff and changed-interface mypy are required in delivery. Remaining boundaries:
+unverifiable legacy owners are not force-reclaimed; no retrospective byte-level deduplication or
+separate complete provisioning byte-reservation ledger is claimed.
+
+Verification: the latest 156-case run passed 154 and timed out in the two real local CUDA provider
+cases waiting on `peer-startup-future-envelope-headroom` (about 3 GiB physically free on the 4 GiB
+desktop GPU). They do not exercise dependency installation and were not made to pass by weakening
+admission. The scoped CPU/provider/storage suite and frozen-resolution rebuild regression are
+verified separately: **154 passed in 53.31 seconds**, including the native CPU provider cases,
+eviction/rebuild with retained resolution pins and corruption/drift rejection. Ruff/format passed
+on 20 touched Python files; mypy passed on 15 source interfaces; `git diff --check` passed.
+Live cluster checks were read-only. No broad CUDA acceptance claim is made.
+
+## Single Work file-checkpoint recovery — 2026-11-06
+
+The reported remote failed Job was inspected read-only. Its owned single Execution has no
+Study design/controller and contains one failed Run; the preventive application voxel guard
+was not OS OOM evidence. Native preview now recognizes its authoritative resolved `single`
+design instead of requiring adaptive state. Verified public CLI `lf retry ... --config ...
+--dry-run --json` returned the original Execution/Run, next Attempt 2, 1176 managed receipts
+(1175 NPZ payloads plus the failure report; 1,433,721,912 registered bytes), zero missing/size
+invalid entries, explicit `payload_hashes: not_checked`, exact original scientific identity,
+code-change acknowledgement and effective RAM 96 GiB rather than the origin's 16 GiB.
+No environment solve, launch, remote installation, checkpoint payload download, consumer edit,
+scientific state rewrite or dataset publication was performed for that validation.
+
+This extends the existing recovery inventory/dispatcher and Job retry path, not another engine:
+single Works preserve the same logical Run/checkpoint collection in a new Attempt, aggregate the
+latest outcome and keep old failure/cost history. Native provider and read-only existing controller
+lock probes reject live/unknown ownership; apply retains atomic controller/recovery locks and GC
+dependency references. Authored/staged display labels are normalized only in this single-design
+recovery context. Science, input/dataset identity, objectives, execution/publication contracts
+remain checked; compatible code needs explicit acknowledgement. Only reviewed CPU/RAM/wall-time
+resource changes are supported and propagate to both Job and public Work resources/audit. Selected
+YAML bytes are pinned; native Work Console now inspects/confirms with feedback before apply.
+Exhausted persisted execution Run/time budgets block recovery rather than refunding old Attempts.
+
+Regression owners: `tests/work/test_single_work_recovery.py`,
+`tests/controlplane/test_single_work_retry.py`, `tests/tui/test_single_work_recovery_console.py`,
+plus existing adaptive/fixed/grant/recovery suites. Disposable native Work fixtures prove intact
+file producers are not rebuilt, failed/interrupted producers retry, corrupted bytes are not reused
+as valid evidence and publication happens only after complete validation through source_checkpoint.
+No mocked Work lifecycle replaces those tests; asynchronous provider acknowledgement alone is
+simulated in control-plane tests to prevent workload launch.
+
+Remaining boundaries: metadata inspection does not hash/deserialize payloads or infer missing
+producer counts from opaque keys; public managed access and consumer validators retain authority.
+It does not promise training epoch resume, Fleet recovery or cross-cluster migration. The actual
+managed environment still needs normal preparation of the corrected LF/compatible consumer build
+when the researcher deliberately applies recovery. No real apply or full producer replay is claimed.
+
+## Entmax15 sparse backward — 2026-11-04
+
+Read-only inspection of V11d's latest native Attempt results confirmed 20 succeeded Runs and
+four failures of the entmax15 cell (seeds 211, 223, 227, 229), rejected downstream as nonfinite
+SchNet distance weights. Two earlier OOM Attempts were retried successfully and are distinct
+history, not the four terminal numerical failures. A local CPU reproduction demonstrated
+correct `[0.5, 0.5, 0, 0]` probabilities with NaN gradients from unused zero-root thresholds.
+
+The existing Entmax15 now retains the identical closed-form forward and computes its analytic
+simplex VJP from the saved probabilities, with zero sensitivity outside support. Safe root
+evaluation in backward also permits higher derivatives on fixed-support regions; no C2 claim
+at actual support transitions. Constructor, names, dtype promotion, state dict and exact zeros
+remain unchanged. No optional package, softmax fallback, epsilon smoothing, generic gradient
+repair or downstream finiteness-check relaxation. Tests compare the old forward byte-for-byte,
+analytic Jacobian, CPU/CUDA float32/64/16/bfloat16, arbitrary/noncontiguous axes, valid -inf masks,
+singleton/support boundary gradients, finite differences and a tiny synthetic optimizer step.
+Catalog documentation is regenerated from the native class.
+
+Consumer code/data, persisted evidence and managed environments were not modified; no real
+Study was resumed or launched. A managed deployment of the reviewed LF build is still needed
+before deliberate recovery; an existing nonfinite checkpoint is not healed by a numerical fix.
+
+## Live resource evidence authority — 2026-10-30
+
+Read-only inspection of the reported running Study found long consumer-side managed-split
+initialization (approximately 44 minutes per observed Run before CUDA), not a stopped coordinator.
+The dispatcher had admitted additional Runs; a zero-CUDA initializing probe held the unvalidated
+ladder lane while a compatible sibling remained protected. Free VRAM alone does not attest the
+future demand of that initializing worker. Consumer source/data, live runtimes, Jobs, reservations
+and scientific records were not changed; no workloads were launched or stopped.
+
+The actual LF defect was endogenous evidence: the live trajectory update used the preceding
+placement forecast (including its own posterior and unmaterialized peers) as historical residuals.
+Repeated polls could change its predictive distribution without new physical/progress evidence.
+The existing ResourceDemandModel is now used with recorded outcomes only for that historical
+prior; an empty-history cold prior is not passed off as history. Placement still receives fresh
+censored live trajectories. Zero-prefix CPU initialization cannot train GPU demand; compatible
+measured prefixes supply an honest weighted-median point forecast, not an intrinsic neighbour
+bound. Upper tails, physical admission, failed-packing dominance and protected lanes are retained.
+Diagnostics add materialized/unmaterialized resident counts, elapsed time and actual planner wait
+reason without a second scheduling policy or increased notification cadence.
+
+Regression owner: `tests/hpo/test_live_resource_evidence_authority.py`, plus native ARI/dispatcher,
+grant-recovery, shared-commitment and scheduling/replay regressions. Tests use disposable CPU-only
+fixtures. **Remaining boundary:** consumer initialization can still leave GPU capacity unused while
+future demand is uncharacterized; LF does not disable scientific validation or promise saturation
+before allocation evidence exists. Existing immutable remote runtimes need explicit managed
+deployment/recovery to adopt this correction; no live rollout is claimed.
+
+## Connectors, tables and bounded preview contracts — 2026-10-29
+
+Task source: the current local dirty/untracked working tree and installed native policies,
+not a remote checkout or a stale client payload. Changes remain entirely in LF. No consumers,
+researcher data, clusters, GPU reservations or live databases/Jobs were modified/contacted.
+No new scheduler, graph interpreter, Work runner, HPO or Dataset registry was introduced.
+
+| Requirement | Implemented and checked | Explicit limit / remaining work |
+| --- | --- | --- |
+| CSV/TSV | Additive native options, explicit headers/names/encoding/BOM/quote/escape/comments/skip/decimal/error policy; incremental projection/row ceiling, gzip decoded guards; existing materialized/internal-path route retained | Wrong-width malformed records now fail unless explicit skip is selected. Native CSV field limit retained, no global override. JSON is not falsely incremental. |
+| Tables | Versioned Column/TableSchema and actual JSON schema/example; cast/null constants, typed declarative row predicates, selection/drop/rename, stable sort, dedup, exact concat, explicitly derived aggregate IDs/lineage, FromRows keys | Sort/dedup/aggregate/concat are bounded materializations, not disk-backed external algorithms. Learned imputer/tokenizer expansion and Parquet/Arrow remain absent/unadvertised. Existing train/fold-only standardizer tests retained. |
+| SQL readers | Existing-file SQLite read-only/authorizer/read transaction/progress timeout; optional Psycopg PostgreSQL read-only repeatable-read/server cursor, separate bound parameters, validated identifiers, explicit TLS/host credential refs, cursor cleanup | SQLite real fixtures pass. PostgreSQL driver boundary/redaction tested with a mock; real ephemeral TLS PostgreSQL requires explicit opt-in fixture and is skipped when absent. No real server certification claimed. Other dialects need mature backend/contract tests, not an advertised empty plugin. |
+| SQL writes | Explicit native operator SQLWritePolicy; insert/upsert/row replace/DDL authority separated, schema/keys/idempotency, bounded atomic rollback on failed/cancelled writes | Operator owns authorization; unrestricted Python is not sandboxed. No raw DDL, auto-create DB file, arbitrary destructive query, JSON flattening or infinite retry. |
+| Preview | Shared row/input-byte/source/deadline/decoded-retention budgets; allowed roots, cancellation, owned temporary cleanup; honest prefix/full/unknown identity, row/source provenance; NPY mmap/selected C-order NPZ incremental prefix | Cooperative allocation guards, not OS RSS hard quotas; native I/O/driver calls can allocate/block before Python checks. NPY/NPZ object/structured and Fortran multi-axis NPZ previews refused. Native typed Work sealing may still fingerprint full input bytes; no scientific identity waiver. |
+| Effects/catalog | operation-effects-v1 plus schema resources/secret refs, native bounded-preview methods, plugins conservatively disabled for native preview; selected signature/default/abstract validation and metadata-only completeness audit | Native PreviewSession is not a sandbox or generic executor. Not every native model has a complete symbolic tensor equation: audit reports 93 models, 1 abstract / 15 declared structures / 77 signature-only. No invented compatibility guarantee. |
+| Model reuse | Structured module injection/state/variadic/multiple-output contracts for ensemble/multitask/mixture/NeuralODE/calibration; actual CPU calls and all native signature descriptors audited without instantiation | Existing GVP/PaiNN/DimeNet/NNConv/sklearn implementations reused. No new scientific architecture or false differentiable classical estimator. Calibration fits held-out data, not train/test. |
+| Providers/config | Versioned installed ClusterProfile schema generated from native defaults + constraints, actual effective resolution and CLI work/cluster schema; synthetic gpu executable / gpu exec / custom explicit visibility fixtures | Existing local/SLURM only; no site protocol inferred from command name and no unsupported bare claim/release ownership relaxation. Existing grant-shrink and cancellation/provider tests retained. |
+| Distribution | Working-tree catalog and cluster-schema freshness guards, exact wheel/content receipt, two equal offline builds and installed non-editable CSV/SQLite/native Work/dataset/sweep/HPO/CLI checks | No client application bundle update or release bump claimed; consumer must install/pin reviewed wheel. Optional dependencies never installed automatically. |
+
+Public EN/ES manual chapter `guide-tabular-connectors`, packaged JSON schemas and actual examples
+define additive migration and limitations. Test owners: `test_tabular_preview`, `test_sql_etl`,
+`test_authoring_effect_contracts`, `work/test_tabular_authoring`, installed wheel acceptance plus
+existing catalog/ETL/sample/Work/authoring/grant tests. Optional real PostgreSQL and skops tests
+remain explicit skips, not successful integrations. Final verification counts are recorded in
+the delivery response; no claims are derived from a test's mere existence.
+
+## Preparation orphan and binary dataset streams — 2026-10-28
+
+Read-only inspection of V10e's failed preparation found an environment-build marker owned by a
+now-absent process on the same controller host. No matching remote installer or inaccessible
+process inventory entries remained. CacheBuildLease acquisition now checks that controller's
+process lifetime, then CAS-reclaims unchanged orphan metadata under the existing GC lock only
+after remote exact-prefix child inspection. Heartbeat age is not sufficient; foreign, live,
+unreadable, changed, symlinked and unexpected-entry cases remain protected. Environments, Jobs,
+scientific bytes and grants are unchanged; no real recovery/submission or unlock was performed.
+
+Direct SSH probes on the real 16↔12 endpoints now fail at authentication, not host-key trust.
+Read-only effective SSH configuration shows neither default site identity files nor an agent.
+No authorized_keys, private credentials or host trust were altered. The separate latest relay
+failure revealed Paramiko's text-mode readline vs binary read contract: PasswordSshTransport now
+opens public binary ChannelFile readers and preserves original handles until cleanup. Diagnostics
+explain that fingerprint approval does not provide noninteractive login authorization.
+
+Verification: **177 passed, 1 skipped** in focused storage/runtime/native-environment, binary,
+orphan recovery, transfer/reliability/durable replication and SSH trust regressions. The skipped
+real-Paramiko test in the development environment was run with already-installed Paramiko using
+the existing consumer interpreter against LF checkout/tests: **10 passed** in binary transport.
+Only disposable local fixtures were created; no dependencies installed or real bytes transferred.
+Ruff/mypy and the final diff whitespace check pass.
+
+## Scientific authoring operations for visual clients — 2026-10-28
+
+The source of truth for this work is the actual dirty working tree, including untracked neural
+operators, not the older Studio payload or HEAD alone. The consumer authoring guide/adapters and
+current public model exports/tests were inspected before adding operations. Existing graph
+families were reused; no WISDOM/AIStudio source/data, real Jobs, clusters or dataset records were
+changed. No release version bump or external dependency installation was performed.
+
+| Area | Implemented / evidence | Remaining boundary |
+| --- | --- | --- |
+| Catalog | Versioned packaged JSON + schema; SDK/CLI; native signatures, aliases, plugin metadata sidecars, structured errors; metadata-only and selective-resolution subprocess tests | Not every native operator has complete machine-readable shape/range/symmetry equations. Unresolved ports explicitly require native documentation; no fake validation guarantee. No consumer editor integration was performed. |
+| Factories | Portable constructor/kwargs provenance; independent state, receiver normalization widths; native class/kwargs injection preserved | Runtime-only alias registrations are not portable plugins; fixed-activation models do not gain unsupported injection. |
+| Samples | Existing native DatasetArtifact/index only; NPZ/NPY/JSON/CSV/sidecars/targets/meta; optional/default/presence, strict dtypes/shapes; bounded preview; stack/ragged/pad/disjoint graphs | Index scan is bounded at 100k members/64 MiB, not a paged billion-sample engine. Read deadlines are cooperative, not OS preemption. URI assets require native materialization. |
+| ETL | Bounded direct Python operations, strict joins/ids/splits, shared field validation, managed staging, native atomic publication; train/fold-only standardizer | General derive expressions/control flow belong to client-generated Python. Many-to-many joins, arbitrary codecs/tokenizers and proof that authored split labels are honest are not claimed. |
+| HTTP | Existing Work.cache.fetch extended with bounded decoded bytes, cancellation/retry checks, HTTPS bearer references and same-origin redirects; native checksum/atomic cache retained | Socket/filesystem calls can block until their timeout; rate-limit waiting retains its existing pacing behavior. No implicit forwarding of controller credentials. |
+| Estimators | Mature optional sklearn trees/forest/boosting/SVC/SVR; seeded/thread-scoped capabilities and provenance; no torch-module fiction | Optional skops round-trip test is skipped when extra absent. Missing-extra diagnostic is tested; no pickle fallback or unreviewed type trust. |
+| Lifecycle | Synthetic ordinary Work: CSV+JSON→checkpointed member publication→two named inputs→field/component sweep **and** native HPO; interruption preserves files and no partial Dataset is registered | No second runner, scheduler/HPO/registry or GUI graph interpreter. Native identity/recovery rules remain authoritative. |
+| Distribution | Offline reproducible wheel builder, freshness guard, dirty/HEAD/version/content receipt; two equal builds; installed non-editable SDK/CLI + prepare/sweep/HPO CPU flow tested outside checkout | No Studio bundle deployment is claimed. Consumer must install the exact reviewed wheel and update its own payload. Backend/environment reproducibility still requires pinned dependencies. |
+
+Checks live in `test_operation_catalog`, `datasets/test_sample_contract`, `test_etl_operations`,
+`work/test_visual_research`, `work/test_visual_download`, `packaging/test_visual_authoring_wheel`
+and the existing native HTTP/managed-infrastructure, plugin, neural/graph/import regressions.
+Ruff and mypy cover changed interfaces; optional skops absence is reported, not hidden as a pass.
+The EN/ES manual's scientific-authoring chapter is the public integration contract, with actual
+JSON/YAML/consumer-Python examples. Future complete symbolic neural contracts and client
+integration are explicit follow-ups, not metadata capability claims.
+
 ## Architecture and audit
 
 Five separate layers: repository/consumer instructions; packaged procedural Skills; project-pinned
@@ -733,9 +1292,9 @@ the larger lifecycle, learned host allocation, product dependency or distributed
 - Fleet supports fresh centrally planned native Studies with managed members, leases and fencing.
   Public distributed recovery, live membership, member co-location, checkpoint transfer and full
   distributed export remain gated; internal coordinator controls do not satisfy public acceptance.
-- Storage leases and preview-first cleanup exist. Provisioning has no separate complete admission
-  budget, and environment identity still includes project code. Dependency/code layer separation
-  must preserve immutable prefixes and numerical provenance.
+- Storage leases and preview-first cleanup existed at this baseline. Provisioning still has no
+  separate complete admission budget. The 2026-11-06 update above implements dependency/code
+  separation while preserving legacy immutable prefixes and numerical provenance.
 
 <a id="history-architectural-reform-implemented-foundation"></a>
 
@@ -861,7 +1420,7 @@ startup boundary correction, not the unfinished executor/ARI responsibility extr
 | 10–18, 31–32, 50, 54–56 | Products, contracts, selection and dependencies | Contract/catalog, promotion, local ModelSet/native StudyDecision, typed Work inputs, roots/consumer audits, single-Study YAML publication and publication-only retry implemented; pending composed/remote/Fleet selection and dependency waiting/replanning/DAG. |
 | 19–20 | Portable import and complete export | Native single-host Study/product import/export, verification and idempotence implemented; pending complete Fleet artifact inventory/transfer and distributed acceptance. |
 | 21–24 | Dataset contracts and equivalence | Existing reconstruction preserved; durable certificates via the native comparison/product catalog implemented. Pending explicit additional representation policy, scalable report artifacts and downstream contract-aware Work resolution. |
-| 25–30, 60 | Filesystem, storage, environments and cache | Storage previews/lazy roots and locked terminal ResultStore deletion/empty Work-parent pruning corrected; pending remaining read-only/lease/cleanup-path audit, provisioning admission, dependency/code layers and cleanup economics. |
+| 25–30, 60 | Filesystem, storage, environments and cache | Previews/lazy roots, locked terminal deletion, immutable dependency/code layers and audited reference repair/physical collection implemented; remaining broad cleanup-path audit and separate provisioning byte admission are pending. |
 | 33–42 | Production Fleet lifecycle | Pending pause/resume/reconcile/adoption, membership/drain/capabilities, spare capacity, co-location and resumable verified transfers. |
 | 43–45 | CLI, Console and HTML | Lifecycle Overview, product metadata/audit browser and confirmed Study import integrated; remaining recovery/selection/dependency dashboards and complete explanations. |
 | 48–49, 51–53, 59 | Compatibility, bounded reads and safety | Preserve current contracts; audit new readers, migrations, dry-run purity, idempotency, locks and bounded stores for every new feature. |
@@ -1390,3 +1949,615 @@ passed), prompting the source-snapshot fix; it is not reported as green. Ruff ch
 with existing dependencies explicitly shared. No real cluster, WISDOM code, dataset, scientific
 record or training process was modified. Whole-repository formatting still reports findings
 outside this focused fix; changed implementation/test files are formatted separately.
+
+<a id="scientific-algorithms-expansion"></a>
+
+## Generic scientific algorithm expansion — 2026-10-18, staged continuation
+
+**The complete supplied specification is NOT accepted.** Initial delivery implemented P0–P4;
+the [P5/P6 follow-up](#scientific-algorithms-fgw-follow-up) below updates the current state to
+**P0–P6 implemented and tested, P7–P12 pending**. Do not repeat completed stages on continuation.
+No WISDOM code, persisted evidence, Job, cluster, dependency environment or release version
+was changed. Baseline was clean `main`, `0eb0310` (the cited FGW/scheduling commit).
+
+### Audit and architecture
+
+| Initial category | Actual baseline |
+|---|---|
+| Complete existing components | StructuredMeasure, balanced q=2 FGW/POT adapter and FGWResult; KMeans, MiniBatchKMeans, DBSCAN, sklearn HDBSCAN, Agglomerative and shared results/capabilities; regression ConformalPredictionInterval. |
+| Partial for this request | `supports_precomputed=True` existed, but native string adaptation rejected public precomputed inputs; silhouette treated them like features without matrix-specific checks. ARI/stability only compare already aligned sample arrays. Work.resume_map/checkpoints/cache already exist and must own future block persistence. |
+| Absent | H0 graph topology, stable spatial regions, independent-control null calibration, FGW block/resume API and barycenters, medoids, prototype assignment/rejection, mixture adapters, classical MDS and extended stability integration. |
+
+Actual environment: Python 3.10, NumPy 2.2.6, SciPy 1.15.3, sklearn 1.7.2, Torch 2.3.1,
+pytest 9.1.1. POT was **not installed**. Supported extra remains `POT>=0.9.6,<0.10`;
+POT installation was requested for a temporary test target, not performed. Public POT docs were
+consulted; their latest signature is not represented as an installed-backend verification.
+
+Existing native APIs were inspected before editing, including Work.resume_map and lifecycle
+contracts. New namespaces are lazy `lambdaforge.topology` and `lambdaforge.stats`; dissimilarity
+validation belongs to existing `distances`, not a second point-distance hierarchy. No factories,
+runner, cache, normalization engine or consumer-specific data model was introduced.
+
+### Implemented stages and scientific decisions
+
+| Stage | Implemented evidence / limitations |
+|---|---|
+| P0 | Audit above, existing contracts/tests/dependencies inspected. Full request remains staged. |
+| P1 | `distances.validate_dissimilarity`, memory check before conversion/CPU transfer; DBSCAN/HDBSCAN/compatible Agglomerative precomputed inputs and silhouette. Ward/KMeans reject. Explicit averaging only; default finite nonnegative/zero-diagonal/symmetry checks. HDBSCAN uses backend `copy=True` after a regression exposed in-place mutation. Matrix guard does not bound all backend workspace. |
+| P2 | Union-find plateau-batched SuperlevelMergeTree, Branch/MergeEvent/MergeTree; elder ties by minimum birth vertex, explicit essential None, event/subtree index, regions/components/mass curves/persistence. Exhaustive tiny-graph oracle, tie/edge/permutation/monotone/deep-chain checks and benchmark. Tied branch names may change with vertex reindexing; partitions and birth/death multiset do not. |
+| P3 | StableRegionSelector/RegionSelection/StableRegion; widest feasible growth-event interval, exact uniform and explicit discrete threshold memberships, core/support/mass and rejection reasons. Death boundary is left-open; no crossing. Default greedy disjoint support policy is not a global packing optimum. Dense retained memberships have a byte guard. weighted_iou/weighted_dice support binary/fuzzy membership, not probabilistic confidence. |
+| P4 | EmpiricalNullCalibrator/CalibrationResult: inclusive add-one upper/lower ranks, grouped max/min, same-statistic evaluation, ties and resolution warning. BootstrapResult + bootstrap_statistic/bootstrap_quantile: independent observations or complete groups, optional fixed strata, reproducible percentile CIs. No posterior/FDR/conditional guarantee or regression-conformal reuse. Unequal-group pooled statistics are explicitly documented. |
+
+Detailed public examples/contracts/math and limits are in
+[manual chapter 34](../MANUAL.md#guide-graph-science) and its Spanish counterpart.
+`examples/graph_regions_calibration.py` is a runnable synthetic topology/control example,
+**not** the still-required full topology→FGW→prototypes example.
+New public result classes have individual files. Existing clustering constructor signatures
+remain intact; silhouette adds only the keyword-only matrix guard. Root exports and existing
+FGW/StructuredMeasure semantics are unchanged. No new dependencies/extras were added.
+
+### Actual verification
+
+- Baseline: `pytest tests/test_clustering.py tests/test_fused_gromov_wasserstein.py -q`:
+  **30 passed, 16 skipped** (POT unavailable).
+- Final focused command:
+  `pytest tests/test_clustering.py tests/test_precomputed_clustering.py tests/test_superlevel_merge_tree.py tests/test_stable_regions.py tests/test_empirical_null.py tests/test_scientific_algorithm_imports.py tests/test_fused_gromov_wasserstein.py tests/test_manual_links.py -q`:
+  **128 passed, 16 skipped**, 2.47 seconds. All skips require POT. This is not numerical
+  validation of a new FGW solver or barycenter (none was added).
+- Earlier broader command also included `tests/test_structure.py`: **130 passed, 16 skipped,
+  1 failed** before adding the last discrete-roundoff regression. The failure identifies four
+  baseline classes missing docstrings: GPUObservationPolicy, ResourceSafetyPolicy, ExtensionReply,
+  SeriesReply. `git show HEAD:<path>` + AST inspection confirmed all four were already missing
+  their docstrings; they were left untouched. New public classes have docstrings.
+- Ruff passes on touched scientific source/tests/examples; mypy passes for **21 source files**.
+- Both standalone synthetic examples/benchmark were executed. Chain benchmark with tracemalloc:
+
+  | Vertices / edges | Seconds | Peak Python-tracked MiB |
+  |---|---:|---:|
+  | 1,000 / 999 | 0.0497 | 0.75 |
+  | 10,000 / 9,999 | 0.4905 | 7.89 |
+  | 50,000 / 49,999 | 2.4800 | 39.39 |
+
+  These are one-machine synthetic timings, not a universal bound. Python-tracked allocations
+  are not total process RSS or all native allocations. Tests include a 3,000-deep event chain
+  without recursive traversal. Discrete membership uses correctly rounded subset sums rather
+  than 100 normalized increments that can spuriously exceed 1. No clipping is introduced.
+- A wheel was built locally with `python -m build --wheel --no-isolation` in a disposable
+  target. A smoke process with cwd `/tmp` imported directly from the wheel (module paths
+  asserted to contain `.whl`), ran topology, region selection, calibration, bootstrap,
+  dissimilarity validation and precomputed DBSCAN successfully. Existing numerical dependencies
+  were shared read-only; no package was installed. Lazy-import assertions passed before requesting
+  clustering. This verifies the artifact, not a fresh dependency installation or POT integration.
+- Repeated final focused run after documentation: **128 passed, 16 skipped**, 3.37 seconds.
+  The other three structural tests separately passed (the known baseline docstring test was
+  explicitly deselected). `git diff --check` passes. No full backend/resource/cluster suite was
+  needed or run for these standalone algorithm changes.
+
+### Next steps recorded at initial delivery (superseded by the follow-up below)
+
+1. **P5**: extend existing FGW pairwise API with deterministic square/rectangular blocks, bounded
+   diagnostics and incomplete NaN/error state. Inside Work, use native resume_map/checkpoints/cache
+   with exact object + solver identities and corrupt/dependency validation. Do not store machine
+   paths or introduce another persistence/parallel engine. Read `work/runtime.py` (resume_map),
+   managed-file/dependency tests and public Work services before designing it.
+2. **P6 mandatory**: verify installed supported `ot.gromov.fgw_barycenters`, implement real
+   barycenters, explicit nonzero-diagonal relational representation without weakening default
+   StructuredMeasure, numeric shared features, masses, init/seed/multistart, genuine convergence,
+   backend vs postcheck objective/coupling diagnostics and actual POT numerical tests.
+3. **P7/P8**: weighted honest PAM/medoids, real observation representatives, cross-distance
+   PrototypeAssigner and explicit rejection/calibration. No fake probabilities/prediction API.
+4. **P9/P10**: sklearn finite/truncated-variational Gaussian mixtures with distinct [N,K]
+   responsibilities and genuine estimator prediction; Classical MDS with explicit negative-eigenvalue
+   policy and distortion. Do not feed an arbitrary FGW matrix to GMM as though it were features.
+5. **P11**: observation-aligned clustering/stability/representative/neighbour metrics and grouped
+   bootstrap integration. The new spatial overlap functions cover only part of this stage.
+6. **P12**: full synthetic integration example, remaining bilingual docs, real optional-backend
+   regression/installed-wheel matrix and final whole-spec acceptance report. No H1/H2, unbalanced OT,
+   domain logic, custom GPU solver or distributed graph engine is part of the requested scope.
+
+Keep exact numerical/scientific evidence distinctions; no completed claim based on placeholders.
+
+<a id="scientific-algorithms-fgw-follow-up"></a>
+
+### P5/P6 follow-up — real POT matrices and barycenters, 2026-10-18
+
+**Current verified scope: P0–P6. Next implementation stage: P7. The whole request remains open.**
+The operator explicitly authorized POT installation only in disposable test directories. POT
+**0.9.7.post1** and the declared minimum **0.9.6** were installed with `--no-deps --target`
+in separate `/tmp/lf-pot-*` directories. Ordinary `.venv` still reports `find_spec('ot') is None`.
+No dependency installation in WISDOM/project/cluster environments, real scientific workload, cluster
+mutation, release bump or push was performed.
+
+P5 adds `distances.FGWMatrixBuilder`, `FGWMatrixBlock`, `FGWMatrixResult` and the internal
+versioned `matrix_identity` codec. Square and rectangular comparisons use the existing actual FGW
+solver, deterministic row-major blocks, explicit triangular reflection and bounded numerical thread
+pools. Dense/streaming budgets include workspace and metadata estimates, not a hard RSS/callback
+memory guarantee. No dense coupling history is accumulated for a matrix. Explicit recorded errors
+remain NaN in memory / null + error in JSON, with completeness separate from convergence.
+
+An executing Work supplies `work=self`; every block uses **native Work.resume_map**, sequentially,
+without a new runner/cache/checkpoint/lock protocol or hidden retries. Keys include exact numerical
+object contents, dtype/shape/endian, total masses, relational semantics, ordered collections,
+scientific solver settings/class, threads and library versions. Opaque feature encodings and callable
+metric revisions are explicit authored contracts; closure equivalence is not guessed. Completed
+JSON records have a checksum and are validated before reuse. Missing/malformed/incomplete/corrupt
+records and recorded failed blocks are recalculated. Interruption loses at most the current block;
+successful comparisons inside an incomplete block may be repeated, an explicit block-granularity
+tradeoff rather than refunded physical compute. Public ordinary FGW pairwise behavior is untouched.
+
+P6 adds the **real** `distances.FGWBarycenter` and `FGWBarycenterResult` using installed
+`ot.gromov.fgw_barycenters`. Supports shared numeric features, explicit masses/support cardinality,
+initial C/X, bounded iterations, seed/restart seeds and sequential multistart. Endpoints alpha=0/1
+are explicitly unsupported by this barycenter API; ordinary FGW still supports them. Candidate
+validity means finite feasible postchecked evidence, not necessarily convergence/global optimality.
+Multistart selects the lowest **weighted final-prototype postcheck objective** among valid starts,
+and retains failed-start diagnostics. Both supplied initializations are not silently perturbed.
+
+`StructuredMeasure(..., relational=True)` is a new **keyword-only opt-in** for symmetric nonzero
+diagonal relations. Defaults/previous positional constructor behavior remain intact. Barycenter
+structures are preserved, never zeroed or projected onto metric matrices. Default/source geometry
+and masses now explicitly reject complex inputs rather than dropping their imaginary part.
+The same ordinary FGW solver can compare a relational prototype afterwards.
+
+Installed POT source inspection confirmed its barycenter OR stopping test and lagging last-update
+transports. The result therefore separates raw feature/structure change histories from freshly
+solved final-prototype couplings/costs, with `backend_objective=None` when the chosen logging mode
+does not supply one. Convergence requires **both** changes small plus converged final comparisons;
+otherwise it warns honestly. No synthetic physical realization, uniqueness or global optimum is
+claimed. The memory preflight accounts for POT's per-iteration transport logging.
+
+#### Verification actually performed
+
+- Latest targeted full scientific command, with POT 0.9.7.post1 on process-only PYTHONPATH:
+  `pytest tests/test_clustering.py tests/test_precomputed_clustering.py tests/test_superlevel_merge_tree.py tests/test_stable_regions.py tests/test_empirical_null.py tests/test_scientific_algorithm_imports.py tests/test_fused_gromov_wasserstein.py tests/test_fgw_matrix.py tests/test_fgw_barycenter.py tests/test_fgw_optional_backend.py tests/work/test_fgw_block_resume.py tests/test_manual_links.py -q`:
+  **171 passed, no skips**, 4.19 seconds.
+- Independent minimum-backend command with POT 0.9.6:
+  `pytest tests/test_fgw_matrix.py tests/test_fgw_barycenter.py tests/test_fgw_optional_backend.py tests/test_fused_gromov_wasserstein.py tests/work/test_fgw_block_resume.py -q`:
+  **66 passed**, 2.89 seconds. Earlier intermediate runs of 53/61/63 cases were also green;
+  they are superseded by the expanded verification, not counted again.
+- `tests/work/test_fgw_block_resume.py` contains **six native lifecycle regressions**: interrupt
+  a real Work, preserve two good blocks, then recover only missing/malformed/checksum-invalid/
+  incomplete blocks; a recorded failed block is not reused. These use disposable local fixtures,
+  actual WorkRunner/checkpoints and real POT, not an alternate mock persistence engine.
+- Numeric tests cover scalar-vs-block matrices, both orientations/explicit symmetry/rectangular
+  collection, identities, memory guard, opaque contracts, NaN failure, one/two/unequal objects,
+  weights, exact/permuted inputs, actual POT comparison, nonzero relational diagonal, reproducible
+  multistart, invalid starts, max-iteration/nonconvergence, OR-vs-BOTH stopping and final marginals.
+  FGW matrices also feed the native precomputed clustering API in an integration regression.
+- With **no POT target on PYTHONPATH**, optional-backend diagnostics/lazy imports:
+  **3 passed**. Importing new classes does not load POT/Torch/sklearn.
+- Ruff passes on scientific source/new tests/examples; mypy passes for **41 source files**.
+  `git diff --check` passes. The earlier unrelated four baseline docstring omissions remain
+  untouched; no green whole-repository structure claim is made.
+- `examples/fgw_barycenter.py` ran with actual POT: weighted 2/3-node objects, a complete matrix,
+  reproducible two-start barycenter and rectangular prototype comparisons. Its observed relational
+  diagonal `[0.16666667, 0.33333333]` was retained, with converged postchecked objective
+  `0.11291666666666667`. This is a synthetic example, not a universal numerical benchmark.
+- The optional POT CI job now requests its clustering extra explicitly and includes the new
+  numerical/native-resume tests and standalone example. GitHub CI was **not** launched/observed.
+
+Public contracts/examples are in [the FGW matrix section](../MANUAL.md#fgw-blocks) and
+[barycenter section](../MANUAL.md#fgw-barycenters), with Spanish counterparts in the same single
+manual structure. Changelog remains Unreleased; release version is unchanged. Final wheel-artifact
+smoke: the rebuilt 0.19.0 wheel was imported directly with cwd `/tmp`, asserting its module paths
+come from `.whl`, sharing only existing numerical dependencies and the temporary POT target.
+Real barycenter optimization retained its nonzero diagonal, a complete native block matrix was
+computed, and imports remained lazy until solving. This is artifact validation, not a fresh
+dependency installation. Repeated final regression runs after the normalized-support underflow
+guard: **171 passed in 4.53 s** (POT 0.9.7.post1), **66 passed in 3.41 s** (POT 0.9.6).
+
+#### Continuation without repeating P0–P6
+
+Start **P7**: inspect Clusterer/ClusteringResult/capabilities and add honest weighted PAM/medoids,
+real observation indices and arbitrary-label representatives under the existing memory/distance
+contracts. Then **P8** cross-distance prototype assignment with explicit rejection (not invented
+probabilities/HDBSCAN prediction), **P9** finite/truncated-variational GMM adapters, **P10** classical
+MDS with negative-spectrum policy, **P11** aligned clustering/representative/neighbour stability,
+and **P12** full topology→FGW→clustering→medoid/barycenter→assignment example and final acceptance.
+No new algorithm placeholders/factories were added for these stages. Native Work lifecycle and
+HPO/resource/recovery policy were not modified by this standalone algorithm work.
+
+## 2026-10-19 — deleted-Job startup commitments and idle V8 GPUs
+
+Read-only native inspection of WISDOM found `wisdom-v8a` Job
+`job-20261019114516-0054cc25` on cluster 12 with zero active Runs and 16 queued,
+approximately 79 GiB physical free VRAM; `wisdom-v8b` Job
+`job-20261019114504-779e02a6` on cluster 16 had two Runs on GPU token `0` while
+its granted token `1` was idle with approximately 140 GiB free. Both now use auto caps.
+Their fresh launch veto was `peer-startup-future-envelope-headroom`, not a YAML cap.
+
+The host-wide startup ledgers still referenced deleted morning Jobs
+`job-20261019084926-ba7a6173` and `job-20261019084951-8927477a`. Their controller
+lifetimes were dead, worker identity files and entire Job directories absent, and the native
+process-marker scan found no surviving marked processes or relevant unresolved ownership.
+Missing request/state files prevented the old reconciliation from retiring those commitments.
+
+The shared admission service now uses `ProcessSupervisor.detached_owner_absent` only when
+the entire owned Job directory is absent. It reuses native lifetime/marker-scope semantics;
+no timestamp-only expiry, physical-idleness inference, fabricated Job state or relaxed grant
+checks. Existing incomplete/corrupt directories stay fail-closed. Repeated commitments from
+one owner/path share their absence check within one reconciliation. This changes operational
+startup accounting only, not scientific status, recovery eligibility or GPU access.
+
+Verified locally: **118 passed** across `tests/hpo/test_adaptive_resources.py`,
+`tests/runtime/test_shared_gpu_commitments.py`, `tests/controlplane/test_recovery_process_scope.py`
+and `tests/controlplane/test_process_scheduler.py`. New tests cover deleted Jobs with dead/reused
+controllers admitting a new Study, surviving orphans, inaccessible/alive owners, corrupt records
+and unsafe paths. Ruff and mypy cover the touched operational modules. No WISDOM source,
+remote Job, grant or persisted evidence was modified. Adoption by already running immutable
+runtimes still requires explicitly authorized native cancellation/recovery; not performed.
+
+## 2026-10-20 — reusable graph technologies from the prospective V9 design
+
+Read the report's `atomic_encoder_design.typ`, the included V9 family specifications and
+`docs/auditoria_v9.md` under the user's TFM/Memoria in read-only mode. The report explicitly
+calls this a prospective architecture comparison, not trained results. Existing GCN, GraphSAGE,
+GIN, R-GCN, PNA, GATv2, sparse GraphTransformer and EGNN are reused, not duplicated.
+
+Implemented independent public modules under `nn/models/graph`, exported through the existing
+graph/models/nn namespaces:
+
+- GINE layer/stack with explicit GINEConv per-message ReLU; full and basis NNConv layer/stack,
+  sum/mean/root controls, centered basis coefficients and node-side basis matrix application.
+  Existing ECMP already covers receiver/sender/edge MPNN; relation embeddings do not falsely
+  claim the report's independent-per-relation MLP semantics.
+- Gaussian/sinusoidal radial features and cosine cutoff; SchNet-style scalar node interactions
+  with explicit distances and optional independent support. SiLU is documented, not silently
+  identified with the full original shifted-softplus application recipe.
+- GVP primitive, residual scalar/vector GVP-GNN stack and whole-vector-channel dropout;
+  PaiNN sinusoidal interaction/local mixing and stack. Persistent polar vectors, invariant
+  node readouts, explicit geometric inputs and zero initial vectors, no chemical featurizer.
+- Bounded explicit GraphTriplets, canonical polynomial envelope, normalized spherical Bessel
+  and real m=0 harmonic bases, distinct bilinear DimeNet and factorized DimeNet++ interaction
+  modules. The generic DimeNet node encoder selects the interaction equation explicitly;
+  standard Torch initialization/arbitrary features/node readouts are documented adaptations.
+  Optional `graph-directional` extra requires SciPy only to construct root constants; no
+  dependency installation occurred. Forward is differentiable Torch. Spherical small-argument
+  series/recurrence match SciPy through all eight supported orders; all 64 roots are distinct
+  and ordered in each of those orders. Outside-support powers/trigonometry are bounded to
+  avoid nonfinite backward even for very distant edges.
+- Graphormer-inspired global structural stack/layer and explicit directed BFS encoding.
+  Batch graphs cannot attend to each other. Unreachable/self/path codes and degree codebooks
+  are explicit; no arbitrary index-selected path attributes. Supplied edge biases must retain
+  permutation equivariance. Degree/path conditioning per block is a declared generic variant,
+  not original graph-token/pretraining parity. Dense score/shortest-path byte limits fail before
+  corresponding matrix allocation; they are not claimed as full training-memory forecasts.
+
+The framework does not implement the consumer's semantic gates, relation branches, baseline
+context, capacity matching, signed data/code selection or campaign protocol. In particular no
+WISDOM file, dataset, study, cluster or scientific workload was changed/launched. Full-paper
+benchmark parity, CUDA conformance/performance and predictive improvement remain unverified;
+these are component APIs and numerical contracts, not evidence of a completed V9 experiment.
+
+Verification (existing Python 3.10 / Torch 2.3.1): **168 passed in 3.22 s**, new graph tests plus
+existing graph/primitives/attention/equivariant/catalog regressions; **6 passed** in the existing
+general model tests. New cases include scalar equations, explicit edge-matrix/triplet sums,
+permutation/multiplicity, isolated/empty nodes, O(3) transformations, state_dict, finite backward,
+bf16 CPU autocast, malformed input, memory bounds and missing optional dependency diagnostics.
+Ruff passes for graph changes, exports, tests and example; mypy passes for **60 source files**
+including graph interfaces and the example. `examples/graph_encoders.py --directional` executed
+all eight variants with finite forward/backward.
+
+Built the 0.19.0 wheel using `build --wheel --no-isolation` (no dependency install), then imported
+it directly with cwd `/tmp`, verified `.whl` provenance and `graph-directional` metadata, and
+executed the packaged example with both directional equations successfully. Artifact:
+`/tmp/lf-graph-v9-wheel.HWcYl8/lambdaforge-0.19.0-py3-none-any.whl`. This shares existing Torch/SciPy
+dependencies in read-only mode; it is not a clean-environment install claim. Manual/example are
+packaged and documented EN/ES; release version remains unchanged. Prior unrelated scientific
+algorithm P7–P12 acceptance work remains pending as recorded above, not folded into this task.
+
+## 2026-10-20 — public graph composition/source-control follow-up
+
+Implemented only the missing public interfaces from the follow-up request; no WISDOM/thesis
+edits, cluster contact, scientific Jobs, dependency installation, automatic commit or release bump.
+The [public capability matrix and exact signatures](../MANUAL.md#graph-operator-controls) distinguish
+existing equations from new composition boundaries, with the same Spanish section.
+
+- GCN/GraphSAGE optional signed aligned message weights preserve original topological degrees
+  and Mean counts. Canonical GCN loops replace supplied loops with modulation one; root/bias
+  policy remains explicit. Both model stacks forward the same modulation without new state.
+- GIN/GINE and PNA forward now reuse public messages/aggregate/update stages. ECMP exposes
+  projection and those stages per existing layer index. One update may combine independent
+  relation messages without duplicated roots/MLPs. PNA's scaler/aggregator order and authored
+  statistics remain unchanged; degree_dtype preserves original AMP arithmetic. Independent
+  branch objects retain unused stage parameters; execution/capacity accounting must be honest.
+- SchNet/PaiNN source weights jointly control radial features and cutoff, keeping unit directions
+  separate. Public radial_inputs and forward_from_radial layer boundaries allow native bases and
+  complete supports to be combined per relation before one node update, with no hidden cutoff.
+- DimeNet distance-source control retains an angle-only constant-one radial baseline, not invalid
+  physical zero lengths. forward_from_basis accepts explicit relation-specific native supports;
+  initial states, incoming/outgoing triplet products, post-interaction states and readout messages
+  honor differentiable weights. Mixed typed paths/multiplicity survive without topology changes.
+  Fractional factors compound over stages; legacy zero-input node-readout constants are explicitly
+  distinguished from messages when all relations close. No original state keys were replaced.
+- Existing structural attention remains global/dense; its score guard now uses promoted dtype
+  under autocast. This is a memory-accounting correction, not a new Graphormer path-edge recipe
+  or permission to override a consumer's prohibition on dense N×N matrices.
+
+Compatibility: constructors/default equations/state keys preserved, checked against hand references
+and pre-refactor equations (including PNA/ECMP bf16 AMP); malformed ECMP topology/relation IDs
+are now rejected rather than silently truncated. Precomputed interfaces validate tensor/topology
+contracts, not hidden physical provenance. Radial controls cannot infer arbitrary consumer edge
+attribute semantics; duplicate scalar distance columns remain the caller's responsibility.
+Source control does not claim to disable directions/angles or the node's own update constants.
+No new generic GNN factory, scientific gate registry or application architecture was introduced.
+
+Verification: **274 passed in 3.67 s**, across graph_operator_controls, v9_graph_components,
+graph_models, graph_primitives, graph_transformer, equivariant_graph_models, models, pna,
+relational_gcn and nn_component_catalog. New synthetic controls cover signed/zero/fractional
+weights, canonical/explicit loops, common roots, relation/attribute separation, mixed triplets,
+distance closure/cutoffs, long relation support, permutations, edge reversal, disjoint batching,
+O(3), finite gradients/bf16, strict state_dict, invalid geometry and controlled memory guards.
+Ruff lint/format pass; mypy passes for **59 source files** (graph interfaces, ECMP and example).
+`examples/graph_operator_controls.py --directional` ran with finite forward/backward, using
+public methods only. Wheel built with existing dependencies and --no-isolation; importing the
+wheel directly from `/tmp` verified module provenance and ran that packaged example successfully:
+`/tmp/lf-graph-controls-wheel.aVa31E/lambdaforge-0.19.0-py3-none-any.whl`.
+No clean dependency installation, real-protein fit, CUDA conformance, GPU performance or predictive
+improvement is claimed. Earlier unrelated scientific algorithm acceptance remains pending.
+
+### 2026-10-20 — Bound live ARI posterior feedback and joint-fit work
+
+Read-only inspection of `wisdom-v8d`, Job `job-20261020101604-883baff7`, cluster16:
+the grant contained physical tokens `1,3`. Token 1 had about 139 GiB free and one 842 MiB
+idle CUDA worker; token 3 had three active training workers. The first Run on token 1 had
+already persisted `succeeded`, but the controller had not collected it. Study/admission
+projections were stale despite the supervisor heartbeat and sibling training continuing.
+Persisted live supports had 3,446/3,447 points and candidate predictions had 6,739; resource
+projection was about 30 MiB and Study summary about 106 MiB. A read-only native debugger stack
+confirmed `_normalized_weights → _weighted_quantile → _joint_fit_probability →
+_resource_experiment_signature → _exploration_value → place → _execute_gpu_admitted_runs`.
+The debugger detached; no Job was cancelled, restarted, retried or remotely patched.
+
+Native correction: bound posterior mixtures and convolution inputs to 128 weighted points;
+retain endpoint masses and conservatively round interior bins upward. Shared-latent fit sweeps
+CDF events once instead of sorting every distribution at every quantile. Live trajectory updates
+retain historical residual weights instead of making a rare tail equiprobable with each body
+support point. Exact small supports, physical checks, grants, OOM dominance and scientific
+planning policies are preserved. No second scheduler or concurrency override was added.
+
+Verification: **175 passed in 3.90 s** across resource-distribution liveness, adaptive resources,
+v3.1 invariants, scheduling benchmark/replay, native live refill/recovery grants and runtime
+commitment/observation/device-health/attribution regressions. Eight new cases cover conservative
+CDFs, exact endpoint masses, exhaustive small-support ensemble agreement, bounded legacy inputs,
+70 live feedback cycles without terminal evidence and residual-tail weighting. Ruff lint/format
+passes for three touched Python files; mypy passes for both changed source interfaces. A local
+synthetic 6,740-point/four-distribution comparison timed out the previous calculation after 3 s;
+the corrected calculation took about 0.042 s. This is not a real-GPU throughput claim.
+
+Operational limitation: the already-running immutable managed runtime still contains the old
+implementation. Adopting the correction in that Job requires a separately authorized lifecycle
+operation; none was performed. No live WISDOM evidence, application code or dependencies changed.
+
+### 2026-10-27 — Durable operational Dataset replication
+
+CLI `datasets replicate --apply` and Console Replicate now enqueue the same native
+`dataset-replication` Job. They reuse JobService/JobStore and provider schedulers/supervisors,
+not a scientific Work, alternate lifecycle or second copy engine. Direct SSH runs on the source
+host independently of the PC. A compressed relay runs under a detached local Job and survives
+UI/launcher exit but still needs its PC/network. Authentication snapshots retain references only;
+interactive-password relay is refused. Site SSH remains host-key verified without forwarding.
+No live transfer was launched, resumed or cancelled, and no remote installation was performed.
+
+Dataset Transfers and `datasets transfers [DATASET]` / `transfer-status JOB` reconnect to bounded
+metadata and native logs. Exact active requests are locked/deduplicated; unknown ownership and
+unacknowledged submission never justify duplicate dispatch. Native CPU/storage/grant policies
+remain intact. Checksum-verified destination acknowledgements reconcile the controller placement
+on reconnect without changing identity; failures/corruption are not complete replicas. Active
+source/destination copies are protected from Dataset deletion even when hosted on the controller.
+Derived profiles are not project-scoped twice. Terminal observations are cached via native metadata
+merge for cheap history; explicit status still reads host metadata. UI refresh retains old rows on
+observation failure and does not repeatedly notify. Completed placements update Locations.
+
+Verification: **142 passed in 73.72 s** across all Dataset tests, native ProcessScheduler and
+Dataset Console tests. Includes real detached disposable local Jobs, parent exit before copy starts,
+concurrent deduplication, direct/relayed compression, scoped-project routing, corruption refusal,
+bounded metadata-only reads, cached terminal history, ownership/path safety, endpoint deletion
+protection and Console pending-versus-verified feedback. Ruff lint/format pass for 12 Python files;
+mypy passes for 9 changed source interfaces. Wheel built without dependency installation; new
+modules and CLI parsers imported directly from that wheel in `/tmp` with provenance asserted.
+No clean installation, real site SSH/SLURM connectivity or real large-dataset throughput is claimed.
+
+Limits: old in-session transfers are not retroactively detached; relays cannot survive PC shutdown;
+interrupted copies restart the byte stream, not byte-offset resume. Already-exact destination
+verification/reconciliation remains the existing synchronous no-new-transfer path. A new transfer
+is durable after native Job acknowledgement, not merely after clicking Submit. No version bump.
+
+### 2026-10-27 — Relative relay request paths and early-failure diagnostics
+
+Read-only inspection of the supplied local `stderr.log`, `request.json` and `work/replication.json`
+for `job-20261027090952-65861abc` confirmed that the request existed but its command argument was
+relative. The native supervisor correctly used its absolute work directory as cwd; the worker
+therefore looked for the project-relative request below that directory and exited before copying.
+No dataset-integrity/scientific failure was inferred. No WISDOM file, dataset, registry or original
+Job was modified, and no actual transfer or remote command was launched for this correction.
+
+Replication now reuses native local submission anchoring *before* constructing paths, staging or
+serializing the worker command. Local profile workspace/state/cache/run/dataset/lease roots and
+explicit interpreter paths are pinned to ProjectContext; the registry was already absolute.
+Snapshots retain those absolute local paths. SSH profiles remain host-owned and unchanged;
+no local resolving of remote paths, symlink workaround, auxiliary copy or worker cwd change.
+
+Status reads a bounded 8 KiB owned stderr tail for failed Jobs, redacts before exposing/caching,
+and returns a nonempty cause plus `logs_command` when no result/progress was ever written. Missing
+logs produce an explicit diagnostic/link, not an empty error. Failed caches from before this fix
+refresh once. CLI renders the cause and Console log details include it; outcome/identity/publication,
+active-transfer deduplication and uncertain-ownership policies are unchanged.
+
+Verification: **146 passed in 81.62 s** across all Dataset tests, native ProcessScheduler and Dataset
+Console regressions. Added real worker execution from work_dir with relative/absolute local roots
+(controller invoked from a project subdirectory), complete local snapshot anchoring, unchanged SSH
+profiles, early missing-request failure with no destination/result/progress, redaction, legacy empty
+failure cache refresh and public CLI JSON/human diagnostics. Existing active deduplication and atomic
+checksum publication regressions pass. Focused early-failure checks were rerun after adding bounded
+tail handling. Ruff lint/format pass for four touched Python files; mypy passes for three changed
+source interfaces. No dependency installation or release bump. Reattempt uses the ordinary explicit
+`datasets replicate` preview then apply; the original failed Job/logs remain historical evidence.
+
+### 2026-10-27 — Immutable nested resource telemetry and Study recovery review
+
+The supplied V10a generator/items traceback is reproduced locally without CUDA or dataset access.
+`dataclasses.asdict` reconstructs dict subclasses with a pair generator; FrozenJsonMapping formerly
+accepted only Mapping. The constructor now accepts the normal dict pair-iterable protocol and
+continues recursively freezing nested values. Resource dataclasses now serialize through one
+field/portable-container boundary instead of asdict/deepcopy reconstruction. Active/terminal
+history, admission, exploration, commitment ledgers and trace scientific-value contracts use it;
+nested frozen lists/mappings and mapping proxies become detached built-in JSON containers.
+Already-portable wire values remain equal and parameter resource identity hashes remain unchanged.
+Unsupported non-JSON values still fail explicitly, preserving the prior atomic snapshot.
+No generic catch, GPU admission/monitor disablement or alternate recovery engine was introduced.
+
+Verification: **213 passed in 72.93 s** across immutable JSON/resource serialization (12 new cases),
+ARI/v3.1/distribution liveness/replay/benchmark, monitor immutable IPC, shared GPU commitments,
+adaptive/fixed Study recovery and GPU-grant recovery. Coverage includes the actual persist_active
+round-trip at synthetic step 89/final-evaluation phase, exact original values/immutability, JSON
+validity, all corresponding resource write paths, stable wire representation and atomic rejection.
+Recovery regressions preserve valid result paths/bytes and checkpoint compatibility, reuse original
+Execution/Run identities, retain physical costs/history, requeue interrupted seeds and do not infer
+completion from telemetry. No recovery code needed changing. An additional native-environment
+identity/cache regression passed. Ruff lint/format pass for four touched Python files; mypy passes
+for both changed source interfaces. Wheel built --no-isolation without installing dependencies;
+from `/tmp`, exact wheel module provenance, nested asdict and native persist_active reload verified.
+
+Deployment remains an explicit operator action: use the corrected controller framework package,
+bootstrap the consumer's managed cluster environment from the consumer project, inspect native
+retry --dry-run, then deliberate retry. Exact wheel bytes participate in EnvironmentIdentity even
+when the release stays 0.19.0. Do not patch the old prefix or rewrite original evidence. The V10a
+YAML was read only to confirm its display name/seed policy; no real Run, transfer, remote probe,
+environment install, dataset/index mutation or recovery was performed. The supplied remote error
+file was not fetched; no live per-Run completion counts or checkpoint compatibility are claimed.
+The unrelated simultaneous Dataset transfer is not attributed as a cause. Version unchanged.
+
+### 2026-10-27 — Direct push/pull replication, explicit relay and honest observation
+
+Read-only inspection of the supplied transfer Job found receiver-write EOF followed by another
+Paramiko EOF during cleanup. This proves a broken receiver stream, not whether the network failed,
+the receiver exited or the controller suspended. Native events recorded the failed process at
+11:21:33 UTC, about five seconds after its 11:21:28 exit; 11:39 was a later confirmation, not the
+first failure detection. The exact prior UI desynchronization is not proven. Dataset listings now
+refresh native transfer observations without requiring transfer-status or an open detail panel.
+
+One native transfer service now probes effective bounded readonly SSH push then inverse pull,
+classifying authentication, host key, timeout, network, tools, permissions and indeterminate causes.
+Push Jobs live on source, pull Jobs on destination; both run the existing exact archive/publication
+engine with no controller data socket. Auto only proposes controller relay. CLI interactive consent,
+explicit --route relay for automation, and Console confirmation show path, original size and PC
+dependency. Approved direction/diagnostics persist; a changed route before dispatch is rejected.
+No trust weakening, key copying, agent forwarding, second runner or automatic unbounded retry.
+
+Status uses native OperationalHealth/Job evidence, separating process outcome, observation age,
+byte advancement/age and observed verification/publication. Unknown observation never fabricates
+failure or confirmed running. No compressed percentage is inferred from original size. Binary
+stderr is drained independently and bounded/redacted; peer exit is unknown when unavailable.
+Cleanup cannot replace the original exception and owned subprocesses are still reaped. Bounded
+receiver phase responses distinguish actual verification/publication during direct push as well
+as pull. Exact checksums, atomic publication, source ownership and active-transfer exclusion remain.
+
+Verification uses only disposable local fixtures and simulated site transports: actual detached
+workers for both directions, no controller stream, route/consent changes, distinct diagnostics,
+unobservable/terminal process views, separate byte/verification clocks, early sender/receiver failure,
+primary/cleanup EOF preservation, incomplete-publication rejection and existing duplicate guards.
+No real site SSH probe, transfer, Job cancellation/restart, dependency install or WISDOM/data/index
+mutation was performed. Site authentication/trust and filesystem/runtime readiness remain operator/
+administrator responsibilities. Probes are snapshots, not future-connectivity guarantees. Partial
+streams restart on deliberate retry, not byte-offset resume; verified destinations are reused.
+The release stays 0.19.0. No claim is made that real cluster-to-cluster connectivity is configured.
+
+Checks: the broad Dataset/ProcessScheduler/SSH-policy/binary/Console suite passed **179 tests** in
+108.07 s. After adding receiver-reported publication phases, the affected replication/binary/Console
+subset passed **77 tests** in 72.17 s (including two new direction/phase regressions). Ruff lint and
+format checks pass for 16 touched files; mypy passes for 12 source interfaces. The wheel builds
+without dependency installation; extracted-wheel import provenance, helper presence and route
+classification were smoke-tested from `/tmp`. These are fixture/packaging checks, not site acceptance.
+
+### 2026-10-27 — Explicit no-laptop replication policy in the Console
+
+Read-only local Job inventory inspection of `job-20261027120734-c733ed69` confirms that `host=local`
+is accurate: it was a controller-stream relay. Its persisted direct-push probe reported missing
+trusted ED25519 host key for the destination; inverse pull reported authentication denied on source.
+This is evidence of those particular failed probes, not a current live connectivity guarantee.
+A fresh preview from this agent could not authenticate because the session's keyring backend was
+unavailable; no keys, credentials, profiles, real Jobs or datasets were changed and no transfer launched.
+
+The Console previously exposed only endpoint selection, then converted a relay proposal into relay
+policy at confirmation. It now explicitly offers Direct only, Auto and Relay, defaults remote
+sources to Direct only and forwards the chosen policy unchanged to the native preview. A direct
+failure opens readable scrollable diagnostics; no implicit relay confirmation is possible. Local
+endpoints explain their PC dependency. Confirmation also rejects a relay plan under direct-only
+policy defensively. Transfers label relay as `via this PC`; existing Jobs retain their pinned route.
+English/Spanish manuals explain that execution host is route-derived, not a freely selectable label.
+
+Checks: replication Console plus native route regressions **33 passed** in 43.99 s; final expanded
+Console suite **10 passed** in 17.97 s, including route selection/default, fixed action controls at
+80×24, readable literal diagnostics, no direct-to-relay confirmation and explicit relay labeling.
+Ruff lint/format pass for three touched files; mypy passes for two source interfaces. The correction
+cannot create site-authorized inter-host SSH access: an operator/administrator must verify host keys
+and authorize noninteractive access in at least one direction. No trust bypass or credential forwarding.
+
+### 2026-10-28 — Explicit first-use peer fingerprint approval
+
+The supplied screenshot identifies unknown ED25519 trust from 16 to the exact destination IP;
+inverse authentication denied is a separate failure. Accepting keys on the controller does not
+configure the initiating cluster, and hostname/IP aliases can use different trust records. A new
+read-only WISDOM preview was attempted but this agent session cannot access its keyring backend;
+current live SSH/authentication state is therefore not asserted. No real trust, credential, Job,
+dataset, registry or WISDOM file was changed, and no real transfer was launched.
+
+Structured native direct-route errors now expose diagnostics without parsing a human traceback.
+SiteSshTrustService/its shipped host helper implement bounded read-only inspection of effective
+SSH configuration, existing user/global trust and offered keys. DatasetService, `datasets trust-ssh`
+and Console consume that same operation. A separate first-use modal names initiator, peer/IP/port,
+remote file and SHA256 keys and warns that keyscan does not authenticate them. Explicit approval
+pins/re-scans every fingerprint, rechecks under a native lock, preserves existing bytes/permissions
+and atomically adds hashed entries to the initiating user's safe effective known_hosts. Concurrent
+changes, mismatched fingerprints, existing changed/marked keys, symlinks and unsafe paths fail closed.
+HostKeyAlias, proxy routes and special path expansions require site-managed trust rather than
+approximate support. No SSH strict-check disablement, credential forwarding or automatic key replace.
+
+After trust approval the Console repeats the normal native preview. Dataset copy still requires
+its own confirmation; canceling trust changes nothing. Recording server identity neither grants
+noninteractive login nor fixes a password-only peer account. Existing native direct push/pull Jobs,
+relay consent, identity/checksum verification and atomic dataset publication remain unchanged.
+
+Verification: **194 passed in 100.32 s** across Dataset tests, first-use trust, binary/SSH policy and
+Dataset Console. Covers native fingerprints vs ssh-keygen, no-write preview, explicit approval,
+hash lookup, original bytes/permissions, idempotence/concurrency, rotation/revocation and unsafe
+paths, port-specific labels, CLI delegation, real helper subprocess execution with fixture-only
+SSH binaries/disposable HOME, modal cancel/approve/re-preview and separate copy confirmation.
+Ruff lint/format pass for 11 touched files; mypy passes for nine source interfaces. CLI help works;
+wheel builds --no-isolation without dependency installation, and extracted-wheel imports verify
+module provenance, helper presence and public trust APIs. OpenSSH's primary manual was checked
+for keyscan's unauthenticated nature. No live site acceptance or release-version bump is claimed.
+
+### 2026-10-28 — V10d CPU startup diagnosis and GPU zero-attribution correction
+
+Read-only inspection of `job-20261028082934-ca20dad0` on ctgpgpu16 found the two granted tokens
+2/3 intact, three live scientific workers and a fourth seed queued. Workers consumed about one
+CPU core each, read tens of GB and remained in the logged managed-split loading stage without
+CUDA process entries or epochs. The immutable consumer runtime's source confirms that structural
+registration calls full sidecar validation and AtomicSASA.validate recomputes SASA during that
+initialization. This is consumer CPU preparation, not proof of a GPU-launch deadlock. Without
+intervention, the first workers reached epochs 3–4 and LF admitted seed 229 at 09:17:10 UTC.
+No Work/YAML, datasets, persisted scientific records, GPU grants or processes were changed.
+Intrusive stack attachment was not used: it would pause a live scientific worker and requires
+separate operator approval. Code, logs, open-file metadata and advancing CPU/I/O were sufficient.
+
+A separate LF bug was reproduced with fixtures: CPU-only live workers absent from the CUDA PID
+table fell through to aggregate attribution, inheriting device-wide driver/other usage (about
+617 MiB here). GPUObservation now explicitly attests process-inventory completeness, including
+NVML/SMI process-inspection failures and truncation. The native runner recognizes absent owned
+processes as measured zero only with a complete measured inventory, validated live lifetime,
+observation after worker birth and no conflicting positive allocator evidence. Unknown per-PID
+bytes, partial/legacy observations and reused lifetimes remain unknown/conservative; uncertain
+multi-device usage cannot be mislabeled exact. No physical free memory, future envelope,
+protected progress lane, exploration policy, device grant or scientific result was relaxed.
+
+Changes are limited to GPUObservation, native runner attribution and a focused regression module,
+plus EN/ES documentation/changelog. **153 tests passed in 2.59 s** across native ARI/v3.1, resource
+distribution/replay/benchmark, attribution/observation and shared GPU admission. Tests include the
+actual live-update path, reserved/foreign VRAM, unknown vs zero, birth time, reused PID, unknown
+per-process bytes, allocator conflict and backend query/inspection failures. Ruff lint/format
+passes for all three touched files; mypy passes for both source interfaces. No dependency install
+or release bump. Existing immutable running Jobs are not hot-patched: the correction is for the
+next explicitly deployed runtime. Reducing the long SASA initialization requires consumer-side
+work; no WISDOM optimization or current-runtime rollout is claimed here.

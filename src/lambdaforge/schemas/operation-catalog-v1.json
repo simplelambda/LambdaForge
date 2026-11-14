@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lambdaforge.dev/schemas/operation-catalog-v1.json",
+  "title": "LambdaForge operation declarations",
+  "type": "object",
+  "required": ["schema_version", "operations"],
+  "properties": {
+    "schema_version": {"const": "operation-catalog-v1"},
+    "framework_version": {"type": "string"},
+    "operations": {"type": "array", "items": {"$ref": "#/$defs/operation"}}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "operation": {
+      "type": "object",
+      "required": ["id", "kind", "label", "implementation", "aliases", "parameters", "methods"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "label": {"type": "string", "minLength": 1},
+        "implementation": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_.]*$"},
+        "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "parameters": {"type": "array", "items": {"type": "object", "required": ["name", "type"], "properties": {
+          "name": {"type": "string"}, "type": {"enum": ["integer", "number", "boolean", "string", "structured"]}
+        }}},
+        "methods": {"type": "array", "items": {"type": "object", "required": ["name", "inputs"], "properties": {
+          "name": {"type": "string"}, "inputs": {"type": "array", "items": {"$ref": "#/$defs/port"}},
+          "outputs": {"type": "array", "items": {"$ref": "#/$defs/port"}}
+        }}},
+        "description": {"type": "object", "additionalProperties": {"type": "string"}},
+        "contract_status": {"type": "string"}
+        ,"effects": {"type": "object", "required": ["schema_version", "capabilities"],
+          "properties": {"schema_version": {"const": "operation-effects-v1"},
+                         "capabilities": {"type": "array", "items": {"type": "string"}}}},
+        "preview": {"type": "object", "required": ["supported"], "properties": {"supported": {"type": "boolean"}}}
+      }
+    },
+    "port": {
+      "type": "object", "required": ["name", "kind"],
+      "properties": {
+        "name": {"type": "string"}, "kind": {"type": "string"},
+        "shape": {"type": ["array", "null"], "items": {"type": ["integer", "string", "null"]}},
+        "dtype": {"type": ["string", "null"]}, "units": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

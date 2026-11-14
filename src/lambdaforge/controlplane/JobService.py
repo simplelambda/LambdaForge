@@ -81,6 +81,7 @@ class JobService:
         job_type: str = "command",
         group_id: str | None = None,
         job_id: str | None = None,
+        stdin_data: bytes | None = None,
     ) -> JobHandle:
         """Submit one schedulable unit and persist its complete reconnection data."""
         profile = self._submission_profile(
@@ -106,6 +107,10 @@ class JobService:
             **(dict(reserved.metadata) if reserved is not None else {}),
             **dict(metadata or {}),
         }
+        if stdin_data is not None:
+            record_metadata["ephemeral_input_required"] = True
+        elif record_metadata.get("ephemeral_input_required"):
+            raise ValueError("This Job requires a fresh ephemeral input; none was supplied.")
         assert profile.storage is not None
         record_metadata["provider_storage"] = profile.storage.to_dict()
         if profile.transport == "local":
@@ -147,6 +152,17 @@ class JobService:
             }
             if "job_id" in parameters:
                 kwargs["job_id"] = job_id
+            if stdin_data is not None:
+                if "stdin_data" not in parameters or profile.scheduler != "local":
+                    raise ValueError(
+                        "Provider cannot deliver ephemeral input; no credentials persisted."
+                    )
+                kwargs["stdin_data"] = stdin_data
+            queue = record_metadata.get("execution_queue")
+            if queue is not None:
+                if "execution_queue" not in parameters or profile.scheduler != "local":
+                    raise ValueError("Provider cannot honor sequential execution queue admission.")
+                kwargs["execution_queue"] = queue
             submission = scheduler.submit(command, resources, **kwargs)
         except Exception as error:
             context = DiagnosticContext(
@@ -166,6 +182,16 @@ class JobService:
                 updated_at_utc=datetime.now(timezone.utc).isoformat(),
             )
             self.store.write(failed)
+            if record_metadata.get("execution_queue"):
+                try:
+                    self._abort_pending_queue(failed)
+                except (OSError, RuntimeError, ValueError) as queue_error:
+                    self.store.append_event(
+                        job_id,
+                        state=failed.state.value,
+                        phase="execution-queue",
+                        message=f"Queue cleanup blocked: {queue_error}",
+                    )
             self.store.append_event(
                 job_id,
                 state=failed.state.value,
@@ -387,6 +413,16 @@ class JobService:
         record = self.store.get(job_id)
         if record.state is JobState.CANCELLED:
             return record
+        if record.scheduler_id is None and self._execution_queue_related(record):
+            try:
+                self._abort_pending_queue(record)
+            except (OSError, RuntimeError, ValueError) as queue_error:
+                self.store.append_event(
+                    job_id,
+                    state=record.state.value,
+                    phase="execution-queue",
+                    message=f"Queue cleanup blocked: {queue_error}",
+                )
         context = DiagnosticContext((), "asynchronous job preparation", record.cluster)
         classified = DiagnosticClassifier().classify(error, context)
         updated = record.with_updates(
@@ -407,6 +443,27 @@ class JobService:
             message=("Background preparation failed; inspect the diagnostic and controller log."),
         )
         return updated
+
+    def _abort_pending_queue(self, record: JobRecord) -> None:
+        from lambdaforge.controlplane.ExecutionQueueService import ExecutionQueueService
+
+        ExecutionQueueService(
+            self.catalog,
+            self.factory,
+            source_dir=Path(record.config_path).parent if record.config_path else None,
+        ).abort(record.cluster, record.job_id)
+
+    def _execution_queue_related(self, record: JobRecord) -> bool:
+        """Only explicit queue dependencies add target I/O to pre-provider lifecycle calls."""
+        return bool(
+            record.metadata.get("execution_queue_requested")
+            or record.metadata.get("execution_queue")
+        ) or any(
+            row.cluster == record.cluster
+            and record.job_id
+            in row.metadata.get("execution_queue", {}).get("ticket", {}).get("blockers", ())
+            for row in self.store.records()
+        )
 
     def resolve_selector(self, selector: str) -> str:
         """Resolve an exact ID, ``latest`` or one unambiguous job name."""
@@ -1356,6 +1413,8 @@ exec "$fallback" "$@"
         try:
             path.relative_to(root)
         except ValueError as error:
+            if self._owned_local_study_path(record, path):
+                return path
             recovery = record.metadata.get("recovery_execution_dir")
             owner_id = record.metadata.get("recovery_owner_job")
             if isinstance(recovery, str) and isinstance(owner_id, str):
@@ -1385,6 +1444,72 @@ exec "$fallback" "$@"
                 f"Study evidence escaped the Job work root for {record.job_id}."
             ) from error
         return path
+
+    def _owned_local_study_path(self, record: JobRecord, path: PurePosixPath) -> bool:
+        """Accept only the sealed local Execution belonging to this project's Work.
+
+        Local Runs live in the scientific project, independently of the provider
+        allocation directory. Never whitelist the whole project or trust a
+        telemetry-supplied root.
+        """
+        if self.catalog.get(record.cluster).transport != "local":
+            return False
+        source = record.metadata.get("source_config_path") or record.config_path
+        fingerprint = record.metadata.get("scientific_identity")
+        name = record.metadata.get("name")
+        if (
+            not isinstance(source, str)
+            or not Path(source).is_absolute()
+            or ".." in Path(source).parts
+            or not isinstance(fingerprint, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+            or not isinstance(name, str)
+        ):
+            return False
+        from lambdaforge.ProjectContext import ProjectContext
+        from lambdaforge.work.recovery import read_owned_json
+
+        context = ProjectContext.discover(Path(source).parent)
+        if str(context.root) != record.metadata.get(
+            "project_root"
+        ) or context.project_id != record.metadata.get("project_id"):
+            return False
+        slug = "".join(c if c.isalnum() or c in "-_." else "-" for c in name).strip(".-")
+        root = context.root / ".lambdaforge" / "runs" / (slug or "work")
+        try:
+            relative = path.relative_to(PurePosixPath(str(root)))
+            execution_id = relative.parts[0]
+            if (
+                len(relative.parts) < 3
+                or relative.parts[1] != "runs"
+                or re.fullmatch(
+                    "execution-" + fingerprint[7:23] + r"(?:-[0-9a-f]{8})?",
+                    execution_id,
+                )
+                is None
+            ):
+                return False
+            execution = root / execution_id
+            if Path(str(path)).resolve() != Path(str(path)):
+                return False
+            origin = read_owned_json(execution / "execution.json")
+        except (OSError, ValueError, IndexError):
+            return False
+        return (
+            origin.get("execution_manifest_version") == 1
+            and (
+                origin.get("job_id") == record.job_id
+                # Historical direct local executions have no provider Job stamp.
+                # Only their exact canonical scientific Execution is admissible;
+                # unstamped deliberate reruns remain outside this Job's scope.
+                or origin.get("job_id") is None
+                and execution_id == "execution-" + fingerprint[7:23]
+            )
+            and origin.get("execution_id") == execution_id
+            and origin.get("scientific_fingerprint") == fingerprint
+            and origin.get("name") == name
+            and origin.get("source") == source
+        )
 
     @staticmethod
     def _read_study_log(
@@ -1631,6 +1756,8 @@ exec "$fallback" "$@"
         if record.state.terminal and not reconciling_cancelled:
             return record
         if record.scheduler_id is None:
+            if self._execution_queue_related(record):
+                self._abort_pending_queue(record)
             record = record.with_updates(
                 state=JobState.CANCELLED,
                 metadata={**dict(record.metadata), "cancelled_before_scheduler": True},
@@ -2101,8 +2228,11 @@ exec "$fallback" "$@"
         script = (
             "from __future__ import annotations\n"
             "import sys,json,hashlib\nfrom typing import Any,Mapping\nfrom pathlib import Path\n"
-            + inspect.getsource(read_extension_configuration) + "\n"
-            + inspect.getsource(inspect_extension_execution) + "\n" + inspect.getsource(page)
+            + inspect.getsource(read_extension_configuration)
+            + "\n"
+            + inspect.getsource(inspect_extension_execution)
+            + "\n"
+            + inspect.getsource(page)
             + "\nrequest=json.loads(sys.argv[1])\n"
             "from lambdaforge.work.recovery import read_owned_json\n"
             "pointer=read_owned_json(Path(request['owner'])/'result.json')\n"
@@ -2117,33 +2247,45 @@ exec "$fallback" "$@"
         offset, digest = 0, None
         while True:
             request = {
-                "owner": str(PurePosixPath(owner.work_dir).parent), "allowed": allowed,
-                "execution_job": owner_id, "offset": offset,
+                "owner": str(PurePosixPath(owner.work_dir).parent),
+                "allowed": allowed,
+                "execution_job": owner_id,
+                "offset": offset,
             }
             assert profile.storage is not None
             environment = (
-                "env", f"LAMBDAFORGE_CLUSTER={record.cluster}",
+                "env",
+                f"LAMBDAFORGE_CLUSTER={record.cluster}",
                 "LAMBDAFORGE_DATASET_REGISTRY="
                 + str(PurePosixPath(profile.storage.state_root) / "datasets.json"),
                 f"LAMBDAFORGE_DATASET_ROOT={profile.storage.dataset_root or ''}",
                 f"LAMBDAFORGE_PRODUCT_ROOT={profile.storage.product_root}",
                 f"LAMBDAFORGE_STORAGE_POLICY={json.dumps(profile.storage.to_dict())}",
             )
-            response = transport.run((
-                *environment,
-                *ControlPlaneFactory.reader_command(profile, preferred=python),
-                "-c", script, json.dumps(request),
-            ), timeout=60)
+            response = transport.run(
+                (
+                    *environment,
+                    *ControlPlaneFactory.reader_command(profile, preferred=python),
+                    "-c",
+                    script,
+                    json.dumps(request),
+                ),
+                timeout=60,
+            )
             if response.returncode:
                 raise ValueError("Cannot inspect extension evidence: " + response.stderr[-2000:])
             if len(response.stdout.encode()) > 1024**2:
                 raise ValueError("Extension evidence page exceeds its wire bound.")
             envelope = json.loads(response.stdout)
             chunk = base64.b64decode(envelope["data"], validate=True)
-            if (len(chunk) > 512 * 1024 or envelope.get("offset") != offset
-                    or envelope.get("next_offset") != offset + len(chunk)
-                    or type(envelope.get("eof")) is not bool
-                    or digest is not None and digest != envelope.get("fingerprint")):
+            if (
+                len(chunk) > 512 * 1024
+                or envelope.get("offset") != offset
+                or envelope.get("next_offset") != offset + len(chunk)
+                or type(envelope.get("eof")) is not bool
+                or digest is not None
+                and digest != envelope.get("fingerprint")
+            ):
                 raise ValueError("Extension evidence changed during inspection; retry preview.")
             digest = envelope["fingerprint"]
             chunks.append(chunk)
@@ -2182,8 +2324,11 @@ exec "$fallback" "$@"
         script = r"""
 import json,sys
 from pathlib import Path
+lock_source=sys.argv.pop()
 seed_source=sys.argv.pop()
+exec(lock_source)
 exec(sys.argv.pop())
+exec(sys.argv.pop().replace("    from lambdaforge.work.recovery import read_owned_json", ""))
 work,known,result,controller=map(Path,sys.argv[1:])
 def read(p):
  if not p.is_file() or p.is_symlink(): return {}
@@ -2210,19 +2355,29 @@ if paths:
  if not p.is_absolute() or p.resolve()!=p or not p.is_relative_to(work):
   raise SystemExit("Recovery state is outside the recorded owner Job workspace")
  manifest=read(p/"execution.json")
+ manifest["recovery_file_bindings"]=original_file_bindings(p)
  designs=manifest.get("study_designs",[])
- if len(designs)==1 and designs[0].get("type") in {"sweep","repeated"}:
+ fixed=len(designs)==1 and designs[0].get("type") in {"sweep","repeated"}
+ if single_execution(manifest) or sequential_execution(manifest) or fixed:
   stream=None
-  if designs[0].get("replication")=="auto-blocks":
+  if designs and designs[0].get("replication")=="auto-blocks":
    # Inspection may use an older system Python, not the managed scientific runtime.
    exec(seed_source.replace(", slots=True", ""))
    stream=ProjectSeedStream
-  out=fixed_recovery_preview(p,seed_stream=stream)
+  out=(sequential_recovery_preview(p,controller_lock=CrossProcessFileLock)
+       if sequential_execution(manifest) else
+       fixed_recovery_preview(p,seed_stream=stream,controller_lock=CrossProcessFileLock))
   keys=("execution_id","scientific_fingerprint","code_identity",
-        "study_designs","expected_products","source")
+        "study_designs","expected_products","source","name","planned_runs","resolved_configuration","resources","recovery_file_bindings")
   out["origin_manifest"]={k:manifest[k] for k in keys if k in manifest}
   out["previous_code_identity"]=read(p/"current-code.json").get("code_identity",manifest.get("code_identity"))
   json.dump(out,sys.stdout); sys.exit(0)
+ if not designs and not (p/"hpo-control"/"state.json").is_file():
+  if len(manifest.get("resolved_configuration",{}).get("levels",[]))>1:
+   raise SystemExit("Unsupported composition recovery topology: sequential single-Run steps only")
+  raise SystemExit("Authoritative single Work recovery state is missing or corrupt; "
+                   "inspect execution.json and resolved-configuration.json. "
+                   "Refusing a silent restart")
  if not (p/"hpo-control"/"state.json").is_file():
   raise SystemExit("Persisted adaptive Study recovery state is missing; refusing a silent restart")
  state=read(p/"hpo-control"/"state.json")
@@ -2242,7 +2397,7 @@ if paths:
                      for key in latest]
  out["previous_code_identity"]=read(p/"current-code.json").get("code_identity",manifest.get("code_identity"))
  keys=("execution_id","scientific_fingerprint","code_identity",
-       "study_designs","expected_products","source")
+       "study_designs","expected_products","source","recovery_file_bindings")
  out["origin_manifest"]={k:manifest[k] for k in keys if k in manifest}
 json.dump(out,sys.stdout)
 """
@@ -2255,15 +2410,26 @@ json.dump(out,sys.stdout)
                 str(previous.metadata.get("recovery_execution_dir") or "."),
                 str(PurePosixPath(previous.work_dir).parent / "result.json"),
                 str(PurePosixPath(previous.work_dir).parent / "study" / "controller.json"),
+                (
+                    Path(__file__).resolve().parents[1] / "work" / "staged_input_identity.py"
+                ).read_text(),
                 (Path(__file__).resolve().parents[1] / "work" / "recovery.py")
                 .read_text(encoding="utf-8")
                 .replace(
                     "        from lambdaforge.work.sweep_blocks import sweep_block_inventory\n", ""
                 )
+                .replace(
+                    "    from lambdaforge.work.staged_input_identity "
+                    "import original_file_bindings\n",
+                    "",
+                )
                 + "\n"
                 + inspect.getsource(sweep_block_inventory),
                 (
                     Path(__file__).resolve().parents[1] / "reproducibility" / "SeedProvider.py"
+                ).read_text(encoding="utf-8"),
+                (
+                    Path(__file__).resolve().parents[1] / "runtime" / "CrossProcessFileLock.py"
                 ).read_text(encoding="utf-8"),
             ),
             timeout=30.0,
@@ -2271,6 +2437,14 @@ json.dump(out,sys.stdout)
         if observed.returncode:
             raise ValueError(f"Cannot inspect Study recovery: {observed.stderr.strip()[-1000:]}")
         plan = json.loads(observed.stdout)
+        if plan.get("resumable"):
+            from lambdaforge.work.staged_input_identity import RECOVERY_BINDING_CONTRACT
+
+            plan["recovery_binding_contract"] = RECOVERY_BINDING_CONTRACT
+            plan["worker_runtime_requirement"] = (
+                "Current managed LF is checked before scientific handoff; preview helper "
+                "does not upgrade or certify an older installed worker."
+            )
         previous_code = plan.get("previous_code_identity")
         historical_config = self._retry_source_config(previous)
         source_config = self._retry_source_config(previous, config=config)
@@ -2303,10 +2477,56 @@ json.dump(out,sys.stdout)
                 )
             restored = restore_seed_context(WorkConfig.from_yaml(selected), origin)
             scientific = validate_recovery_configuration(restored, origin)
+            plan["configuration"]["bounded_input_identity"] = {
+                "contract": "bounded-role-v1",
+                "roles": restored.recovery_file_bindings,
+                "verification": "exact raw bytes; original historical identity reconstructed",
+            }
             plan["configuration"].update(
                 scientific_compatibility="verified",
                 scientific_identity=scientific,
                 sha256=hashlib.sha256(selected.read_bytes()).hexdigest(),
+            )
+        if plan.get("strategy") == "single":
+            from lambdaforge.work.config import WorkConfig
+            from lambdaforge.work.recovery import (
+                restore_seed_context,
+                validate_recovery_configuration,
+            )
+
+            origin = plan.get("origin_manifest")
+            if not isinstance(origin, Mapping):
+                raise ValueError("Original single Work configuration is missing.")
+            if exists and source_config:
+                selected_config = restore_seed_context(WorkConfig.from_yaml(source_config), origin)
+                scientific = validate_recovery_configuration(selected_config, origin)
+                plan["configuration"]["bounded_input_identity"] = {
+                    "contract": "bounded-role-v1",
+                    "roles": selected_config.recovery_file_bindings,
+                    "verification": "exact raw bytes; original historical identity reconstructed",
+                }
+                plan["configuration"].update(
+                    scientific_compatibility="verified",
+                    scientific_identity=scientific,
+                    sha256=hashlib.sha256(Path(source_config).read_bytes()).hexdigest(),
+                )
+                effective = selected_config.resources.to_dict()
+            else:
+                effective = dict(previous.resources)
+            before_resources = dict(previous.resources)
+            changed = {
+                key: {"previous": before_resources.get(key), "effective": value}
+                for key, value in effective.items()
+                if before_resources.get(key) != value
+            }
+            if set(changed) - {"cpu_cores", "ram_bytes", "runtime_seconds"}:
+                raise ValueError(
+                    "Single Work recovery only supports CPU/RAM/wall-time resource changes."
+                )
+            plan["effective_resources"] = effective
+            plan["resource_changes"] = changed
+            plan["resource_change_policy"] = (
+                "explicit recovery apply of reviewed YAML; CPU/RAM/wall-time only"
             )
         plan.pop("origin_manifest", None)
         if (
@@ -2330,7 +2550,9 @@ json.dump(out,sys.stdout)
                 "cluster": previous.cluster,
                 "owner_job_id": owner_id,
                 "will_preserve": (
-                    "valid evidence, assigned seeds, original fixed design and spent budgets"
+                    "original Execution/Run, durable file checkpoints and complete Attempt history"
+                    if plan.get("strategy") == "single"
+                    else "valid evidence, assigned seeds, original fixed design and spent budgets"
                     if plan.get("strategy") in {"sweep", "repeated"}
                     else "valid evidence, assigned seeds, HPO decisions and spent budgets"
                 ),
@@ -2346,6 +2568,52 @@ json.dump(out,sys.stdout)
                 "preparation of the reviewed extension delta only; no training Execution to resume"
             )
         return cast(dict[str, Any], plan)
+
+    def recovery_dependencies(
+        self, job_id: str, *, apply: bool = False, limit: int = 100
+    ) -> dict[str, Any]:
+        """Explicit bounded legacy dependency inventory/bytes-only repair; never network replay."""
+        if not 1 <= limit <= 1000:
+            raise ValueError("Recovery dependency page limit must be between 1 and 1000.")
+        previous = self.store.get(job_id)
+        plan = self.retry_preview(job_id)
+        if not plan.get("resumable"):
+            raise ValueError("No owned Execution is available for dependency recovery.")
+        if apply and any(
+            not self.store.get(dependent).state.terminal
+            for dependent in self.recovery_dependents(job_id)
+        ):
+            raise ValueError("A recovery Job is active; do not repair inputs under a live Attempt.")
+        profile = self.catalog.get(previous.cluster)
+        assert profile.storage is not None
+        from lambdaforge.work import recovery_dependencies as dependencies
+
+        source = Path(dependencies.__file__).read_text()
+        script = (
+            "import sys,json\nexec(sys.argv[1])\n"
+            "plan=repair_recovery_dependencies(Path(sys.argv[2]),Path(sys.argv[3]),apply=sys.argv[4]=='yes')\n"
+            "plan['entry_count']=len(plan['entries'])\n"
+            "plan['entries']=plan['entries'][:int(sys.argv[5])]\n"
+            "json.dump(plan,sys.stdout)\n"
+        )
+        observed = self.factory.transport(profile).run(
+            (
+                *self.factory.reader_command(profile),
+                "-c",
+                script,
+                source,
+                plan["execution_dir"],
+                profile.storage.cache_root,
+                "yes" if apply else "no",
+                str(limit),
+            ),
+            timeout=120,
+        )
+        if observed.returncode:
+            raise ValueError(
+                f"Cannot inspect/repair recovery dependencies: {observed.stderr[-1500:]}"
+            )
+        return json.loads(observed.stdout)
 
     def recovery_dependents(self, job_id: str) -> tuple[str, ...]:
         """History owners cannot be cleaned while recovery/Fleet evidence references them."""
@@ -2459,10 +2727,20 @@ json.dump(out,sys.stdout)
         unchanged. The existing locked enqueue path is still the execution authority.
         """
         previous = self.store.get(job_id)
+        if previous.metadata.get("ephemeral_input_required"):
+            raise ValueError(
+                "This Job used a non-persisted credential/input. For Dataset transfers, "
+                "repeat datasets replicate with --ask-password (preview before apply). "
+                "No credential can be recovered from its Job history."
+            )
         request_id = (
             "recovery-" + uuid4().hex
             if not dry_run
-            and (previous.metadata.get("study_expected") or previous.metadata.get("fleet"))
+            and (
+                previous.job_type == "work"
+                or previous.metadata.get("study_expected")
+                or previous.metadata.get("fleet")
+            )
             else None
         )
         if request_id is not None:
@@ -2522,11 +2800,14 @@ json.dump(out,sys.stdout)
                 "Use 'lf run CONFIG --rerun' for deliberate repetition after success."
             )
         retry_metadata = dict(previous.metadata)
+        # Admission tickets belong to one Job lifetime, never to its scientific recovery.
+        retry_metadata.pop("execution_queue", None)
+        retry_metadata.pop("execution_queue_requested", None)
         retry_metadata.pop("failure_phase", None)
         retry_metadata.pop("failure_category", None)
         retry_metadata["attempt"] = self._attempt_number(previous.job_id)
         if previous.metadata.get("submission_mode") == "asynchronous" or (
-            previous.metadata.get("study_expected")
+            (previous.job_type == "work" or previous.metadata.get("study_expected"))
             and (config is not None or self._retry_source_config(previous))
         ):
             source_config = self._retry_source_config(previous, config=config)
@@ -2556,9 +2837,11 @@ json.dump(out,sys.stdout)
                     if config is not None
                     else self.retry_preview(job_id)
                 )
-                if previous.metadata.get("study_expected")
+                if previous.job_type == "work" or previous.metadata.get("study_expected")
                 else {}
             )
+            if preview.get("effective_resources"):
+                request = ResourceRequest.from_mapping(preview["effective_resources"])
             if (
                 config_sha256 is not None
                 and preview.get("configuration", {}).get("sha256") != config_sha256
@@ -2581,25 +2864,30 @@ json.dump(out,sys.stdout)
             # A preparation failure may precede any Execution. Retrying its exact delta
             # still belongs to the reviewed extension, not an unrelated fresh Study.
             recovery_metadata: dict[str, Any] = {
-                **({"study_extension": dict(previous.metadata["study_extension"])}
-                   if previous.metadata.get("study_extension") else {}),
-                **({"pinned_scientific_identity": previous.metadata[
-                    "pinned_scientific_identity"
-                ]} if previous.metadata.get("study_extension")
-                   and previous.metadata.get("pinned_scientific_identity") else {}),
+                **(
+                    {"study_extension": dict(previous.metadata["study_extension"])}
+                    if previous.metadata.get("study_extension")
+                    else {}
+                ),
+                **(
+                    {"pinned_scientific_identity": previous.metadata["pinned_scientific_identity"]}
+                    if previous.metadata.get("study_extension")
+                    and previous.metadata.get("pinned_scientific_identity")
+                    else {}
+                ),
             }
             if preview.get("resumable"):
                 cleaned = [
                     argument for argument in cleaned if argument not in {"--rerun", "--restart"}
                 ]
-                cleaned.extend(
-                    (
-                        "--resume-execution",
-                        str(preview["execution_dir"]),
-                        "--resume-study-path",
-                        str(PurePosixPath(previous.work_dir).parent / "study"),
+                cleaned.extend(("--resume-execution", str(preview["execution_dir"])))
+                if preview.get("strategy") != "single":
+                    cleaned.extend(
+                        (
+                            "--resume-study-path",
+                            str(PurePosixPath(previous.work_dir).parent / "study"),
+                        )
                     )
-                )
                 if accept_code_change:
                     cleaned.append("--accept-code-change")
                 recovery_identity = str(
@@ -2618,9 +2906,15 @@ json.dump(out,sys.stdout)
                 )
                 recovery_metadata = {
                     **recovery_metadata,
-                    **({"prepared_extension_attestation": dict(previous.metadata[
-                        "prepared_extension_attestation"
-                    ])} if previous.metadata.get("prepared_extension_attestation") else {}),
+                    **(
+                        {
+                            "prepared_extension_attestation": dict(
+                                previous.metadata["prepared_extension_attestation"]
+                            )
+                        }
+                        if previous.metadata.get("prepared_extension_attestation")
+                        else {}
+                    ),
                     "recovery_configuration": preview.get("configuration"),
                     "recovery_execution_dir": preview["execution_dir"],
                     "recovery_owner_job": preview["owner_job_id"],
@@ -2643,7 +2937,9 @@ json.dump(out,sys.stdout)
                         previous.cluster,
                         JobState.PLANNED,
                         preview={
-                            "operation": "study-recovery",
+                            "operation": "work-recovery"
+                            if preview.get("strategy") == "single"
+                            else "study-recovery",
                             "source_config": str(source_config),
                             "run_arguments": list(run_arguments),
                             "will_submit_new_job": True,

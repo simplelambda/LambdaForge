@@ -267,6 +267,8 @@ def run_cluster_command(arguments: argparse.Namespace) -> int:
             f"Runtime: {dict(bootstrapped.runtime or {})}\n"
             f"PyTorch: {dict(bootstrapped.pytorch or {})}\n"
             f"Native environment: {dict(bootstrapped.native_environment or {}) or 'none'}\n"
+            "Isolated tools: "
+            f"{', '.join(str(v['name']) for v in bootstrapped.tool_runtimes) or 'none'}\n"
             f"Pruned environments: {bootstrapped.pruned_environments or 'none'}"
             + (
                 f"\nCleanup deferred: {bootstrapped.cleanup_blocked_reason}"

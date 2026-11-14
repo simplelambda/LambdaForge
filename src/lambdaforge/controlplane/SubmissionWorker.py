@@ -50,7 +50,8 @@ def serve(request_path: str | Path) -> int:
             and hashlib.sha256(Path(str(value["config"])).read_bytes()).hexdigest() != pin
         ):
             raise ValueError(
-                "Recovery YAML changed after submission; re-preview before recovering."
+                "Submitted YAML changed before preparation; "
+                "review and submit the intended revision."
             )
         arguments = value.get("run_arguments", ())
         if not isinstance(arguments, Sequence) or isinstance(arguments, (str, bytes, bytearray)):
@@ -96,7 +97,8 @@ def serve(request_path: str | Path) -> int:
                 return prepared_entrypoint(prepared, proof, tuple(str(item) for item in arguments))
 
         if (
-            isinstance(extension, Mapping) and extension.get("delta_contract")
+            isinstance(extension, Mapping)
+            and extension.get("delta_contract")
             and cluster != "local"
         ):
             from lambdaforge.controlplane.StudyExtensionDispatch import (
@@ -122,22 +124,31 @@ def serve(request_path: str | Path) -> int:
                     if not isinstance(previous, Mapping):
                         raise ValueError("Missing original extension preparation attestation.")
                     attestation["scientific_identity"] = str(previous["scientific_identity"])
-                jobs.store.write(current.with_updates(metadata={
-                    **current.metadata, "prepared_extension_attestation": attestation,
-                }))
+                jobs.store.write(
+                    current.with_updates(
+                        metadata={
+                            **current.metadata,
+                            "prepared_extension_attestation": attestation,
+                        }
+                    )
+                )
                 forwarded = tuple(str(item) for item in arguments)
                 if extension.get("retained_runtime"):
                     return prepared_entrypoint(
-                        prepared, extension["retained_runtime"], forwarded,
+                        prepared,
+                        extension["retained_runtime"],
+                        forwarded,
                         attestation=attestation,
                     )
                 return current_entrypoint(prepared, attestation, forwarded)
 
         native_arguments = (
             ()
-            if isinstance(extension, Mapping) and (
+            if isinstance(extension, Mapping)
+            and (
                 extension.get("retained_runtime")
-                or extension.get("delta_contract") and cluster != "local"
+                or extension.get("delta_contract")
+                and cluster != "local"
             )
             else arguments
         )

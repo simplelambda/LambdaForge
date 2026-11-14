@@ -12,6 +12,7 @@ import yaml
 
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.data.DatasetService import DatasetService
+from lambdaforge.data.errors import DirectTransferUnavailableError
 
 
 class DatasetCommands:
@@ -21,8 +22,16 @@ class DatasetCommands:
     def run(cls, arguments: argparse.Namespace) -> int:
         service = DatasetService(clusters=ClusterCatalog.load(arguments.clusters))
         operation = arguments.dataset_command
-        if operation == "list":
-            payload: Any = [
+        if operation == "trust-ssh":
+            payload: Any = service.replication_ssh_trust(
+                arguments.source,
+                arguments.destination,
+                apply=arguments.apply,
+                fingerprints=arguments.fingerprint,
+                expected_file=arguments.known_hosts_file,
+            )
+        elif operation == "list":
+            payload = [
                 value.to_dict()
                 for value in service.list(cluster=arguments.on, all_clusters=arguments.all)
             ]
@@ -120,6 +129,10 @@ class DatasetCommands:
             ).to_dict()
             if arguments.content_id:
                 payload["explicit_content_id"] = arguments.content_id
+        elif operation == "transfers":
+            payload = service.replications(arguments.dataset)
+        elif operation == "transfer-status":
+            payload = service.replication_status(arguments.job_id)
         elif operation == "materialize":
             payload = service.materialize(
                 arguments.dataset,
@@ -128,14 +141,96 @@ class DatasetCommands:
                 apply=arguments.apply,
             ).to_dict()
         else:
-            payload = service.replicate(
-                arguments.dataset,
+            options = dict(
                 source=arguments.source,
                 destination=arguments.destination,
-                apply=arguments.apply,
                 route=getattr(arguments, "route", "auto"),
-                progress=None if getattr(arguments, "json", False) else cls._replication_progress,
-            ).to_dict()
+            )
+
+            def ask_password() -> None:
+                import getpass
+                import warnings
+
+                if arguments.json or not sys.stdin.isatty():
+                    raise ValueError(
+                        "Password entry needs an interactive terminal; "
+                        "no secret CLI arguments or JSON prompts are supported."
+                    )
+                if options["route"] == "relay" or "local" in {
+                    arguments.source,
+                    arguments.destination,
+                }:
+                    raise ValueError(
+                        "Destination-password authentication requires "
+                        "two remote clusters and Direct."
+                    )
+                peer = service.clusters.get(arguments.destination)
+                print(
+                    f"Direct {arguments.source} → {arguments.destination}: "
+                    "the destination password "
+                    "will be delivered over encrypted SSH to the source, kept only in memory, "
+                    "and used for this transfer. It will not be saved. Ctrl-C cancels.",
+                    file=sys.stderr,
+                )
+                options["route"] = "direct"
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", getpass.GetPassWarning)
+                        options["site_password"] = getpass.getpass(
+                            f"Password for {peer.user}@{peer.host}: "
+                        )
+                except getpass.GetPassWarning:
+                    raise ValueError(
+                        "Terminal cannot hide password input; use the LF password dialog."
+                    ) from None
+
+            if getattr(arguments, "ask_password", False):
+                ask_password()
+            try:
+                plan = service.replication_preview(arguments.dataset, **options)
+            except DirectTransferUnavailableError as error:
+                if (
+                    "site_password" in options
+                    or arguments.json
+                    or not sys.stdin.isatty()
+                    or not any(n.get("category") == "authentication" for n in error.diagnostics)
+                ):
+                    raise
+                ask_password()
+                plan = service.replication_preview(arguments.dataset, **options)
+            if (
+                plan.relay_consent_required
+                and "site_password" not in options
+                and not arguments.json
+                and sys.stdin.isatty()
+                and any(n.get("category") == "authentication" for n in plan.route_diagnostics)
+            ):
+                ask_password()
+                plan = service.replication_preview(arguments.dataset, **options)
+            if arguments.apply:
+                if plan.relay_consent_required:
+                    cls._human("replicate", plan.to_dict()) if not arguments.json else None
+                    if arguments.json or not sys.stdin.isatty():
+                        raise ValueError(
+                            "No usable direct route was confirmed. Controller relay requires "
+                            "explicit acceptance: inspect the preview, "
+                            "then use --route relay --apply."
+                        )
+                    answer = input(
+                        "Accept source → controller PC → destination relay? "
+                        "Keep this PC powered and connected; closing LF is safe. [y/N] "
+                    )
+                    if answer.strip().lower() not in {"y", "yes"}:
+                        raise ValueError("Relay not approved; no transfer started.")
+                    options["route"] = "relay"
+                payload = service.enqueue_replication(
+                    arguments.dataset,
+                    **options,
+                    approved_route=plan.transfer_route,
+                    approved_diagnostics=plan.route_diagnostics,
+                ).to_dict()
+            else:
+                payload = plan.to_dict()
         if getattr(arguments, "json", False):
             if isinstance(payload, dict) and getattr(arguments, "default_cluster_source", None):
                 payload.setdefault("target_source", arguments.default_cluster_source)
@@ -187,6 +282,73 @@ class DatasetCommands:
         default_source: str | None = None,
         verbose: bool = False,
     ) -> None:
+        if operation == "trust-ssh":
+            print(f"SSH host trust: {payload['initiator']} → {payload['peer']}")
+            print(f"Peer: {payload['host']}:{payload['port']} · state: {payload['state']}")
+            print(f"Trust file on {payload['initiator']}: {payload['known_hosts_file']}")
+            for key in payload["keys"]:
+                print(f"  {key['type']}  {key['fingerprint']}")
+            print(payload["notice"])
+            print(
+                "Host trust recorded; no copy started."
+                if payload.get("applied")
+                else "No key changed. Apply requires --known-hosts-file and every --fingerprint "
+                "from this preview, after independent verification."
+            )
+            return
+        if operation in {"transfers", "transfer-status"}:
+            for row in payload if isinstance(payload, list) else [payload]:
+                progress = row.get("progress", {})
+                print(
+                    f"{row['job_id']} · {row.get('display_state', row['state'])} · {row['dataset']}"
+                )
+                print(f"  {row['source']} → {row['destination']} · host {row['host']}")
+                print(
+                    f"  {progress.get('message') or progress.get('phase') or 'Waiting for worker'}"
+                )
+                print(
+                    f"  Last confirmed: {row.get('last_confirmed_at_utc') or 'not observed'} "
+                    f"· age {row.get('observation_age_seconds')} s"
+                )
+                print(
+                    "  Last byte advance: "
+                    f"{row.get('last_byte_progress_at_utc') or 'not observed'} "
+                    f"· compressed bytes {progress.get('compressed_bytes', 0)} "
+                    f"· original bytes {row.get('uncompressed_bytes', 'unknown')}"
+                )
+                if row.get("reconciliation_error"):
+                    print(f"  Registry reconciliation: {row['reconciliation_error']}")
+                if row.get("observation_error"):
+                    print(f"  Observation unavailable: {row['observation_error']}")
+                if row.get("error"):
+                    print(f"  Error: {row['error']}")
+                print(f"  Logs: lf jobs logs {row['job_id']} --tail 100")
+            return
+        if operation == "replicate" and payload.get("action") == "REPLICATE":
+            print(
+                f"Dataset: {payload['dataset']} · original/uncompressed size: "
+                f"{payload.get('estimated_bytes')} bytes"
+            )
+            print("Data path: " + " → ".join(payload.get("data_path", ())))
+            print(
+                f"Execution host: {payload.get('execution_host')}; "
+                f"route: {payload.get('transfer_route')}"
+            )
+            for note in payload.get("route_diagnostics", ()):
+                print(f"  {note.get('direction')}: {note.get('category')} · {note.get('message')}")
+            if payload.get("requires_controller_online"):
+                print(
+                    "Keep this PC powered and connected. Closing LF is safe; "
+                    "suspend/shutdown/network loss is not."
+                )
+            if payload.get("relay_consent_required"):
+                print("Relay has NOT been approved. Explicit choice: --route relay --apply.")
+            if payload.get("job_id"):
+                print(
+                    f"Job: {payload['job_id']} · inspect: "
+                    f"lf datasets transfer-status {payload['job_id']}"
+                )
+            return
         if operation == "adopt" or operation == "remove" and "content_id" in payload:
             print(
                 "CHOOSE DATASET REFERENCE" if operation == "adopt" else "REMOVE EXACT REGISTRATION"

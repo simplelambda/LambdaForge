@@ -52,6 +52,76 @@ class Producer(lf.Work):
         return {"produced": value}
 
 
+class SequentialRecoveryWork(lf.Work):
+    """Small acquisition session with resumable items and optional repeated interruptions."""
+
+    def run(self, label: str, source: Path | None = None, failures: int = 1) -> None:
+        if not self.checkpoints.exists("session.json"):
+            self.checkpoints.save_json("session.json", {"created": 1})
+        calls = (
+            self.checkpoints.load_json("calls.json")
+            if self.checkpoints.exists("calls.json")
+            else []
+        )
+        invocation = (
+            self.checkpoints.load_json("invocation.json")
+            if self.checkpoints.exists("invocation.json")
+            else 0
+        )
+        self.checkpoints.save_json("invocation.json", invocation + 1)
+
+        def item(number: int) -> int:
+            calls.append(number)
+            self.checkpoints.save_json("calls.json", calls)
+            if number == 2 and invocation < failures:
+                raise RuntimeError("synthetic interruption")
+            return number
+
+        self.resume_map(range(4), item, key=lambda number: str(number), name="discovery", workers=1)
+        self.outputs.value("label", label)
+        path = self.run_dir / "answer.txt"
+        path.write_text(source.read_text() if source else label)
+        self.outputs.artifact("answer", path)
+
+
+class FrozenAcquisitionRecoveryWork(lf.Work):
+    """A tiny external observation retained through failed map ownership and code revisions."""
+
+    def run(self) -> None:
+        def acquire(number: int) -> object:
+            managed = self.cache.fetch("https://fixture.invalid/frozen", key=f"source/{number}")
+            return {"source": managed}
+
+        self.resume_map([0, 1], acquire, key=lambda n: str(n), name="frozen", workers=1)
+        if not self.checkpoints.exists("failed.json"):
+            self.checkpoints.save_json("failed.json", True)
+            raise RuntimeError("synthetic stop")
+
+
+def read_frozen_item(item: object) -> str:
+    """Top-level spawn target with an explicit native ManagedFile input."""
+    return item["source"].read_text()
+
+
+class BoundMapRecoveryWork(lf.Work):
+    """Policy and dependency contracts are independent of executor/worker count."""
+
+    def run(self, executor: str = "thread") -> None:
+        source = self.checkpoints.file("source.txt", build=lambda p: p.write_text("frozen"))
+        self.resume_map(
+            [{"id": "one", "source": source}],
+            read_frozen_item,
+            key="id",
+            workers=2,
+            executor=executor,
+            name="bound",
+            scientific_policy={"equation": "v1", "cutoff": 3.0},
+        )
+        if not self.checkpoints.exists("failed.json"):
+            self.checkpoints.save_json("failed.json", True)
+            raise RuntimeError("synthetic stop")
+
+
 class Consumer(lf.Work):
     def run(self, number: int) -> dict[str, int]:
         return {"consumed": number}
@@ -67,6 +137,24 @@ class SeedWork(lf.Work):
         score = float((self.seed or 0) * scale)
         self.metrics.log("score", score)
         return {"seed": self.seed, "score": score}
+
+
+class QueuedParallelWork(lf.Work):
+    """A disposable two-seed barrier proves queue admission preserves native Run overlap."""
+
+    def run(self, markers: str) -> dict[str, int]:
+        import time
+
+        root = Path(markers)
+        assert self.seed in {1, 2}
+        (root / f"seed-{self.seed}.started").write_text(str(time.monotonic()))
+        deadline = time.monotonic() + 30
+        while not all((root / f"seed-{seed}.started").is_file() for seed in (1, 2)):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("The other required seed did not start concurrently")
+            time.sleep(0.05)
+        (root / f"seed-{self.seed}.finished").write_text(str(time.monotonic()))
+        return {"seed": self.seed}
 
 
 class StructuredSweepWork(lf.Work):
@@ -383,6 +471,91 @@ class FixedRecoveryWork(lf.Work):
         self.metrics.log("score", score, step=3)
         self.outputs.file("report", filename="report.json").write_json({"seed": self.seed})
         return {"score": score}
+
+
+class SingleFileRecoveryWork(lf.Work):
+    """Durable producer fixture: failed/uncommitted files must not invalidate good siblings."""
+
+    def run(self, source: Path, count: int = 3) -> dict[str, Any]:
+        def produce(index: int, target: Path) -> None:
+            if index == count - 1 and not self.checkpoints.exists("failed-once.json"):
+                target.write_bytes(b"unfinished")
+                self.checkpoints.save_json("failed-once.json", True)
+                raise MemoryError("preventive application guard, not OS OOM")
+            if index < count - 1 and self.checkpoints.exists(f"producers/{index}.bin"):
+                raise AssertionError("an intact expensive producer was rebuilt")
+            target.write_bytes(source.read_bytes() + str(index).encode())
+
+        files = [
+            self.checkpoints.file(
+                f"producers/{index}.bin",
+                build=lambda path, i=index: produce(i, path),
+                validate=lambda managed: managed.read_bytes().startswith(source.read_bytes()),
+            )
+            for index in range(count)
+        ]
+        self.outputs.file("complete", filename="complete.json").write_json(
+            {"files": [managed.sha256 for managed in files]}
+        )
+        return {"files": len(files), "resuming": self.resuming}
+
+
+class BoundedInputRecoveryWork(SingleFileRecoveryWork):
+    """Distinct roles can share authored names but have different bounded staging names."""
+
+    def run(self, source: Path, reference: Path) -> dict[str, Any]:
+        assert reference.read_text() == "reference"
+        return super().run(source, count=3)
+
+
+class ChainedBoundedRecoveryWork(SingleFileRecoveryWork):
+    """Six-role legacy staging with three scientific failures and expensive retained files."""
+
+    def run(
+        self,
+        legacy_train: Path,
+        legacy_validation: Path,
+        legacy_test: Path,
+        legacy_positives: Path,
+        legacy_negatives: Path,
+        legacy_all: Path,
+    ) -> dict[str, Any]:
+        for path in (
+            legacy_train,
+            legacy_validation,
+            legacy_test,
+            legacy_positives,
+            legacy_negatives,
+            legacy_all,
+        ):
+            assert path.is_file()
+        count = (
+            self.checkpoints.load_json("invocations.json")
+            if self.checkpoints.exists("invocations.json")
+            else 0
+        )
+        self.checkpoints.save_json("invocations.json", count + 1)
+        result = super().run(legacy_train)
+        if count < 3:
+            raise ValueError("synthetic independent scientific failure after restored files")
+        return result
+
+
+class SingleFileRecoveryDatasetWork(SingleFileRecoveryWork):
+    """Publish only after every producer returned a validated managed file."""
+
+    def run(self, source: Path, count: int = 3) -> dict[str, Any]:
+        result = super().run(source, count)
+        self.outputs.dataset(
+            name="recovered-producers",
+            version="1",
+            source_checkpoint="producers",
+            members=[
+                {"id": str(index), "path": self.checkpoints.file(f"producers/{index}.bin").path}
+                for index in range(count)
+            ],
+        )
+        return result
 
 
 class ProductConsumerWork(lf.Work):

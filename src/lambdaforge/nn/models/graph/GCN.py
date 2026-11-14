@@ -111,11 +111,13 @@ class GCN(Model):
         )
         self.residual = bool(residual)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, message_weights: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Encode nodes while keeping the graph topology sparse."""
         for index, layer in enumerate(self.layers):
             identity = x
-            x = layer(x, edge_index)
+            x = layer(x, edge_index, message_weights)
             if index < len(self.activations):
                 x = self.dropouts[index](self.activations[index](self.normalizations[index](x)))
                 if self.residual and x.shape == identity.shape:

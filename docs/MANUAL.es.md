@@ -6,12 +6,15 @@ Este es el único manual público del framework; las guías detalladas son capí
 
 ## Índice
 
+- [Authoring científico: contratos, muestras y ETL](#guide-scientific-authoring)
+  - [Tablas incrementales, SQL y efectos de preview](#guide-tabular-connectors)
 - [1. Modelo mental](#1-modelo-mental)
 - [2. Instalación y estructura](#2-instalación-y-estructura)
 - [3. API de Work](#3-api-de-work)
 - [4. Ficheros gestionados, cache, map, outputs y herramientas](#4-ficheros-gestionados-cache-map-outputs-y-herramientas)
   - [4.1 Elegir almacenamiento](#41-elegir-almacenamiento)
   - [4.2 ManagedFile y cache](#42-managedfile-y-cache)
+  - [Validación científica compartida de datasets](#guide-dataset-validation-cache)
   - [4.3 Map simple y reanudable](#43-map-simple-y-reanudable)
   - [4.4 Outputs y checkpoints](#44-outputs-y-checkpoints)
   - [4.5 Herramientas externas](#45-herramientas-externas)
@@ -32,10 +35,12 @@ Este es el único manual público del framework; las guías detalladas son capí
   - [Recuperar un Study interrumpido](#recuperar-un-study-interrumpido)
 - [9. Resultados y metadata](#9-resultados-y-metadata)
 - [10. Clústeres y Jobs](#10-clústeres-y-jobs)
+  - [Colas de ejecución secuenciales](#guide-execution-queues)
   - [Paquetes nativos declarados por el proyecto](#paquetes-nativos-declarados-por-el-proyecto)
 - [11. Limpieza y seguridad](#11-limpieza-y-seguridad)
 - [12. Referencia CLI](#12-referencia-cli)
 - [13. Clustering](#13-clustering)
+  - [Disimilitudes precalculadas](#disimilitudes-precalculadas)
 - [14. Componentes neuronales reutilizables](#14-componentes-neuronales-reutilizables)
 - [15. Arquitectura y extensiones](#15-arquitectura-y-extensiones)
 - [16. Análisis de estudios](#16-análisis-de-estudios)
@@ -97,6 +102,7 @@ Este es el único manual público del framework; las guías detalladas son capí
   - [Qué se puede eliminar](#guide-storage-qué-se-puede-eliminar)
   - [Checkpoints y publicación](#guide-storage-checkpoints-y-publicación)
   - [Límites actuales](#guide-storage-límites-actuales)
+  - [Reutilización de dependencias y reparación](#guide-storage-environment-layers)
 - [27. Pestañas de informes con assets completos gestionados](#guide-managed-reports)
   - [API del navegador](#guide-managed-reports-api-del-navegador)
   - [Visor nativo remoto y offline](#guide-managed-reports-visor-nativo-remoto-y-offline)
@@ -145,6 +151,9 @@ Este es el único manual público del framework; las guías detalladas son capí
   - [HTTP local opcional](#guide-integration-http-local-opcional)
   - [Memoria y sincronización](#guide-integration-memoria-y-sincronización)
   - [Python y GUI](#guide-integration-python-y-gui)
+- [34. Topología de grafos y calibración independiente](#guide-graph-science)
+  - [Matrices FGW acotadas y reanudables](#fgw-blocks)
+  - [Baricentros FGW reales y estructuras relacionales](#fgw-barycenters)
 
 Resultados e informes de Work, dependencias históricas exactas y materialización comprimida explícita:
 [Guía de resultados](#guide-work-results). Reutilizan runner, ResultStore, registro de productos e
@@ -325,9 +334,107 @@ entre threads de esa instancia de Work; no coordina Jobs distribuidos. `lf clean
 de Work y `--apply` lo elimina solo cuando obtiene el lock exclusivo; un Work activo mantiene una
 lease compartida.
 
+**Dependencias de recuperación y observaciones externas.** Los mapas y recibos de un Run
+conservado protegen sus namespaces de caché tras fallo, cancelación y cambios de código aceptados,
+no solo durante una lease activa. La granularidad actual es el namespace de Work, no cada archivo
+sobrante. GC muestra `protected_bytes`, `reference_chains` y `retained-recovery-dependency`, y avisa
+de presión no resuelta sin destruir esos inputs. Borrar historial propietario libera referencias
+solo si lo permiten sus dependientes nativos. Se conservan artifacts de Attempts de Works fallidos
+con mapas para posible reparación exacta; las cachés no referenciadas siguen siendo limpiables.
+
+`fetch` dentro de un Work guarda digest y contrato de petición hasheado en el Run original.
+Reutiliza solo bytes exactos; si faltan, falla en vez de consultar una URL que podría haber cambiado.
+Las adquisiciones científicas duraderas deben sellarse además con `checkpoints.file` y un recibo
+de primera observación/digest declarado por el proyecto. Aceptar código permite localizar bytes
+registrados entre namespaces, nunca demuestra equivalencia científica.
+
+En `resume_map`, pasa/devuelve ManagedFile explícitos: las dependencias de entrada se conservan
+también con `executor="process"`. En threads se registran además accesos a caché del callback;
+el I/O oculto de subprocesos no puede inferirse automáticamente. Declara ecuaciones/configuración
+relevantes en `scientific_policy={...}`, que se comprueba al restaurar; no metas frecuencia de logs
+ni número de workers. Un resultado legado identificado solo por PDB ID sin dependencia de fuente
+no acredita compatibilidad con coordenadas nuevas: migra fuentes originales exactas o exige una
+adquisición nueva. Los logs distinguen restaurados y reconstrucciones/misses; el bloqueo por una
+observación ausente incluye su digest esperado.
+
+`Retry-After` numérico o fecha HTTP impone cooldown compartido por servicio en el mismo volumen
+de caché, entre threads y procesos; por defecto agrupa el origen HTTP. No coordina máquinas sin
+almacenamiento común ni sustituye el pacing local. Para hints JSON del proveedor, pasa
+`cooldown_policy=HttpCooldownPolicy(json_field="retryAfter")` desde `lambdaforge.work`; puedes
+agrupar servicios explícitamente con `cooldown_scope`. Se conserva el cooldown aunque se agoten
+reintentos. La espera comprueba cancelación en pausas cortas; lecturas en curso siguen acotadas por
+timeout. Errores permanentes fallan, sin fabricar metadata vacía.
+
+Preview nativo sin ejecutar ciencia:
+
+```sh
+lf jobs recovery-dependencies JOB --json --limit 100
+# Solo tras revisar, reparación de bytes desde artifacts propietarios:
+lf jobs recovery-dependencies JOB --apply --json
+```
+
+Se separan presentes/no verificados, candidatos de copia, ausentes y registros sin fuente ligada.
+El preview solo lee metadata. Coincidir en tamaño no verifica contenido: apply exige fingerprint
+histórico exacto con basename lógico original y copia atómicamente bajo locks nativos. No mueve
+checkpoints, usa symlinks, consulta la red ni ejecuta ciencia. Apply exige runtime gestionado actual.
+Si los bytes se perdieron, permanecen no disponibles: ni la URL ni los recuentos los recuperan.
+Las APIs equivalentes son `recovery_dependency_preview` y `repair_recovery_dependencies` de
+`lambdaforge.work`.
+
 `DatasetCache` sigue siendo el cache especializado de muestras serializadas. Work cache reutiliza
 el `CrossProcessFileLock`, convenciones de huella/atomicidad y ownership, pero no usa su sobre opaco
 porque un fichero científico debe seguir siendo path-like.
+
+<a id="guide-dataset-validation-cache"></a>
+
+#### Validación científica compartida de datasets
+
+`self.cache` incluye identidad/semilla de la Run. Para comprobaciones costosas independientes
+de la semilla, usa un recibo compartido dentro de `Work.run`:
+
+```python
+# El proyecto aporta validar_estructuras(root: Path).
+recibo = self.validate_dataset(
+    "dataset",  # entrada tipada exacta de self.inputs
+    validator=validar_estructuras,
+    contract="miproyecto.estructuras",
+    version="1",
+    parameters={"families": familias_seleccionadas},
+)
+# Construir loaders ligeros, sin repetir el validador profundo.
+```
+
+El callback lanza excepción o devuelve `False` si rechaza, `True`/`None` si acepta. Solo valida
+contenido inmutable declarado: no ajusta normalización ni estado dependiente de semillas,
+modifica datos o consulta entradas externas sin fijar. Declara los ajustes que afectan al
+contrato en `parameters` y cambia su versión si cambian dependencias externas relevantes.
+La clave incluye código consumidor nativo, ID exacto de contenido, ubicación, contrato/versión/
+ajustes y runtime; no las semillas ni etiquetas de trials. Código desconocido/no versionado se
+rechaza. Cambios de código/runtime invalidan conservadoramente la reutilización.
+
+La primera llamada verifica bytes exactos mediante DatasetOperations y ejecuta el callback.
+Las llamadas concurrentes comparten lock. La reutilización (`recibo["reused"]`) solo inventaría
+metadata: dispositivo/inodo/tipo/tamaño/mtime/ctime. Cambiar o reemplazar archivos, índice o
+ubicación exige verificar bytes y ciencia de nuevo; la corrupción falla, no se acepta como otra
+identidad. `force=True` revalida todo explícitamente. Un fallo o modificación durante el proceso
+no publica éxito. Recibos corruptos bloquean; force reconstruye esa caché desechable, nunca
+sobrescribe el dataset. `timeout_seconds=3600` acota cada espera de lock; los logs indican espera
+y reutilización/validación. Leases nativas protegen de GC la validación activa. Limpiar recibos
+solo obliga a validar otra vez; no son checkpoints ni resultados científicos.
+
+Soporte: POSIX, directorios DatasetArtifact v2 locales con checksums, máximo 200.000 entradas;
+sin assets URI externos. Es una caché local de confianza bajo semántica normal del filesystem,
+no una prueba criptográfica ante manipulación hostil de metadata o un filesystem que oculte
+cambios. Sin `ignore_hash` global: `datasets verify`, transporte y publicación siguen exactos.
+El servicio público `lambdaforge.data.DatasetValidationCache` admite `implementation` explícito
+con la identidad nativa del código para llamadas fuera de Work.
+
+**Adopción consumidora:** LF no intercepta llamadas Python arbitrarias. WISDOM debe mover
+`StructuralSidecars.validate_assets` y la reconstrucción de grafos al callback, para después
+vincular assets ya validados con checks ligeros. Conservar las llamadas profundas anteriores
+junto a esta API no ahorra nada. No actualiza runtimes/Studies activos en caliente. La primera
+validación aún puede ser larga; prepárala antes de usar GPU cuando sea posible, nunca simulando
+actividad GPU para mantener reservas.
 
 ### 4.3 Map simple y reanudable
 
@@ -451,6 +558,94 @@ una cola acotada en `ToolResult`, registra duración/status y lanza `ToolExecuti
 `threads` configura OMP/MKL/OpenBLAS/NumExpr solo en el hijo. La herramienta y su versión explícita
 se registran una vez en `environment.json`.
 
+#### Herramientas científicas Python aisladas
+
+Se declaran en el **`pyproject.toml` del consumidor**, no en el YAML del Work:
+
+```toml
+[tool.lambdaforge.tool_runtimes.analysis_tool]
+python = "3.11"
+requirements = ["numpy==1.26.4"]
+imports = ["numpy"]
+entrypoints = {extract = "tools/extract.py"}
+```
+
+```bash
+lf clusters bootstrap CLUSTER --project . --dry-run
+lf clusters bootstrap CLUSTER --project .
+```
+
+Dry-run describe declaraciones y resolución pendiente sin instalar. Aplicar selecciona un Python
+compatible independiente, resuelve conjuntamente todas las dependencias, comprueba imports y
+conserva inventario/resolución exactos. Los envíos normales preparados hacen lo mismo. No instala
+LF ni el paquete consumidor en ese prefijo: sus requisitos incompatibles quedan separados.
+Se preparan todas las declaraciones; no hay selector adicional, hooks shell ni runner anidado.
+Bootstrap no carga pesos de modelos y `Work.run` nunca instala paquetes.
+
+El preflight científico no importa `pip` ni sus librerías privadas: interfieren con
+`setuptools`/`distutils` cuando Triton los carga. El probe recoge metadata con la biblioteca
+estándar y LF comprueba los pins PEP 440 fuera de ese intérprete. Bootstrap y Work comparten la
+misma comprobación, sin degradar dependencias ni forzar variables de entorno de distutils.
+
+```python
+tool = self.tools.runtime("analysis_tool")
+tool.preflight()  # Antes de productores costosos; run() también comprueba la primera llamada.
+completed = tool.run(
+    ["python", tool.entrypoint("extract"), "--input", str(entrada), "--output", str(salida)],
+    threads=self.resources.cpu,
+    cwd=self.temp_dir,
+    timeout=3600,
+)
+```
+
+`runtime(nombre)` exige preparación y, si falta, explica qué bootstrap ejecutar.
+`entrypoint(nombre)` devuelve un `.py` independiente copiado/verificado por hash: máximo 32,
+de 1 MiB cada uno. `python -I` evita imports accidentales del proyecto, módulos hermanos y entorno
+consumidor. El intercambio usa rutas/JSON/NPZ explícitos. LF no interpreta proteínas ni contenido
+científico. Rodear el productor con `checkpoints.file(..., build=..., validate=...)` permite
+recuperar archivos completos sin repetirlos; pesos/checkpoints originales se leen, no se mutan.
+Se conserva la historia normal de Attempts y no se promete continuación por epoch sin soporte.
+
+`run(argv, *, threads=None, cwd=None, env=None, timeout=None, check=True)` admite `python` o un
+ejecutable del `bin` aislado. Stdout/stderr llegan al log; cancelar/timeout termina únicamente el
+árbol de procesos propio. Un código no cero lanza `ToolExecutionError` salvo `check=False`.
+Los hilos toman por defecto el límite CPU del Work; no se permite aumentarlo ni reemplazar por
+`env` variables del framework, intérprete, PATH, hilos o grants GPU. CUDA_VISIBLE_DEVICES y
+NVIDIA_VISIBLE_DEVICES se heredan sin ampliar ni sustituir tokens. Declarar CUDA exige grant no
+vacío y un tensor real en preflight; no existe fallback CPU silencioso ni selección física de GPU.
+Es aislamiento de procesos/dependencias, **no un sandbox** para Python no confiable.
+
+Cada paquete raíz exige `==` exacto o Git HTTPS con commit completo de 40 caracteres, sin secretos
+ni condiciones. `index_url` usa PyPI por defecto; `extra_index_urls` y `wheel_sources` son HTTPS
+explícitos. Todo es binary-only salvo excepciones raíz fijadas/revisadas en `source_packages`
+y el propio Git inmutable declarado. No hay compilación de fallback ni instalación `--no-deps`.
+Los backends de build revisados pueden ejecutar código: son declaraciones del proyecto confiable.
+Torch exige `torch_index` y `torch_cuda="cpu"` o versión CUDA `major.minor`. Cada tabla
+`wheel_sources` exige `url`, `packages`, `build_tag`, y versiones raíz con el mismo `+build_tag`.
+Se comprueban origen/versión real e imports. Una wheel incompatible/ausente bloquea preparación.
+
+El ID del entorno depende de paquetes/fuentes/Python/plataforma, no de cambios de código consumidor.
+Los scripts pequeños tienen bundle independiente por contenido. Recibos de versiones fuera del
+cache evitan deriva; inventario modificado falla sin reemplazar el prefijo inmutable. Procedencia
+del entorno/resolución/scripts se añade a `environment.json`. Bindings por Job, recuperación y
+leases de preparación/uso protegen entorno y scripts de GC. El pruning de reemplazos del entorno
+principal no borra herramientas; almacenamiento/limpieza explícita nativos gestionan históricos
+no usados. No se crea un entorno por proteína ni se importan directorios privados de checkpoints.
+
+**Aceptación SLAE e integración pendiente en WISDOM:** `examples/isolated_tools.toml` contiene una
+receta revisada **solo CPU**. En un entorno Linux/Python 3.11 temporal autorizado se importó SLAE
+`078b94e436b8eceb02251a254c3c224358ec6ee2` y cargó el checkpoint base con `device="cpu"`, tras
+verificar SHA-256 `ac5bf9613209fc310145e58f1aa7ddc9111d833a131488fe30ea738d51f7bb99`
+(882.525.854 bytes). Versiones observadas: Torch 2.6.0+cpu, torchvision 0.21.0+cpu, NumPy 1.26.4,
+ESM 3.2.1, Transformers 4.48.1, PyG 2.7.0, scatter 2.1.2+pt26cpu, cluster 1.6.3+pt26cpu,
+sparse 0.6.18+pt26cpu, runstats 0.2.0, e3nn 0.6.0, atomworks 3.0.4 y Lightning 2.6.6.
+Provisioning conserva inventario/resolución completos. Esto **no valida CUDA ni extracción**.
+WISDOM debe declarar su runtime objetivo revisado, aportar script independiente, sustituir el
+import en proceso por la llamada pública y validar archivos restaurados/producidos. Coordinar
+una extracción pequeña antes de dar por aceptado el adaptador científico. No se modifica WISDOM
+ni se ejecutan clusters en esta implementación. Después se puede recuperar el Job fallido por el
+ciclo nativo con reconocimiento de cambio compatible, no reiniciarlo todo silenciosamente.
+
 ## 5. Referencia YAML
 
 Los campos superiores son `name`, `run`, `with`, `resources`, `seeds`, `search`, `objective` y
@@ -528,10 +723,14 @@ nunca infiere contratos científicos ausentes ni cambia identidades de bytes.
 
 `lf datasets replicate NOMBRE@VERSION --source ORIGEN --destination DESTINO` previsualiza; `--apply`
 copia bytes exactos y registra la colocación verificada en destino y controlador.
-`--route auto|direct|relay` prefiere SSH entre hosts o exige directo/retransmisión comprimida.
+`--route auto|direct|relay` comprueba envío y descarga SSH directos; relay exige consentimiento explícito.
 SSH directo no copia credenciales del controlador; relay no usa archivos intermedios locales.
 Consola **Datasets → DatasetVersion → Replicate…** usa el mismo servicio, confirmación y progreso
-en segundo plano. Mantén la sesión abierta hasta terminar. El destino requiere `storage.dataset_root`
+en segundo plano. `--apply` confirma un Job operativo persistente, no que la copia ya esté
+verificada. Tras recibir su ID puedes cerrar LF. SSH directo se ejecuta en el cluster origen sin
+el PC; relay usa un supervisor local independiente y necesita ese PC encendido/conectado.
+Consulta `lf datasets transfers [NOMBRE@VERSION]` o `lf datasets transfer-status JOB_ID`.
+El destino requiere `storage.dataset_root`
 y runtime LambdaForge disponible, no Work científico/claim GPU. Checksums, staging seguro,
 admisión en destino e identidad inmutable siguen siendo obligatorios. Rechaza conflictos y reutiliza
 destinos idénticos. [Guía](#guide-dataset-reconstruction-publicar-una-vez-replicar-el-contenido-exacto).
@@ -1085,7 +1284,14 @@ mucho la demanda. `max_parallel` conserva el máximo global duro y limita estudi
 
 LambdaForge atribuye VRAM por PID/árbol de procesos mediante NVML y reconcilia uso externo en cada
 muestra. Heartbeats del allocator añaden fase, checkpoint y picos breves; el fallback agregado queda
-censurado. La evidencia OOM separa memoria intrínseca de la firma del packing fallido: por ello
+censurado. Un worker vivo ausente de un inventario de procesos completo y reciente tiene uso CUDA
+observado cero durante inicialización CPU. Una observación incompleta/desconocida, bytes por PID
+desconocidos, PID reutilizado o allocator positivo contradictorio nunca se convierten en cero.
+La reserva del driver y memoria ajena no se atribuyen a esa Run; la VRAM físicamente libre sigue
+mandando. Uso cero mientras carga datos no valida un futuro consumo de entrenamiento bajo ni
+elimina la protección de la vía de progreso. Una inicialización CPU larga del Work puede mantener
+la GPU sin actividad: revisa el log antes de concluir que la admisión GPU está bloqueada.
+La evidencia OOM separa memoria intrínseca de la firma del packing fallido: por ello
 `heavy+heavy` no reduce un techo global ni prohíbe `heavy+small`.
 La terminación científica y la completitud de recursos son distintas. Las fases relevantes se
 aprenden de Runs compatibles; no existe una lista universal
@@ -1100,13 +1306,42 @@ Un snapshot activo acotado y atómico sobrevive a una interrupción del controla
 provisional anterior. Puede informar la incertidumbre tras reiniciar, pero nunca se restaura como
 proceso vivo o pico exacto; la evidencia terminal lo sustituye y el cierre normal lo vacía.
 
+La telemetría de recursos materializa recursivamente copias JSON nativas de mappings/listas antes
+de serializar, incluidos parámetros Work inmutables anidados. No modifica parámetros, identidades
+ni contenedores originales. Evidencia activa/terminal, admisión, ledgers y trazas comparten ese
+límite de serialización. Valores no JSON no admitidos siguen fallando explícitamente; no se ocultan
+errores de persistencia ni se desactiva la monitorización segura de GPU.
+
+Tras corregir serialización del framework, actualizar solo el controlador no parchea el runtime
+remoto gestionado. Instala/usa LambdaForge corregido en el entorno local del consumidor y, desde
+ese proyecto, ejecuta explícitamente `lf clusters bootstrap CLUSTER --project .` (puedes revisar
+antes con `--dry-run`). La identidad del entorno usa los bytes exactos del wheel, no solo la versión
+visible: se verifica un prefijo nuevo sin editar entornos inmutables antiguos. Preparar retry también
+empaqueta el framework actual. Revisa `lf retry JOB_ID --dry-run --json` antes de `lf retry JOB_ID`;
+no envíes un Work nuevo para recuperar el Study. Recovery reutiliza resultados completos autoritativos
+y procesa solo Runs lógicas elegibles interrumpidas/fallidas/pendientes. Un log de evaluación final
+o número de epoch no prueba éxito. Continuar desde checkpoint requiere soporte del consumidor;
+si no existe, se reinicia la Run afectada sin repetir hermanas completadas. No edites registros ni
+checkpoints originales ni desactives identidad científica para esquivar un fallo de telemetría.
+
 ARI v3.1 separa la trayectoria visual de `ResourceTrajectoryStatistics`. La primera sigue acotada;
 la segunda conserva incrementalmente ciclos de progreso/optimizer, visitas y máximos por fase,
 picos materiales, sketches robustos de crecimiento/ruido/residuales y cadencia de checkpoints. El
 hazard se actualiza con progreso y asignación, no con cantidad de sondeos, así que muestras
-duplicadas no fabrican confianza. La convolución ponderada exacta conserva colas discretas raras en
+duplicadas no fabrican confianza. La convolución ponderada acotada conserva colas discretas raras en
 P(fit), con un ensemble explícito independiente/epistémico compartido para varias Runs. Placements
 posteriores calibran la probabilidad sin contaminar el objetivo científico.
+
+Las mezclas posteriores activas y entradas de convolución se acotan a 128 puntos ponderados;
+es un límite interno de representación/coste, no un umbral de concurrencia o riesgo. Los soportes
+pequeños siguen siendo exactos. En los grandes se conservan las masas de los extremos y se agrupan
+intervalos interiores hacia arriba: comprimir no aumenta la probabilidad de que una admisión quepa.
+Las actualizaciones conservan los pesos de residuales históricos, sin convertir colas raras en
+muestras equiprobables. El ensemble de incertidumbre compartida recorre eventos de la CDF una
+sola vez, sin ordenar en cada cuantil. Así un Study largo no puede hacer crecer indefinidamente
+el posterior de recursos y bloquear recogida de Futures, cierre de workers, telemetría o admisión.
+Memoria física libre, cotas OOM y permisos GPU siguen siendo la autoridad. Los runtimes inmutables
+ya en ejecución no cargan esta corrección en caliente.
 
 WaitRegret es una integral atómica versionada. Un cambio de frontera cierra el tramo anterior con
 su tasa y fracción ociosa previas; no borra la oportunidad perdida. Solo se reinicia si desaparece
@@ -1579,6 +1814,81 @@ desconocida.
 
 ## 10. Clústeres y Jobs
 
+<a id="guide-execution-queues"></a>
+
+### Colas de ejecución secuenciales
+
+`--queue` prepara un Work/Study ahora, pero solo ejecuta su proceso científico cuando acaben los
+anteriores del mismo proyecto/cluster. Admite múltiples entradas, no solo un sucesor:
+
+**La cola ordena envíos completos, no Runs.** Una vez admitido un Study, sus Trials/seeds
+conservan la ejecución concurrente habitual y los límites de recursos/ejecución declarados.
+`--queue` no fija `max_parallel: 1`, reduce las GPU solicitadas ni serializa un sweep. Una Run
+activa puede estar preparando entradas del consumidor en CPU antes de reservar CUDA; la
+admisión espera su evidencia de consumo en vez de lanzar Runs adicionales sin medir sin límite.
+
+```bash
+lf run experiments/a.yaml --on citius-ctgpgpu16 --queue
+lf run experiments/b.yaml --on citius-ctgpgpu16 --queue
+lf run experiments/c.yaml --on citius-ctgpgpu16 --queue
+lf queue --on citius-ctgpgpu16
+lf queue --on citius-ctgpgpu16 --all --json
+```
+
+También sirve si A ya está ejecutándose por un envío normal y se ponen B/C con `--queue`.
+El orden FIFO se asigna atómicamente al registrar en el destino; para llamadas simultáneas manda
+ese orden de llegada. Terminar antes la preparación no permite adelantar al anterior.
+Sin `--queue` se conserva el envío concurrente: un nuevo Job normal no se serializa ni cancela
+automáticamente. La cola pertenece al proyecto/destino, no a otros proyectos o usuarios.
+La admisión de recursos/GPU sigue considerando ocupación ajena.
+
+En `lf`, abre **Run Work**, selecciona YAML/cluster y marca **Queue after earlier Studies / Works**.
+**View execution queue…** muestra orden, nombres, fase de admisión y último estado Job registrado,
+con Refresh y Back. Es metadata, no una prueba nueva de vida ni historiales Study/Run.
+Las vistas normales muestran `queued` y mantienen logs y cancelación.
+
+La preparación sigue el ciclo nativo detached: validación, bundle, entradas exactas y entorno
+gestionado antes del acuse del proveedor. El YAML encolado queda fijado; editarlo durante esa
+preparación rechaza el envío en vez de cambiar su revisión. Puedes cerrar la consola mientras el
+preparador detached trabaja, pero **mantén el PC conectado hasta que todos los Jobs deseados estén
+en `queued` o `running` del proveedor**. A partir de ese hand-off, los supervisores y metadata FIFO
+residen en el cluster, sin despachador en el portátil ni terminal abierta. `preparing` no significa
+que código/entradas hayan llegado ya al servidor.
+
+El ProcessSupervisor existente aplica la espera antes de reservar CPU/RAM/GPU/almacenamiento o
+lanzar ciencia. Los supervisores en espera no ocupan slots de entreno ni contextos GPU por la cola.
+Solo avanzan tras un estado terminal y liberación de procesos/recursos propios; propietario
+desconocido, evidencia ausente o no inspeccionable bloquea de forma segura. La limpieza confirmada
+deja un recibo de liberación para poder borrar después el workspace antiguo sin perder el orden.
+Predecesores, código y entornos preparados quedan protegidos mientras son necesarios. La espera
+no consume tiempo de entrenamiento científico; tras admisión se aplican los límites normales.
+
+El siguiente entra tras **cualquier resultado terminal**: éxito, fallo, cancelación o timeout.
+Es planificación, no un DAG de dependencias científicas ni retry automático. Cancela con los
+controles confirmados del Work/Study o el ciclo nativo, por ejemplo:
+
+```bash
+lf cancel JOB_ID --dry-run
+lf cancel JOB_ID --apply
+```
+
+Un ticket **no despachado** abandonado porque su preparador no puede terminar se puede retirar
+explícitamente con `lf queue --on CLUSTER --remove-pending JOB_ID --apply`; no envía señales a
+Jobs ejecutándose. Los ya despachados exigen cancelación nativa. Una recuperación crea otro Job,
+no reutiliza su ticket FIFO antiguo; `--queue` se ofrece en envíos nuevos `lf run`, no en acciones
+de recuperación. No relances un Study completo como sustituto de recuperar sus Runs.
+No borres/edites metadata para desbloquear: manifiesto ausente/corrupto bloquea, no reinicia la cola.
+
+Soporte actual: hosts POSIX de procesos directos, locales o SSH, incluido `gpu exec`. Se rechaza
+SLURM/Fleet explícitamente, sin otro runner. Hay que actualizar un runtime existing antiguo;
+se comprueba su capacidad antes de despachar para que no ignore la espera. Registro/historial
+acotados a 10.000 tickets y 8 MiB de metadata: protección operativa, no límite de una entrada.
+No se ofrece reinicio automático de preparadores/supervisores perdidos, prioridades ni cola
+entre proyectos. La cola **no** reclama/renueva reservas GPU ni evita expiraciones/revocaciones
+del proveedor: siguen mandando los grants y la admisión nativos.
+
+### Configuración de clústeres y destinos Fleet
+
 Inspección Fleet: `lf fleets list/show/offers`; controles de catálogo:
 `lf fleets drain/disable/enable FLEET CLUSTER [--apply]`. Observar no concede GPUs y estas acciones
 nunca detienen Jobs activos. `lf run CONFIG --on-fleet NAME [--dry-run]` usa un coordinador local
@@ -1754,11 +2064,102 @@ paquetes, plataforma/subdir, ejecutables, conectividad y un solve exacto ya cach
 preparación real resuelve inventario name/version/build/channel/subdir y lo incorpora a la identidad
 junto con bytes de especificación y wheels, plataforma, Python, Torch y política offline.
 
-El resultado es un solo prefijo: micromamba crea un temporal exacto y su propio Python instala Torch
-y wheels. Antes del rename atómico se comprueban `pip check`, inventario Conda, TLS, framework,
-Torch/CUDA y ejecutables. El recibo registra path/versión y paquete propietario con versión, build,
+Micromamba crea el prefijo de dependencias exacto en su **ruta definitiva**, donde su propio Python
+instala Torch y wheels. No se supone que Conda, console scripts Python ni lanzadores shell sean
+reubicables. `pip check`, inventario Conda, TLS, framework, Torch/CUDA y ejecutables se verifican
+en esa misma ruta antes de publicar atómicamente el recibo de «listo», sin renombrar el entorno
+instalado. El recibo registra path/versión y paquete propietario con versión, build,
 canal y subdir. Builds concurrentes comparten lock por identidad. `tools.require()` busca primero el
 `bin` de ese Python y sigue siendo comprobación, nunca instalador.
+
+**Publicación y recuperación gestionada.** El contrato `stable-prefix-v1` forma parte de las
+identidades de entorno/dependencias. Los prefijos del contrato anterior se conservan: no se
+parchean, sobrescriben ni reutilizan silenciosamente. Bootstrap/envío actual construye otro
+prefijo; si existe un recibo congelado válido del contrato anterior, conserva sus versiones Python
+exactas y mantiene el inventario nativo exacto. Un recibo corrupto/incompatible bloquea la operación.
+El nuevo binding operativo no cambia identidades de inputs, datasets ni parámetros científicos.
+
+El lease de construcción/GC por identidad cubre reserva, instalación, verificación en destino y
+publicación. Micromamba recibe un directorio vacío: la reserva se guarda en el lock, fuera del
+prefijo. Un prefijo sin sellar nunca se considera listo/activo. Un fallo deja
+`.lambdaforge-publication.json` con diagnóstico redactado, sin recibo de listo. No se repara en
+sitio automáticamente. `lf clean --on CLUSTER --environments-only --json` muestra el plan y
+`--apply` elimina solo prefijos fallidos/obsoletos sin referencias ni leases activos. Jobs activos,
+observaciones de procesos y dependencias de recuperación siguen protegidos; si GC lo conserva,
+no fuerces su eliminación. Un build interrumpido sin evidencia fiable permanece protegido por
+propiedad no resuelta, no se supone basura.
+
+Tras instalar LF corregido en el controlador, un fallo de preparación se recupera sin cambiar
+el YAML de WISDOM. Ejemplo, **revisar antes de aplicar**:
+
+```bash
+cd /home/david/Escritorio/WISDOM
+lf clusters bootstrap citius-ctgpgpu16 --project . --dry-run
+lf clusters bootstrap citius-ctgpgpu16 --project .
+lf retry job-20261113230941-0a6d159f --config experiments/preprocess/enrich_physics.yaml --accept-code-change --dry-run --json
+lf retry job-20261113230941-0a6d159f --config experiments/preprocess/enrich_physics.yaml --accept-code-change --json
+```
+
+Bootstrap prepara/verifica runtimes, no ejecuta ciencia. `retry` conserva Execution/Run/checkpoints
+propios cuando la ciencia ya empezó; si aún no hubo Execution, reintenta preparación, sin fingir
+continuación de checkpoints. Aceptar cambio de código no omite identidad científica. No hagas un
+`lf run` nuevo para recuperar una Execution existente, ni edites lanzadores, borres prefijos
+protegidos o uses `--rerun` para ocultar este fallo de infraestructura.
+
+Bootstrap, preparación automática de envíos y reutilización de prefijos comparten el mismo sondeo
+de versiones nativas. Normalmente se exige salida no vacía y código cero. APBS requiere además un
+banner `APBS <versión del paquete>` coincidente con el paquete Conda propietario `apbs`; únicamente
+APBS **3.4.1** con `--version` puede devolver **13** en lugar de cero. La excepción no afecta a la
+ejecución científica ni a otros argumentos, versiones o ejecutables. El recibo conserva argv,
+código de salida, stdout/stderr acotados y política junto con versión/build/paquete. Los fallos
+explican ambos sondeos, códigos y diagnósticos capturados, incluidos errores de arranque y timeouts.
+Siguen siendo obligatorias la pertenencia al paquete y la verificación del inventario exacto.
+Actualiza LambdaForge en el controlador antes de preparar/hacer bootstrap del entorno gestionado;
+no parches prefijos históricos inmutables ni cambies el YAML científico.
+
+**Selección de bibliotecas nativas.** En Conda gestionado, LF vincula la política por proceso
+`native-prefix-libraries-v1` al directorio `lib` del prefijo de dependencias seleccionado. Los venvs
+de código utilizan su base vinculada, no un `lib` inventado bajo el venv. Un lanzador aislado de
+solo biblioteca estándar (`-I -S`) establece la ruta del cargador y hace `exec` del comando original:
+se aplica antes de Torch, SciPy o el `sitecustomize` del destino. Sin exportaciones globales,
+reordenar imports, rebajar paquetes, parchear binarios ni rutas propias de un clúster.
+
+Preparación, reutilización, sondeo de ejecutables, ejecución supervisada/SLURM y descendientes
+normales conservan esa política. Se aplica **dentro** del wrapper GPU del proveedor: respeta su
+concesión y conserva rutas absolutas de drivers después del prefijo elegido. Omite entradas
+vacías/relativas del cargador y elimina duplicados. No cambia visibilidad GPU ni fuerza
+`LD_PRELOAD`; preloads incompatibles u otro runtime C++ realmente cargado hacen fallar la
+verificación. `tools.run(env=...)` no permite sobrescribir variables del cargador con la política
+activa. Al entrar en una herramienta aislada declarada se retiran rutas/marca del consumidor,
+conservando drivers del proveedor y concesiones GPU.
+
+Antes de sellar/reutilizar, procesos nuevos prueban Torch → SciPy y SciPy → Torch (si SciPy está
+instalado), operaciones CPU pequeñas de tensor/KDTree y el origen real en `/proc/self/maps` del
+runtime C++/GCC seleccionado, cuando existe. Importar sin error no basta para acreditar qué
+biblioteca se usó. JSON de bootstrap, metadata del Job y recibos nuevos incluyen
+`native_library_policy`/`native_libraries`; `environment.json` de cada Run registra las bibliotecas
+realmente cargadas y rechaza orígenes incompatibles con la política activa. No se reescriben
+recibos inmutables ni Runs antiguos: reutilizar genera evidencia operativa actual, sin afirmar que
+el pasado superase estas comprobaciones. No hace falta reconstruir dependencias compatibles solo
+para activar la política. No se adivinan rutas para entornos no nativos o `existing`. Invocar
+manualmente el Python cacheado fuera de LF no equivale a este arranque gestionado.
+
+Para desplegar la corrección, activa el entorno Python habitual de LF y revisa cada preview antes
+de su comando de aplicación:
+
+```bash
+python -m pip install --force-reinstall --no-deps /home/david/Escritorio/SimpleLambda/LambdaForge
+cd /home/david/Escritorio/WISDOM
+lf clusters bootstrap citius-ctgpgpu16 --project . --dry-run
+lf clusters bootstrap citius-ctgpgpu16 --project .
+lf retry job-20261113234529-a34c00f4 --accept-code-change --dry-run --json
+lf retry job-20261113234529-a34c00f4 --accept-code-change --json
+```
+
+Se preparan wheels exactos por la vía gestionada, sin editar con pip prefijos remotos activos.
+No borres entornos de dependencias ni abras otro experimento con `--rerun` para recuperarlo.
+Retry mantiene identidad científica, checkpoints y compatibilidad: no omite controles ni promete
+continuación de entrenamiento sin soporte de checkpoints del Work.
 
 La verificación enriquece `micromamba list --json` con los registros regulares `conda-meta` del
 prefijo, conservando el subdir real `linux-*` o `noarch` aunque esa versión del gestor lo omita. La
@@ -1925,14 +2326,16 @@ las clases directas son explícitas y una extensión hereda el ABC pequeño `Clu
 Todo clusterer acepta matriz finita `[N, F]` de NumPy o PyTorch; el tensor se separa y normaliza por
 CPU. Un `Distance` custom se evalúa en el device/dtype de sus parámetros o buffers y la matriz se
 separa después hacia CPU para el backend.
+Los algoritmos compatibles admiten además `[N,N]` con `distance="precomputed"`:
+[validación y límites](#disimilitudes-precalculadas).
 Devuelve `ClusteringResult` inmutable con `labels`, `n_clusters`, `noise_count`, `noise_fraction` y
 `diagnostics`. `centers`, `inertia` y `probabilities` solo existen cuando son reales. Ruido es `-1`.
 
 | Clusterer | Distancias | Evidencia específica |
 |---|---|---|
 | `KMeans`, `MiniBatchKMeans` | solo Euclídea/cuadrada | centros e inercia; `seed` determinista |
-| `DBSCAN` | euclidean, manhattan, minkowski, chebyshev, cosine o `Distance` precomputed | ruido |
-| `HDBSCAN` | mismas métricas density o `Distance` precomputed | ruido y probabilidades |
+| `DBSCAN` | euclidean, manhattan, minkowski, chebyshev, cosine; precomputed explícita o `Distance` | ruido |
+| `HDBSCAN` | mismas métricas density; precomputed explícita o `Distance` | ruido y probabilidades |
 | `Agglomerative` | Ward solo euclidean; otros linkages native/precomputed | etiquetas |
 
 Solo existe el contrato `lambdaforge.nn.distances.Distance`: `EuclideanDistance`,
@@ -1952,7 +2355,7 @@ Los componentes PyTorch no dependen de Work/YAML: se instancian en Python del pr
 | Familia | Opciones públicas |
 |---|---|
 | general/densa | `Model`, `MLP`, `CNN2D`, `ECMP`, `BatchedKNN` |
-| grafos | `GCN`, `GAT`, `GATv2`, `GIN`, `GraphSAGE`, `PNA`, `RelationalGCN`, `GraphTransformer`, `EGNN`, `TensorFieldNetwork`, capas públicas y `GraphReadout` |
+| grafos | `GCN`, `GAT`, `GATv2`, `GIN`, `GraphSAGE`, `PNA`, `RelationalGCN`, `GraphTransformer`, `EGNN`, `TensorFieldNetwork`, `GINE`, `NNConv`, `SchNet`, `GVPGNN`, `PaiNN`, `DimeNet`, `StructuralGraphTransformer`, capas públicas y `GraphReadout` |
 | secuencia | `RNNModel`, `GRUModel`, `LSTMModel`, `TemporalConvNet`, Transformer encoder/decoder/seq2seq, `ConformerModel`, `StateSpaceAdapter` |
 | conjuntos | `DeepSets`, `SetTransformer` |
 | tabular | `ResidualMLP`, `FTTransformer`, `TabNet`, `SAINT`, `AutoInt`, `DeepFM` |
@@ -1972,6 +2375,328 @@ densos, grafos, secuencias, imágenes, conjuntos y tabular. Un alias vago oculta
 científicas de topología, agregación, readout, equivariancia y forma de salida, además de duplicar
 clases probadas. Una arquitectura de dominio pertenece al proyecto; un nuevo primitivo reutilizable
 solo se añade con contrato tensorial y pruebas de conformidad precisas.
+
+### Activación simplex dispersa: Entmax15
+
+`lambdaforge.nn.activations.Entmax15(dim=-1, force_float32=True)` implementa entmax de
+alpha=1.5, no softmax. No cambian sus probabilidades dispersas, constructor ni state-dict.
+El backward usa el Jacobiano analítico del simplex, con `s = sqrt(p)`:
+`grad_x = s * (grad_p - sum(s * grad_p) / sum(s))`, reduciendo sobre `dim`.
+No deriva candidatos de umbral no seleccionados cuyo `sqrt(0)` podía introducir NaN incluso
+con logits finitos como `[0, 0, -2, -2]`. Los ceros dispersos tienen sensibilidad cero; no se
+añaden epsilon, suavizado de probabilidades, clipping ni `nan_to_num`. Se verifican derivadas
+superiores dentro de regiones de soporte fijo, no en las transiciones de soporte.
+
+Para half/bfloat16, umbral y backward siguen calculándose en float32 por defecto y se restaura
+el dtype de entrada. Logits en menos infinito usados como máscara conservan peso/sensibilidad
+cero si quedan logits válidos sin enmascarar. NaN/+inf o filas enteramente enmascaradas no se
+reparan inventando evidencia. Hay regresiones de forward y gradiente analítico en CPU/CUDA,
+derivadas numéricas de primer/segundo orden y un paso sintético de optimización. Referencia:
+[Peters, Niculae y Martins, 2019, proposición 2](https://aclanthology.org/P19-1146/).
+
+Los Jobs gestionados existentes conservan su runtime LF fijado. Hay que desplegar el build
+corregido mediante preparación gestionada normal antes de recuperar explícitamente las Runs
+fallidas; cambiar el checkout no parchea un entorno remoto antiguo ni repara un estado del
+modelo/optimizador que ya contenga valores corruptos.
+
+<a id="graph-encoders"></a>
+
+### Encoders genéricos de aristas, distancias, direcciones y vectores
+
+Los nuevos bloques se importan desde `lambdaforge.nn.models.graph`, también reexportados por
+`lambdaforge.nn.models` y `lambdaforge.nn`. Cada clase tiene su propio módulo. No importan proyectos
+consumidores ni datasets y no crean otro runner, registro o configuración científica.
+
+| Mecanismo | API pública | Alcance exacto |
+|---|---|---|
+| MPNN receptor/emisor/arista | `ECMP` existente | Atributos escalares y embedding relacional opcional; no una MLP independiente por relación |
+| GIN con aristas | `GINE`, `GINELayer` | `MLP((1+epsilon)x + sum ReLU(x_emisor + E(arista)))`; proyección de arista sin sesgo |
+| Filtros matriciales | `NNConv`, `NNConvLayer` | Matriz completa o restricción explícita `num_bases`, suma/media y raíz opcional; condicionador por bases centrable |
+| Filtros radiales continuos | `SchNet`, `SchNetLayer` | Bases gaussianas, SiLU, cutoff opcional explícito y condicionamiento escalar de arista |
+| Vectores persistentes | `GVP`, `GVPGNN`, `GVPGNNLayer`, `VectorDropout` | Escalares/vectores polares, dropout por canal y readout escalar invariante |
+| Interacción radial/vectorial | `PaiNN`, `PaiNNLayer` | Bases sinusoidales, transporte vectorial, direcciones y mezcla local invariante |
+| Mensajes direccionales | `DimeNet`, `DimeNetInteraction`, `DimeNetPlusPlusInteraction` | Interacciones bilineales/factorizadas distintas, Bessel/armónicos reales y tripletas tipadas |
+| Atención estructural global | `StructuralGraphTransformer`, `StructuralGraphTransformerLayer`, `GraphStructuralEncoding` | Variante inspirada en Graphormer con grados/caminos y grafos independientes; sin su receta de token global |
+
+Se reutilizan GCN, GraphSAGE, GIN, R-GCN, PNA, GATv2, Transformer disperso y EGNN fija/con coordenadas
+latentes existentes. Estos bloques **no** implementan una campaña V9 de WISDOM, sus gates semánticos,
+ramas químicas, controles de capacidad, pérdidas, datos o protocolo experimental. Componer capas
+con subconjuntos explícitos de aristas permite ramas independientes. Una pareja que pertenece a
+dos relaciones conserva dos incidencias; no se fusionan de forma oculta. El embedding de relación
+de ECMP no se declara equivalente a una MLP independiente por rama.
+
+**Contrato tensorial.** Aristas enteras `(2,E)` emisor→receptor, nodos escalares `(N,F)` y atributos
+escalares `(E,A)` alineados por fila; salida en el mismo orden de nodos. `edge_geometry(pos[N,3],
+edges)` devuelve distancias `(E,)` y direcciones unitarias `(E,3)` del **receptor al emisor**.
+No crea vecinos, cambia posiciones ni infiere unidades físicas. Rechaza geometría no finita o
+de longitud cero. GVP recibe vectores polares de arista `(E,C_arista,3)` y conserva estados
+`(N,C_vector,3)`; PaiNN usa igual cantidad de canales escalares y vectoriales.
+`forward_with_vectors` expone ambos estados; `forward` termina en embeddings escalares por nodo.
+Normas/mezcla de canales respetan O(3), incluidas reflexiones, no escala ni detección garantizada
+de quiralidad. El contrato requiere atributos escalares invariantes y vectores polares. Validar
+direcciones respeta redondeo bf16/fp16, sin prometer equivarianza bit a bit en precisión reducida.
+
+```python
+from lambdaforge.nn.models.graph import GINE, NNConv, SchNet, GVPGNN, PaiNN, edge_geometry
+
+# x: (N,F), edges: (2,E), attributes: (E,A), coordinates: (N,3).
+F, A, D = x.shape[1], attributes.shape[1], 64
+distance, direction = edge_geometry(coordinates, edges)
+gine = GINE(F, D, A, hidden_channels=(64, 64))
+ecc = NNConv(F, D, A, num_bases=4, center_conditioner=True)
+radial = SchNet(F, D, edge_channels=A, radius=6.0, cutoff=6.0)
+vector = GVPGNN(F, D, edge_channels=A)
+painn = PaiNN(F, D, edge_channels=A, radius=6.0, cutoff=6.0)
+h_gine = gine(x, edges, attributes)
+h_ecc = ecc(x, edges, attributes)
+h_radial = radial(x, edges, distance, attributes)
+h_vector = vector(x, edges, direction[:, None, :], attributes)
+h_painn = painn(x, edges, distance, direction, attributes)
+```
+
+Las distancias se proporcionan explícitamente, no se reconstruyen ocultamente. Las primitivas
+`GaussianRadialBasis`, `SineRadialBasis` y `CosineCutoff` son independientes. `radius` fija la escala
+de la base; `cutoff` fija aparte su soporte. En SchNet/PaiNN, `cutoff=None` conserva las relaciones
+largas suministradas: no se aplica por defecto el corte espacial a otra relación. Gates y unidades
+pertenecen al proyecto. Distancia cero no significa universalmente «apagar geometría»; DimeNet
+exige longitudes positivas. Al apagar una fuente, el consumidor debe cerrar también su ruta
+derivada en bases. Direcciones/ángulos son entradas geométricas adicionales explícitas. Apagar una
+rama relacional/global exige anular toda su contribución, no únicamente su sesgo de atención.
+
+**DimeNet/DimeNet++.** El extra opcional `lambdaforge[graph-directional]` aporta SciPy para calcular
+constantes de raíces Bessel al construir las bases. Forward y gradientes son Torch; no requieren
+PyG, torch-scatter ni SymPy. No se instala nada automáticamente. Límites validados: hasta 64 bases
+radiales y 8 órdenes esféricos. Se usa el envelope polinómico de DimeNet y armónicos reales m=0.
+El encoder genérico sustituye embeddings de número atómico por descriptores de nodo arbitrarios;
+usa SiLU, inicialización Torch y readouts por nodo, no pesos preentrenados, energías/fuerzas ni
+paridad con el protocolo QM9. SchNet usa SiLU en vez de atribuirse toda la receta shifted-softplus.
+
+```python
+from lambdaforge.nn.models.graph import DimeNet, GraphTriplets
+
+triplets = GraphTriplets.from_edges(edges, len(x), max_triplets=1_000_000)
+angles = triplets.angles(coordinates, edges)
+encoder = DimeNet(F, D, edge_channels=A, cutoff=6.0,
+                 interaction_type="factorized")  # interacción DimeNet++
+h = encoder(x, edges, distance, triplets, angles, attributes)
+# interaction_type="bilinear" selecciona la interacción original DimeNet.
+```
+
+Tripletas `k→j→i`, sin `k=i` ni autoconexiones, conservando aristas tipadas duplicadas. Se construyen
+explícitamente sin inventar vecinos. `max_triplets` limita precomputación y `max_triplet_bytes`
+comprueba tensores principales antes de expandir bases/interacciones. No son una predicción de
+toda la memoria de backward. Los bloques de NNConv completa limitan matrices temporales, pero no
+garantizan memoria constante de todas las activaciones retenidas por autograd.
+
+**Atención estructural global.** Entradas `(B,N,F)`, códigos de camino `(B,N,N)`, grados de entrada/
+salida `(B,N)` y máscara Booleana opcional `valid_nodes[B,N]`. Código `0`=inalcanzable y longitud
+de camino `d` usa `d+1`, incluida diagonal `1`. El preprocesado satura en el último código; grados
+fuera del codebook declarado se rechazan sin recorte oculto. `edge_bias[B,H,N,N]` opcional debe ser
+finito y equivarante a permutación. No se elige un camino mínimo por índice para sus atributos.
+`GraphStructuralEncoding.from_edges` usa BFS dirigido independiente de empates: preprocesado CPU
+explícito O(N*(N+E)) y matriz O(N²) acotada por bytes. Nunca hay atención entre elementos del batch;
+la salida del padding es cero. Los modelos dispersos usan unión disjunta; los globales, batch
+independiente. Grados/caminos se incorporan en cada bloque como variante genérica declarada.
+
+```python
+from lambdaforge.nn.models.graph import GraphStructuralEncoding, StructuralGraphTransformer
+
+encoding = GraphStructuralEncoding.from_edges(edges, len(x), num_spatial_codes=32)
+global_encoder = StructuralGraphTransformer(F, D, num_heads=4, num_spatial_codes=32)
+h = global_encoder(x[None], encoding.spatial_indices[None],
+                   encoding.in_degree[None], encoding.out_degree[None])[0]
+```
+
+`max_attention_bytes` comprueba la matriz de scores antes de materializarla, no toda la memoria de
+entrenamiento. Atención global cambia realmente el alcance; no se sustituye silenciosamente por
+otra dispersa. No se promete toda la receta molecular/de atributos de caminos del Graphormer
+original. Ejemplo sintético ejecutable: `python examples/graph_encoders.py [--directional]`, sin
+Jobs, mutaciones de datasets ni entrenamiento científico. Pruebas CPU de ecuaciones, gradientes,
+permutación/multiplicidad, O(3), grafos vacíos/aislados, autocast bf16, state_dict, geometría inválida,
+límites de memoria y dependencias opcionales. No acreditan rendimiento CUDA ni mejora de WISDOM.
+
+Fuentes primarias: [GINEConv](https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.conv.GINEConv.html),
+[ECC](https://openaccess.thecvf.com/content_cvpr_2017/html/Simonovsky_Dynamic_Edge-Conditioned_Filters_CVPR_2017_paper.html),
+[SchNet](https://arxiv.org/abs/1706.08566), [referencia GVP de sus autores](https://github.com/drorlab/gvp-pytorch),
+[implementación PaiNN de sus autores](https://schnetpack.readthedocs.io/en/latest/_modules/representation/painn.html),
+[DimeNet](https://arxiv.org/abs/2003.03123), [DimeNet++](https://arxiv.org/abs/2011.14115) y
+[Graphormer](https://arxiv.org/abs/2106.05234). Las adaptaciones genéricas anteriores no se presentan
+como reproducción literal de modelos completos; no se incluyen pesos ni código fuente ajeno.
+
+<a id="graph-operator-controls"></a>
+
+### Composición pública de mensajes y controles de fuentes geométricas
+
+El consumidor sigue definiendo relaciones, normalización química, valores de moduladores/gates
+y protocolo experimental. LF aporta ecuaciones y etapas reutilizables, no una campaña de dominio.
+
+| Capacidad auditada | Existente / faltante | Interfaz pública |
+|---|---|---|
+| GCN / GraphSAGE | Existían; faltaban moduladores escalares alineados | `message_weights` opcional en capas y stacks |
+| GIN / GINE | Existían; faltaba separar la actualización común | `messages`, `aggregate`, `update` |
+| MPNN receptor/emisor/arista | ECMP ya existía | `project_inputs` y etapas públicas con `layer_index` |
+| PNA/estadísticas de grado | Ya existían, incluidas estadísticas externas | Separación pre-MLP, agregación estadística y post-MLP, sin otra ecuación |
+| Bases/cutoffs radiales | Ya existían; faltaba cerrar toda la ruta | `distance_weights`, `radial_inputs`, `forward_from_radial` de las capas |
+| Tripletas dirigidas tipadas | Multiplicidades/mezclas ya conservadas | Pesos diferenciables por etapas en DimeNet/ambas interacciones |
+| Soporte direccional por relación | Bases existentes; faltaba inyección | `DimeNet.forward_from_basis` |
+| Atención global estructural | Ya existía; conflicto de política del consumidor | Se conserva; límites y dtype promovido explícitos |
+
+**Modulación escalar, no adyacencia ponderada.** Firmas nuevas compatibles:
+
+```python
+GCNLayer.forward(x, edge_index, message_weights=None)
+GraphSAGELayer.forward(x, edge_index, message_weights=None)
+GCN.forward(x, edge_index, message_weights=None)
+GraphSAGE.forward(x, edge_index, message_weights=None)
+```
+
+`message_weights` es un tensor flotante finito `(E,)`, alineado, con signo permitido y sin detach,
+recorte ni normalización. GCN aplica `a_e*w_topológico/sqrt(D_out(emisor)*D_in(receptor))` sin
+recalcular grados con `a_e`: **no es GCN de adyacencia ponderada**. Los grados usan incidencias
+originales y pesos de autoconexión declarados. Con `add_self_loops=True`, autoconexiones suministradas
+y sus moduladores se sustituyen por una canónica por nodo, modulación **uno**. Desactivado, las
+autoconexiones explícitas son incidencias normales moduladas. El sesgo se añade una sola vez.
+GraphSAGE modula mensajes antes del agregador; Mean divide por número de incidencias, **no** suma
+de moduladores. Su raíz independiente no se modula ni se añaden autoconexiones. Una autoconexión
+suministrada junto a `root_weight=True` representa dos contribuciones declaradas, no inferidas.
+`None` y factores uno conservan propagación previa; los duplicados conservan su multiplicidad.
+
+```python
+a = 1 + C(edge_attributes).squeeze(-1) - C(torch.zeros_like(edge_attributes)).squeeze(-1)
+h_gcn = gcn_layer(x, edges, message_weights=a)
+h_sage = sage_layer(x, edges, message_weights=a)
+```
+
+**Mensajes independientes y una actualización.** Firmas públicas:
+
+```python
+GINLayer.messages(x, edge_index)
+GINELayer.messages(x, edge_index, edge_features=None)
+GINLayer.aggregate(messages, edge_index, num_nodes)
+GINELayer.aggregate(messages, edge_index, num_nodes)
+GINLayer.update(x, aggregated)
+GINELayer.update(x, aggregated)
+ECMP.project_inputs(x)
+ECMP.messages(h, edge_index, edge_attr=None, edge_type=None, *, layer_index=0)
+ECMP.aggregate(messages, edge_index, num_nodes)
+ECMP.update(h, aggregated, *, layer_index=0)
+PNALayer.messages(x, edge_index, edge_features=None)
+PNALayer.aggregate(messages, edge_index, num_nodes, *, degree_dtype=None)
+PNALayer.update(x, aggregated)
+```
+
+GIN/GINE agregan mensajes `(E,F)` por suma y aplican `(1+epsilon)*x` y MLP **una vez**. GINE
+conserva ReLU por mensaje y proyección de atributos sin sesgo. ECMP conserva el orden
+`[emisor,receptor,arista,relación]`, estados previamente proyectados `(N,H)`, y actualización con
+su MLP, normalización, dropout y residual opcional. PNA conserva `[receptor,emisor,arista]`;
+agrega `(E,M)` a `(N,M*agregadores*escaladores)` ordenando primero escalador y después agregador.
+Los grados son topológicos. Para equivalencia exacta del split bajo AMP, usar `degree_dtype=x.dtype`,
+como forward; por defecto se usa dtype de mensajes. Estadísticas medias de grado/log-grado se
+siguen declarando desde entrenamiento. El post-MLP concatena una sola raíz.
+
+```python
+ac = c.aggregate(c.messages(x, edges_c, attrs_c), edges_c, len(x))
+as_ = s.aggregate(s.messages(x, edges_s, attrs_s), edges_s, len(x))
+h = c.update(x, z_c * ac + z_s * as_)  # GINE/PNA, una actualización común
+
+h0 = c_mpnn.project_inputs(x)
+ac = c_mpnn.aggregate(c_mpnn.messages(h0, edges_c, attrs_c), edges_c, len(x))
+as_ = s_mpnn.aggregate(s_mpnn.messages(h0, edges_s, attrs_s), edges_s, len(x))
+h = c_mpnn.update(h0, z_c * ac + z_s * as_)
+```
+
+Elegir anchuras/layouts compatibles; en PNA también coincidir en el orden de agregadores y
+escaladores. El multiplicador afecta al **agregado completo de la relación**, después de min/max/std,
+no antes: esas operaciones no conmutan en general. Sumar encoders completos duplica raíz/MLP y
+no equivale a esta composición. Objetos de relación separados conservan parámetros de etapas
+que no se llamen; la contabilidad de capacidad/optimizador debe distinguir parámetros ejecutados,
+no afirmar que participan todos los registrados. Atributos cero no eliminan relación: GINE
+todavía emite `ReLU(x_emisor)`. Relación cero deja intacta la raíz común. Para anular raíz GIN/GINE,
+fijar explícitamente `epsilon=-1`; PNA/ECMP pueden pasar estados raíz cero a `update`, tras calcular
+mensajes con los originales. `residual=False` en ECMP solo quita residual, no la entrada raíz del
+MLP. Los sesgos de actualización aún pueden producir una constante.
+
+**Fuentes de distancia derivadas.** Firmas adicionales, sin cambiar constructores/estado:
+
+```python
+SchNet.forward(x, edge_index, distances, edge_features=None, *, distance_weights=None)
+SchNetLayer.forward(x, edge_index, distances, edge_features=None, *, distance_weights=None)
+PaiNN.forward(x, edge_index, distances, directions, edge_features=None, *, distance_weights=None)
+PaiNN.forward_with_vectors(x, edge_index, distances, directions, edge_features=None, *, distance_weights=None)
+PaiNNLayer.forward(scalars, vectors, edge_index, distances, directions,
+                  edge_features=None, *, distance_weights=None)
+SchNetLayer.radial_inputs(distances, *, distance_weights=None)
+PaiNNLayer.radial_inputs(distances, *, distance_weights=None)
+SchNetLayer.forward_from_radial(x, edge_index, radial, support=None, edge_features=None)
+PaiNNLayer.forward_from_radial(scalars, vectors, edge_index, radial, directions,
+                              support=None, edge_features=None)
+```
+
+`distance_weights=g`, tensor finito escalar o `(E,)`, sin recorte, aplica `radial=g*R(d)` y
+`support=(1-g)+g*cutoff(d)`. Sin cutoff, su valor es uno. Con `g=0` desaparece exactamente toda
+dependencia de distancia por radial y cutoff, pero la geometría sigue validándose. LF no infiere
+qué columna arbitraria de atributos duplica esa distancia: el consumidor debe cerrar también
+esa entrada escalar con su control de fuente. Permanecen
+sesgos del filtro, otros atributos y operaciones propias del nodo. En PaiNN las direcciones
+unitarias explícitas **siguen activas**; no se afirma apagar toda geometría ni se usa distancia
+cero como sentinel inválido.
+
+`forward_from_radial` consume `(E,R)` y multiplicadores completos `(E,)` opcionales, **sin volver
+a aplicar cutoff**. Permite combinar bases/soportes nativos por relación antes de una sola
+interacción/actualización y conservar relaciones largas fuera del corte de otra rama espacial.
+`support=None` es identidad. Multiplicar soporte por el modulador relacional elimina todos sus
+mensajes escalares/vectoriales, no la mezcla local ni los sesgos sin mensajes. El consumidor de
+bases precalculadas posee su procedencia/geometría; LF valida tensores, no una fuente física que
+esa interfaz no recibe.
+
+**Control direccional y de relaciones tipadas.**
+
+```python
+DimeNetBasis.forward(distances, angles, triplets, *, distance_weights=None)
+DimeNet.forward(x, edge_index, distances, triplets, angles, edge_features=None,
+                *, distance_weights=None, message_weights=None)
+DimeNet.forward_from_basis(x, edge_index, radial, spherical, triplets,
+                           edge_features=None, *, message_weights=None)
+DimeNetInteraction.forward(x, radial, spherical, triplets, *, message_weights=None)
+DimeNetPlusPlusInteraction.forward(x, radial, spherical, triplets, *, message_weights=None)
+```
+
+DimeNet usa neutral **uno**: `rbf_g=(1-g)+g*rbf(d)` y
+`sbf_g=[(1-g_entrante)+g_entrante*Bessel_envelope(d_entrante)]*Y(ángulo)`. Al cerrar distancia no
+queda ninguna dependencia radial/envelope/cutoff, pero los ángulos permanecen explícitos y útiles.
+Cero neutral apagaría indirectamente mensajes/ángulos/readout a través de filtros sin sesgo.
+Siguen nodos, sesgos y geometría angular; no equivale a pruning. Se exigen distancias positivas
+finitas originales incluso cuando la fuente esté cerrada.
+
+Por cada incidencia tipada `m_e`: inicialización de estado de arista multiplicada por `m_e`;
+tripletas ponderadas por **`m_entrante*m_saliente`**; estado final de cada interacción multiplicado
+por `m_saliente`, incluidas rutas afines/residuales; mensaje de readout por arista multiplicado
+por `m_e`. Así un sesgo no revive una arista cerrada ni su camino mixto. Sin detach, umbrales,
+filtrado de índices, vecinos nuevos o reconstrucción topológica. Pesos fraccionarios/con signo
+se componen por etapa/profundidad: no son una única ponderación de importancia ni probabilidad.
+Factores uno recuperan la ecuación anterior. Todos cero dejan `root(x)` más las constantes
+históricas de los readouts por nodo evaluados en cero, no información de relaciones cerradas.
+
+`forward_from_basis` recibe radial `(E,R)` y esférica `(T,L*R)`. Con bases `DimeNetBasis` separadas
+por soporte relacional, elegir cada fila radial según la arista y cada fila esférica según la
+**arista entrante** de la tripleta. Las tripletas mixtas se mantienen; los pesos eliminan caminos
+que usen cualquiera de las relaciones cerradas. No se aplica indebidamente un cutoff espacial
+global a todo. Permanecen los controles de forma/memoria antes de expandir.
+
+Ejemplo mínimo ejecutable: `python examples/graph_operator_controls.py [--directional]`, solo
+métodos públicos, sin mutar submódulos privados ni reimplementar mensajes de grafos. Constructores,
+forward por defecto y claves de state_dict se conservan. ECMP rechaza ahora topología flotante/
+Booleana e identificadores de relación inválidos, en lugar de truncarlos. No se reescriben
+checkpoints históricos ni identidades científicas.
+
+**Frontera global.** StructuralGraphTransformer sigue siendo denso: grados dirigidos, códigos BFS
+y sesgos opcionales del consumidor, no la receta original de atributos de camino de Graphormer.
+No cruza elementos del batch y enmascara padding. El límite de scores contempla promoción de dtype
+por sesgos estructurales bajo autocast; **no** acota todos los tensores simultáneos, backward,
+optimizador ni encodings del llamador. El límite BFS acota su matriz, no toda la lista/colas Python.
+Un consumidor que prohíba matrices densas N×N debe revisar explícitamente esa política para la
+comparación global o declararla no soportada/inviable. LF no la evade, inventa atributos de camino
+ni llama igual a un fallback disperso.
 
 ## 15. Arquitectura y extensiones
 
@@ -1994,7 +2719,7 @@ storage conservan ownership durable independiente.
 | `EnvironmentManifest` | procedencia software/hardware/Git/plugin/tool | una sola fuente de verdad |
 | `SubmissionService`/`ControlPlane` | preparación asíncrona y destino | responsabilidad operacional |
 | `NativeEnvironmentSpecification`/`NativeEnvironmentPlanner` | declaración estricta, solve de plataforma e inventario Conda | software nativo pertenece al despliegue, no a parámetros/hooks del Work |
-| `ManagedEnvironmentProvider` | venv o prefijo Conda temporal verificado, pip/Torch y publicación atómica | convierte un plan completo en entorno ejecutable |
+| `ManagedEnvironmentProvider` | instalación Conda/venv en prefijo definitivo, pip/Torch, verificación y recibo listo atómico | convierte un plan completo en entorno ejecutable |
 | `GpuAccessPolicy` | admisión scheduler/exclusive/shared/wrapper de claim | la política del clúster no entra en YAML científico ni Work |
 | `StorageOperations` | GC exacto, poda de entornos, borrado de Job y compactación | toda mutación queda acotada, idempotente y auditable |
 | `Transport` | conexión y transferencia | no decide semántica del scheduler |
@@ -3514,20 +4239,163 @@ final sigue comprobando identidad bajo el lock del registro.
 lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --json
 # Revisar ruta, tamaño y destino; después aplicar:
 lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --apply
+# Exigir ruta directa (envío O descarga), sin intermediación del PC:
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --route direct --apply
+# Solo tras aceptar la dependencia del PC/red, solicitar relay explícitamente:
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --route relay --apply
 ```
 
 En `lf`, abre **Datasets → DatasetVersion → Replicate…**, elige origen/destino, revisa el plan nativo
-y confirma. La consola sigue respondiendo y muestra fases/tiempo transcurrido y bytes comprimidos
-en la ruta retransmitida. Mantén la sesión abierta hasta terminar. Locations se actualiza tras el
+y confirma. El selector permite **Direct only · no laptop required** (por defecto si el origen es
+remoto), Automatic y Relay explícito. Direct only bloquea si ninguna dirección SSH funciona y
+muestra una explicación legible de host key/autenticación/herramientas, sin sustituirla por una
+copia local. El host se deriva de la ruta real, no es una etiqueta editable: origen en envío directo,
+destino en descarga directa y controlador en relay. Jobs relay existentes conservan su ruta;
+seleccionar Direct only no migra ni cancela una transferencia enviada anteriormente.
+La consola sigue respondiendo y muestra fases/tiempo transcurrido y bytes comprimidos
+en la ruta retransmitida. **Transfers** conserva ID, origen/destino, estado, fase, bytes comprimidos,
+host de ejecución y logs seleccionados entre sesiones. Cerrar el panel o LF no cancela una
+transferencia ya confirmada. Locations se actualiza tras el
 registro. El destino requiere `storage.dataset_root` y runtime LambdaForge disponible (existente o
 preparado mediante bootstrap); no ejecuta Work científico/claim GPU. Mantiene el scope del proyecto.
 
-`--route auto` comprueba SSH desde origen a destino con clave de host fiable, sin prompts ni
-forwarding de agente/credenciales. Si funciona, los bytes viajan directamente entre hosts. Configura
-en el origen autenticación no interactiva autorizada por el centro y claves de host fiables para
-habilitarlo; LambdaForge no instala claves ni copia credenciales locales. `--route direct` exige esa
-conexión. `--route relay` usa los transportes autenticados del controlador con un **stream comprimido
-en memoria acotada**, no un archivo intermedio en tu equipo ni en `/tmp`.
+`--route auto` comprueba primero envío SSH origen → destino y después descarga iniciada desde
+destino ← origen. Las sondas acotadas, sin escritura ni copia de assets, verifican autenticación,
+confianza de host, intérprete/imports necesarios, lectura del origen y planificación segura/escritura
+del destino. El preview distingue autenticación, host key, red, timeout, permisos, herramientas y
+fallo indeterminado por dirección. Una sonda inconclusa no demuestra ausencia de conectividad;
+verificar requisitos ahora tampoco garantiza la conexión futura. Las sondas automáticas no reenvían
+agentes/claves privadas ni relajan host keys. Un fallo de autenticación interactivo puede ofrecer
+por separado la contraseña de un solo uso descrita abajo.
+
+**Huellas de primer acceso.** La confianza SSH pertenece al host iniciador: aceptar una huella
+en el portátil no autoriza 16 → 12. Un SSH manual desde 16 al mismo host/IP y usuario usados por
+LF puede resolver la huella desconocida, pero si pide contraseña no demuestra que funcione sin
+interacción. Alias e IP pueden tener entradas distintas en known_hosts.
+
+Si tras aceptar las huellas el diagnóstico pasa a `authentication / Permission denied`, ya hay
+confianza pero falta autenticación automática. Puedes configurar acceso no interactivo aprobado
+en una dirección o introducir explícitamente una contraseña del destino para iniciar desde origen.
+LF no instala claves ni reutiliza/reenvía secretos del controlador automáticamente. El relay SSH
+con contraseña usa lectores binarios para cabecera y payload comprimido.
+
+**Contraseña directa de un solo uso.** No requiere crear claves SSH ni guardar credenciales del SO:
+
+```bash
+lf datasets replicate NOMBRE@VERSION --source CLUSTER16 --destination CLUSTER12 \
+  --route direct --ask-password --apply
+```
+
+El prompt oculto explica que la contraseña del destino se entrega por SSH autenticado/cifrado al
+origen. Solo permanece en memoria y pasa al supervisor/worker nativo detached por pipes anónimos:
+no se escribe en argv, entorno, solicitudes, registros Job ni logs de LF, tampoco en keyring.
+El origen conecta directamente al destino con PasswordSshTransport; conserva el mismo motor de
+archivo comprimido, checksums, identidad y publicación atómica. Los bytes no pasan por el portátil.
+Mantenlo conectado hasta el acuse del Job; después el Job del origen ya no depende del PC.
+
+En CLI interactivo se ofrece el prompt tras fallos clasificados como autenticación. JSON/no
+interactivo nunca pregunta ni acepta contraseñas como argumentos. El preview autentica y revisa
+permisos sin copiar datos. En LF elige **Direct · ask destination password**, o usa la modal
+ofrecida tras fallar el acceso automático. El campo se oculta y vacía al aceptar/cancelar; el
+secreto no aparece en la confirmación de copia posterior, que sigue siendo obligatoria. Huellas
+desconocidas/cambiadas exigen su decisión separada: la contraseña no las acepta automáticamente.
+Una contraseña incorrecta no provoca reintentos automáticos ni cambio a relay.
+
+El runtime iniciador necesita LF con entrada efímera de Jobs y la dependencia opcional
+`lambdaforge[cluster-password]`/Paramiko. Preflight comprueba ambos antes de enviar el secreto;
+si faltan, se requiere bootstrap/actualización explícita, no modificar un prefijo inmutable ni
+instalar al importar. El destino solo necesita el receptor LF normal. La autorización con
+contraseña es origen→destino; nunca se prueba la misma contraseña en sentido inverso. MFA y
+keyboard-interactive no están implementados. Tras caer proceso/host el secreto no se recupera:
+el retry genérico de Job rechaza esas operaciones. Repite `datasets replicate --ask-password`
+con preview/apply para aportarlo otra vez. Se conservan bloqueo de duplicados activos y verificación
+exacta del destino.
+
+Si Direct only falla por confianza de host, la consola ofrece una modal separada con cluster
+iniciador, host/puerto del destino, huellas SHA256 y ruta remota del archivo de confianza. Contrasta
+las huellas con el administrador u otro canal fiable y confirma o cancela. Las observaciones de
+`ssh-keyscan` no están autenticadas: [aviso de seguridad de OpenSSH](https://man.openbsd.org/ssh-keyscan).
+Confirmar vuelve a obtener/comprobar todas las huellas y añade exclusivamente claves desconocidas
+al known_hosts efectivo del usuario en el iniciador. Usa nombres de host hasheados, lock y escritura
+atómica conservando entradas/permisos. Nunca sustituye claves diferentes, revocadas o certificadas.
+Después repite el preview normal; **iniciar la copia requiere otra confirmación**. Cancelar no cambia
+confianza ni datasets. Aceptar la identidad del servidor no concede permiso de inicio de sesión.
+
+La misma operación nativa existe por comando, sin depender de un dataset:
+
+```bash
+# Solo lectura: observar huellas desde el cluster iniciador.
+lf datasets trust-ssh --source gpu16 --destination gpu12 --json
+# Solo tras verificar: repetir --fingerprint para TODAS las claves del preview.
+lf datasets trust-ssh --source gpu16 --destination gpu12 \
+  --known-hosts-file /home/USER/.ssh/known_hosts \
+  --fingerprint SHA256:HUELLA_VERIFICADA --apply
+```
+
+Usa la ruta remota exacta del preview, no una ruta del PC. Python ofrece
+`DatasetService.replication_ssh_trust(initiator, peer, ...)`; aplicar exige huellas revisadas y
+`expected_file`. Ninguna sonda normal de replicación escribe confianza automáticamente. Proxy SSH,
+HostKeyAlias, expansiones especiales o archivos inseguros/no propios requieren administración
+explícita, no suposiciones. El iniciador necesita SSH/keyscan/keygen e intérprete LF existente;
+sin instalar paquetes, reenviar claves privadas/contraseñas ni relajar políticas SSH.
+
+Si no hay dirección directa utilizable, auto **propone** relay, pero nunca lo inicia silenciosamente.
+CLI interactivo muestra ruta, motivo, tamaño original y dependencia del PC y pide consentimiento;
+en JSON/no interactivo debes elegir `--route relay`. La consola exige el mismo aviso/confirmación.
+El tamaño original no es un total comprimido. Se fija la dirección aprobada: si cambia antes del
+envío hay que revisar de nuevo, no se pasa a relay a escondidas.
+
+Para rutas automáticas de claves/Kerberos, el administrador debe autorizar SSH y host keys en el iniciador
+(origen para envío, destino para descarga), además de runtimes LF y permisos utilizables en ambos.
+LambdaForge puede guardar claves públicas desconocidas aprobadas explícitamente como se explica
+arriba; nunca cambia confianza en silencio, sustituye claves registradas ni distribuye claves privadas.
+`--route direct` admite ambas direcciones y garantiza ausencia de intermediación local: si ninguna
+funciona falla antes de copiar. `--route relay` acepta expresamente la dependencia del controlador y
+usa sus transportes autenticados con un **stream comprimido en memoria acotada**, no un archivo
+intermedio en tu equipo ni en `/tmp`.
+
+La copia usa el ciclo de vida Job/scheduler nativo con tipo `dataset-replication`, no un Work
+científico ni Study ficticio. El envío directo se aloja en origen y la descarga directa en destino:
+supervisor, progreso, resultado y logs sobreviven allí aunque desconectes el PC. Solo se registra contenido verificado
+en destino; al reconectar se reconcilian sus metadatos exactos con el índice del controlador.
+Un conflicto de identidad exige reconciliación explícita, nunca elegir una referencia a ciegas.
+Relay se ejecuta como Job local independiente de la consola: puedes cerrar LF, pero apagar/suspender
+el PC o perder su red puede interrumpirlo. `requires_controller_online` señala esa dependencia del
+host, no de la interfaz. Relay desatendido requiere OpenSSH o una referencia de credencial guardada,
+sin contraseñas en snapshots ni prompts posteriores.
+
+```bash
+lf datasets transfers corpus@7 --json
+lf datasets transfer-status job-YYYYMMDDHHMMSS-ID --json
+lf jobs logs job-YYYYMMDDHHMMSS-ID --tail 100
+```
+
+Las filas separan estado del proceso, última observación confirmada/antigüedad y último avance de
+bytes comprimidos/antigüedad. Si el host no es observable, muestran estado no confirmado y último
+estado conocido; no running confirmado indefinidamente ni fallo inventado. Verificar/publicar puede
+no mover bytes; transferir sin avance indica transferencia/espera, no bloqueo demostrado. No se
+inventan porcentajes sin total comprimido conocido. Listado de Datasets y Transfers también
+actualizan la observación nativa y conservan estados terminales, causa redactada y comando de logs.
+EOF/BrokenPipe conservan la excepción original y stderr/exit del extremo cuando están disponibles;
+sin esa evidencia no se puede distinguir pérdida de red de salida del receptor.
+
+Solicitudes repetidas/concurrentes de la misma copia activa reutilizan el Job; estado incierto
+no permite duplicarlo. Consultar estado lee metadatos acotados, no assets ni archivos comprimidos.
+Una transferencia activa protege origen/destino frente a borrado nativo. No hay reintentos infinitos:
+tras un fallo corrige la causa y solicita replicar otra vez. No es continuación por offset; una copia
+incompleta se transfiere de nuevo y una ya verificada se reutiliza. Las transferencias iniciadas con
+una versión anterior no se convierten retroactivamente en persistentes. En Python se usan
+`DatasetService.replication_preview()`, `enqueue_replication()`, `replications()` y
+`replication_status()`; `replicate()` de bajo nivel sigue siendo la copia síncrona que usa el worker
+relay nativo. No hay un segundo motor de transferencia.
+Antes de preparar una transferencia independiente, LF ancla workspace/almacenamiento locales y
+las rutas explícitas de intérprete al proyecto fijado del controlador. Solicitud y perfiles locales
+serializados usan rutas absolutas, independientes del `work_dir` del worker; las rutas SSH nunca
+se resuelven con el filesystem del PC. Estado/historial fallidos incluyen una causa stderr acotada
+y redactada y `logs_command`, aunque no haya progreso ni resultado. Cachés antiguas con error vacío
+se actualizan una vez. Tras corregir un error de arranque, solicita la misma previsualización
+`datasets replicate ...` y después `--apply`: Jobs activos/inciertos siguen impidiendo duplicados,
+destinos exactos se reutilizan y se conserva el Job fallido con sus logs. No hay que recalcular datos.
 
 Tar/gzip en streaming (nivel 3) verifica el origen completo, rechaza enlaces/entradas especiales y
 rutas peligrosas, usa staging/admisión de almacenamiento en destino y comprueba contenido exacto
@@ -3979,13 +4847,96 @@ de Attempts. Los metadatos de retención ausentes/corruptos se tratan conservado
 Están implementadas la admisión de run_root y las reservas de copias de publicación gestionadas.
 Staging de bundles y preparación de dependencias todavía no tienen reservas independientes de bytes
 en sus volúmenes de destino. Generar índices/manifests de datasets no es una cuota de disco.
-Los entornos managed siguen usando identidad v2 con hashes exactos de wheels: **todavía
-no se han separado** el entorno de dependencias y las capas de código. Los marcadores de build se
-protegen conservadoramente y la orfandad entre hosts sigue sin inferirse. Los markers de runtime Python
+Los entornos managed nuevos usan identidad v3: una base de dependencias inmutable y una capa pequeña
+de código exacto instalada independientemente (se explica abajo). Los prefijos v2 existentes no se
+reescriben ni actualizan bajo Jobs. La orfandad entre hosts sigue sin inferirse. Los markers de runtime Python
 y entorno comparten la adquisición atómica con GC y heartbeat acotado, también al verificar reuse.
 Un prefijo completo inválido se conserva, no se reemplaza bajo Jobs que podrían referenciarlo.
 `lf storage reconcile` ofrece un inventario diagnóstico de medidas, no contabilidad completa de cada
 escritura. Esta guía no promete protección frente a todo ENOSPC durante preparación.
+
+<a id="guide-storage-environment-layers"></a>
+
+### Reutilización de dependencias, limpieza de entornos y reparación de referencias
+
+Las nuevas ejecuciones y bootstrap comparten `ManagedEnvironmentProvider`. Un prefijo `deps-*`
+resuelve y congela una vez las dependencias pesadas. Su contrato incluye `Requires-Dist`, requisitos
+Python/extras de los wheels, Python/runtime/plataforma seleccionados, Torch/CUDA exacto, resolución
+nativa y checksums de wheels offline. Cambiar código, YAML, seeds o hiperparámetros no duplica esa
+instalación si no cambia el contrato. Comentarios/nombres del archivo nativo y notas de descubrimiento
+no invalidan una resolución idéntica. Cambios reales de dependencias, Python/ABI, paquetes nativos o
+política Torch/CUDA sí generan otra base.
+Observaciones de driver/dispositivos y exigir una prueba CUDA en el Job actual son evidencia de
+validación, no bytes de paquetes; la reutilización sigue verificando los grants reales del proveedor.
+
+La base conserva sus wheels iniciales de bootstrap/instalación y el inventario resuelto; **no** son
+el código científico seleccionado para nuevas ejecuciones. Cada capa `env-*` instala los wheels
+exactos actuales de LF/proyecto con `--no-deps --ignore-installed` en su propio venv, con precedencia
+sobre los paquetes iniciales de la base. No actualiza dependencias compartidas: verifica el contrato
+combinado y publica atómicamente. Entry points Python de dependencias usan el intérprete de ejecución;
+binarios nativos conservan su base inmutable. Los hashes de código siguen formando parte de identidad
+y procedencia. La primera resolución compatible queda congelada, no se actualiza silenciosamente
+desde el índice. No se instala nada al importar ni se deduplican prefijos antiguos en uso.
+`state/dependency-resolutions/<contrato>.json` conserva inventario sellado y
+`dependency_resolution_id` aunque se limpie la caché. Reconstruir una base aplica las versiones
+exactas y rechaza diferencias antes de publicar. Un recibo corrupto es error diagnosticable, no
+permiso para resolver otra vez. Entorno preparado y Job registran la identidad resuelta; cambiar
+el contrato de dependencias/resolución genera otra vinculación. Los paquetes de código iniciales
+de bootstrap se separan del inventario compartido fijado.
+Una referencia nativa protege entorno/bundle/runtime desde staging hasta el hand-off al proveedor,
+incluido el intervalo entre terminar la instalación y publicar request.json; no depende solo del
+puntero activo, que otra preparación podría cambiar.
+
+```bash
+lf clean --on CLUSTER --environments-only --json          # inventario/plan sin borrar
+lf clean --on CLUSTER --environments-only --apply --json  # solo tras revisarlo
+```
+
+La limpieza explícita selecciona entornos completos obsoletos sin referencias aunque no hubiera
+cuota ni edad configuradas. Este modo no compacta Jobs, artefactos ni checkpoints. Protege punteros
+activos, intérpretes/procesos vivos, builds, entornos de recuperación fallida/cancelada, dependencias
+de recuperación y series. Una capa de código conservada retiene su base. Si no queda ningún consumidor
+necesario, elimina primero código y después la base en la misma transacción GC. La limpieza automática
+sigue cuotas/edad/presión; `storage.cache_max_size` y `storage.cache_max_age` se configuran en el perfil.
+La cuota existente mide **bytes aparentes de archivos**, no promete liberar esa cantidad física.
+
+El plan distingue cantidad, bytes aparentes, bloques únicos de **archivos** y estimación física
+liberable. Cuenta enlaces duros una vez y no estima liberar sus bloques si queda un enlace fuera de
+la selección. Metadatos de directorios, reflinks y actividad ajena pueden cambiar el resultado. Apply
+revalida referencias/propietarios bajo el lock nativo GC, registra eliminaciones exactas y devuelve
+bytes aparentes realmente retirados más delta observado de espacio libre por filesystem. Ese delta
+no se atribuye exclusivamente a LF. Una operación vacía es `outcome=no-change`, no bytes liberados.
+
+Un Job sin estado válido pero con solicitud legible protege su entorno **concreto**, no todos.
+Sin solicitud ni propietario atribuible se conserva la protección y se identifica el Job bloqueante.
+Se puede revisar y retirar explícitamente una referencia operativa abandonada:
+
+```bash
+lf storage repair --on CLUSTER --retire-job job-IDENTIDAD-EXACTA --json
+lf storage repair --on CLUSTER --retire-job job-IDENTIDAD-EXACTA --apply --json
+```
+
+No cambia estado del Job, Execution, Run, Attempt ni archivos científicos. Audita el snapshot en
+`state/storage-reference-repairs.json`; cambios de estado/solicitud o propiedad viva invalidan la
+retirada. Requiere inspección de procesos disponible y no adivina propiedad de SLURM. Jobs remotos
+ausentes del catálogo local se incluyen igualmente en el inventario; los argumentos de recuperación conservan
+el Job/entorno original aunque no exista registro local.
+
+`storage repair` también acepta repetidamente `--release-build .environment-build-env-ID.lock`.
+El PID/nacimiento/muerte del controlador se comprueba **en su host registrado** y los descendientes
+instaladores se verifican independientemente en el host del build. No se retiran propietarios vivos,
+recientes, ilegibles o extranjeros no verificables. Edad, PID inexistente en otro host o marker
+ilegible no prueban muerte. Se audita intención antes de retirar el marker exacto, nunca su prefijo.
+Después de liberación verificada, los temporales huérfanos son candidatos GC. Un marker antiguo
+ilegible puede quedar protegido hasta recuperar su atribución; no bloquea los demás prefijos.
+
+El preview de repair muestra además un plan **hipotético** de limpieza posterior. No autoriza borrar:
+tras la reparación aprobada hay que repetir `lf clean` con las referencias actuales. La consola
+ofrece **Clusters → Storage → Repair references…**, selección exacta, preview y confirmación aparte;
+**Clear storage…** usa el mismo servicio. Con cero candidatos explica el bloqueo sin ofrecer una
+falsa limpieza. El refresco habitual usa metadatos de medición cacheados y capacidad física, sin
+recorrer entornos; clean/reconcile explícitos hacen la medición profunda. El colector operativo remoto
+usa el código actual del controlador sin modificar los entornos inmutables de trabajos científicos.
 
 
 <a id="guide-managed-reports"></a>
@@ -4827,6 +5778,15 @@ dependencias downstream no resueltas ni propuestas aleatorias sin información �
 
 ## 30. Salud operativa, monitorización y recuperación deliberada
 
+**Locks de preparación huérfanos.** Un controlador detenido puede dejar el marcador de construcción
+de entorno/runtime aunque no haya estudios activos. La preparación actualizada verifica host y
+vida del proceso controlador, y comprueba que no quede un instalador del prefijo exacto en destino.
+Solo retira el marcador huérfano sin cambios bajo el lock GC nativo, nunca entornos ni ficheros
+científicos. La antigüedad no basta: propietarios vivos, ajenos, ilegibles o cambiantes siguen
+protegidos. Requiere el controlador actualizado; no relanza Jobs por sí mismo. Si falló totalmente
+en preparación, vuelve a enviar el YAML: no hay Execution científica que reanudar. Para recuperaciones
+de entrenos ya iniciados sigue existiendo `lf retry`.
+
 Español · [English](MANUAL.md#guide-operational-reliability)
 
 Estado lógico, evidencia científica y salud operativa son conceptos distintos. Un registro antiguo
@@ -4989,6 +5949,100 @@ deja una barrera permanente para consultar.
 <a id="guide-operational-reliability-recuperación-y-yaml-trasladado"></a>
 
 ### Recuperación y YAML trasladado
+
+#### Recuperación de Works secuenciales
+
+`lf retry JOB --config pipeline.yaml --dry-run --json` admite `steps` con un Work ejecutable sin
+semillas por nivel secuencial. La acción **Retry / Recover Work** de la consola usa el mismo plan.
+`strategy: sequential` muestra cada paso como `reuse`, `retry` o `pending`, Run original, siguiente
+Attempt e inventario registrado de checkpoints. No se inventa estado de HPO.
+
+Se conservan Execution y checkpoints. Los predecesores completados se reconstruyen desde valores,
+artifacts y datasets publicados, sin volver a ejecutar su ciencia ni depender de un retorno Python.
+El worker comprueba hashes de outputs e identidades exactas antes de reutilizarlos; el preview solo
+inspecciona metadata, sin descargar assets pesados. El paso fallido/interrumpido crea un nuevo
+Attempt del mismo Run; los posteriores esperan a su éxito. `resume_map` conserva registros válidos
+y comprueba dependencias/validadores, recalculando únicamente lo ausente o inválido. No garantiza
+continuación por epoch ni compatibilidad universal de checkpoints del consumidor.
+
+Se preservan identidad científica, recursos raíz/por paso y presupuestos consumidos.
+`--accept-code-change` reconoce una corrección de código, nunca cambios científicos. Siguen vigentes
+propiedad del proveedor, locks y protección frente a limpieza. Niveles paralelos y composiciones
+con Studies se rechazan como no soportados, no como corruptos. Un Attempt antiguo interrumpido sin
+evidencia suficiente de propiedad se bloquea, nunca se reinicia silenciosamente. Despliega LF
+corregido mediante preparación gestionada, sin parchear el entorno original ni mover checkpoints.
+Tras revisar el plan: `lf retry JOB --config pipeline.yaml --accept-code-change`.
+
+#### Work único con productores en checkpoints de archivo
+
+**Nombres históricos del staging acotado.** Retry usa el contrato versionado `bounded-role-v1`
+cuando el recibo del bundle original y los inputs del Attempt demuestran el renombrado ligado al
+rol (`train.txt` → `inputs/0000-train.txt`). Comprueba bytes originales contra SHA-256 raw del bundle,
+rol/configuración y fingerprint histórico. El YAML local o el nuevo staging deben aportar esos
+mismos bytes; se reconstruye la identidad antigua sin renombrar datos, reescribir la Execution ni
+cambiar globalmente los hashes legados. Dos roles con basename igual no se emparejan por nombre.
+Los nombres relativos dentro de directorios siguen siendo contenido científico. El preview muestra
+rol, nombre histórico y digest raw; un cambio informa hashes esperado/observado. Sin procedencia
+original válida no se autoriza esta adaptación. Preview, dependencias y worker comparten autoridad;
+aceptar código no evita verificar contenido/diseño. Los checkpoints mantienen su propietario y se
+comprueban mediante acceso nativo y validadores científicos del consumidor.
+
+La recuperación repetida conserva el binding autorizado del **Attempt 1** y su bundle original.
+Los Attempts posteriores validan sus propios directorios, bundle, roles y bytes; no deben apuntar
+físicamente al Job original. Deben acreditar un request del mismo emplazamiento dirigido a la
+Execution original y una entrada aceptada en el historial nativo. No se omite un Attempt corrupto
+porque otro resulte válido. Se admiten recibos legados v3/v4 y fingerprints con basename histórico
+cuando se acreditan propiedad y contenido. Evidencia original ausente, linaje ajeno o bytes cambiados
+bloquean con Attempt/propietario/rol concretos, sin sugerir cambiar ciencia ni borrar Attempts.
+
+El preview envía el helper actual para lectura; **no actualiza** el entorno remoto. Antes de enviar
+ciencia, el intérprete preparado debe acreditar `bounded-role-chain-v2`. La preparación gestionada
+normal instala el wheel exacto actual en otro entorno inmutable; un intérprete antiguo/existente se
+rechaza con indicación de actualizar/bootstrap, sin parchear el entorno histórico ni lanzar el Job.
+
+`lf retry JOB --dry-run --json` admite un Work ejecutable sin seeds/search/sweep. El diseño se
+verifica en la Execution/configuración resuelta y sus registros Run/Attempt, sin HPO ni metadata
+Study inventada. La Run fallida/interrumpida crea otro Attempt de **la misma Run lógica y
+Execution original**. Se vuelve a entrar en `run(...)` con su colección pública `self.checkpoints`.
+El Work restaura productores completos mediante `checkpoints.file(..., validate=...)` y construye
+los que falten/fallaran. No implica continuación de epochs ni que LF conozca el grafo de
+productores de la aplicación. Un límite preventivo de asignación no demuestra OOM del sistema.
+
+El plan de metadata informa `strategy: single`, `work_status`, propietario Job/Execution/Run,
+`next_attempt`, número/bytes registrados, archivos ausentes/tamaño inválido, confirmación de código,
+`effective_resources` y `resource_changes`. **No verifica hashes de payload** en preview: el acceso
+gestionado comprueba hashes y la validación del Work verifica física/schema. No infiere cuántas
+proteínas/productores faltan a partir de claves opacas. Recibos corruptos/ajenos y rutas inseguras
+bloquean recuperación; corrupción de igual tamaño se detecta al acceder. Solo tras validar todos
+los productores debe publicarse el dataset; para assets en checkpoints se usa la API nativa
+`outputs.dataset(..., source_checkpoint="producers")`, sin copiar rutas privadas ni publicar
+resultados parciales como completos.
+
+En esta ruta de Work único se pueden cambiar explícitamente `resources.cpu`, `resources.memory`
+y `resources.time` en el YAML revisado. Los usan tanto el nuevo Job como el Work y quedan en la
+auditoría; el origen inmutable conserva su solicitud antigua. No habilita cambios de topología
+GPU/procesos/storage. Parámetros físicos, bytes de entradas tipadas, identidad del dataset,
+objetivo, diseño y contratos de publicación siguen intactos, incluso con `--accept-code-change`.
+El nombre implícito de un YAML que staging renombró a `config.yaml` se normaliza al namespace
+histórico, sin modificar cómo se resuelven entradas ni omitir comprobaciones científicas.
+Cambios compatibles de implementación/defaults de guardas requieren confirmación explícita de
+código; LF no decide que un parámetro físico cambiado es meramente operativo.
+Los presupuestos originales `execution.max_runs`/`execution.max_time` no se reinician: si están
+agotados bloquean recuperación. Cambiar `resources.time` por Attempt no devuelve cómputo gastado.
+
+```sh
+# Solo inspección: no crea Jobs, prepara entornos ni descarga checkpoints.
+lf retry JOB --config experiments/preprocess/enrich_structures.yaml --dry-run --json
+# Solo después de revisar compatibilidad/recursos y decidir lanzar:
+lf retry JOB --config experiments/preprocess/enrich_structures.yaml --accept-code-change
+```
+
+Un solve de entorno exacto sin preparar es un requisito posterior, no pérdida de checkpoints.
+Apply prepara el runtime revisado y vuelve a verificar propietario, lock nativo del controlador,
+hash del YAML y duplicados bajo el lock existente. Los Jobs propietarios/dependencias siguen
+protegidos de limpieza. La consola ofrece **Recover Work…** con el mismo plan, selector de YAML
+y checkbox de código; el primer click solo inspecciona, y rechazo/preparación aceptada tienen
+feedback visible.
 
 ```sh
 lf retry STUDY --dry-run --json
@@ -5220,6 +6274,34 @@ se marcan no disponibles.
 
 ### Startup entre Studies
 
+**Inferencia en vivo e inicialización lenta.** Una Run nativa puede tardar mucho en cargar o
+validar científicamente datos del consumidor antes de su primera asignación CUDA. El consumo
+cero exacto en esa fase no es una muestra de demanda GPU nula: sigue siendo una Run viva, con
+propietario y una asignación futura sin validar. No permite liberar su slot ni lanzar workers
+sin límite. El diagnóstico distingue `materialized_runs` y `unmaterialized_runs`, incluye
+`elapsed_seconds` de cada residente y expone `capacity_wait_reason` del planner real (por ejemplo
+`UNVALIDATED_LADDER_STEP` o `PROTECTED_LANE`). El log de espera, limitado en frecuencia, también
+muestra workers sin asignación materializada.
+
+Las trayectorias físicas de cada Run son la autoridad de inferencia en vivo. Su pronóstico
+anterior **no** es evidencia histórica independiente: solo resultados compatibles registrados
+aportan el prior de residuos históricos, una vez. Sondeos con idéntica asignación/progreso no
+pueden modificar recursivamente su distribución de memoria. El predictor de placement sigue
+compartiendo prefijos medidos y censurados entre candidatos/GPU compatibles; su predicción
+puntual es la mediana ponderada, no un pico exacto ni un límite OOM obligatorio para vecinos.
+Los workers sin asignación no contaminan esa predicción. Las colas de fases futuras desconocidas
+se conservan: una envolvente superior de toda la GPU no equivale a una asignación física.
+Siguen vigentes memoria libre real, mínimos declarados, packings fallidos exactos, exploración
+protegida y comprobaciones frescas antes del lanzamiento.
+
+Esto no acelera una validación científica dentro de `Work.run` del consumidor. Ese código debe
+reportar progreso nativo y evitar decodificar/revalidar repetidamente los mismos assets inmutables
+cuando su contrato científico lo permita; LF no omite sus comprobaciones implícitamente. Los Jobs
+existentes usan runtimes gestionados inmutables y no recargan correcciones del checkout. Hay que
+desplegar el wheel corregido mediante preparación gestionada normal antes de una recuperación
+solicitada explícitamente; no editar el entorno activo, registros científicos ni datos para
+forzar admisión.
+
 `shared` y `command` coordinan arranques mediante locks cortos por UUID GPU/MIG. La autoridad
 sigue siendo `GPUPlacementPlanner`, que comprueba memoria física fresca bajo el lock. El
 compromiso temporal se persiste **antes** de crear el worker e incluye las identidades nativas
@@ -5231,7 +6313,13 @@ libre ya excluye el consumo residente; no se resta otra vez. El controlador ya c
 propias Runs con sus envelopes. Se reconcilian vidas de worker verificadas como ausentes;
 propietarios inciertos siguen protegidos y un fichero de PID ausente no demuestra muerte.
 Para huérfanos se puede reutilizar la observación nativa de propiedad del Job; la edad no es
-prueba. La ventana de startup de un worker vivo atestiguado es por defecto 60 s, finita, no
+prueba. Si se eliminó todo el directorio del Job antiguo, solo se retira su compromiso operativo
+tras confirmar la muerte/reutilización del controlador y comprobar mediante la inspección nativa
+que no quedan descendientes con su marcador de Job ni procesos relevantes de propiedad incierta.
+Esto no recrea registros, autoriza recovery ni evita comprobar reservas y capacidad física actual.
+Si el directorio existe pero faltan registros individuales, la evidencia sigue siendo incierta o
+corrupta, no una prueba de ausencia.
+La ventana de startup de un worker vivo atestiguado es por defecto 60 s, finita, no
 una reserva permanente de `gpu_memory` por residentes. Evidencia compatible de tiempo hasta
 el envelope puede extenderla, con límite de una hora. Baseline y exploración no pueden ignorar
 startup pendiente de otro Study. No cambian techos ni decisiones científicas. Waiters acotados
@@ -5738,3 +6826,736 @@ Contratos/miembros/provenance/consumidores de productos son metadata. Runs/curva
 y recursos de un cluster son consultas explícitas nativas; preview de texto verifica ownership e
 integridad con límite de 64 KiB. Resto de acciones científicas, semántica, vault externo, cobertura total
 de APIs y conversaciones completas siguen en el registro de pendientes.
+
+<a id="guide-graph-science"></a>
+
+## 34. Topología de grafos y calibración independiente
+
+Estos algoritmos genéricos de NumPy se usan directamente desde Python o dentro de un Work
+nativo. No conocen proteínas, superficies concretas ni Jobs. Los exports diferidos de `topology`
+y `stats` permiten usarlos sin cargar Torch, scikit-learn ni POT. No hay otro motor de ejecución
+ni un sistema nuevo de almacenamiento.
+
+### Disimilitudes precalculadas
+
+DBSCAN, HDBSCAN y Agglomerative con `single`, `average` o `complete` admiten
+`distance="precomputed"`. Ward, KMeans y MiniBatchKMeans lo rechazan. Se conserva el uso de
+características `[N,F]` y de las instancias neuronales `Distance` existentes.
+
+```python
+from lambdaforge.clustering import HDBSCAN, silhouette_score
+from lambdaforge.distances import validate_dissimilarity
+
+# D puede proceder de fgw.pairwise(objects, symmetric=True).
+D = validate_dissimilarity(D, max_pairwise_bytes=512 * 1024**2)
+clusters = HDBSCAN(min_cluster_size=10, distance="precomputed").cluster(D)
+score = silhouette_score(D, clusters, distance="precomputed")
+```
+
+Se exige una matriz densa cuadrada no vacía, numérica real, finita, no negativa y de diagonal
+**exactamente cero**. La simetría se comprueba con `symmetry_atol=1e-10`, `symmetry_rtol=1e-8`,
+sin cambiar valores ni asumir desigualdad triangular. Para tratar asimetría numérica de forma
+explícita puede usarse `validate_dissimilarity(D, symmetry="average")`: sustituye cada par por
+su media aritmética, cambiando la disimilitud científica. No mejora la precisión del solver
+FGW local. Nunca se recortan negativos, se rellena NaN ni se anula una diagonal automáticamente.
+
+El límite `max_pairwise_bytes`, por defecto 512 MiB, comprueba `N*N*8` **antes** de convertir
+a float64 o transferir un tensor a CPU; no limita todo el workspace del backend. HDBSCAN copia
+explícitamente su entrada para no modificar la del consumidor. Silhouette conserva `-1` como
+etiqueta: para excluir ruido hay que filtrar explícitamente filas, columnas y etiquetas. Sigue
+necesitando entre 2 y N-1 etiquetas diferentes.
+
+### Árboles H0 de superniveles
+
+```python
+import numpy as np
+from lambdaforge.topology import SuperlevelMergeTree
+
+tree = SuperlevelMergeTree().fit(
+    values=np.array([5., 2., 4., 1., 3.]),
+    edges=np.array([[0, 1], [1, 2], [2, 3], [3, 4]]),
+    vertex_weights=np.array([1., 2., 3., 4., 5.]),
+)
+tree.persistence_diagram()  # ((5., None), (4., 2.), (3., 1.))
+tree.components_at(2.)     # componentes conexas de values >= 2
+tree.region_at(1, 3.)      # rama 1 antes de morir/fusionarse
+tree.mass_curve(0)         # nivel descendente y masa después de cada evento
+```
+
+El contrato de aristas es `[E,2]` entero y no dirigido; para cero aristas se usa
+`np.empty((0,2), dtype=int)`. Duplicados y bucles no alteran la topología. Valores finitos
+reales y pesos finitos no negativos con masa total positiva. Se rechazan rango del campo o
+masa total que excedan float64, sin reescalado silencioso.
+
+Union-find procesa las mesetas completas. En una fusión sobrevive la rama de mayor nacimiento;
+en empate, la de menor identificador de vértice de su meseta de nacimiento. Reordenar vértices
+puede renombrar ramas empatadas, pero no las particiones ni el multiconjunto de persistencia.
+Una transformación estrictamente creciente conserva la topología, no la persistencia numérica.
+Cada componente desconectada conserva una rama esencial con `death=None`, `persistence=None`
+y `essential=True`, no una persistencia infinita o cero inventada. Una rama existe en
+`death < threshold <= birth`: consultar su muerte o por debajo falla. La rama superviviente
+continúa con la región combinada tras absorber otra rama.
+
+`branches` contiene mesetas de origen, padres, hijos y evento de fusión; `events` conserva la
+jerarquía de crecimiento/fusión. Cada vértice se almacena una vez en eventos y otra en un índice
+contiguo de subárboles. Construcción aproximadamente O(N log N + E alpha(N)), con ordenación
+determinista adicional, y memoria O(N+E). Consultar regiones no reconstruye el grafo. La prominencia
+topológica **no** es confianza estadística ni la jerarquía de densidad de HDBSCAN.
+
+### Regiones estables y pertenencia por umbrales
+
+```python
+from lambdaforge.topology import StableRegionSelector, uniform_membership
+
+selection = StableRegionSelector(
+    min_persistence=1., min_mass=1., min_width=1., min_samples=2,
+    min_iou=.8, overlap="disjoint",
+).select(tree)
+for region in selection.regions:
+    print(region.branch_id, region.interval, region.mass, region.membership)
+print(selection.rejected)
+phi = uniform_membership(tree, branch_id=1, lower=2., upper=4.)
+```
+
+Se busca el intervalo **más ancho** que cumpla los límites, con extremos en eventos de la rama
+y el suelo observado/muerte; no el intervalo diminuto que maximiza IoU. En empate de anchura
+se prefiere mayor estabilidad y luego mayor extremo superior. El núcleo en el extremo alto debe
+cumplir `min_mass`. La estabilidad es masa del núcleo/masa del soporte, la IoU ponderada entre
+regiones anidadas. El extremo bajo es abierto: el soporte corresponde al límite por encima,
+no a la región fusionada. `min_samples` cuenta extremos de umbrales, **no observaciones
+independientes**. Las ramas esenciales usan el suelo/rango observado sin asignarles persistencia.
+
+En `(lower,upper]`, `membership[i]` integra exactamente y normaliza la pertenencia del vértice
+para umbrales uniformes. El momento en que un subárbol se incorpora importa; no basta su
+intensidad original. La muerte puede ser un extremo de medida cero, nunca atravesarse.
+`discrete_membership(tree, branch_id, thresholds, weights)` permite una distribución discreta
+de umbrales normalizada explícitamente; todos sus niveles deben estar en la vida de la rama.
+Son pertenencias espaciales, **no probabilidades de un evento científico**.
+
+`overlap="allow"` conserva soportes posiblemente anidados. Por defecto `disjoint` acepta
+primero los intervalos más anchos y rechaza soportes posteriores solapados; es una política
+greedy explícita, no un óptimo global. Nunca recorta ni renormaliza máscaras. El límite
+`max_membership_bytes` (256 MiB) acota los vectores N de pertenencia retenidos, no todo el proceso.
+
+`weighted_iou(a,b,weights=w)` calcula `sum(w*min(a,b))/sum(w*max(a,b))`;
+`weighted_dice` calcula `2*sum(w*min(a,b))/sum(w*(a+b))`. Con indicadores son medidas de
+conjuntos; con fracciones, solapamiento espacial difuso. Unión/masa vacía usa `empty_value`
+explícito, por defecto 1, no evidencia científica inferida. Las entradas deben pertenecer a
+`[0,1]` y estar alineadas por vértice.
+
+### Controles independientes y remuestreo
+
+```python
+from lambdaforge.stats import EmpiricalNullCalibrator, bootstrap_quantile
+
+null = EmpiricalNullCalibrator(tail="upper", alpha=.05).fit(reference_scores)
+result = null.evaluate(new_score)
+null.fit_groups(candidate_scores, object_ids, reducer="max")
+result = null.evaluate_group(new_object_scores)
+interval = bootstrap_quantile(reference_object_maxima, .95, seed=42, n_resamples=1000)
+```
+
+Cola superior: `p=(1+count(reference >= score))/(n+1)`; cola inferior: `<=`. Los empates son
+inclusivos y se reportan. La decisión es `p <= alpha`. La resolución/mínimo p es `1/(n+1)`;
+si alpha impide rechazar se devuelve una advertencia. `reference_level` es un cuantil empírico
+descriptivo, **no otro umbral de decisión**. Se conserva cola, alpha, empates, unidad y tamaños
+de grupos. `fit_groups` permite `max` o `min`; `evaluate_group` aplica el mismo estadístico.
+
+La definición del score, generación y selección de candidatos deben fijarse antes de calibrar.
+Se requieren controles negativos independientes e intercambiables por objeto. Calibrar máximos
+controla alguna falsa detección en un objeto negativo bajo esas hipótesis, no la proporción de
+regiones falsas en objetos positivos, probabilidad posterior, causalidad o garantías condicionales
+bajo cambios arbitrarios de distribución. No se reutiliza `ConformalPredictionInterval` de regresión.
+
+`bootstrap_statistic(values, statistic, group_ids=..., strata=..., seed=...)` remuestrea grupos
+independientes enteros con reemplazo, conservando filas y multiplicidad. Un estadístico sobre
+filas agrupadas depende de sus tamaños: para peso idéntico por objeto hay que reducir previamente
+a un escalar por objeto. Cada grupo debe pertenecer a un estrato. La salida contiene estimación,
+intervalo percentil aproximado, confianza, remuestreos, seed, unidad/número de unidades y
+degeneración. No es una garantía exacta ni corrige múltiples comparaciones. `bootstrap_quantile`
+comparte esa política y usa cuantiles lineales de NumPy. Pocos controles o controles degenerados
+siguen siendo evidencia débil.
+
+Ejemplos ejecutables: [grafos y controles](../examples/graph_regions_calibration.py),
+[benchmark de escala](../examples/benchmark_merge_tree.py). Referencias:
+[GUDHI](https://gudhi.inria.fr/doc/latest/group__persistent__cohomology.html),
+[Phipson y Smyth](https://gksmyth.github.io/pubs/PermPValuesPreprint.pdf),
+[HDBSCAN de scikit-learn](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.HDBSCAN.html).
+Las ampliaciones restantes de clustering/asignación de prototipos siguen en el registro de pendientes.
+
+<a id="fgw-blocks"></a>
+
+### Matrices FGW acotadas y reanudables
+
+`FGWMatrixBuilder` reutiliza el solver FGW existente. No es otro runner ni otro cache. Acepta
+colecciones cuadradas o rectangulares, enumera pares deterministas por filas y acota bloques
+y threads numéricos explícitamente: por defecto 32 comparaciones y un thread.
+
+```python
+from lambdaforge.distances import FGWMatrixBuilder, FusedGromovWassersteinDistance
+
+builder = FGWMatrixBuilder(FusedGromovWassersteinDistance(alpha=.5), block_size=32)
+square = builder.build(objects, symmetric=True)
+cross = builder.build(new_objects, prototypes)
+for block in builder.blocks(objects, symmetric=True):
+    print(block.pairs, block.values, block.complete, block.diagnostics)
+```
+
+`symmetric=True` declara simetría de la métrica de atributos: resuelve el triángulo superior,
+incluidas comparaciones propias, y refleja resultados. No afirma que dos orientaciones del
+solver local den exactamente lo mismo. Dos colecciones explícitas son rectangulares y no pueden
+pedir reflexión aunque tengan igual longitud. Con una colección sin simetría explícita se resuelven
+ambas orientaciones. La firma/comportamiento anterior de `distance.pairwise(...)` se conserva.
+
+`blocks()` no asigna la matriz completa. `build()` devuelve `FGWMatrixResult` con `values` de
+solo lectura, `identity`, `symmetric` y diagnósticos por bloque: rango/número de pares, cantidad
+convergida, iteraciones totales, máximo error marginal y fallos con hasta ocho mensajes abreviados.
+No retiene todos los acoplamientos densos; para uno concreto se usa `distance.solve`.
+
+Por defecto `error_policy="raise"` propaga el primer error. `"record"` continúa con **NaN**, no una
+distancia inventada, donde falló una comparación. `complete` significa valores finitos, **no**
+convergencia de todos los solves ni óptimo global. Errores de memoria o dependencias siempre se
+propagan. Hay que comprobar integridad antes de clustering/publicación/JSON estricto. La validación
+de disimilitudes rechaza matrices parciales con NaN.
+En checkpoints JSON el fallo se guarda como `null` y su error; NaN solo se reconstruye en memoria.
+
+`max_memory_bytes` vale 512 MiB por defecto. La estimación incluye workspace denso, conversión de
+atributos numéricos, buffers de bloque, metadatos de identidad, resúmenes acumulados y dos buffers
+de salida en `build()`. No es un límite duro de RSS ni acota callbacks/encoders arbitrarios. Los
+objetos de entrada ya están residentes. Para colecciones grandes conviene consumir `blocks()` en
+outputs gestionados nativos en vez de aumentar sin más el presupuesto denso.
+
+Dentro de un Work en ejecución se puede usar la misma API:
+
+```python
+result = builder.build(objects, symmetric=True, work=self)
+```
+
+Cada bloque usa `self.resume_map(..., workers=1, retries=0)` y checkpoints JSON nativos. No hay
+rutas de máquina serializadas, pickle, locks paralelos ni otro sistema de ficheros cacheados. Los
+bloques acabados sobreviven a interrupciones; se repite el bloque interrumpido. Se recalculan bloques
+ausentes, mal formados, incompletos, con checksum inválido o identidad distinta; los fallidos
+registrados no se reutilizan como éxitos.
+
+La identidad incluye esquema versionado, estructuras/atributos/pesos exactos, masas originales,
+modo relacional, orden de colecciones, simetría, parámetros/clase del solver, threads y versiones
+de LambdaForge/POT/NumPy/SciPy. Tamaño de bloque y límite de memoria no son identidad científica.
+Los atributos numéricos usan dtype/shape/bytes de endian canónico. Los opacos requieren
+`feature_encoder(features) -> bytes`, determinista y exacto. Una métrica callable requiere
+`metric_identity="mi-metrica/revision-implementacion"`; debe actualizarse si cambia su ciencia.
+No se adivina equivalencia de closures ni se serializan objetos Python arbitrarios. El checksum
+detecta corrupción, no una reescritura maliciosa acompañada de otro hash. Identidad/ownership y
+aceptación de cambio de código del Work siguen comprobándose independientemente. Se reanudan
+comparaciones, no las iteraciones internas de un solve POT interrumpido.
+
+<a id="fgw-barycenters"></a>
+
+### Baricentros FGW reales y estructuras relacionales
+
+`FGWBarycenter` llama al solver opcional real `ot.gromov.fgw_barycenters`. No promedia nodos sin
+correspondencias. Optimiza un **prototipo relacional sintético local**, con soporte elegido por
+el investigador; un medoide sería una observación real. No garantiza una realización física ni
+que el tamaño del soporte sea óptimo.
+
+```python
+from lambdaforge.distances import FGWBarycenter
+
+result = FGWBarycenter(n_support=16, alpha=.5, seed=42, n_init=3).fit(
+    objects, object_weights=None, support_weights=None,
+    init_structure=None, init_features=None,
+)
+prototype = result.prototype
+print(result.objective, result.converged, result.warnings)
+```
+
+Se requieren atributos numéricos finitos `[N,F]` en una dimensión común. Se admite
+`0 < alpha < 1`, masas balanceadas de probabilidad, pérdida estructural cuadrática y coste
+de atributos euclídeo cuadrado. Esta formulación no admite atributos opacos/métricas personalizadas
+ni promete baricentros de alpha extremo. Los pesos de objetos se normalizan explícitamente con
+suma positiva. Los de soporte deben ser estrictamente positivos: POT divide por ellos. Los objetos
+pueden tener masas no uniformes. No se reescalan unidades; alpha mezcla componentes cuya escala
+debe elegirse conscientemente. Para un prototipo de cluster se pasan solo sus objetos y pesos.
+
+`StructuredMeasure` mantiene por defecto sus validaciones de simetría/no negatividad/diagonal cero.
+`StructuredMeasure(..., relational=True)` permite explícitamente relaciones de diagonal no nula.
+La salida POT se conserva en ese modo, **sin anular su diagonal**. No se afirma que sea una métrica;
+puede compararse después con la distancia o el builder FGW existente. Geometría/masas complejas se
+rechazan, sin descartar silenciosamente la parte imaginaria. La distancia ordinaria mantiene sus
+atributos arbitrarios, no este algoritmo numérico de baricentros.
+
+Controles: `n_support`, `alpha`, `max_iter=100`, `tol=1e-7`, `seed`, `n_init=1`, `threads=1`,
+`max_memory_bytes=512 MiB`, `transport_max_iter=200`, `transport_tol=1e-9`. Los dos últimos
+son para verificaciones de transporte **posteriores**; los solves internos POT también usan
+`max_iter`. C inicial `[support,support]` y X inicial `[support,F]` se aplican a cada reinicio.
+Si se dan ambas, los reinicios pueden ser idénticos: no se añade ruido no solicitado. Si falta C,
+se usa la inicialización estructural POT con seed; se registra cada seed generada. Multistart es
+secuencial y elige el menor objetivo ponderado posterior válido, no un óptimo global ni necesariamente
+un reinicio convergido. Los inválidos conservan diagnóstico; si todos lo son se produce un error.
+
+El resultado contiene `prototype`, pesos, seed elegida, reinicios, historial de cambios de parámetros,
+iteraciones, avisos y comparaciones finales. `objective` se verifica posteriormente mediante
+`sum(lambda[k] * FGW(final_prototype, object[k]))`. `comparisons` contiene nuevos acoplamientos
+factibles en el prototipo **final**, no los acoplamientos previos al último update POT. El modo
+de logging usado no da un historial ponderado del objetivo final: `backend_objective=None` lo indica.
+
+En POT 0.9.6 y 0.9.7.post1, comprobados realmente, el criterio de parada acepta cambio pequeño
+de atributos **o** estructura. El wrapper no lo presenta silenciosamente como convergencia completa:
+`converged` exige **ambos** cambios bajo tolerancia y comparaciones finales convergidas. De lo
+contrario devuelve no convergencia y un aviso aunque POT parase pronto. Tampoco prueba un óptimo
+global ni un etiquetado único de nodos. La estimación de memoria incluye los acoplamientos por
+iteración guardados por POT; combinaciones excesivas se rechazan antes de resolver.
+
+Ejemplo ejecutable: [matrices ponderadas y baricentro](../examples/fgw_barycenter.py).
+Referencia: [POT FGW barycenters](https://pythonot.github.io/gen_modules/ot.gromov.html#ot.gromov.fgw_barycenters).
+
+<a id="guide-scientific-authoring"></a>
+
+## Authoring científico: contratos, muestras y ETL
+
+LambdaForge proporciona operaciones científicas, evidencia tipada y el ciclo nativo de Work.
+El cliente visual posee canvas, expresiones/selecciones/bucles y generación de Python normal.
+No se introduce un intérprete de nodos, otro runner, un registro de datasets paralelo ni otro
+optimizador HPO. Las clases generadas heredan de `Work` y ejecutan su único `run(...)` sin GUI.
+Se reutilizan GraphSAGE, NNConv, PNA, GINE, GVP/GVPGNN, PaiNN, SchNet, DimeNet y el Transformer
+estructural ya existentes en el árbol local; no se reimplementan versiones para el editor.
+
+### Descubrir y seleccionar operaciones
+
+```sh
+lf catalog --json
+lf catalog PaiNN --kind model --json
+lf catalog --kind etl --json
+```
+
+```python
+from lambdaforge.catalog import OperationCatalog, ComponentFactory, ContractError
+
+catalog = OperationCatalog()
+description = catalog.describe("PaiNN", kind="model")
+catalog.validate("MLP", {"in_features": 2, "out_features": 1}, kind="model")
+selected_class = catalog.resolve(description["id"])
+```
+
+`operation-catalog-v1` se distribuye como JSON del paquete. Descubrir lee metadatos, no importa
+Torch/sklearn ni módulos de plugins, no abre arrays y no hace peticiones. Resolver importa la
+implementación elegida y sus dependencias reales. Los IDs son `modulo:Clase` o
+`plugin:TIPO:NOMBRE`; los alias cortos ignoran mayúsculas, guiones y guiones bajos. Si hay
+ambigüedad se exige el ID exacto. `ComponentRegistry.aliases("activation"|"normalization")`
+expone públicamente los alias registrados, incluidos los de ese proceso. ComponentRegistry
+conserva la precedencia histórica de alias nativos; el catálogo exige namespace ante colisiones.
+Un alias registrado solo en memoria no es una declaración portable: distribúyelo como plugin.
+
+Los descriptores contienen proveedor/versión, descripción traducible y clave de traducción,
+tipos/defaults, puertos de configuración fábrica, métodos/puertos, estado e instancias. No todos
+los operadores tienen ecuaciones de forma totalmente legibles por máquina:
+`shape_status="see-native-docstring"` y `contract_status="native-signature"` significan
+pendiente de resolver, **no** compatibilidad demostrada. MLP y encoders de grafos principales
+tienen puertos detallados: PaiNN/GVPGNN separan salida escalar invariante del estado vectorial
+polar `[N,C,3]`, GVP devuelve una tupla, atención estructural conserva `[B,N,F]` y padding.
+Topología/geometría/unidades las aporta el consumidor, sin inferir vecinos ni tipos de proteína.
+Las simetrías solo se afirman donde están documentadas para el operador concreto.
+
+`check_ports(origen, destino)` rechaza conflictos explícitos de tipo/dtype/unidades/rango y
+dimensiones fijas; no resuelve todas las formas simbólicas. `validate` comprueba la firma y los
+tipos primitivos declarados sin construir un modelo. Rangos específicos, restricciones cruzadas
+y tensores reales siguen validándose en las implementaciones nativas. Una GUI no debe presentar
+restricciones pendientes como demostradas ni construir modelos al descubrir el catálogo.
+Schema distribuido: `schemas/operation-catalog-v1.json`.
+
+Los plugins siguen PluginRegistry y sus entry points/procedencia. Un proveedor puede instalar
+`lambdaforge.operations.json` junto a su `METADATA`, con el mismo schema y el ID exacto del
+entry point. Este último determina implementación/proveedor/versión, no una redirección arbitraria
+del JSON. Sin declaración se informa `contract_status="undeclared"`, sin inventar puertos.
+Límite de metadatos: 1 MiB por proveedor. `ContractError.to_dict()` proporciona `code`, `message`,
+`details`; los errores CLI de catálogo devuelven código 2 y JSON `operation-error-v1`.
+Códigos: `UNKNOWN_OPERATION`, `AMBIGUOUS_ALIAS`, `CONTRACT_VERSION`, `INVALID_CONTRACT`,
+`INVALID_PARAMETERS`, `MISSING_DEPENDENCY`, `ABSTRACT_OPERATION`, `INCOMPATIBLE_PORT`,
+`INCOMPATIBLE_SHAPE`.
+
+```python
+from lambdaforge.nn import MLP
+
+activation = ComponentFactory("prelu", "activation", {"num_parameters": 1})
+normalization = ComponentFactory("layernorm", "normalization", {"eps": 1e-6})
+model = MLP(2, 1, hidden=[4, 8],
+            activation=activation.component_type(), activation_kwargs=activation.kwargs,
+            normalization=normalization.component_type(), normalization_kwargs=normalization.kwargs)
+a, b = normalization.build(features=4), normalization.build(features=8)
+provenance = activation.provenance()
+```
+
+Cada construcción crea parámetros independientes; reutilizar una instancia comparte pesos y
+buffers deliberadamente. Train/eval son explícitos. Las fábricas de normalización rechazan
+anchos impuestos por el editor: los determina la capa receptora. MLP, ResidualMLP, CNN2D, GCN y
+GraphSAGE admiten los pares clase/kwargs documentados; consulta `configuration_ports` del
+constructor elegido. Arquitecturas de activación fija como PaiNN no adquieren esa inyección.
+Las activaciones gated pueden cambiar el ancho; el generador debe tenerlo en cuenta.
+
+### Muestras identificadas con varios assets
+
+API: `from lambdaforge.data.samples import FieldSpec, SampleSchema, SampleDataset,
+collate_samples, collate_graphs`. Es un lector perezoso del DatasetArtifact/índice nativo,
+no otro registro. Recibe la raíz que resuelve el input Work `{dataset: NOMBRE@VERSION}`;
+DatasetService gestiona ubicación/materialización. No descarga implícitamente ni registra nada.
+[`examples/sample-schema.json`](../examples/sample-schema.json) contiene un ejemplo real;
+`schemas/sample-schema-v1.json` se instala en el paquete. La misma declaración puede estar en
+YAML o metadatos del dataset, elegida explícitamente por el consumidor, no por nombres inferidos.
+
+Cada campo declara asset lógico, formato NPZ/NPY/JSON/CSV, array/campo/índice, dtype, forma sin
+lote, ejes/unidades, rol y política de ausencia/collate. Puede leer targets/metadatos/particiones/id
+sin abrir assets. Los roles separan entrada de modelo, objetivo/loss, metadatos, máscaras,
+índices, coordenadas y vectores. `bindings` une argumento del modelo → campo; no permite inyectar
+targets/loss/metadatos como entradas. Elegir campos es Python del consumidor y puede exponerse
+como hiperparámetro del sweep/search nativo, sin otro motor de optimización.
+
+```python
+from lambdaforge.data.samples import SampleSchema, SampleDataset, collate_samples
+
+schema = SampleSchema.from_mapping(declared_mapping)
+train = SampleDataset(resolved_dataset_path, schema, partitions={"split": "train"})
+report = train.preflight()                  # solo declaraciones/índice
+small = train.preview(samples=2, max_bytes=1_048_576, max_seconds=2)
+batch = collate_samples([train[0], train[1]], schema)
+inputs = schema.model_inputs(batch["fields"])
+```
+
+La construcción verifica el checksum exacto del índice y recorre metadatos acotados: por defecto
+100.000 miembros, índice de 64 MiB y declaración de 1 MiB. No abre arrays. Preflight comprueba
+declaraciones de assets necesarios, no demuestra compatibilidad de sus valores. Al acceder
+verifica SHA-256 del asset elegido, dtype y forma. Un campo opcional no declarado puede usar
+`none` o default JSON; se conserva su máscara de presencia. Si estaba declarado y faltan sus
+bytes, o está corrupto, no se oculta con un default. Se conservan ids, particiones e identidad
+exacta de contenido y assets en procedencia.
+
+El límite por muestra es de 32 MiB codificados/decodificados y 5 segundos cooperativos. Preview
+comparte un presupuesto global entre 0–20 muestras. Son guardas conservadoras, no cuotas RSS ni
+preempción de llamadas nativas bloqueadas. NPY solo headers 1/2; NPZ comprueba expansión antes
+de decodificar. No acepta arrays object/pickle, symlinks, escapes de raíz ni URIs remotas sin
+materialización nativa previa. CSV conserva cadenas salvo conversión explícita de la receta.
+Inventarios mayores requieren otra estrategia de acceso/batching: no se truncan silenciosamente.
+
+`collate_samples` permite `stack` con shape/dtype iguales, `ragged`/`list`, o padding de ceros
+explícito únicamente en el primer eje con `masks["CAMPO:padding"]`, separado de presencia.
+`collate_graphs(..., node_fields=(...), edge_fields=(...))` valida índices/cardinalidades,
+desplaza aristas y devuelve `batch`, `ptr`, ids/procedencia. No aplana `[N,C,3]`, mezcla grafos
+ni promociona tipos silenciosamente. El consumidor convierte NumPy a tensores explícitamente.
+
+### ETL Python y estado aprendido solo en train
+
+`lambdaforge.etl` exporta `ListFiles`, `ReadRecords`, `WriteRecords`, `SelectFields`,
+`JoinRecords`, `PartitionRecords`, `WriteSampleAssets`, `ValidateRecords`, `TrainStandardizer`, `Download`.
+Expresiones para derivar campos, condiciones y bucles siguen siendo Python ordinario del
+generador. Los escritores rechazan sobrescritura/object arrays y usan rutas de staging
+gestionadas explícitas, no son publicadores alternativos. `ValidateRecords` valida filas
+decodificadas con las mismas reglas dtype/shape de SampleSchema, preservando valores y
+particiones sin imputación implícita. `JoinRecords` ofrece left/inner
+uno-a-uno, IDs únicos, índice derecho limitado, sin colisiones de columnas ni desacuerdos de
+partición. Renombra antes; many-to-many no está soportado. `SelectFields` conserva id/particiones
+y filtra por igualdad explícita. `PartitionRecords` usa hash de semilla + grupo/id, independiente
+del orden, sin sobrescribir splits. Son proporciones esperadas, no estratificación exacta.
+
+`TrainStandardizer.fit(values, ids=..., splits=["train", ...], fold="cv-1")` se ajusta una sola
+vez sobre filas train identificadas, finitas y 2D. `transform(..., fold="cv-1")` no reajusta ni
+acepta otro fold; `state_dict/from_state_dict` usan JSON portable. Crea estado independiente por
+fold/trial. No ajusta valid/test ni demuestra que las etiquetas train aportadas sean honestas.
+Otros imputers/tokenizers deben respetar esa separación; no se afirma un motor genérico de
+tokenización. [Guía de fuga de datos](https://scikit-learn.org/stable/common_pitfalls.html#data-leakage).
+
+`Download(timeout=30, retries=3, max_bytes=268435456, credential=None)` delega en
+`work.cache.fetch` con SHA-256 obligatorio, límite decodificado, caché atómica y cancelación entre
+lecturas/reintentos. El timeout limita sockets bloqueados, no hay preempción inmediata. Rechaza
+URLs con credenciales/query. Las referencias bearer `env:NOMBRE`/`keyring:IDENTIFICADOR` usan
+CredentialService, HTTPS y redirecciones del mismo origen exacto. Configura las referencias en
+el host de ejecución: no se reenvían secretos del portátil implícitamente, ni se guardan en
+registros de caché o motivos HTTP autenticados. Descubrir no descarga. La API de caché también
+acepta explícitamente `max_bytes`, `cancelled` y `credential`.
+
+Para reanudar usa `Work.resume_map` y checkpoints; para publicar, `outputs.dataset(...)` con
+schema/targets/assets/lineage y registro nativo. No publiques tras cancelar. El ejemplo almacena
+dependencias lógicas ManagedFile, no rutas de máquina, y publica desde `source_checkpoint`.
+Un fallo conserva checkpoints sin registrar datasets parciales; el reintento nativo reutiliza
+los elementos válidos. No se debilita identidad ni recuperación del framework.
+
+### Estimadores clásicos, no módulos diferenciables
+
+Extra opcional `lambdaforge[estimators]`. `SklearnEstimator(algorithm, parameters=None, seed=0,
+threads=1)` carga sklearn al ajustar: árboles, random forest, gradient boosting convencional de
+clasificación/regresión y SVC/SVR. `capabilities` declara fit/predict/probabilidades, sin transform,
+CPU y no diferenciable. SVC exige `probability=True` para probabilidades. El Work aporta métricas,
+objetivos y HPO nativos; no hay otro trainer. Semillas/hilos son explícitos. GradTree/NODE/GRANDE
+siguen siendo modelos distintos.
+
+Persistencia opcional `lambdaforge[estimator-persistence]`: `save`, `inspect_file` y
+`load(..., trusted_types=tipos_revisados)` usan skops, nunca pickle. Revisa los tipos desconocidos
+exactos antes de aprobarlos; no confíes en listas de un atacante. Usa ficheros gestionados de
+checkpoint/output. No instala extras al importar. Compatibilidad entre versiones del backend y
+confianza siguen siendo responsabilidades explícitas. [Persistencia sklearn](https://scikit-learn.org/stable/model_persistence.html).
+
+### Ejemplo CPU y distribución al cliente visual
+
+Copia `visual_research.py`, `visual_prepare.yaml`, `visual_train.yaml`, `visual_search.yaml` de
+los ejemplos instalados a un proyecto Python desechable/importable. Ajusta el módulo de `run`
+solo si cambia el nombre del fichero. Desde ese proyecto:
+
+```sh
+python visual_research.py raw          # CSV + JSON sintéticos, no sobrescribe directorio
+lf run visual_prepare.yaml             # Work ETL + visual-demo@1 atómico
+lf run visual_train.yaml               # sweep exacto de campo/activación
+lf run visual_search.yaml              # mismas operaciones, planner HPO nativo
+```
+
+Combina dos entradas nombradas: features NPZ y sidecar JSON; un campo opcional conserva
+default/presencia y los targets no entran al modelo. Publica scaler/preview como artifacts.
+`use_context` y activación se varían con el diseño nativo. No contacta clusters ni modifica WISDOM.
+
+Construcción desde el **árbol de trabajo real**, incluidos ficheros nuevos, no solo HEAD:
+
+```sh
+python tools/build_operation_catalog.py
+python tools/build_scientific_wheel.py /ruta/absoluta/salida-nueva
+```
+
+El builder usa setuptools/wheel ya instalados y offline, comprueba catálogo actualizado, fija
+SOURCE_DATE_EPOCH/PYTHONHASHSEED y guarda `build-receipt.json` con versión, HEAD, dirty flag,
+SHA-256 del wheel/contenido empaquetado y hashes por miembro. Usa una salida vacía; dos builds
+sin cambios con el mismo epoch deben coincidir. No instala dependencias ni produce un payload
+editable. Sigue siendo 0.19.0 sin una petición de release: versión, HEAD y contenido no son lo
+mismo. Instala el wheel revisado en el runtime/bundle del cliente, fija su SHA exacto, valida
+catálogo/recorrido CPU allí y reconstruye el payload con el empaquetado del cliente. El payload
+0.17.1 antiguo no obtiene estas APIs al abrir el checkout. No se modifica SimpleAIStudio ni se
+afirma integración de su interfaz. Versiones de schema desconocidas fallan sin migraciones
+silenciosas ni puertos inventados.
+
+<a id="guide-tabular-connectors"></a>
+
+## Tablas incrementales, SQL y efectos de preview
+
+Ampliación aditiva de `operation-catalog-v1`. Los defaults CSV existentes siguen siendo coma,
+una fila de cabecera, UTF-8 y valores string. El cliente genera Python/Work corriente; no hay
+intérprete de nodos. `lf catalog --kind etl --json` lee metadatos sin importar backends SQL,
+abrir fuentes, descargar datasets ni entrenar.
+
+### Ficheros delimitados y columnas tipadas
+
+```python
+from lambdaforge.etl import ReadRecords, WriteRecords, PreviewBudget, PreviewSession
+from lambdaforge.etl.tables import Column, TableSchema
+
+schema = TableSchema([
+    Column("id"),
+    Column("amount", "number", nullable=True, null_values=("", "NA")),
+    Column("measured_at", "datetime", date_format="%Y-%m-%d", timezone="UTC"),
+], keys=["id"])
+reader = ReadRecords("csv", csv={"delimiter": ";", "decimal": ",", "bom": "strip"},
+                     schema=schema.to_dict(), columns=["id", "amount"], max_rows=50)
+for row in reader.iter_records(source):
+    consume(row)                         # cerrar generadores abandonados explícitamente
+preview = reader.preview(source, budget=PreviewBudget(max_rows=10, max_bytes=64_000))
+```
+
+`csv` configura `CsvOptions`: delimiter, header_rows, columns, encoding, bom
+(`preserve|strip|error`), quotechar/escapechar (null desactiva quoting/escape), doublequote,
+comment, skip_rows, decimal y parse_errors (`error|skip`). TSV usa tabulador por defecto.
+Las cabeceras son registros: **la última** fila da los nombres, o se imponen nombres explícitos.
+Sin cabecera es obligatorio declarar nombres. skip_rows cuenta líneas físicas iniciales; los
+comentarios se saltan solo entre registros, nunca dentro de campos multilínea entrecomillados.
+Registros físicos vacíos se ignoran, como DictReader. Cabeceras vacías/duplicadas, anchos
+incorrectos y encoding inválido fallan. Preview informa de registros malformados omitidos con
+diagnósticos acotados. La conversión de columnas tiene su política independiente.
+
+La proyección `columns` y `max_rows` se aplican durante la lectura, no tras cargar el fichero.
+`__call__` mantiene el resultado materializado y selección interna `path` histórica, con guarda
+de memoria. `iter_records`/`preview` requieren CSV/TSV sin path interno. JSON completo no se
+anuncia falsamente incremental. `compression="gzip"` comprueba bytes/registros **decodificados**;
+no se adivina compresión por extensión. NPZ tiene su lector de arrays. Se mantiene el límite
+nativo de tamaño de campo de Python CSV, sin cambiar esa opción global detrás de otros lectores.
+
+`WriteRecords("csv"|"tsv", csv=...)` comparte delimitador/nombres/encoding/quote/escape/decimal,
+cabecera de 0 o 1 filas y `write_bom=True` explícito si se desea BOM de salida. Rechaza opciones
+exclusivas de lectura (saltos, comentarios, múltiples cabeceras, omitir errores). Escribe filas
+incrementalmente, no sobrescribe ni publica: usa rutas de staging/checkpoint/output gestionadas.
+La escritura NPY/NPZ/JSON anterior conserva sus defaults.
+
+`table-schema-v1` es un contrato portable de columnas escalares. Ejemplo real:
+[`examples/table-schema.json`](../examples/table-schema.json); schema instalado:
+`schemas/table-schema-v1.json`. Tipos string/integer/number/boolean/datetime/json, nullable,
+null_values, invalid (`error|null`), categories, date_format y timezone. Nada se infiere de un
+preview. El vacío solo es null si se declara; no se truncan fracciones a enteros. Invalid-to-null
+requiere nullable. Fechas usan formato/ISO explícito y zona para valores sin zona; rechaza horas
+locales ambiguas/inexistentes. No aplana arrays/geometría como escalares. `TableSchema.convert`
+conserva extras; `keys` declara columnas no nulas, y FromRows/escritores SQL verifican unicidad.
+
+Operaciones Python ordinarias:
+
+| Operación | Contrato |
+| --- | --- |
+| `CastTable(schema)` | Conversiones declaradas; id/particiones/procedencia no se reescriben. |
+| `FillNulls(values)` | Relleno constante explícito, **no** imputer aprendido; campos protegidos intactos. |
+| `FilterTable(predicate, keep=True)` | eq/ne/lt/le/gt/ge/in/is_null/not_null escalares, all/any/not acotados; sin eval. Comparaciones con null son falsas salvo operadores null; not es negación booleana normal. |
+| `SelectTable(columns, drop=(), rename=None)` | Proyecta/elimina/renombra, conservando campos protegidos; rechaza colisiones. |
+| `SortTable(by, descending=False, nulls="last")` | Orden estable y materialización limitada, no ordenación externa en streaming. |
+| `DeduplicateTable(keys, keep="first")` | Conserva primero/último explícitamente; no fusiona ids/particiones/procedencias diferentes. |
+| `AggregateTable(by, aggregations, identity="derive")` | Nuevos IDs deterministas y lineage completo/acotado de miembros; particiones forman parte del grupo. Count/sum/mean/min/max excluyen null, no los convierten en cero. |
+| `ConcatTables()` | Mismo conjunto de columnas; rechaza ids duplicados, no une schemas implícitamente. |
+| `FromRows(schema)` | Filas portables declaradas, claves/conversiones explícitas, materialización limitada. |
+
+El argumento de agregación `identity="derive"` es obligatorio, no una reescritura implícita de ids.
+Predicado: `{"all": [{"column": "amount", "op": "not_null"},
+{"column": "amount", "op": "gt", "value": 0}]}`. Agregación:
+`{"mean_amount": {"column": "amount", "op": "mean"}}`. Las operaciones materializadas
+tienen límites de 10.000 filas y 8 MiB por defecto; excederlos falla, no muestrea silenciosamente.
+Las transformaciones streaming consumen el iterador aportado: el Python generado debe usar
+fuentes acotadas/comprobar cancelación. `TrainStandardizer` conserva aislamiento train/fold.
+Los calibradores usan su contrato de **calibración held-out**, no entrenamiento o test.
+
+### Presupuesto compartido de preview y staging temporal
+
+```python
+from lambdaforge.etl import PreviewArray
+
+budget = PreviewBudget(max_rows=20, max_bytes=1_048_576, max_seconds=5,
+                       max_memory=8_388_608, max_files=4, cancelled=stop_requested)
+session = PreviewSession([approved_input_root], budget)
+table = session.records(reader, source)
+array = session.array(PreviewArray("npz", key="features"), array_source)
+with session.staging_directory() as scratch:
+    inspect_temporary(scratch)           # únicamente salida temporal, nunca publicación
+```
+
+Un presupuesto cubre filas, bytes realmente leídos/decodificados, fuentes, tiempo y retención
+de previews entre llamadas. Rechaza symlinks/traversal/rutas fuera de raíces aprobadas.
+`table-preview-v1` y `array-preview-v1` informan **prefijo**, complete (false conservador al
+alcanzar el límite de filas), procedencia/ordinales/rangos de líneas, contadores efectivos y
+`content_identity=null`. Un hash del prefijo no es identidad del fichero/dataset. No inventa
+estimaciones estadísticas.
+
+NPY usa mmap de solo lectura para filas del primer eje; NPZ descomprime solo el prefijo de un
+array seleccionado C-order, acotando datos decodificados y no fiándose del tamaño comprimido.
+Informa dtype/shape y tamaño decodificado total sin reservarlo. Rechaza object/records estructurados
+y NPZ Fortran multieje. NPY Fortran sí usa mmap. No verifica los bytes que no leyó: verificación/
+materialización de datasets inmutables sigue en DatasetService, no un atajo de GUI. Abrir un
+descriptor nunca materializa datasets remotos completos.
+
+La lectura parcial del lector es distinta del sellado de inputs nativos de Work: un input
+tipado `{file: ...}` sigue verificando su huella exacta antes de ejecutar y puede leer todos
+sus bytes. Preview no exime de esa identidad. El cliente debe acotar su acceso de preview
+separado, no afirmar que lanzar el Work entero solo lee un prefijo.
+
+Límites cooperativos, **no sandbox RSS del SO**. Se guardan tamaños de objetos retornados y
+chunks decodificados; parsers/drivers asignan algunos objetos antes de comprobarlos. I/O de disco,
+DNS, DB y llamadas nativas necesitan sus timeouts. PostgreSQL puede entregar un valor grande
+antes de la guarda Python; SQLite en Python 3.10 carece de setlimit y en 3.11+ se limita además
+el tamaño del valor antes de recuperarlo. Proyección/chunks pequeños y Works con límites de
+recursos siguen siendo necesarios para entradas adversarias. Cierra iteradores parciales: salida
+de contextos cierra ficheros/cursors y revierte lecturas. El staging limpia solo su propio árbol
+incluso tras error, no inputs. No es aislamiento de plugins ni un sistema de permisos de código.
+
+### SQL, fuentes mutables y escrituras deliberadas
+
+SQLite usa stdlib; PostgreSQL es opcional/perezoso `lambdaforge[sql-postgresql]` (Psycopg 3).
+Nada se instala ni conecta durante construcción/descubrimiento.
+
+```python
+from lambdaforge.etl import ReadSQL
+
+sqlite = ReadSQL("sqlite", file="source.sqlite", table="measurements",
+                 columns=["id", "amount"], order_by=["id"], chunk_size=100)
+rows = sqlite.iter_records(budget=PreviewBudget(max_rows=1000))
+postgres = ReadSQL("postgresql", credential="env:PROJECT_DB", table="measurements",
+                   columns=["id", "amount"], order_by=["id"], sslmode="verify-full")
+remote_preview = PreviewSession([approved_input_root], allow_network=True).sql(postgres)
+```
+
+La referencia de credencial se resuelve con CredentialService en el host ejecutor a JSON con
+host/port/dbname/user/password/sslrootcert según corresponda. Ese JSON secreto no va en YAML,
+contratos ni logs. Rechaza credenciales sin referencia y TLS desactivado. Timeouts de conexión/
+consulta explícitos. TLS por defecto verify-full; require/verify-ca son políticas más débiles
+explícitas, no fallback silencioso. Errores de driver se redactan sin encadenar DSN/password.
+Usa un rol DB limitado al alcance de lectura/escritura que necesita el proyecto.
+
+Elige **query O table**. Valida y entrecomilla identificadores simples de tabla/columna/orden;
+schemas cualificados/expresiones complejas requieren SQL escrito explícitamente, no interpolación
+de identificadores. Parámetros separados: SQLite `?`/`:name`, PostgreSQL `%s`/`%(name)s`.
+Query controla proyección/orden; aliases de salida únicos. SQLite abre la DB existente mode=ro y
+su authorizer rechaza DDL/mutaciones/carga de extensiones. PostgreSQL usa transacción read-only
+repeatable-read y cursor de servidor. Ambos recuperan chunks limitados. SQLite comprueba tiempo/
+cancelación en su progress handler; PostgreSQL usa statement_timeout y comprueba cancelación entre
+llamadas. No es sandbox de SQL arbitrario: funciones del servidor pueden tener efectos externos,
+así que se requiere confianza en rol DB/autores de query.
+
+Cada iterador ve una transacción, no un snapshot reutilizable entre Runs. Preview conserva backend,
+aislamiento, huella de consulta y hash del **prefijo observado** por separado. La misma consulta
+con datos distintos no es el mismo input científico. Para fijarlo, materializa las filas exactas
+en staging/checkpoint gestionado, conserva receta/dependencias y publica con `Work.outputs.dataset`;
+entrena con ese DatasetInput inmutable. No uses una huella de consulta como identidad de dataset.
+
+`WriteSQL(dialect, table, schema, ..., mode="insert"|"upsert"|"replace", create=False)` solo
+escribe tablas declaradas. SQLite exige fichero existente, no crea una DB implícitamente.
+TableSchema keys es obligatorio; rechaza claves de entrada duplicadas. Upsert usa la restricción
+única real de DB y es idempotente sobre esas claves. Replace elimina **filas**, no tablas.
+Crear tabla requiere autorización DDL separada. Filas/DDL son una transacción: ante fallo de
+conversión/schema/clave/presupuesto/cancelación se revierte todo. No reintenta indefinidamente.
+Columnas JSON necesitan adaptador backend explícito futuro, no se aplanan silenciosamente.
+
+```python
+from lambdaforge.etl import WriteSQL, SQLWritePolicy
+
+# Solo código operador/sesión fiable tras revisión humana, no un booleano del nodo.
+authorization = SQLWritePolicy(allow_insert=True, allow_update=True)
+writer = WriteSQL("sqlite", "measurements", schema.to_dict(), file="target.sqlite", mode="upsert")
+receipt = writer(validated_rows, policy=authorization)
+```
+
+SQLWritePolicy es un límite de confianza de API, no sandbox contra Python sin restricciones.
+El cliente debe conservar autorización del lado del operador. Preview rechaza escritores y no
+publica ni borra/reemplaza fuentes/DDL. Tests con PostgreSQL efímero TLS real son opt-in mediante
+`LAMBDAFORGE_TEST_EPHEMERAL_PG_REF`; sin referencia se omiten sin contactar servidores. SQLite
+incluye fixtures locales de snapshot/rollback/transacciones. Otros dialectos no están soportados:
+requieren adaptador DB-API maduro y pruebas de read-only/snapshot/placeholders/timeouts/
+identificadores/transacciones/evidencia, no renombrar un comando. Referencias:
+[SQLite Python](https://docs.python.org/3/library/sqlite3.html),
+[Psycopg transacciones](https://www.psycopg.org/psycopg3/docs/basic/transactions.html).
+
+### Efectos, modelos estructurados y configuración de proveedores
+
+Descriptores incluyen `operation-effects-v1`: read-data/read-metadata, network (condicional en
+SQL), learn-state, instance-state, write-cache, write-staging, modify-external-source y DDL
+condicional. preview.supported identifica un método nativo limitado, no permiso global. Plugins
+tienen preview desactivado por defecto incluso con metadatos; PreviewSession no invoca plugins/
+subclases arbitrarios. ContractError.to_dict añade translation_key estable junto a code/message/
+details. Se traducen códigos, sin parsear textos de excepción.
+
+`OperationCatalog.validate_descriptor(ID)` importa solo la clase seleccionada y contrasta nombres,
+defaults/requeridos, puertos de métodos y estado abstracto/concreto. No construye modelos ni prueba
+ecuaciones tensoriales generales. `audit(kind="model")` es metadata-only y separa abstract,
+declared-structure y signature-only. Inventario inspeccionado: 93 modelos, 1 abstracto, 15 con
+estructura de salida declarada y 77 solo firma. Estructura declarada **no** demuestra toda
+componibilidad. Se reutilizan modelos existentes: ensembles retienen módulos/comparten pesos,
+multitarea devuelve tensores nombrados, mixtures exponen expertos y top-k sigue evaluándolos todos,
+NeuralODE declara dynamics(t,y), forma trayectoria/estado e integración fija, y calibración declara
+estado mutable held-out y salidas estructuradas.
+
+`ConfigurationSchemas.schema("work"|"cluster")` y `lf config schema --kind cluster --json`
+exponen contratos instalados. El default sigue siendo Work. `cluster-profile-v1.json` incluye
+políticas nativas, opciones/condiciones/defaults, unidades y secretos por referencia;
+`resolve_cluster(name, mapping)` comprueba schema y llama al **mismo normalizador ClusterProfile**
+para defaults efectivos sin conectar/reservar. Restricciones cruzadas/propiedad siguen en la
+validación nativa. Work schema es guía estática: firmas Work.run requieren la validación Python
+autorizada ya existente. No hay segundo normalizador YAML.
+
+Fixtures sintéticos cubren `command_prefix: [gpu]` → `gpu ejecutable args`, `[gpu, exec]` y otros
+argv explícitos con pruebas de visibilidad declaradas. Un nombre de comando no prueba protocolo
+ni que una GPU física libre sea una concesión propia. Servicios procesos/SLURM existentes poseen
+submit/recibo/identidad, inventario/logs/cancelación y capacidades declaradas pause/resume. Claim/
+release argv sueltos siguen rechazados sin prueba de reserva por Job; preserva reservas manuales/
+hermanas. **No se añade scheduler arbitrario** ni parser SLURM reutilizado de manera falsa.
+Un proveedor nuevo requeriría todo el contrato Scheduler/propiedad/recuperación y sus pruebas.
+
+Migración aditiva: defaults CSV e identidades científicas previas intactos, nuevos contratos
+tablas/efectos/preview versionados. Ecuaciones tensoriales completas, Parquet/Arrow y otros SQL
+quedan pendientes, no como endpoints anunciados. Ejemplo CPU:
+[Work de preview](../examples/tabular_preview.py), [YAML](../examples/tabular_preview.yaml),
+junto al recorrido ETL→dataset→modelo→sweep/HPO existente. Para construir el wheel del árbol real,
+regenera `tools/build_operation_catalog.py` y `tools/build_cluster_schema.py`: se comprueba que
+ambos contratos estén actualizados. El recibo fija bytes/HEAD/dirty del paquete sin afirmar que
+se haya actualizado el bundle de la aplicación cliente.

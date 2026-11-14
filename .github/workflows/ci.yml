@@ -244,11 +244,12 @@ jobs:
       - name: Install the optional transport solver
         run: |
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.3"
-          python -m pip install -e ".[dev,optimal-transport]"
+          python -m pip install -e ".[dev,clustering,optimal-transport]"
       - name: Check numerical transport invariants and the documented example
         run: |
-          python -m pytest -q tests/test_fused_gromov_wasserstein.py tests/test_clustering.py
+          python -m pytest -q tests/test_fused_gromov_wasserstein.py tests/test_fgw_matrix.py tests/test_fgw_barycenter.py tests/test_fgw_optional_backend.py tests/work/test_fgw_block_resume.py tests/test_clustering.py tests/test_precomputed_clustering.py
           python examples/fgw.py
+          python examples/fgw_barycenter.py
 
   adaptive-hpo-provider:
     name: Optional BoTorch adaptive HPO / CPython 3.11

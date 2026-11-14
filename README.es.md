@@ -107,7 +107,19 @@ detecta después la declaración automáticamente. Dentro del Work,
 `self.tools.require("mmseqs", version_args=["version"])` comprueba la herramienta preparada, pero
 nunca instala durante el cálculo. El manual explica locks offline exactos.
 
+Para **dependencias Python científicas incompatibles**, declara tablas independientes
+`[tool.lambdaforge.tool_runtimes.NOMBRE]` y usa `self.tools.runtime(NOMBRE)`; el mismo bootstrap
+las prepara sin instalar dentro LF/consumidor. Consulta
+[herramientas aisladas](docs/MANUAL.es.md#45-herramientas-externas) y la receta SLAE CPU revisada
+[isolated_tools.toml](examples/isolated_tools.toml). El adaptador científico pertenece al consumidor.
+
 ## Primer Work
+
+Para ejecución nocturna secuencial usa `lf run experiments/a.yaml --on gpu --queue` y añade B/C
+igual. Consulta `lf queue --on gpu` o marca **Queue after earlier Jobs** en **Run Work**. Tras
+preparar los Jobs, la cola avanza en el cluster sin consola abierta; mantén conectado el PC hasta
+que estén en `queued`/`running` del proveedor. Consulta
+[colas de ejecución](docs/MANUAL.es.md#guide-execution-queues).
 
 ```python
 from pathlib import Path

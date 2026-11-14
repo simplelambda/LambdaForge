@@ -135,10 +135,10 @@ class RuntimeResolutionTransport(Transport):
                 return CommandResult(1, stderr="solver failed")
             time.sleep(self.create_delay)
             prefix = values[values.index("--prefix") + 1]
-            requested = next(
-                value.split("=", 1)[1] for value in values if value.startswith("python=")
+            requested = next(value.split("=")[1] for value in values if value.startswith("python="))
+            self.pythons[f"{prefix}/bin/python"] = (
+                f"{requested}.9" if requested.count(".") == 1 else requested
             )
-            self.pythons[f"{prefix}/bin/python"] = f"{requested}.9"
             self.directories.add(prefix)
             return CommandResult(0)
         if "list" in values and uses_manager:
@@ -146,7 +146,13 @@ class RuntimeResolutionTransport(Transport):
                 0,
                 json.dumps(
                     [
-                        {"name": "python", "version": "3.13.9", "build_string": "h1"},
+                        {
+                            "name": "python",
+                            "version": self.pythons[
+                                values[values.index("--prefix") + 1] + "/bin/python"
+                            ],
+                            "build_string": "h1",
+                        },
                         {"name": "pip", "version": "25.1", "build_string": "pyh"},
                     ]
                 ),
@@ -325,7 +331,7 @@ def test_existing_conda_creates_and_reuses_a_dedicated_runtime_prefix() -> None:
     assert first.managed and first.action == "install"
     assert second.runtime_id == first.runtime_id and second.action == "reuse"
     creates = [command for command in transport.commands if "create" in command]
-    assert len(creates) == 1
+    assert len(creates) == 2
     assert "--prefix" in creates[0]
     assert not any("activate" in command for command in transport.commands)
     assert first.executable.startswith("/work/user/.lambdaforge/cache/runtimes/")
@@ -342,7 +348,7 @@ def test_concurrent_runtime_requests_create_once_then_reuse() -> None:
 
     assert results[0].runtime_id == results[1].runtime_id
     assert {result.action for result in results} == {"install", "reuse"}
-    assert sum("create" in command for command in transport.commands) == 1
+    assert sum("create" in command for command in transport.commands) == 2
 
 
 def test_rejected_runtime_advances_to_the_next_python_minor() -> None:
@@ -464,4 +470,20 @@ def test_failed_runtime_creation_cleans_staging_and_never_activates() -> None:
     assert "/work/user/.lambdaforge/state/active-python-runtime.json" not in transport.files
     assert any(
         command[:2] == ("rm", "-rf") and ".tmp-" in command[-1] for command in transport.commands
+    )
+
+
+def test_conda_prefix_is_installed_and_verified_at_its_permanent_path():
+    transport = RuntimeResolutionTransport({"python3": "3.9.21"}, manager="conda")
+    runtime = PythonRuntimeResolver().resolve(managed_profile(), transport)
+    creates = [c for c in transport.commands if "create" in c]
+    assert len(creates) == 2
+    final = creates[-1][creates[-1].index("--prefix") + 1]
+    assert runtime.executable == final + "/bin/python"
+    assert "--offline" in creates[-1] and "python=3.13.9=h1" in creates[-1]
+    assert not any(c[0] == "mv" and ".tmp-" in c[-2] and c[-1] == final for c in transport.commands)
+    # The final executable itself was probed before publishing its receipt.
+    assert any(
+        runtime.executable in c and "platform.python_version" in " ".join(c)
+        for c in transport.commands
     )

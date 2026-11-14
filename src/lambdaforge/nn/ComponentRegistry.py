@@ -129,9 +129,7 @@ class ComponentRegistry:
         key = cls._key(spec)
         if key in cls._activations:
             return cls._activations[key]
-        return PluginRegistry.default().resolve(
-            PluginReference(kind=PluginKind.ACTIVATION, name=key)
-        )
+        return PluginRegistry.default().resolve(cls._plugin_alias(PluginKind.ACTIVATION, key))
 
     @classmethod
     def resolve_normalization(
@@ -145,9 +143,24 @@ class ComponentRegistry:
         key = cls._key(spec)
         if key in cls._normalizations:
             return cls._normalizations[key]
-        return PluginRegistry.default().resolve(
-            PluginReference(kind=PluginKind.NORMALIZATION, name=key)
-        )
+        return PluginRegistry.default().resolve(cls._plugin_alias(PluginKind.NORMALIZATION, key))
+
+    @classmethod
+    def aliases(cls, kind: str) -> dict[str, str]:
+        """Public built-in aliases to import paths; plugins use discover/resolve contracts."""
+        if kind not in {"activation", "normalization"}:
+            raise ValueError("Component aliases support activation/normalization.")
+        values = cls._activations if kind == "activation" else cls._normalizations
+        return {key: value.__module__ + ":" + value.__name__ for key, value in values.items()}
+
+    @classmethod
+    def _plugin_alias(cls, kind: PluginKind, key: str) -> PluginReference:
+        from lambdaforge.plugins.PluginResolutionError import PluginResolutionError
+
+        matches = [d for d in PluginRegistry.default().discover(kind) if cls._key(d.name) == key]
+        if len(matches) > 1:
+            raise PluginResolutionError(f"Plugin component alias {key!r} is ambiguous.")
+        return PluginReference(kind, matches[0].name if matches else key)
 
     @staticmethod
     def _key(name: str) -> str:

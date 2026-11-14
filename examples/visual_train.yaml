@@ -1,0 +1,13 @@
+name: train-visual
+run: visual_research.TrainSamples
+with:
+  dataset: {dataset: visual-demo@1}
+  epochs: 2
+sweep:
+  space:
+    activation: [relu, tanh]
+    use_context: [true, false]
+seeds: [7]
+objective: {metric: val_loss, mode: min}
+resources: {cpu: 1}
+execution: {max_parallel: 1}

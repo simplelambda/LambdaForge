@@ -7,7 +7,7 @@ import numpy as np
 from lambdaforge.nn.distances import Distance
 
 from .._types import ArrayInput
-from ..backend import adapt_distance, diagnostics, feature_array, require_sklearn, thread_limit
+from ..backend import adapt_distance, clustering_array, diagnostics, require_sklearn, thread_limit
 from ..ClusterCapabilities import ClusterCapabilities
 from ..Clusterer import Clusterer
 from ..ClusteringResult import ClusteringResult
@@ -61,7 +61,7 @@ class HDBSCAN(Clusterer):
         require_sklearn(type(self).__name__)
         from sklearn.cluster import HDBSCAN as BackendHDBSCAN
 
-        values = feature_array(features)
+        values = clustering_array(features, self.distance, self.max_pairwise_bytes)
         if len(values) < self.min_cluster_size:
             raise ValueError("min_cluster_size cannot exceed the number of samples.")
         metric, backend_values = adapt_distance(
@@ -88,6 +88,7 @@ class HDBSCAN(Clusterer):
                 allow_single_cluster=self.allow_single_cluster,
                 metric=metric,
                 n_jobs=self.threads,
+                copy=True,
             ).fit(backend_values)
         return ClusteringResult.from_labels(
             estimator.labels_,

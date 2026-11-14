@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from lambdaforge.nn.models.graph.GraphEdgeData import GraphEdgeData
 from lambdaforge.nn.models.graph.GraphEdgeIndex import GraphEdgeIndex
 from lambdaforge.nn.models.Scatter import Scatter
 
@@ -43,8 +44,16 @@ class GCNLayer(nn.Module):
         self.self_loop_weight = float(self_loop_weight)
         self.degree_epsilon = float(degree_epsilon)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        """Return node embeddings with shape ``(N, out_channels)``."""
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, message_weights: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Return (N,out_channels) with optional signed (E,) message modulation.
+
+        Degrees use original incidences/canonical loop weights, not modulation.
+        With add_self_loops=True supplied loops and their modulators are replaced
+        by one canonical loop per node with modulation one. Otherwise supplied
+        loops are ordinary modulated incidences. This is not weighted-adjacency GCN.
+        """
         if x.ndim != 2 or x.shape[1] != self.in_channels:
             raise ValueError(f"x must have shape (N, {self.in_channels}).")
         num_nodes = x.shape[0]
@@ -54,6 +63,9 @@ class GCNLayer(nn.Module):
             num_nodes=num_nodes,
         )
         source, destination = edge_index
+        modulation = GraphEdgeData.normalize_message_weights(
+            message_weights, edge_count=source.numel(), reference=x
+        )
         weights = x.new_ones(source.shape[0])
         if self.add_self_loops:
             non_self = source != destination
@@ -66,6 +78,8 @@ class GCNLayer(nn.Module):
                     x.new_full((num_nodes,), self.self_loop_weight),
                 )
             )
+            if modulation is not None:
+                modulation = torch.cat((modulation[non_self], x.new_ones(num_nodes)))
         out_degree = (
             Scatter.sum(weights.unsqueeze(-1), source, num_nodes)
             .squeeze(-1)
@@ -77,6 +91,8 @@ class GCNLayer(nn.Module):
             .clamp_min(self.degree_epsilon)
         )
         normalization = weights * out_degree[source].rsqrt() * in_degree[destination].rsqrt()
+        if modulation is not None:
+            normalization = normalization * modulation
         transformed = self.linear(x)
         messages = transformed[source] * normalization.unsqueeze(-1)
         output = Scatter.sum(messages, destination, num_nodes)

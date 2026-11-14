@@ -7,7 +7,7 @@ import statistics
 import numpy as np
 
 from ._types import ArrayInput
-from .backend import feature_array, require_sklearn
+from .backend import clustering_array, require_sklearn
 from .Clusterer import Clusterer
 from .ClusteringResult import ClusteringResult
 from .StabilityResult import StabilityResult
@@ -29,13 +29,19 @@ def silhouette_score(
     result: ClusteringResult | np.ndarray,
     *,
     distance: str = "euclidean",
+    max_pairwise_bytes: int | None = 512 * 1024 * 1024,
 ) -> float:
-    """Return the mean silhouette score for explicit features and labels."""
+    """Mean silhouette for features or validated ``distance='precomputed'`` data.
+
+    Noise (-1) remains a label; filter it explicitly if a noise-excluded score is
+    desired. This function never silently removes observations.
+    """
     require_sklearn("silhouette_score")
     from sklearn.metrics import silhouette_score as backend_score
 
     labels = result.labels if isinstance(result, ClusteringResult) else np.asarray(result)
-    return float(backend_score(feature_array(features), labels, metric=distance))
+    values = clustering_array(features, distance, max_pairwise_bytes)
+    return float(backend_score(values, labels, metric=distance))
 
 
 def stability(

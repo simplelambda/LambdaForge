@@ -110,8 +110,31 @@ not a waiver of configuration/input/seed/objective identity checks. Preserve imm
 referenced owner Jobs from cleanup and use the existing cross-process lock. Never silently start
 over if persisted recovery state is missing/corrupt, automatically retry consumer exceptions,
 repeat valid confirmation seeds, or remove physical failed Attempt cost/history. Recovery currently
-requires one Study per Execution; it does not migrate state between clusters. Recovery restores a
+supports sequential single unseeded Works, one single Work or one Study per Execution;
+parallel/composed Studies remain unsupported. Sequential recovery preserves predecessor outputs
+and reconnects original Run checkpoints, never replaying completed steps for Python return values.
+It does not migrate state between clusters. Recovery restores a
 Study, not necessarily an epoch: checkpoint continuation requires explicit Work support.
+Single Works recover the authoritative resolved single design and owned Run/Attempts, never
+require HPO state or start a new Run to bypass missing recovery evidence. Public managed file
+checkpoints remain with their original Execution/Run; preserve producer results and publication
+completeness. Metadata preview is independent of native environment preparation and does not
+verify payload hashes. Single-Work recovery may review CPU/RAM/wall-time changes, not silently
+reuse old requests or relax physical parameters/input identity. Normalize historical staging
+display-name drift only; code changes require explicit acknowledgement. CLI and Work Console
+share native inspection/apply, hash pins, controller/recovery locks and GC dependencies.
+Historical bounded staging uses explicit `bounded-role-v1` recovery bindings derived from the
+original owned bundle/configuration and Attempt input receipts. Verify original transport SHA-256
+and historical fingerprint, then verify current bytes under that exact role and reconstruct the
+old basename-bound identity. Never guess from a `0000-` prefix, match duplicate names across roles,
+rewrite origin manifests or globally change legacy digest meaning. Selected configuration,
+dependency preview and newly staged worker share this authority. Changed bytes/labels/design still
+fail even with code acknowledgement; directories retain relative member names as content.
+Anchor origin bindings to Attempt 1; validate later Attempts against their own same-placement Job
+request, bounded bundle and accepted Execution recovery audit. Never require their paths to equal
+origin paths or select whichever Attempt passes. Retain foreign/corrupt Attempt refusal and concrete
+Attempt/role/owner causes. Current preview helpers do not certify old runtimes: preparation checks
+the worker's `bounded-role-chain-v2` capability before scientific handoff, never mutates old prefixes.
 
 ```python
 from pathlib import Path
@@ -199,9 +222,38 @@ Offline native provisioning requires a platform-specific `@EXPLICIT` SHA-256 loc
 uses one immutable Conda prefix, exact inventory and verified tools. `tools.require` checks that
 prefix and never installs. Pip-only and `environment: existing` behavior is unchanged.
 
+Managed Conda/venv installers use their final lifetime prefix, never a temporary prefix later
+renamed. The versioned publication contract participates in environment identities; readiness is
+an atomic receipt published only after final-path checks under the native build/GC lease. Old
+prefixes are not patched in place; valid prior frozen dependency receipts are migrated read-only.
+Failed/unsealed builds are not active or reusable; reference-aware cleanup is the only eviction
+authority. No blanket binary/text prefix replacements or tool-specific consumer wrappers.
+
+Managed Conda process startup binds `NativeLibraryPolicy` to the owned dependency prefix, including
+code layers, provider launch, supervisor and inherited children. Apply it before interpreter/site
+imports, inside provider GPU wrapping; never mutate controller/global loader paths or GPU grants.
+Keep absolute provider driver paths, reject conflicting loaded C++/GCC origins, and retain actual
+library provenance. Isolated named tools detach consumer-injected loader paths. Both Torch/SciPy
+import orders and loaded origins are readiness evidence, not a guessed version/import workaround.
+
 Use `tools.require(..., version_args=...)` and `tools.run(argv, ...)` for external executables.
 Commands are argv, never shell strings; child thread variables and environment overrides remain
 scoped, output reaches Work logs, and tool provenance belongs only in `environment.json`.
+
+Named isolated scientific Python tools use `[tool.lambdaforge.tool_runtimes.NAME]`, not the
+consumer environment or Work YAML. ToolRuntimeSpecification validates exact pins/source policies
+and small standalone entrypoints; ToolRuntimeService provisions through the native Python,
+transport, build leases and storage services during bootstrap/prepared submission, never Work.run.
+Do not install LF/consumer distributions there or bypass solving with --no-deps. Compiled companion
+wheels need explicit source/build tags and binary-only failure, not opportunistic compilation.
+`self.tools.runtime(NAME).preflight/entrypoint/run` owns process isolation, bounded capture,
+CPU/thread limits, cancellation and provider-grant preservation. No shell, credential forwarding,
+physical GPU discovery or silent CPU fallback. Separate package-resolution and code-bundle
+identities extend native environment provenance. Named/Job/recovery bindings and shared use leases
+protect both environments and scripts; GC rechecks exclusive leases before deletion. Retain exact
+version receipts outside cache and reject drift. This is trusted tool execution, not a sandbox.
+Scientific checkpoint formats and input/output validation remain in consumer code. The CPU SLAE
+import/base-weight test is not CUDA or end-to-end adapter acceptance; see Manual §4.5.
 
 ## Clustering contract
 
@@ -758,11 +810,41 @@ Publication-copy leases target the destination volume and GC only owned cache ro
 publication folders. `lf storage reconcile` measures explicit diagnostic drift; `--apply` only writes
 the ledger, never scientific state. It is not a per-write ledger. Protect recovery references and
 independent live Work-cache leases.
+Retained mapped Runs and observed-source receipts additionally protect their recorded cache
+namespaces across terminal failures and accepted code revisions. GC must recheck durable
+reachability under its deletion lease; report protected chains/bytes and unresolved pressure.
+Namespace-level retention is conservative, not precise per-file liveness. Explicit history deletion
+can release ownership, never uncertainty alone. Exact managed references resolve only within
+recorded owned revision namespaces with matching digests. Missing observed/legacy recovery inputs
+fail closed: a URL is not a content identity. Native legacy repair previews metadata/candidates,
+checks historical filename-aware fingerprints on apply and copies only owned exact bytes, under
+controller/key/GC locks. Unavailable bytes remain unavailable; source-unbound map records do not
+prove scientific compatibility. Process callbacks must expose ManagedFile inputs/outputs; hidden
+subprocess I/O cannot be inferred. Declared map scientific_policy excludes operational knobs.
+HTTP Retry-After establishes a shared-volume service cooldown even when local retries are
+exhausted. Optional JSON hints require an explicit HttpCooldownPolicy. No empty fallback, infinite
+retry, cross-host coordination claim without shared storage or secret persistence.
 **Clear storage…** confirms native cleanup; **Clear output** only clears text. Successful unpinned
 checkpoints have configurable grace; failed/interrupted recovery remains protected. Named
 `checkpoints.pin/unpin`, `outputs.from_checkpoint` and dataset `source_checkpoint` declare independent
 publication/retention; never mutable hardlinks. Read `docs/MANUAL.md#guide-storage` for exact scope and unfinished
 provisioning/code-layer guarantees rather than claiming those are implemented.
+
+New managed prefixes use v3 exact execution-wheel identities plus a frozen `deps-*` base keyed
+by dependency contracts and runtime/native/Torch/offline resolution policy. Install exact code in
+an independent venv; never upgrade the shared base or silently refresh its resolution. Preserve
+the durable sealed dependency inventory/resolution ID outside GC. Reconstruction must apply its
+pins and reject inventory drift before publication; corrupt receipts are not fresh-start permission.
+Record the actual resolved dependency identity alongside the planned code/contract identity. Preserve
+legacy prefixes. Native preparation leases bridge staging/build → durable provider ownership, even
+when another activation replaces the pointer. Explicit `clean --environments-only` can collect
+obsolete unreferenced prefixes without a quota, never Job/checkpoint bytes. Distinguish apparent
+quota bytes from unique file blocks and actual observed free-space deltas. An unknown Job with a
+readable request protects concrete references; genuinely missing ownership remains fail-closed with
+an exact diagnostic. `storage repair` is preview/apply audited operational reference retirement,
+not scientific state editing: snapshot changes/new live ownership invalidate it. Controller death
+requires the recorded host; installer descendants require independent build-host inspection.
+Never infer foreign death, force unreadable locks or apply hypothetical post-repair cleanup plans.
 
 Project-scoped dataset roots affect new publications only. Preserve a verified legacy absolute
 placement already recorded for the current project. Content-hash subdirectories are immutable
@@ -774,6 +856,15 @@ registered directory is proven absent; unreachable or existing bytes remain a ha
 Dataset creation occurs only from `self.outputs.dataset(...)`; it streams members into the existing
 DatasetArtifact v2/index/registry format. There is no dataset-build execution protocol. Preserve v1
 manifest reads and immutable name/version conflict checks.
+
+`Work.validate_dataset` shares explicit scientific validation receipts across Runs by exact managed
+dataset content/placement, native consumer code, contract/version/settings and runtime, never seed.
+Initial/mutated inputs require native byte verification plus the project's callback; reuse checks
+bounded POSIX file metadata without opening asset bytes. No global hash bypass or hidden consumer
+interception. Only local checksummed sealed v2 assets are supported. Failure/change publishes no
+success; corrupt cache fails closed until explicit revalidation. Native Work-cache leases protect
+active validation from GC. Contracts must exclude fitting/seed state and declare relevant settings.
+Receipt metadata is disposable operational cache, not science/checkpoints or a hostile-storage proof.
 
 Dataset producers call `outputs.dataset_preflight(...)` before expensive work; `datasets preflight`
 inspects all indexes without mutation. `intent="rebuild"` seals a pinned unregistered candidate.
@@ -797,11 +888,43 @@ paths/exact manifests. Never relabel bytes, rewrite old Runs or treat adoption a
 
 Dataset replication is explicit preview/apply: `lf datasets replicate NAME@VERSION --source SOURCE
 --destination TARGET [--route auto|direct|relay] [--apply]`; Console Dataset → Replicate uses the same
-service. Prefer host-key-verified site SSH without credential/agent forwarding; fallback streams
-tar/gzip through authenticated controller transports without local disk staging. Verify both ends,
+service. Probe bounded effective site SSH push then destination-initiated pull, preserving classified
+diagnostics and host-key checks without automatic credential/agent forwarding. Direct forbids controller relay;
+auto fallback only proposes relay, requiring explicit CLI/Console consent (--route relay for automation).
+Pin the approved direction; do not silently change routes. Relay streams tar/gzip through authenticated
+controller transports without local disk staging. Verify both ends,
 safe archive paths, destination-volume admission and locked immutable publication, then register
-both indexes. Never rebuild/overwrite conflicting identities. Keep the session online. Legacy
+both indexes. Never rebuild/overwrite conflicting identities. CLI/Console apply acknowledges a
+native `dataset-replication` Job, not completion. Source/destination-host direct Jobs survive controller exit;
+fallback local relay Jobs survive UI exit but require their PC online. Observe native Job state,
+bounded progress/result and logs in Dataset Transfers; do not fabricate a scientific Work/Study.
+Reuse pending exact transfers under a controller lock, retain uncertain ownership, and reconcile
+only verified exact placement metadata on reconnect. No automatic unbounded retry or implicit credential
+forwarding. Explicit `--ask-password` / Console Direct-password approval may deliver a one-use
+destination password to the source over encrypted control SSH, only in memory/anonymous native
+Job stdin pipes. Never serialize it into metadata/argv/env/logs or reuse it for reverse auth.
+Source preflight requires current ephemeral-input support and optional Paramiko; no auto-install or
+old-prefix mutation. Native PasswordSshTransport retains strict initiating-host trust and the same
+binary/archive verification/publication engine. No laptop dependency after Job acknowledgement.
+Unattended/JSON never prompt; generic retry refuses Jobs whose ephemeral input cannot be restored.
+No MFA, automatic password retries or relay fallback. Low-level synchronous replication is the same
+engine used by detached relay Jobs; password copies require native enqueue. Legacy
 source placements remain usable; loopback tests do not certify real site SSH connectivity.
+Anchor local transfer profiles to the pinned controller project before staging/serializing paths,
+not after deriving a relative worker command. Never resolve remote filesystem paths on the PC.
+Failed transfer diagnostics read only bounded owned stderr, redact before exposing/caching, and
+remain useful without progress/result files. Error observation must not change a Job's outcome.
+Expose process outcome, confirmation age and last byte progress separately. Unobservable/stale is not
+confirmed running or failure; verification may legitimately have no byte advancement. Retain terminal
+evidence and refresh through ordinary views, not only explicit status. Preserve original transport
+errors through cleanup, bounded redacted peer diagnostics and unknown exit status when unavailable.
+First-use inter-host trust is a separate native `datasets trust-ssh`/DatasetService operation,
+not a side effect of route probing. Show unverified offered SHA256 fingerprints and remote initiating
+user trust path; require explicit operator approval/out-of-band verification. Re-scan/pin fingerprints,
+lock/recheck exact effective user trust and atomically append unknown keys only, preserving entries
+and permissions. Reject changed/revoked/certified keys, symlinks, unsafe paths and unsupported custom
+SSH policies. No private credential forwarding or relaxed strict checking. Console confirmation
+updates trust only, repeats native replication preview and still requires separate copy approval.
 
 Public `lf run CONFIG --on-fleet NAME` supports fresh adaptive/fixed/repeated/automatic paired Studies,
 local coordinator and managed member profiles. Run Work exposes the same targets. Checkpoint/fidelity
@@ -809,6 +932,19 @@ continuation, co-location, recovery/adoption, live expansion and distributed exp
 `docs/MANUAL.md#guide-coordinated-studies`. Never describe independent JobGroups as a coordinated Study or
 instantiate a second optimizer. Dry-run never acquires grants. Do not claim SSH/command/SLURM
 acceptance from loopback tests.
+
+Direct POSIX submission optionally uses `lf run --queue`: native SubmissionService registers a
+project/placement FIFO ticket on the target, then the normal prepared ProcessSupervisor gates
+science before CPU/RAM/GPU/storage admission. Do not add another runner/optimizer or laptop
+dispatcher. Preserve exact Job identity, pinned queued YAML, native locks and scoped path checks.
+Unknown/missing predecessor evidence blocks; terminal status alone does not prove resource release.
+Native cleanup/verified observation seals release receipts; preserve predecessor workspaces until
+then so GC/history deletion cannot erase the admission proof. Queue errors must not overwrite an
+already completed scientific outcome. No duplicate provider dispatch, automatic retry, grant
+renewal, broadened GPUs or unsupported SLURM/Fleet fallback. Preparation still requires a live
+controller until provider acknowledgement; after hand-off queued supervisors run independently.
+Recovery never replays an old Job's FIFO ticket. Console uses the same domain services and
+metadata-only queue reads, with bounded feedback rather than recurring notification spam.
 
 `WorkRunner(dispatcher=...)`, `PreparedShardExecutor` and `CoordinatedDispatcher` retain one native
 planning/execution boundary. Persistent owned member Jobs execute finite concrete waves and reuse

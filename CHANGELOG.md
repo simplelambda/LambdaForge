@@ -12,6 +12,123 @@ metadata rather than invented release numbers.
 
 ### Added
 
+- Process-scoped native library selection before interpreter startup, shared by managed Conda
+  preparation/reuse, layered execution, supervisors and children. Torch/SciPy interoperability
+  checks both import orders and actual C++/GCC library origins; bootstrap/Job/Run provenance
+  records the policy and loaded paths. GPU grants/driver paths and named-tool isolation remain
+  intact; no import-order workaround, dependency downgrade or global library-path mutation.
+
+- Stable-prefix managed environment publication: install Conda and execution venvs at their
+  lifetime paths and atomically seal readiness only after final-path checks. Distinct publication
+  identities recover old broken prefixes without modifying live/recovery-owned environments;
+  frozen dependency resolutions migrate read-only. Failed builds retain redacted diagnostics
+  for reference-aware GC; native probes distinguish absent tools, broken/missing interpreters
+  and incompatible version policies. The strict APBS 3.4.1 exit-13 exception remains intact.
+
+- Strict native executable version policies shared by bootstrap, submission and cache reuse:
+  APBS 3.4.1 `--version` accepts exit 13 only with a matching package-owned version banner.
+  Receipts retain probe evidence; failures expose arguments, status and bounded diagnostics
+  without bypassing executable ownership or exact package inventory verification.
+
+- Chained bounded-input Work recovery validates each later Attempt's own staging owner and
+  accepted recovery lineage while preserving authoritative origin bindings, Run IDs and files.
+  Prepared-worker capability checks prevent a new preview from handing recovery to an old helper.
+
+- Versioned role-bound recovery of historically renamed bounded file inputs. Exact bundle/raw
+  byte checks reconstruct immutable legacy identities consistently in retry preview, dependency
+  inspection and recovery workers; original Runs/checkpoints remain intact and changed bytes fail.
+
+- Durable recovery-cache reachability across failed/cancelled Runs and accepted revisions,
+  exact legacy dependency preview/artifact repair (`jobs recovery-dependencies`), source-bound
+  map inputs/policy and fail-closed missing observations. GC reports protected chains/bytes
+  rather than silently collecting retained acquisitions. Shared HTTP Retry-After cooldowns
+  support seconds, dates and explicitly declared provider JSON hints.
+
+- Native sequential Work recovery through CLI and Console: preserve completed steps and typed
+  outputs, retry only unfinished child Runs using original checkpoints, expose read-only step
+  plans and retain ownership, budgets, code acknowledgement and cleanup protections.
+
+- Explicit one-use passwords for direct Dataset replication, with hidden CLI/Console prompts,
+  strict host trust, optional native password transport and anonymous supervised-Job input.
+  Source-host copies survive controller exit after acknowledgement; no password persistence,
+  reverse-credential reuse, automatic retry or relay fallback.
+
+- Shared scientific validation receipts through `Work.validate_dataset` and the native
+  DatasetValidationCache service: exact first verification, content/code/contract/runtime pinning,
+  metadata-only reuse across seeds, concurrent single validation and native GC leases. No global
+  integrity bypass or automatic interception of consumer validators; POSIX local sealed v2 only.
+
+- Native opt-in sequential Work/Study execution with `lf run --queue`, target-side persistent
+  FIFO admission, `lf queue` inspection and Console selection/queue view. Independent prepared
+  supervisors start one scientific Job at a time, retain predecessor/GC evidence and preserve
+  cancellation, grants and resource ceilings. Trials/seeds inside each admitted Study retain
+  normal parallel dispatch; the queue does not serialize Runs. POSIX direct clusters only; no SLURM/Fleet fallback
+  or reservation-renewal promise. The PC is needed only until preparation/provider hand-off.
+
+- Named isolated scientific Python tool runtimes declared in project metadata and provisioned by
+  bootstrap/prepared submission, without installing consumer/framework dependencies there.
+  Exact pins/source/ABI checks, separate script bundles, public Work preflight/argv execution,
+  preserved GPU grants, CPU limits, cancellation, provenance and native GC/recovery protection.
+  Authorized disposable CPU acceptance loads the reviewed SLAE base checkpoint; CUDA and the
+  consumer's standalone extraction adapter remain separate acceptance work.
+
+- Immutable reusable dependency bases and exact execution-code layers for managed environments;
+  quota-independent `clean --environments-only`, physical/hard-link-aware estimates and explicit
+  audited `storage repair` with Console selection/confirmation. Scoped unknown-Job references,
+  cross-host controller/installer proof, preparation-to-provider reference leases and metadata-only
+  Console storage refreshes preserve scientific and recovery evidence without rewriting old prefixes.
+
+- Incremental configurable CSV/TSV and gzip prefix reads, versioned typed columns, explicit table
+  transforms and shared preview budgets/allowed roots/scratch cleanup. NPY mmap and selected C-order
+  NPZ prefixes avoid full materialization. Native SQLite read-only snapshots and transactional
+  schema/key-checked insert/upsert/replace; optional lazy PostgreSQL/Psycopg with host credential
+  references/TLS/server cursors. Operator-owned write authorization, honest mutable-source/prefix
+  provenance, effect contracts and structured model/composition audit. Installed ClusterProfile
+  schema and native effective resolution; existing GPU wrapper/grant/provider boundaries unchanged.
+  Bilingual contracts, synthetic fixtures and offline installed-wheel acceptance; no consumer edits.
+- Public metadata-only `lf catalog`/OperationCatalog scientific operation contracts, portable
+  component factories and selective lazy neural exports. Identified multi-asset sample schemas,
+  bounded readers/previews, explicit padding/disjoint graph batches and train/fold-only scaling.
+  Ordinary Python ETL with native checkpointed publication, bounded/cancellable exact-checksum
+  downloads and credential references; optional sklearn estimators and reviewed skops persistence.
+  CPU ETL→dataset→two-input sweep/HPO examples, bilingual contracts and reproducible dirty-tree
+  wheel receipts. No graph interpreter, alternate registry/trainer or consumer-project changes.
+
+- Explicit first-use inter-cluster SSH fingerprint review in the Dataset Console and native
+  `datasets trust-ssh` preview/apply. Pins approved SHA256 keys on the initiating host, preserves
+  existing trust and rejects changed/revoked keys; rechecks replication before separate copy approval.
+- Dataset transfer route diagnostics with bounded effective SSH push/pull checks, destination-host
+  direct Jobs, explicit relay consent and pinned approved routes. CLI/Console distinguish confirmed
+  process state, observation age, byte advancement and verification/publication phases; transport
+  failures retain original EOF/BrokenPipe and available redacted peer evidence through cleanup.
+  Console exposes Direct only (default for remote sources), Auto and Relay; blocked previews show
+  readable diagnostics rather than silently accepting a laptop-hosted copy.
+- Durable Dataset replication Jobs shared by CLI and Console: source-host direct copies survive
+  controller shutdown; local relay copies survive Console exit. Persisted native state/progress/logs,
+  Transfers history, exact request deduplication and verified placement reconciliation on reconnect.
+  Relay PC/network dependency stays explicit; no scientific Work, GPU claim or alternate copy engine.
+- Public graph-operator composition: signed GCN/GraphSAGE message modulation with unchanged
+  topological degrees; GIN/GINE/ECMP/PNA message/aggregate/update stages; complete radial-source
+  controls and explicit radial-basis injection; differentiable typed-edge DimeNet path controls.
+  Existing constructors, default equations and state keys remain intact; structural attention's
+  score guard now accounts for promoted precision under autocast. No consumer-specific policy.
+- Generic graph encoders and primitives for edge-aware GIN, full/basis NNConv, radial SchNet,
+  persistent GVP/PaiNN polar-vector states, bilinear DimeNet/factorized DimeNet++ directional
+  interactions with Bessel/spherical bases, and bounded Graphormer-inspired structural attention.
+  Explicit topology/geometry, optional `graph-directional` construction dependency, scalar node
+  outputs, bilingual contracts and a synthetic example; no consumer-specific gates or science.
+- Bounded square/rectangular FGW matrix blocks with native Work.resume_map recovery, numerical
+  identities, corruption checks, bounded diagnostics and explicit incomplete NaN/error results.
+  Real POT FGW barycenters with weighted support/objects, seeded multistart, explicit relational
+  nonzero-diagonal measures and separate backend-change/final-objective coupling evidence.
+  Numerical and native recovery regressions verified with POT 0.9.6 and 0.9.7.post1 in temporary
+  test targets. Remaining scientific expansion stages are recorded, not claimed complete.
+- Scientific algorithms, first verified stages: validated public precomputed dissimilarities for
+  DBSCAN/HDBSCAN/compatible Agglomerative and silhouette; generic plateau-aware H0 superlevel
+  merge trees, exact threshold memberships and explicit stable-region policies; inclusive
+  empirical-null ranks with object/group calibration and group/stratified percentile bootstrap.
+  Lazy NumPy-only topology/statistics APIs, synthetic examples and scaling benchmark. The wider
+  requested prototype/mixture expansion is not yet complete; see the acceptance ledger.
 - Generic balanced q=2 Fused Gromov–Wasserstein distance through optional
   `lambdaforge[optimal-transport]` (POT): weighted structured measures, vector or project-defined
   attributes, precomputed feature distances, feasible warm starts and inspectable transport/local
@@ -62,6 +179,60 @@ metadata rather than invented release numbers.
 
 ### Fixed
 
+- Isolated-tool bootstrap/Work preflight no longer imports pip into the scientific interpreter,
+  preventing its distutils/setuptools import-order conflict when CUDA Triton loads. Metadata-only
+  probing and controller-side PEP 440 checks preserve package/VCS/inventory/ABI/grant validation
+  without replacing immutable environments, downgrading packages or changing consumer inputs.
+
+- Native `lf retry` and Console **Recover Work…** preserve the original Execution/Run and managed
+  file checkpoints for a failed/interrupted single Work, without HPO state or a fresh scientific
+  Run. Metadata-only preview works before environment preparation, reports owner/next Attempt,
+  registered files, code acknowledgement and effective CPU/RAM/wall-time changes. Historical
+  staging-name drift is normalized without waiving input/scientific identity; reviewed YAML,
+  locks, dependency GC protection, old Attempts and validated complete publication remain native.
+- Portable Study import distinguishes immutable origin identity from an audited recovery
+  revision. Changed fingerprints require matching sealed current-code and native recovery
+  history; imported evidence remains read-only and original provenance is never rewritten.
+
+
+- Entmax15 preserves its exact sparse forward and uses the analytic support-aware simplex
+  backward, preventing NaN gradients from unused zero-root thresholds (including tied logits).
+  No softmax substitution, epsilon smoothing or silent gradient repair. CPU/CUDA mixed-dtype,
+  negative-infinity mask, Jacobian and finite-difference regressions cover the native activation.
+- GPU resource inference no longer feeds a live trajectory's previous forecast back as historical
+  evidence or learns demand from workers that have not allocated CUDA. Recorded outcomes and raw
+  censored trajectories remain distinct, repeated polls cannot recursively alter the posterior,
+  and point predictions use the measured prefix distribution without fabricating exact peaks.
+  Admission reports materialized/unmaterialized Runs, elapsed time and the planner's actual wait
+  reason; physical memory, OOM bounds, protected exploration and immutable runtime rules remain.
+- Managed environment/runtime preparation recovers orphan build markers only after proving the
+  originating controller process is dead/reused and no exact remote builder remains. Snapshot
+  compare-and-swap under the native GC lock preserves live/foreign/unknown ownership and content.
+- Password-SSH dataset streams use genuinely binary Paramiko channel readers: header readline
+  can no longer return text to a byte receiver. Direct-transfer diagnostics distinguish accepted
+  server fingerprints from the separate noninteractive inter-cluster login authorization.
+- GPU Run attribution during CPU initialization: a complete fresh process inventory can establish
+  observed zero without assigning driver-reserved/foreign VRAM to the Run. Partial/legacy inventories,
+  stale lifetimes and unknown or conflicting allocator evidence remain conservative; physical-memory
+  admission, future envelopes and protected-lane policy are unchanged.
+- Resource telemetry accepts nested immutable JSON parameters without crashing `persist_active`:
+  FrozenJsonMapping supports dict's iterable-pair reconstruction protocol, and active/terminal
+  history, admission, ledgers and traces materialize portable fields without `dataclasses.asdict`
+  reconstructing nested containers. Original immutability, values and scientific identities remain
+  intact; GPU monitoring/admission and recovery evidence requirements are not bypassed.
+- Anchor detached Dataset replication request/local storage paths before staging, so relative
+  local job roots work after the supervisor changes cwd. Remote paths retain host semantics.
+  Failed transfer status/history expose bounded redacted worker diagnostics and log commands,
+  including failures before any progress/result, without changing identity or retry protections.
+- Bound live GPU-memory posterior feedback and joint-fit convolution inputs; sweep shared CDF
+  events once instead of repeatedly sorting thousands of support points. Long Studies no longer
+  stall result collection/cleanup and leave an idle CUDA worker blocking an otherwise free GPU.
+  Conservative upper-bin compression retains endpoint tail masses and historical residual weights;
+  physical-memory, grant, concurrency and OOM protections remain enforced.
+- Reconcile orphaned cross-Study GPU startup commitments after an old Job directory was deleted.
+  A dead/reused controller and a complete native process-ownership scan are both required;
+  live descendants, unresolved ownership and corrupt existing Job records remain protected.
+  Removed Jobs no longer indefinitely block an empty GPU's baseline Run.
 - Resource dispatch no longer stalls a completely idle Study because helper-process RAM was
   omitted from its elastic share and counted again at launch. Fresh whole-tree headroom caps only
   native derived shares; physical/cgroup and aggregate limits remain enforced. Real flat progress
@@ -1952,3 +2123,16 @@ using the existing execution, result, publication and portable evidence infrastr
 [0.3.0]: https://github.com/simplelambda/LambdaForge/compare/510b8e8d2ebbd76eb86dfcfa6fb309d1e6d680e6...v0.3.0
 [0.2.0]: https://github.com/simplelambda/LambdaForge/commit/510b8e8d2ebbd76eb86dfcfa6fb309d1e6d680e6
 [0.1.0]: https://github.com/simplelambda/LambdaForge/commit/4c1ddc985b681ad88c7b8e8962f20bdccec22a49
+
+### Managed Python publication and dataset inventories
+
+- Install exact resolved Conda packages at the permanent runtime prefix instead of
+  renaming a patched temporary prefix. Verify the final interpreter and inventory
+  before publishing receipts; preserve failed immutable prefixes. Managed prefix
+  layout identity v2 keeps damaged legacy runtimes separate.
+- Read bounded remote dataset registry metadata with the configured bootstrap
+  Python's stdlib, independently of the active scientific venv. Decode using the
+  native registry validator; unreadable/corrupt metadata is never reported as absence.
+- Metric semantics accept explicit dataset partition names as well as the standard
+  train/validation/test roles. Metric calculation definitions and evaluation scopes
+  remain distinct in visual consumers.

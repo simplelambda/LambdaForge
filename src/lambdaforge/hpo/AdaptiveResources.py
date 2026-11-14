@@ -14,7 +14,7 @@ import os
 import re
 import statistics
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -51,6 +51,9 @@ _HISTORY_LIMIT = 2048
 RESOURCE_FRONTIER_LIMIT = 16
 _TRAJECTORY_LIMIT = 192
 _BOOTSTRAP_POINTS = 31
+# Numerical representation bound, not an admission/risk policy. Upper-endpoint bins retain
+# their probability mass and never make the memory distribution more optimistic.
+_RESOURCE_SUPPORT_LIMIT = 128
 _OOM_ALLOCATION = re.compile(
     r"(?:tried to allocate|attempted to allocate)\s+([0-9]+(?:\.[0-9]+)?)\s*"
     r"(bytes?|kib|mib|gib|kb|mb|gb)",
@@ -120,7 +123,7 @@ class ResourceTrajectorySample:
     phases_seen: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _resource_dict(self)
 
 
 @dataclass(slots=True)
@@ -203,7 +206,7 @@ class ResourceTrajectoryStatistics:
         return cls(**payload)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _resource_dict(self)
 
     def observe(self, sample: ResourceTrajectorySample) -> None:
         """Merge one poll while counting only genuine progress/allocation evidence."""
@@ -466,7 +469,7 @@ class OOMResourceEvidence:
     timestamp_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _resource_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,7 +490,7 @@ class PlacementOOMEvidence:
     timestamp_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _resource_dict(self)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> PlacementOOMEvidence:
@@ -541,6 +544,7 @@ class ResourceTrajectoryAnalyzer:
         values: Sequence[ResourceTrajectorySample],
         *,
         historical_residuals: Sequence[int] = (),
+        historical_residual_weights: Sequence[float] = (),
         total_bytes: int = 0,
         trajectory_statistics: ResourceTrajectoryStatistics | None = None,
         phase_model: ResourcePhaseModel | None = None,
@@ -565,6 +569,7 @@ class ResourceTrajectoryAnalyzer:
         return _analysis_from_statistics(
             sufficient,
             historical_residuals=historical_residuals,
+            historical_residual_weights=historical_residual_weights,
             total_bytes=total_bytes,
             phase_model=phase_model,
         )
@@ -575,6 +580,7 @@ class ResourceTrajectoryAnalyzer:
         sample: ResourceTrajectorySample,
         *,
         historical_residuals: Sequence[int] = (),
+        historical_residual_weights: Sequence[float] = (),
         total_bytes: int = 0,
         phase_model: ResourcePhaseModel | None = None,
     ) -> ResourceTrajectoryAnalysis:
@@ -583,6 +589,7 @@ class ResourceTrajectoryAnalyzer:
         return _analysis_from_statistics(
             statistics_state,
             historical_residuals=historical_residuals,
+            historical_residual_weights=historical_residual_weights,
             total_bytes=total_bytes,
             phase_model=phase_model,
         )
@@ -621,11 +628,7 @@ class ActiveResourceEvidence:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the bounded portable right-censored snapshot."""
-        value = asdict(self)
-        value["parameters"] = _portable(self.parameters)
-        value["trajectory"] = [item.to_dict() for item in self.trajectory]
-        value["trajectory_statistics"] = _portable(self.trajectory_statistics)
-        return value
+        return _resource_dict(self)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> ActiveResourceEvidence:
@@ -769,14 +772,7 @@ class ResourceProfileObservation:
     throughput_concurrency: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
-        value["parameters"] = _portable(self.parameters)
-        value["fixed_arguments"] = _portable(self.fixed_arguments)
-        value["fidelity"] = dict(self.fidelity)
-        value["trajectory"] = [dict(item) for item in self.trajectory]
-        value["phases_seen"] = list(self.phases_seen)
-        value["trajectory_statistics"] = _portable(self.trajectory_statistics)
-        return value
+        return _resource_dict(self)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> ResourceProfileObservation:
@@ -826,7 +822,7 @@ class ResourcePrediction:
         return max(self.upper_bytes, self.known_lower_bound_bytes)
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
+        value = _resource_dict(self)
         value["commitment_bytes"] = self.commitment_bytes
         return value
 
@@ -931,7 +927,14 @@ class ResourceDemandModel:
         active_compatible = [
             value
             for value in self.active_evidence
-            if value.compatibility_key == compatibility_key and value.hardware == hardware
+            if value.compatibility_key == compatibility_key
+            and value.hardware == hardware
+            # An owned CPU-initializing process can have exact *zero* CUDA usage. That is
+            # operational evidence, not a sample of the Work's GPU demand. Including its
+            # unmaterialized prior poisons measured sibling profiles with zero/full-device
+            # draws and lets a new startup change predictions before it allocates anything.
+            and value.running_peak_bytes > 0
+            and value.measurement_provenance != "unavailable"
         ]
         names = set(self.parameter_schema) | set(parameters)
         points = tuple(
@@ -1057,6 +1060,10 @@ class ResourceDemandModel:
                 if not samples:
                     samples = (provisional_lower, total_bytes)
                     sample_weights = (0.5, 0.5)
+                # A prefix is censored, never an exact peak or a hard neighbour lower bound.
+                # Nevertheless the displayed point prediction must describe that distribution,
+                # rather than report zero while compatible Runs already use GPU memory.
+                predicted = max(provisional_lower, _weighted_quantile(samples, sample_weights, 0.5))
                 upper = max(samples)
                 support = "active-same-candidate" if active_matches else "active-near-compatible"
                 quality: ResourceEvidenceQuality = "active-provisional"
@@ -1439,7 +1446,7 @@ class AdmissionDecision:
     timestamp_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _resource_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1477,7 +1484,7 @@ class ExplorationEvaluation:
     evaluation_version: int = 2
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _resource_dict(self)
 
 
 class WaitRegretTracker:
@@ -2570,7 +2577,7 @@ class ResourceHistoryStore:
             return
         values = [
             {
-                **asdict(device),
+                **_resource_dict(device),
                 "future_committed_bytes": device.future_committed_bytes,
                 "predicted_headroom_bytes": device.predicted_headroom_bytes,
                 "admission_headroom_bytes": device.admission_headroom_bytes,
@@ -2630,7 +2637,9 @@ class ResourceHistoryStore:
                     "candidate": value.key,
                     "scientific_value": value.scientific_value,
                     "value_contract": (
-                        asdict(value.value_contract) if value.value_contract is not None else None
+                        _resource_dict(value.value_contract)
+                        if value.value_contract is not None
+                        else None
                     ),
                     "predictions": {
                         str(device.index): value.prediction_for(device).to_dict()
@@ -2698,6 +2707,7 @@ def resource_state(
         analysis = ResourceTrajectoryAnalyzer.analyze(
             trajectory,
             historical_residuals=prediction.future_residual_samples,
+            historical_residual_weights=prediction.sample_weights,
             total_bytes=max(prediction.upper_bytes, observed_peak_bytes),
         )
         if analysis.state in {"STARTING", "RAMPING", "PLATEAU_UNCONFIRMED"}:
@@ -2717,6 +2727,7 @@ def _analysis_from_statistics(
     value: ResourceTrajectoryStatistics,
     *,
     historical_residuals: Sequence[int],
+    historical_residual_weights: Sequence[float] = (),
     total_bytes: int,
     phase_model: ResourcePhaseModel | None = None,
 ) -> ResourceTrajectoryAnalysis:
@@ -2780,7 +2791,10 @@ def _analysis_from_statistics(
         body_mass * (1.0 - hazard),
         body_mass * hazard - empirical_share,
     ]
-    weights.extend((empirical_share / len(empirical) for _ in empirical) if empirical else ())
+    weights.extend(
+        empirical_share * weight
+        for weight in _normalized_weights(historical_residual_weights, len(empirical))
+    )
     # Normalize below: exact tail mass is retained regardless of support resolution.
     weights.append(tail_probability)
     residuals, residual_weights = _coalesce_weighted_samples(support, weights)
@@ -3007,15 +3021,20 @@ def _normalized_weights(weights: Sequence[float], count: int) -> tuple[float, ..
 def _coalesce_weighted_samples(
     samples: Sequence[int], weights: Sequence[float]
 ) -> tuple[tuple[int, ...], tuple[float, ...]]:
-    """Combine repeated support points without turning a rare tail into an equal draw."""
+    """Bound live mixtures without turning a rare tail into an equal draw.
+
+    Active predictions feed subsequent trajectory posteriors. Merely merging duplicates leaves
+    that feedback support unbounded even though the observations themselves are bounded.
+    """
     if not samples:
         return (), ()
     normalized = _normalized_weights(weights, len(samples))
     combined: dict[int, float] = {}
     for sample, weight in zip(samples, normalized, strict=True):
         combined[max(0, int(sample))] = combined.get(max(0, int(sample)), 0.0) + weight
-    ordered = tuple(sorted(combined))
-    return ordered, _normalized_weights(tuple(combined[value] for value in ordered), len(ordered))
+    bounded = _compress_weighted_support(combined)
+    ordered = tuple(sorted(bounded))
+    return ordered, _normalized_weights(tuple(bounded[value] for value in ordered), len(ordered))
 
 
 def _weighted_cdf(samples: Sequence[int], weights: Sequence[float], limit: int) -> float:
@@ -3095,13 +3114,13 @@ def _fit_uncertainty_sources(
 
 
 def _joint_fit_probability(prediction: ResourcePrediction, device: GPUResourceState) -> float:
-    """Tail-aware small-ensemble fit probability with exact discrete integration.
+    """Tail-aware ensemble fit with exact small/conservatively bounded large supports.
 
     One member integrates run-specific residuals independently.  The other uses a shared latent
     resource-model quantile.  Their equal model ensemble is explicit, unlike index-aligned Monte
-    Carlo, and every discrete mass boundary—including a 0.5% tail—is represented.
+    Carlo. Explicit tail masses (including a 0.5% full-device tail) survive compression.
     """
-    distributions = [
+    raw_distributions = [
         (
             prediction.samples or (prediction.predicted_peak_bytes,),
             prediction.sample_weights,
@@ -3115,6 +3134,8 @@ def _joint_fit_probability(prediction: ResourcePrediction, device: GPUResourceSt
             for value in device.active
         ],
     ]
+    # Bound *inputs*, including persisted older posteriors, before forming any Cartesian sum.
+    distributions = [_coalesce_weighted_samples(*value) for value in raw_distributions]
     candidate_samples, candidate_weights = distributions[0]
     candidate_physical_fit = _weighted_cdf(candidate_samples, candidate_weights, device.free_bytes)
     if candidate_physical_fit <= 0:
@@ -3131,49 +3152,56 @@ def _joint_fit_probability(prediction: ResourcePrediction, device: GPUResourceSt
         summed = _compress_weighted_support(combined)
     independent = sum(weight for total, weight in summed.items() if total <= device.total_bytes)
 
-    breakpoints = {0.0, 1.0}
-    for samples, weights in distributions:
+    # Integrate the shared quantile by sweeping CDF events once. Previously every event called
+    # _weighted_quantile for every distribution, sorting the same support thousands of times.
+    events: list[tuple[float, int, int]] = []
+    quantile_values = [samples[0] for samples, _weights in distributions]
+    used = device.external_bytes + sum(quantile_values)
+    for index, (samples, weights) in enumerate(distributions):
         cumulative = 0.0
-        for _sample, weight in sorted(
-            zip(samples, _normalized_weights(weights, len(samples)), strict=True)
-        ):
+        for offset, weight in enumerate(weights[:-1]):
             cumulative += weight
-            breakpoints.add(min(1.0, cumulative))
-    ordered = sorted(breakpoints)
+            events.append((min(1.0, cumulative), index, samples[offset + 1]))
+    events.sort()
     shared = 0.0
-    for left, right in zip(ordered, ordered[1:], strict=False):
-        if right <= left:
-            continue
-        quantile = (left + right) / 2.0
-        candidate_value = _weighted_quantile(candidate_samples, candidate_weights, quantile)
-        used = device.external_bytes + sum(
-            _weighted_quantile(samples, weights, quantile) for samples, weights in distributions
-        )
-        if used <= device.total_bytes and candidate_value <= device.free_bytes:
+    left = 0.0
+    for right, index, sample in events:
+        if used <= device.total_bytes and quantile_values[0] <= device.free_bytes:
             shared += right - left
+        used += sample - quantile_values[index]
+        quantile_values[index] = sample
+        left = right
+    if used <= device.total_bytes and quantile_values[0] <= device.free_bytes:
+        shared += 1.0 - left
     return min(candidate_physical_fit, max(0.0, min(1.0, (independent + shared) / 2.0)))
 
 
 def _compress_weighted_support(values: Mapping[int, float]) -> dict[int, float]:
-    """Bound convolution cost while preserving exact small supports and both tails."""
-    if len(values) <= 4096:
-        return dict(values)
-    ordered = sorted(values.items())
-    total = sum(weight for _sample, weight in ordered)
+    """Conservative bounded CDF: exact endpoints/masses, upper-endpoint interior bins.
+
+    Do not replace bins by their mean: that can increase a fit probability at an admission
+    boundary. Small supports stay exact; a rare full-device tail keeps its original mass.
+    """
+    positive = {sample: weight for sample, weight in values.items() if weight > 0}
+    if len(positive) <= _RESOURCE_SUPPORT_LIMIT:
+        return positive
+    ordered = sorted(positive.items())
     output: dict[int, float] = {ordered[0][0]: ordered[0][1], ordered[-1][0]: ordered[-1][1]}
-    target = total / 4094
+    interior = ordered[1:-1]
+    slots = _RESOURCE_SUPPORT_LIMIT - 2
+    remaining = sum(weight for _sample, weight in interior)
     mass = 0.0
-    weighted_sum = 0.0
-    for sample, weight in ordered[1:-1]:
+    target = remaining / slots
+    for sample, weight in interior:
         mass += weight
-        weighted_sum += sample * weight
-        if mass >= target:
-            representative = int(round(weighted_sum / mass))
-            output[representative] = output.get(representative, 0.0) + mass
-            mass = weighted_sum = 0.0
+        if slots > 1 and mass >= target:
+            output[sample] = mass
+            remaining = max(0.0, remaining - mass)
+            slots -= 1
+            target = remaining / slots
+            mass = 0.0
     if mass:
-        representative = int(round(weighted_sum / mass))
-        output[representative] = output.get(representative, 0.0) + mass
+        output[interior[-1][0]] = mass
     normalizer = sum(output.values())
     return {sample: weight / normalizer for sample, weight in output.items()}
 
@@ -3368,6 +3396,16 @@ def _digest(value: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _resource_dict(value: Any) -> dict[str, Any]:
+    """Serialize resource fields without reconstructing/deepcopying immutable containers.
+
+    Read the dataclass once and materialize detached built-in JSON containers. In particular,
+    arbitrary nested parameter mappings must be normalized *before* any asdict reconstruction.
+    This same boundary covers active/terminal history, admission, ledgers and replay traces.
+    """
+    return {item.name: _portable(getattr(value, item.name)) for item in fields(value)}
+
+
 def _portable(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -3376,6 +3414,8 @@ def _portable(value: Any) -> Any:
         }
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         return [_portable(item) for item in value]
+    if is_dataclass(value) and not isinstance(value, type):
+        return _resource_dict(value)
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, float) and not math.isfinite(value):

@@ -251,6 +251,7 @@ def _startup_remaining(
     """Only peers' not-yet-observed startup bytes, never free memory minus resident bytes twice."""
     extra = 0
     retained = []
+    absent_owners: dict[tuple[int, float, str, str], bool] = {}
     for record in records:
         owner = ProcessIdentity.from_mapping(record["controller"])
         metadata = record["metadata"]
@@ -281,8 +282,12 @@ def _startup_remaining(
             except FileNotFoundError:
                 pass  # Spawn has not yet published its exact worker identity.
         status = worker.storage_status() if worker else owner.storage_status()
-        if worker is None and status in {"dead", "reused"} and _job_absence_proven(metadata, owner):
-            continue
+        if worker is None and status in {"dead", "reused"}:
+            key = (owner.pid, owner.create_time, owner.job_id, str(metadata.get("job_state_path")))
+            if key not in absent_owners:
+                absent_owners[key] = _job_absence_proven(metadata, owner)
+            if absent_owners[key]:
+                continue
         if worker is not None and status in {"dead", "reused"}:
             continue
         if worker is not None and status == "alive" and time.time() >= record["expires_at"]:
@@ -308,11 +313,22 @@ def _job_absence_proven(metadata: Mapping[str, object], owner: ProcessIdentity) 
     if path.name != "state.json" or path.parent.name != owner.job_id or path.resolve() != path:
         return False
     try:
+        from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor
+
+        try:
+            path.parent.stat()
+        except FileNotFoundError:
+            # Deleting a finished Job also removes its worker identity. Do not turn its
+            # conservative cold-start envelope into a permanent whole-GPU reservation.
+            # Missing files/age alone are NOT proof: verify the parent ownership and use
+            # the same native per-Job process-marker/lifetime scope as normal observation.
+            parent = path.parent.parent.stat()
+            if os.name == "posix" and parent.st_uid != os.getuid():
+                return False
+            return ProcessSupervisor.detached_owner_absent(owner)
         for name in ("state.json", "request.json"):
             if (path.parent / name).stat().st_size > 2 * 1024 * 1024:
                 return False
-        from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor
-
         observation = ProcessSupervisor.observe(path.parent)
         return observation.get("provider_observation") in {"terminal", "lost_confirmed"}
     except (OSError, ValueError, TypeError, KeyError):

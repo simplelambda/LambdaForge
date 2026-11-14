@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from lambdaforge.configuration.ConfigurationDescriptor import ConfigurationDescriptor
+from lambdaforge.controlplane.CacheBuildLease import CacheBuildLease
 from lambdaforge.controlplane.ClusterCatalog import ClusterCatalog
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.ControlPlaneFactory import ControlPlaneFactory
@@ -26,6 +28,7 @@ from lambdaforge.controlplane.NativeEnvironment import (
     NativeEnvironmentPlanner,
     NativeEnvironmentSpecification,
 )
+from lambdaforge.controlplane.NativeLibraryPolicy import NativeLibraryPolicy
 from lambdaforge.controlplane.PreparedWork import PreparedWork
 from lambdaforge.controlplane.python_runtime import (
     NoCompatiblePythonRuntimeError,
@@ -86,7 +89,43 @@ class ControlPlane:
         input_bindings: Mapping[str, Any] | None = None,
     ) -> tuple[JobHandle, ExecutionBundle]:
         """Build/cache a bundle, stage it and submit the normal remote run command."""
+        with ExitStack() as preparation:
+            return self._submit(
+                config_path,
+                cluster=cluster,
+                resources=resources,
+                dry_run=dry_run,
+                run_arguments=run_arguments,
+                group_id=group_id,
+                reserved_job_id=reserved_job_id,
+                allow_duplicate=allow_duplicate,
+                progress=progress,
+                entrypoint_builder=entrypoint_builder,
+                input_bindings=input_bindings,
+                preparation=preparation,
+            )
+
+    def _submit(
+        self,
+        config_path: str | Path,
+        *,
+        cluster: str,
+        resources: ResourceRequest | None,
+        dry_run: bool,
+        run_arguments: Sequence[str],
+        group_id: str | None,
+        reserved_job_id: str | None,
+        allow_duplicate: bool,
+        progress: Callable[[str], None] | None,
+        entrypoint_builder: Callable[[PreparedWork], Sequence[str]] | None,
+        input_bindings: Mapping[str, Any] | None,
+        preparation: ExitStack,
+    ) -> tuple[JobHandle, ExecutionBundle]:
+        """Native preparation with exact GC references retained until provider hand-off."""
         notify = progress or (lambda _phase: None)
+        dependency_resolution_id: str | None = None
+        library_policy: NativeLibraryPolicy | None = None
+        library_evidence: dict[str, Any] | None = None
         if entrypoint_builder is not None:
             if run_arguments:
                 raise ValueError("Prepared entrypoints cannot silently ignore run arguments.")
@@ -299,6 +338,19 @@ class ControlPlane:
             remote_dir = str(PurePosixPath(storage.bundle_root) / bundle.bundle_id)
             assert transport is not None
             if not dry_run:
+                reserved_job_id = reserved_job_id or JobService.new_id()
+                preparation.enter_context(
+                    CacheBuildLease.preparation(
+                        transport,
+                        cache_root=PurePosixPath(storage.cache_root),
+                        environment=bundle.environment_id,
+                        bundle_id=bundle.bundle_id,
+                        job_id=reserved_job_id,
+                        work_dir=str(PurePosixPath(storage.job_root) / reserved_job_id / "work"),
+                        python=effective_profile.python,
+                        runtime_id=runtime.runtime_id if runtime is not None else None,
+                    )
+                )
                 created = transport.run(("mkdir", "-p", str(PurePosixPath(remote_dir).parent)))
                 if created.returncode:
                     raise RuntimeError(f"Could not create remote bundle cache: {created.stderr}")
@@ -337,6 +389,9 @@ class ControlPlane:
                         "Prepared interpreter belongs to another environment identity."
                     )
                 remote_python = prepared.python
+                library_policy = prepared.library_policy
+                library_evidence = prepared.library_evidence
+                dependency_resolution_id = prepared.dependency_resolution_id
                 if bundle.result_inputs:
                     notify("inputs")
                     self._verify_result_inputs(
@@ -436,6 +491,20 @@ class ControlPlane:
             environment_prefix = (
                 ("env", *environment_assignments) if environment_assignments else ()
             )
+            if dry_run and native_plan is not None:
+                layer = (bundle.environment_policy or {}).get("dependency_layer")
+                dependency = (
+                    str(layer["identity"])
+                    if isinstance(layer, Mapping)
+                    else str(bundle.environment_id)
+                )
+                library_policy = NativeLibraryPolicy(
+                    str(PurePosixPath(storage.environment_root) / dependency)
+                )
+            environment_prefix = (
+                *environment_prefix,
+                *(library_policy.launch_prefix(profile.python) if library_policy else ()),
+            )
             command = self._command(
                 (*profile.command_prefix, *environment_prefix),
                 remote_python,
@@ -468,6 +537,35 @@ class ControlPlane:
             ):
                 raise ValueError("Prepared entrypoints require a nonempty module argv.")
             command = (*execution_prefix, executable, "-m", *module_argv)
+        if not dry_run and "--resume-execution" in run_arguments:
+            self._verify_recovery_binding_runtime(
+                transport or self.factory.transport(profile),
+                executable,
+                library_policy=library_policy,
+            )
+        from lambdaforge.controlplane.ToolRuntimeService import ToolRuntimeService
+        from lambdaforge.controlplane.ToolRuntimeSpecification import ToolRuntimeSpecification
+
+        tool_specs = ToolRuntimeSpecification.discover(project)
+        tool_bindings: tuple[dict[str, Any], ...] = ()
+        if tool_specs and not dry_run:
+            expected = json.loads(bundle.manifest_path.read_text()).get("tool_runtime_declarations")
+            if expected != [spec.descriptor() for spec in tool_specs]:
+                raise ValueError(
+                    "Tool declarations/code changed after bundle validation; retry preparation."
+                )
+            notify("tool-runtimes")
+            transport = transport or self.factory.transport(profile)
+            tool_service = ToolRuntimeService(self.runtime_resolver)
+            tool_bindings = tool_service.prepare(tool_specs, profile, transport, retain=preparation)
+            if expected != [spec.descriptor() for spec in tool_specs]:
+                raise ValueError(
+                    "Tool source changed during preparation; "
+                    "no scientific computation was launched."
+                )
+            reserved_job_id = reserved_job_id or JobService.new_id()
+            binding_path = tool_service.bind_job(profile, transport, reserved_job_id, tool_bindings)
+            command = ("env", f"LAMBDAFORGE_TOOL_RUNTIMES_PATH={binding_path}", *command)
         if request.gpu_count > 0 and gpu_mode == "command":
             command = profile.gpu_access.wrap(command)
         environment_id = bundle.environment_id or "existing"
@@ -477,9 +575,9 @@ class ControlPlane:
             except (KeyError, FileNotFoundError):
                 pass  # Existing internal prepared callers may reserve only at provider submit.
             else:
-                retained = (reservation.metadata.get("study_extension", {}).get(
-                    "retained_runtime"
-                ) or {})
+                retained = (
+                    reservation.metadata.get("study_extension", {}).get("retained_runtime") or {}
+                )
                 if retained:
                     if entrypoint_builder is None or executable != retained.get("python"):
                         raise ValueError("Retained extension runtime was not prepared/verified.")
@@ -497,6 +595,10 @@ class ControlPlane:
                 metadata={
                     "bundle_size_bytes": bundle.size_bytes,
                     "environment_id": environment_id,
+                    "dependency_resolution_id": dependency_resolution_id,
+                    "native_library_policy": library_policy.to_dict() if library_policy else None,
+                    "native_libraries": library_evidence,
+                    **({"tool_runtimes": tool_bindings} if tool_bindings else {}),
                     **descriptor.metadata(),
                     "execution_identity": f"{cluster}:{bundle.bundle_id}",
                     "remote_config_path": config,
@@ -773,6 +875,32 @@ except Exception as error:
                     product.scientific_meaning[key]
                 ):
                     raise ValueError(f"Remote product scientific expectation differs for {key!r}.")
+
+    @staticmethod
+    def _verify_recovery_binding_runtime(
+        transport: Transport, python: str, *, library_policy: NativeLibraryPolicy | None = None
+    ) -> None:
+        """A new preview helper must never attest an obsolete recovery worker implementation."""
+        from lambdaforge.work.staged_input_identity import RECOVERY_BINDING_CONTRACT
+
+        result = transport.run(
+            (
+                *(library_policy.launch_prefix(python) if library_policy else ()),
+                python,
+                "-c",
+                "from lambdaforge.work.staged_input_identity import RECOVERY_BINDING_CONTRACT; "
+                "print(RECOVERY_BINDING_CONTRACT)",
+            ),
+            timeout=20,
+        )
+        if result.returncode or result.stdout.strip() != RECOVERY_BINDING_CONTRACT:
+            raise ValueError(
+                "Recovery worker runtime lacks bounded-role-chain-v2; inspection is read-only "
+                "and may use a newer controller helper. Prepare/bootstrap an updated managed LF "
+                "runtime before retry; do not patch historical environments "
+                "or change scientific YAML. "
+                "No scientific recovery Job was launched."
+            )
 
     @staticmethod
     def _project_root(start: Path) -> Path | None:

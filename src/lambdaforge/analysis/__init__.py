@@ -7,14 +7,15 @@ from lambdaforge.LazyExports import LazyExports
 if TYPE_CHECKING:
     from lambdaforge.analysis.AnalysisProfile import AnalysisProfile
     from lambdaforge.analysis.MetricCatalog import MetricCatalog
+    from lambdaforge.analysis.ObservedStudyChart import ObservedStudyChart
     from lambdaforge.analysis.StudyAnalysis import StudyAnalysis
 
 LazyExports.install(
     __name__,
     {
         name: (f"lambdaforge.analysis.{name}", name)
-        for name in ("AnalysisProfile", "MetricCatalog", "StudyAnalysis")
+        for name in ("AnalysisProfile", "MetricCatalog", "ObservedStudyChart", "StudyAnalysis")
     },
 )
 
-__all__ = ["AnalysisProfile", "MetricCatalog", "StudyAnalysis"]
+__all__ = ["AnalysisProfile", "MetricCatalog", "ObservedStudyChart", "StudyAnalysis"]

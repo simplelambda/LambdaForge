@@ -120,9 +120,12 @@ from lambdaforge.work.recovery import (
     latest_outcomes,
     read_owned_json,
     restore_seed_context,
+    sequential_execution,
+    sequential_inventory,
     validate_execution,
     validate_recovery_configuration,
 )
+from lambdaforge.work.recovery_dependencies import recovery_dependency_preview, recovery_namespaces
 from lambdaforge.work.retention import compact_attempt
 from lambdaforge.work.runtime import WorkRuntime
 from lambdaforge.work.state import StudyState, execution_evidence
@@ -351,12 +354,6 @@ class WorkRunner:
             )
         manifest: Mapping[str, Any] | None = None
         if resume_execution is not None:
-            if (
-                len(config.levels) != 1
-                or len(config.levels[0].runs) != 1
-                or not config.levels[0].runs[0].study_expected
-            ):
-                raise ValueError("Study recovery requires one Study, not a composed Work.")
             if rerun or restart:
                 raise ValueError("Study recovery cannot be combined with --rerun or --restart.")
             execution_dir = Path(resume_execution).expanduser().absolute()
@@ -366,9 +363,28 @@ class WorkRunner:
             raise ValueError("Recovery options require an existing Study execution.")
         plan = self.plan(config, rerun=rerun)
         if manifest is not None:
-            if config.levels[0].runs[0].search_policy is None:
+            cache_root = Path(
+                os.environ.get(
+                    "LAMBDAFORGE_CACHE_ROOT",
+                    self._project_root(plan.source.parent) / ".lambdaforge/cache",
+                )
+            )
+            dependencies = recovery_dependency_preview(execution_dir, cache_root)
+            if dependencies["unavailable_observed"]:
+                raise ValueError(
+                    f"Missing original recovery input: {dependencies['unavailable_observed']} "
+                    "observed/legacy dependencies are unavailable. Inspect lf jobs "
+                    "recovery-dependencies; restore exact bytes or start a new acquisition."
+                )
+            if sequential_execution(manifest):
+                _validate_sequential_recovery(config, execution_dir, manifest)
+            elif config.levels[0].runs[0].search_policy is None:
                 _validate_fixed_recovery(
-                    config.levels[0].runs[0], plan.source, execution_dir, manifest
+                    config.levels[0].runs[0],
+                    plan.source,
+                    execution_dir,
+                    manifest,
+                    bindings=config.recovery_file_bindings.get(config.levels[0].runs[0].name, {}),
                 )
             validate_recovery_configuration(config, manifest)
             previous_identity = manifest.get("scientific_fingerprint")
@@ -429,6 +445,10 @@ class WorkRunner:
                 self._compact_outcomes(prior_execution.runs)
                 return prior_execution
         execution_dir.mkdir(parents=True, exist_ok=True)
+        if recovering:
+            origin = read_owned_json(execution_dir / "execution.json")
+            if sequential_execution(origin):
+                _validate_sequential_recovery(config, execution_dir, origin)
         atomic_json(
             execution_dir / "current-code.json",
             {
@@ -447,6 +467,7 @@ class WorkRunner:
                             "scientific_fingerprint": plan.scientific_fingerprint,
                             "code_identity": _code_identity(self._project_root(plan.source.parent)),
                             "compatible_evidence_reuse": True,
+                            "effective_resources": config.resources.to_dict(),
                         },
                         sort_keys=True,
                     )
@@ -609,6 +630,9 @@ class WorkRunner:
                             "source": plan.source,
                             "restart": restart,
                             "study_recovery": recovering,
+                            "recovery_file_bindings": config.recovery_file_bindings.get(
+                                definition.name, {}
+                            ),
                         }
                     )
                 groups.append(specifications)
@@ -1144,7 +1168,11 @@ class WorkRunner:
                     {
                         "name": definition.name,
                         "work_class": definition.work_class,
-                        "parameters": _identity_values(definition.parameters, source_dir),
+                        "parameters": _identity_values(
+                            definition.parameters,
+                            source_dir,
+                            bindings=config.recovery_file_bindings.get(definition.name, {}),
+                        ),
                         "seeds": definition.seeds,
                         "variants": [dict(variant) for variant in definition.variants],
                         "objective": dict(definition.objective or {}),
@@ -1238,6 +1266,44 @@ def _execute_group(
             )
     if dispatcher is not None:
         raise ValueError("External execution requires a normalized Study design.")
+    if specifications and specifications[0].get("study_recovery"):
+        execution_dir = Path(specifications[0]["execution_dir"])
+        manifest = read_owned_json(execution_dir / "execution.json")
+        if sequential_execution(manifest):
+            inventory = sequential_inventory(execution_dir, manifest)
+            prior = inventory["latest"].get(specifications[0]["definition"]["name"])
+            if prior is None:
+                return (_execute_run(specifications[0]),)
+            previous = tuple(
+                _work_result_from_mapping(a)
+                for a in inventory["attempts"]
+                if a["name"] == prior["name"] and a["status"] != "interrupted"
+            )
+            if prior["status"] == "succeeded":
+                return previous
+            spec = {
+                **specifications[0],
+                "recovery_run_id": prior["run_id"],
+                "recovery_checkpoint_root": str(
+                    execution_dir / "runs" / prior["run_id"] / "checkpoints"
+                ),
+            }
+            return (*previous, _execute_run(spec))
+        inventory = fixed_inventory(execution_dir)
+        if inventory["design"]["type"] != "single" or len(specifications) != 1:
+            raise ValueError("Single Work recovery requires its original single Run.")
+        prior = inventory["latest"][(1, None)]
+        previous = (_work_result_from_mapping(prior),) if prior["status"] != "interrupted" else ()
+        if prior["status"] == "succeeded":
+            return previous
+        spec = {
+            **specifications[0],
+            "recovery_run_id": prior["run_id"],
+            "recovery_checkpoint_root": str(
+                execution_dir / "runs" / prior["run_id"] / "checkpoints"
+            ),
+        }
+        return (*previous, _execute_run(spec))
     definition = specifications[0]["definition"] if specifications else {}
     telemetry = (
         StudyTelemetry.from_environment() if definition.get("study_expected") is True else None
@@ -1269,14 +1335,62 @@ def _execute_group(
     return tuple(outcomes)
 
 
+def _validate_sequential_recovery(
+    config: WorkConfig, execution_dir: Path, manifest: Mapping[str, Any]
+) -> None:
+    """Verify available resolved inputs and exact predecessor artifacts before any write."""
+    inventory = sequential_inventory(execution_dir, manifest)
+    outputs: dict[str, Mapping[str, Any]] = {}
+    for level in config.levels:
+        definition = level.runs[0]
+        prior = inventory["latest"].get(definition.name)
+        if prior is None:
+            break
+        parameters = WorkRunner._resolve_references(definition.parameters, outputs)
+        source = WorkRunner._source(config)
+        _values, _inputs, identity = _resolve_inputs(
+            parameters,
+            source.parent,
+            bindings=config.recovery_file_bindings.get(definition.name, {}),
+        )
+        if identity != prior.get("parameters"):
+            raise ValueError(f"Recovery step {definition.name}: exact input/parameter mismatch.")
+        if prior["status"] != "succeeded":
+            break
+        result = _work_result_from_mapping(prior)
+        restored = dict(result.outputs)
+        for artifact in result.artifacts:
+            path = result.run_dir / artifact.path
+            if fingerprint(path) != (artifact.sha256, artifact.size_bytes):
+                raise ValueError(
+                    f"Recovery step {definition.name}: corrupt output {artifact.name}."
+                )
+            restored[artifact.name] = {"file": str(path)}
+        for name, record in result.datasets.items():
+            typed = {"dataset": f"{record['name']}@{record['version']}"}
+            _v, inputs, _i = _resolve_inputs({name: typed}, source.parent)
+            if inputs[name].content_id != record.get("dataset_id"):
+                raise ValueError(
+                    f"Recovery step {definition.name}: dataset output identity changed."
+                )
+            restored[name] = typed
+        outputs[definition.name] = restored
+
+
 def _validate_fixed_recovery(
     definition: RunDefinition,
     source: Path,
     execution_dir: Path,
     manifest: Mapping[str, Any],
+    *,
+    bindings: Mapping[str, Any] | None = None,
 ) -> None:
     """Validate per-cell identities before dry-run returns or recovery writes its audit."""
     inventory = fixed_inventory(execution_dir, manifest=manifest)
+    if inventory["design"]["type"] == "single":
+        from lambdaforge.work.recovery import checkpoint_collection_preview
+
+        checkpoint_collection_preview(execution_dir, inventory["latest"][(1, None)]["run_id"])
     variants = {trial: variant for trial, variant, _seed in WorkRunner._expanded(definition)}
     for requirement in inventory["requirements"]:
         trial, seed = int(requirement["candidate"]), requirement.get("seed")
@@ -1287,7 +1401,9 @@ def _validate_fixed_recovery(
         if prior is None:
             continue
         _parameters, inputs, identity_parameters = _resolve_inputs(
-            {**definition.parameters, **variant}, source.parent
+            {**definition.parameters, **variant},
+            source.parent,
+            bindings=bindings,
         )
         identity = ScientificIdentity.from_payload(
             {
@@ -1457,7 +1573,9 @@ def _execute_fixed_evidence_group(
         origin = read_owned_json(Path(specifications[0]["execution_dir"]) / "execution.json")
         for value in tuple(prepared):
             _params, inputs, identity_parameters = _resolve_inputs(
-                value["parameters"], Path(value["source"]).parent
+                value["parameters"],
+                Path(value["source"]).parent,
+                bindings=value.get("recovery_file_bindings"),
             )
             fingerprint = ScientificIdentity.from_payload(
                 {
@@ -1936,7 +2054,9 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
     execution_dir = Path(specification["execution_dir"])
     project_root = WorkRunner._project_root(source.parent)
     parameters, inputs, identity_parameters = _resolve_inputs(
-        specification["parameters"], source.parent
+        specification["parameters"],
+        source.parent,
+        bindings=specification.get("recovery_file_bindings"),
     )
     seed = specification["seed"]
     trial_index = int(specification["trial_index"])
@@ -2002,6 +2122,8 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         run_dir / "request.json",
         {
             "execution_id": str(specification["execution_id"]),
+            "name": definition.name,
+            "work_class": definition.work_class,
             "run_id": run_id,
             "attempt_id": attempt_id,
             "attempt_number": attempt_number,
@@ -2076,6 +2198,16 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
             / "work"
             / identity.removeprefix("sha256:"),
             hold_gc_lease=True,
+            recovery_roots=tuple(
+                Path(os.environ.get("LAMBDAFORGE_CACHE_ROOT", project_root / ".lambdaforge/cache"))
+                / "work"
+                / namespace
+                for namespace in recovery_namespaces(run_root)
+            )
+            if specification.get("study_recovery")
+            else (),
+            recovering=bool(specification.get("study_recovery")),
+            dependency_root=checkpoint_root,
         ),
         seed,
         trial,
@@ -2086,8 +2218,17 @@ def _execute_run_inner(specification: Mapping[str, Any]) -> WorkResult:
         run_id,
         attempt_id,
         WorkPathContext.load(source),
+        code_identity=code_identity,
     )
     training_metrics_path = run_dir / "training-metrics.jsonl"
+    atomic_json(
+        run_dir / "cache-namespace.json",
+        {
+            "execution_id": str(specification["execution_id"]),
+            "run_id": run_id,
+            "cache_namespace": identity.removeprefix("sha256:"),
+        },
+    )
     telemetry = StudyTelemetry.from_environment() if definition.study_expected else None
     if telemetry is not None:
         telemetry.run_started(
@@ -5743,7 +5884,9 @@ def _controller_failure_result(
         # Even a worker lost before returning must retain the normal scientific Run ID.
         source = Path(specification["source"])
         _parameters, inputs, recorded_parameters = _resolve_inputs(
-            specification["parameters"], source.parent
+            specification["parameters"],
+            source.parent,
+            bindings=specification.get("recovery_file_bindings"),
         )
         identity = ScientificIdentity.from_payload(
             {
@@ -6796,6 +6939,7 @@ def _execute_gpu_admitted_runs(
                 f"safe_headroom={_memory_text(device.predicted_headroom_bytes)} "
                 f"provisional_headroom={_memory_text(device.provisional_headroom_bytes)} "
                 f"active={len(device.active)}/{device.run_cap} "
+                f"unmaterialized={sum(item.running_peak_bytes == 0 for item in device.active)} "
                 "states="
                 f"{'+'.join(item.resource_state.lower() for item in device.active) or 'idle'}"
                 for device in devices
@@ -7714,6 +7858,7 @@ def _gpu_process_memory(
 ) -> tuple[dict[Any, int], ResourceEvidenceQuality]:
     """Attribute NVML physical VRAM to registered worker process trees when available."""
     pid_owner: dict[int, Any] = {}
+    owner_birth: dict[Any, float] = {}
     for future, snapshot in snapshots.items():
         pid = snapshot.get("pid")
         if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
@@ -7722,6 +7867,7 @@ def _gpu_process_memory(
                     continue
             except Exception:
                 continue
+            owner_birth[future] = float(snapshot["create_time"])
             for child in _descendant_pids(pid):
                 pid_owner[child] = future
     if not pid_owner:
@@ -7736,22 +7882,54 @@ def _gpu_process_memory(
         return {}, "unavailable"
     usage: dict[Any, int] = {}
     physical: dict[tuple[str, int, Any], int] = {}
-    for device in snapshot.get("devices", ()):
+    uncertain: set[Any] = set()
+    devices = snapshot.get("devices", ())
+    complete = bool(devices) and all(
+        device.get("quality") == "measured"
+        and device.get("process_inventory_complete") is True
+        and type(device.get("compute_process_count")) is int
+        and device["compute_process_count"] >= len(device.get("processes", ()))
+        for device in devices
+    )
+    for device in devices:
         for observed in device.get("processes", ()):
             owner = pid_owner.get(observed.get("pid"))
+            if owner is not None and type(observed.get("used_bytes")) is not int:
+                uncertain.add(owner)
             if owner is not None and type(observed.get("used_bytes")) is int:
                 try:
                     if (
                         __import__("psutil").Process(observed["pid"]).create_time()
                         != observed["create_time"]
                     ):
+                        uncertain.add(owner)
                         continue
                 except Exception:
+                    uncertain.add(owner)
                     continue
                 key = (str(device.get("parent_uuid") or device.get("uuid")), observed["pid"], owner)
                 physical[key] = max(physical.get(key, 0), observed["used_bytes"])
     for (_device, _pid, owner), amount in physical.items():
         usage[owner] = usage.get(owner, 0) + amount
+    for owner in uncertain:
+        usage.pop(owner, None)
+    if complete:
+        # Absence in a complete, fresh owned-process inventory is observed zero, not missing
+        # attribution. In particular, CPU-only Work initialization must not inherit driver-
+        # reserved or external VRAM through the conservative aggregate fallback below.
+        for owner in set(pid_owner.values()) - uncertain:
+            evidence = snapshots[owner]
+            observed_at = snapshot.get("observed_at")
+            if (
+                isinstance(observed_at, int | float)
+                and not isinstance(observed_at, bool)
+                and observed_at >= owner_birth[owner]
+                and not any(
+                    (_optional_int(evidence.get(key)) or 0) > 0
+                    for key in ("cuda_allocated_bytes", "cuda_reserved_bytes")
+                )
+            ):
+                usage.setdefault(owner, 0)
     return usage, "nvml-process-exact" if usage else "unavailable"
 
 
@@ -7766,6 +7944,17 @@ def _update_active_resource_commitments(
     now: float,
 ) -> tuple[ActiveResourceEvidence, ...]:
     """Incrementally update active future envelopes from bounded physical observations."""
+    # Trajectories own live inference. Only independent recorded outcomes may supply their
+    # historical residual prior: model.active_evidence contains these same trajectories'
+    # previous posteriors. Feeding that forecast back as history manufactures evidence at
+    # every poll, changes tail weights without progress, and propagates an unmaterialized
+    # worker's full-device prior through otherwise measured residents. The placement model
+    # still consumes the freshly produced live evidence below, once, across sibling GPUs.
+    historical_model = ResourceDemandModel(
+        model.observations,
+        placement_failures=model.placement_failures,
+        parameter_schema=model.parameter_schema,
+    )
     snapshots = {
         future: _read_live_resource_snapshot(value) for future, (value, _, _) in pending.items()
     }
@@ -7899,7 +8088,7 @@ def _update_active_resource_commitments(
                     ),
                 )
             )
-            prediction = model.predict(
+            prediction = historical_model.predict(
                 candidate_key=str(details.get("candidate_key", "")),
                 compatibility_key=str(details.get("compatibility_key", "")),
                 parameters=dict(specification.get("trial_parameters", {})),
@@ -7927,10 +8116,17 @@ def _update_active_resource_commitments(
             )
             analysis = ResourceTrajectoryAnalyzer.analyze(
                 trajectory.values,
-                historical_residuals=prediction.future_residual_samples,
+                historical_residuals=(
+                    prediction.future_residual_samples
+                    if prediction.compatible_history_count
+                    else ()
+                ),
+                historical_residual_weights=(
+                    prediction.sample_weights if prediction.compatible_history_count else ()
+                ),
                 total_bytes=total,
                 trajectory_statistics=trajectory.statistics,
-                phase_model=model.phase_model(
+                phase_model=historical_model.phase_model(
                     str(details.get("compatibility_key", "")),
                     str(details.get("hardware", f"cuda-vram-{total}")),
                 ),
@@ -8651,6 +8847,29 @@ def _resource_admission_diagnostics(
             return "awaiting a scientifically useful admissible frontier action"
         return "no pending scientific action is currently available"
 
+    def capacity_wait_reason(device: GPUResourceState) -> str | None:
+        if not pending or any(
+            getattr(value, "target_gpu", None) == device.index for value in admitted
+        ):
+            return None
+        launch_wait = next((row for row in launch_waits if row.get("gpu") == device.index), None)
+        if launch_wait is not None:
+            return str(launch_wait["reason"])
+        evaluation = next(
+            (value for value in exploration_evaluations if value.gpu == device.index), None
+        )
+        if evaluation is not None:
+            return evaluation.rejection_reason
+        return next(
+            (
+                str(note["reason"])
+                for decision in blocked
+                for note in getattr(decision, "devices", ())
+                if note.get("gpu") == device.index and note.get("reason") is not None
+            ),
+            idle_reason(device),
+        )
+
     waiting = {(row.get("candidate"), row.get("gpu")) for row in launch_waits}
     launchable = any(
         (getattr(item, "candidate_key", None), getattr(item, "target_gpu", None)) not in waiting
@@ -8727,6 +8946,12 @@ def _resource_admission_diagnostics(
                 "provisional_headroom_bytes": value.provisional_headroom_bytes,
                 "admission_headroom_bytes": value.admission_headroom_bytes,
                 "active_runs": len(value.active),
+                # A submitted Run may spend substantial time inside consumer initialization
+                # before allocating CUDA. Do not present that as a busy GPU or a free slot:
+                # the pending native worker and its future demand still belong to admission.
+                "unmaterialized_runs": sum(item.running_peak_bytes == 0 for item in value.active),
+                "materialized_runs": sum(item.running_peak_bytes > 0 for item in value.active),
+                "capacity_wait_reason": capacity_wait_reason(value),
                 "runs_per_gpu": value.run_cap,
                 "role": (
                     "packing-probe"
@@ -8744,6 +8969,7 @@ def _resource_admission_diagnostics(
                         "trial": item.trial,
                         "seed": item.seed,
                         "current_bytes": item.current_bytes,
+                        "elapsed_seconds": item.elapsed_seconds,
                         "running_peak_bytes": item.running_peak_bytes,
                         "future_commitment_bytes": item.commitment_bytes,
                         "future_peak_samples": list(item.future_peak_samples),
@@ -10153,7 +10379,7 @@ def _scoped_environment(values: Mapping[str, str]) -> Any:
 
 
 def _resolve_inputs(
-    value: Mapping[str, Any], source_dir: Path
+    value: Mapping[str, Any], source_dir: Path, *, bindings: Mapping[str, Any] | None = None
 ) -> tuple[dict[str, Any], dict[str, WorkInput], dict[str, Any]]:
     inputs: dict[str, WorkInput] = {}
 
@@ -10183,7 +10409,7 @@ def _resolve_inputs(
                 configured = str(item["file"])
                 path = Path(configured)
                 path = path.resolve() if path.is_absolute() else (source_dir / path).resolve()
-                digest, size = _path_fingerprint(path)
+                digest, size = _bound_path_fingerprint(path, (bindings or {}).get(name), name)
                 record = WorkInput(name, "file", configured, path, digest, size_bytes=size)
                 inputs[name] = record
                 return path, {"file": {"sha256": digest, "size_bytes": size}}
@@ -10233,7 +10459,9 @@ def _resolve_inputs(
     return parameters, inputs, identities
 
 
-def _identity_values(value: Any, source_dir: Path) -> Any:
+def _identity_values(
+    value: Any, source_dir: Path, *, bindings: Mapping[str, Any] | None = None, role: str = ""
+) -> Any:
     """Resolve typed input identity while retaining output references as logical values."""
     if isinstance(value, Mapping):
         if set(value) == {"result"}:
@@ -10250,7 +10478,7 @@ def _identity_values(value: Any, source_dir: Path) -> Any:
             configured = str(value["file"])
             path = Path(configured)
             path = path.resolve() if path.is_absolute() else (source_dir / path).resolve()
-            digest, size = _path_fingerprint(path)
+            digest, size = _bound_path_fingerprint(path, (bindings or {}).get(role), role)
             return {"file": {"sha256": digest, "size_bytes": size}}
         if set(value) == {"dataset"}:
             configured = str(value["dataset"])
@@ -10264,10 +10492,28 @@ def _identity_values(value: Any, source_dir: Path) -> Any:
                 "dataset": record.key,
                 "content_id": record.dataset_id,
             }
-        return {str(key): _identity_values(item, source_dir) for key, item in value.items()}
+        return {
+            str(key): _identity_values(
+                item, source_dir, bindings=bindings, role=f"{role}.{key}" if role else str(key)
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, list | tuple):
-        return [_identity_values(item, source_dir) for item in value]
+        return [
+            _identity_values(item, source_dir, bindings=bindings, role=f"{role}[{index}]")
+            for index, item in enumerate(value)
+        ]
     return value
+
+
+def _bound_path_fingerprint(
+    path: Path, binding: Mapping[str, Any] | None, role: str
+) -> tuple[str, int]:
+    if binding is None:
+        return _path_fingerprint(path)
+    from lambdaforge.work.staged_input_identity import bound_file_identity
+
+    return bound_file_identity(path, binding, role)
 
 
 def _path_fingerprint(path: Path) -> tuple[str, int]:

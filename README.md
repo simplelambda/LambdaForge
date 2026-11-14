@@ -112,7 +112,19 @@ with that prefix's Python, verifies the tools and records package/build/channel 
 `self.tools.require("mmseqs", version_args=["version"])` only verifies/resolves the prepared tool;
 it never installs software during scientific execution. See the manual for exact offline locks.
 
+For conflicting **Python scientific dependencies**, declare independent
+`[tool.lambdaforge.tool_runtimes.NAME]` tables and use `self.tools.runtime(NAME)`; the same bootstrap
+prepares them without installing LF/consumer dependencies inside them. See
+[isolated tools](docs/MANUAL.md#45-external-tools) and the reviewed CPU SLAE declaration in
+[isolated_tools.toml](examples/isolated_tools.toml). Scientific adapters remain consumer code.
+
 ## First Work
+
+For overnight sequential execution, use `lf run experiments/a.yaml --on gpu --queue`, then enqueue
+B/C the same way. Inspect with `lf queue --on gpu`, or choose **Queue after earlier Jobs** in
+**Run Work**. Prepared Jobs advance on the cluster without an open Console; keep the controller
+online until preparation reaches provider `queued`/`running`. See
+[sequential execution queues](docs/MANUAL.md#guide-execution-queues).
 
 Working on several projects? Run `lf` inside each project's directory (or a subdirectory).
 `lf project --json` shows the selected root and ID. Virtual environments choose Python dependencies;

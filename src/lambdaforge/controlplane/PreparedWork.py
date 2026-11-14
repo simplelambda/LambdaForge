@@ -12,7 +12,8 @@ class PreparedWork:
     """The same bundle/environment/workspace prepared by ordinary ControlPlane submission.
 
     An internal entrypoint builder returns only module argv. ControlPlane retains interpreter,
-    TLS/environment assignments and site GPU wrapping, so a shard cannot bypass those policies.
+    TLS/environment assignments, native loader selection and site GPU wrapping, so a shard
+    cannot bypass those policies.
     This object is not exposed to consumer Work code.
     """
 

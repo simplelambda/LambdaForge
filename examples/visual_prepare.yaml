@@ -1,0 +1,5 @@
+name: prepare-visual
+run: visual_research.PrepareSamples
+with:
+  raw: {file: raw}
+resources: {cpu: 1}

@@ -6,12 +6,15 @@ This is the single public framework manual; detailed guides are chapters here. I
 
 ## Contents
 
+- [Scientific authoring: contracts, samples and ETL](#guide-scientific-authoring)
+  - [Incremental tables, SQL and preview effects](#guide-tabular-connectors)
 - [1. Mental model](#1-mental-model)
 - [2. Installation and project layout](#2-installation-and-project-layout)
 - [3. Work API](#3-work-api)
 - [4. Managed files, cache, map, outputs and tools](#4-managed-files-cache-map-outputs-and-tools)
   - [4.1 Storage meanings](#41-storage-meanings)
   - [4.2 ManagedFile and cache](#42-managedfile-and-cache)
+  - [Shared scientific dataset validation](#guide-dataset-validation-cache)
   - [4.3 Plain and resumable map](#43-plain-and-resumable-map)
   - [4.4 Outputs and checkpoints](#44-outputs-and-checkpoints)
   - [4.5 External tools](#45-external-tools)
@@ -32,10 +35,12 @@ This is the single public framework manual; detailed guides are chapters here. I
   - [Recover an interrupted Study](#recover-an-interrupted-study)
 - [9. Results and metadata](#9-results-and-metadata)
 - [10. Clusters and jobs](#10-clusters-and-jobs)
+  - [Sequential execution queues](#guide-execution-queues)
   - [Project-declared native packages](#project-declared-native-packages)
 - [11. Cleanup and safety](#11-cleanup-and-safety)
 - [12. CLI reference](#12-cli-reference)
 - [13. Clustering](#13-clustering)
+  - [Precomputed dissimilarities](#precomputed-dissimilarities)
 - [14. Reusable neural components](#14-reusable-neural-components)
 - [15. Architecture and extension boundaries](#15-architecture-and-extension-boundaries)
 - [16. Study Analysis](#16-study-analysis)
@@ -97,6 +102,7 @@ This is the single public framework manual; detailed guides are chapters here. I
   - [What collection can remove](#guide-storage-what-collection-can-remove)
   - [Checkpoints and publication](#guide-storage-checkpoints-and-publication)
   - [Current boundaries](#guide-storage-current-boundaries)
+  - [Dependency reuse and reference repair](#guide-storage-environment-layers)
 - [27. Full-resolution managed project report tabs](#guide-managed-reports)
   - [Browser API and lifecycle](#guide-managed-reports-browser-api-and-lifecycle)
   - [Native remote and offline viewing](#guide-managed-reports-native-remote-and-offline-viewing)
@@ -146,6 +152,9 @@ This is the single public framework manual; detailed guides are chapters here. I
   - [Optional dependencies and paired HTTP](#guide-integration-optional-dependencies-and-paired-http)
   - [Portable knowledge](#guide-integration-portable-knowledge)
   - [Python, GUI and sync](#guide-integration-python-gui-and-sync)
+- [34. Graph topology and independent-control calibration](#guide-graph-science)
+  - [Bounded and resumable FGW matrices](#fgw-blocks)
+  - [Real FGW barycenters and relational structures](#fgw-barycenters)
 
 [Work results guide](#guide-work-results) covers ordinary Work evidence,
 reports, exact historical dependencies and explicit compressed materialization. These reuse the runner,
@@ -349,10 +358,110 @@ instance; it is not a distributed rate limit across Jobs. The cache is identity-
 reconstructible. `lf clean` previews each Work cache identity, and `--apply` removes it only after
 obtaining an exclusive GC lock; a running Work holds the corresponding shared lease.
 
+**Recovery dependencies and external observations.** A retained Run's resumable maps and
+observed-input receipts protect its recorded cache namespaces across failure, cancellation and
+accepted code revisions, not just while its process lease is live. Protection is currently at
+Work-cache namespace granularity, not individual unused-file reclamation. GC reports
+`protected_bytes`, `reference_chains` and `retained-recovery-dependency`; unresolved pressure is
+reported, never fixed by deleting those inputs. Deleting exact owning history releases references
+only when native recovery dependents permit it. Failed mapped Works retain Attempt artifacts for
+potential exact recovery. Unreferenced caches remain collectible.
+
+`fetch` inside a managed Work also records an observed source's exact digest and hashed request
+contract under its original Run. Reuse validates exact bytes; missing observations fail rather
+than querying the same URL for potentially newer content. Durable scientific acquisitions should
+still be sealed through public `checkpoints.file`, with a first-observation/digest receipt owned
+by the project. Cache is not a substitute for that acquisition contract. Compatible-code approval
+permits namespace lookup by recorded digest, not arbitrary scientific equivalence.
+
+Use explicit ManagedFile inputs/outputs in `resume_map`: input references are retained even with
+`executor="process"`. Thread callbacks also collect touched cache dependencies; subprocess-hidden
+I/O is not magically observable and must return/pass explicit managed references. Declare relevant
+equations/settings with `scientific_policy={...}`; its identity is checked on restore. Exclude
+thread count/log frequency from that scientific policy. Legacy PDB-ID-only results with no source
+dependency do not prove coordinate compatibility: migrate exact original sources or require a new
+acquisition, never mix them with newly queried coordinates. Logs distinguish restored entries and
+rebuild/cache misses; blocked missing observations report their expected digest.
+
+`Retry-After` seconds and HTTP dates now establish a filesystem-shared service cooldown across
+threads and processes using the same cache volume (default scope: HTTP origin). This is distinct
+from the instance-local pacing limiter. Other hosts without shared storage are not coordinated.
+For providers with JSON hints, explicitly pass
+`cooldown_policy=HttpCooldownPolicy(json_field="retryAfter")` from `lambdaforge.work`; optional
+`cooldown_scope="provider-service"` groups endpoint origins when appropriate. Cooldown applies even
+if the triggering request exhausts its retries. Waiting checks cancellation between short sleeps;
+in-flight network reads remain bounded by timeout. Permanent errors still fail; no empty fallback.
+
+Inspect legacy retained input dependencies without scientific computation:
+
+```sh
+lf jobs recovery-dependencies JOB --json --limit 100
+# Explicit bytes-only repair from owned Attempt artifact candidates, after review:
+lf jobs recovery-dependencies JOB --apply --json
+```
+
+The plan separates present/unverified, copy candidates, unavailable and source-unbound records.
+It reads metadata, not large input payloads. Size-only artifact candidates are NOT verified sources;
+apply checks their exact historical fingerprint using the original logical basename, then copies
+atomically into the owned cache under controller/key/GC locks. No symlinks, checkpoint relocation,
+network replay or science are involved. Apply requires a current managed runtime. Missing bytes
+remain unavailable: LF cannot recover deleted observations from a URL or counts alone. The same
+services are `recovery_dependency_preview` and `repair_recovery_dependencies` in `lambdaforge.work`.
+
 The dataset cache remains a different specialization: `DatasetCache` stores serialized map-style
 samples through memory/disk backends and codecs. Work cache reuses the common
 `CrossProcessFileLock`, atomic/fingerprint conventions and storage ownership, but cannot reuse the
 dataset record envelope as a normal path-like scientific file.
+
+<a id="guide-dataset-validation-cache"></a>
+
+#### Shared scientific dataset validation
+
+`self.cache` includes the Run identity/seed. For expensive, seed-independent checks of a published
+dataset, use a separate shared validation receipt inside `Work.run`:
+
+```python
+# The project supplies validate_structural_assets(root: Path).
+receipt = self.validate_dataset(
+    "dataset",  # exact typed input in self.inputs
+    validator=validate_structural_assets,
+    contract="myproject.structural-assets",
+    version="1",
+    parameters={"families": selected_families},
+)
+# Bind lightweight loaders, without invoking the deep validator again.
+```
+
+The callback raises or returns `False` on rejection, `True`/`None` on success. It validates
+declared immutable content only: no fitting normalization, seed-dependent state, dataset mutation
+or unpinned external inputs. Include all rule-dependent settings in `parameters`, and version
+the contract when relevant external dependencies change. Keys include native consumer code,
+exact content ID, placement, contract/version/settings and runtime, not seeds/trial labels.
+Unknown/unversioned code is rejected. Conservative code/runtime changes invalidate reuse.
+
+First use verifies exact bytes through native DatasetOperations and calls the project validator.
+Concurrent callers share a lock. Reuse (`receipt["reused"]`) inventories filesystem metadata only:
+device/inode/type/size/mtime/ctime. Changed or replaced files/indexes/placements require exact
+verification and scientific validation again. Corruption fails; it is not accepted as a new
+identity. `force=True` deliberately revalidates bytes and science. Failures or changes during the
+check publish no success. Corrupt receipts fail closed; force may reconstruct this disposable
+cache, never overwrite dataset content. `timeout_seconds=3600` bounds each lock wait; Work logs
+report waiting and reuse/validation. Native Work-cache leases protect active validation from GC.
+Cleaning receipts only forces another validation; they are not checkpoints or scientific results.
+
+Support: POSIX, local checksummed DatasetArtifact v2 directories, at most 200,000 entries; no
+external URI assets. This is a trusted local cache under ordinary filesystem change semantics,
+not cryptographic proof against hostile metadata replay or a filesystem concealing changes.
+No global `ignore_hash`: explicit `datasets verify`, publication and transport remain exact.
+The public `lambdaforge.data.DatasetValidationCache` service also accepts an explicit native
+`implementation` code-identity mapping for standalone callers.
+
+**Consumer adoption:** LF cannot intercept arbitrary project Python calls. WISDOM must move its
+deep `StructuralSidecars.validate_assets` / graph reconstruction into the callback, then bind
+already validated assets with lightweight checks. Keeping the original repeated deep calls
+alongside the new API saves nothing. Existing remote runtimes/Studies are not upgraded in place.
+The first check can still be long; prepare it before GPU use when possible, never simulate GPU
+activity to keep a reservation.
 
 ### 4.3 Plain and resumable map
 
@@ -485,6 +594,104 @@ environment overrides are also child-scoped. Tools actually required/executed an
 results are written once in `environment.json`; this extends rather than duplicates environment
 provenance.
 
+#### Isolated scientific Python tools
+
+Declare independent package environments in the **consumer's `pyproject.toml`**, not Work YAML.
+They are prepared by the same native bootstrap/submission services, never by `Work.run`:
+
+```toml
+[tool.lambdaforge.tool_runtimes.analysis_tool]
+python = "3.11"
+requirements = ["numpy==1.26.4"]
+imports = ["numpy"]
+entrypoints = {extract = "tools/extract.py"}
+```
+
+```bash
+lf clusters bootstrap CLUSTER --project . --dry-run
+lf clusters bootstrap CLUSTER --project .
+```
+
+Dry-run reports the declarations and unresolved target package resolution without installing.
+Apply selects an independent compatible Python, solves all dependencies together, checks imports
+and records the exact installed inventory/resolution. Ordinary prepared Work submissions do this
+too. Neither LF nor the consumer distribution is installed into the isolated prefix; their
+incompatible requirements therefore do not constrain it. Bootstrap never loads model weights.
+All declared runtimes are prepared; there is no extra selector flag or nested Work runner.
+
+The scientific preflight does not import `pip` or its vendored libraries: these can interfere
+with `setuptools`/`distutils` when Triton imports them. The probe collects package metadata using
+the standard library; LF applies full PEP 440 pin checks outside that interpreter. The same path
+serves bootstrap and Work preflight, without dependency downgrades or distutils environment hacks.
+
+```python
+tool = self.tools.runtime("analysis_tool")
+tool.preflight()  # Do this before expensive producers; run() also checks the first invocation.
+script = tool.entrypoint("extract")
+completed = tool.run(
+    ["python", script, "--input", str(input_file), "--output", str(output_file)],
+    threads=self.resources.cpu,
+    cwd=self.temp_dir,
+    timeout=3600,
+)
+```
+
+`runtime(name)` requires a prepared binding and gives a bootstrap diagnostic otherwise. Its
+`entrypoint(name)` is a hash-verified, staged, standalone `.py` file (maximum 32 files, 1 MiB each).
+No automatic import of sibling modules or consumer dependencies occurs (`python -I`). Exchange
+explicit paths/JSON/NPZ files; scientific decoding, validation and atom correspondence remain
+consumer code. Use native `checkpoints.file(..., build=..., validate=...)` around the producer and
+leave the original checkpoint/weights read-only. Failures retain normal Run/Attempt history;
+checkpoint reuse does not imply unsupported epoch-level continuation.
+
+`run(argv, *, threads=None, cwd=None, env=None, timeout=None, check=True)` supports `python` or a
+bare executable in that prefix's `bin`. Output streams to Work logs; cancellation/timeout stop
+only the owned process tree, and nonzero status raises `ToolExecutionError` unless `check=False`.
+Thread limits default to the Work CPU request and cannot be raised by `threads`/environment
+overrides. This is process/dependency isolation, **not a security sandbox** for untrusted Python.
+`CUDA_VISIBLE_DEVICES`/`NVIDIA_VISIBLE_DEVICES` are inherited unchanged. Framework, interpreter,
+PATH and thread-control variables cannot be replaced via `env`. A CUDA-declared tool requires a
+nonempty provider grant and a real tensor preflight; it never substitutes a CPU build or selects
+physical device ordinals. CPU-only tools are explicitly declared, not a failure fallback.
+
+Package declarations accept exact `==` pins or HTTPS Git sources pinned to a full 40-character
+commit, without inline credentials or conditional root requirements. `index_url` defaults to
+PyPI; `extra_index_urls` and `wheel_sources` must be explicit public HTTPS sources. All dependencies
+default to binary-only. `source_packages` permits only specifically pinned, reviewed root source
+builds (the pinned VCS requirement is itself explicit); it is not a fallback compilation switch.
+No shell installation hooks or `--no-deps` bypass is accepted. Builds may execute reviewed package
+build backends, so declarations are trusted project code, not untrusted agent input.
+
+For Torch, declare `torch_index` plus `torch_cuda="cpu"` or an exact CUDA `major.minor`. Each
+`wheel_sources` table requires `url`, `packages` and `build_tag`; companion roots must pin that
+same `+build_tag`. The actual download origin/version and imports are verified before activation.
+A missing target wheel fails provisioning rather than compiling a different ABI.
+
+Environment IDs depend on package/source/Python/platform contracts, not consumer code changes.
+Small entrypoints have separate content-addressed bundles. The exact version receipt lives in
+native state outside disposable cache; immutable prefixes are reused and inventory drift fails
+closed. Runtime/resolution/code identities extend `environment.json` tool provenance. Job binding
+snapshots, preparation/use leases, recovery dependencies and current named bindings protect the
+prefix and scripts from native GC. Main-environment replacement pruning never removes isolated
+tools; native storage status/explicit cleanup handles unused historical tools. No per-protein
+environments, private checkpoint imports or manual cache installation are needed.
+
+**SLAE acceptance and WISDOM integration:** the packaged `examples/isolated_tools.toml` is a
+reviewed **CPU-only** recipe. In an authorized disposable Linux/Python 3.11 environment, pinned
+SLAE `078b94e436b8eceb02251a254c3c224358ec6ee2` imported and loaded the reviewed base checkpoint
+with `device="cpu"` after verifying SHA-256
+`ac5bf9613209fc310145e58f1aa7ddc9111d833a131488fe30ea738d51f7bb99` (882,525,854 bytes).
+Observed versions: Torch 2.6.0+cpu, torchvision 0.21.0+cpu, NumPy 1.26.4, ESM 3.2.1,
+Transformers 4.48.1, PyG 2.7.0, scatter 2.1.2+pt26cpu, cluster 1.6.3+pt26cpu,
+sparse 0.6.18+pt26cpu, runstats 0.2.0, e3nn 0.6.0, atomworks 3.0.4 and Lightning 2.6.6.
+Full inventories/resolutions are recorded by provisioning, not replaced with these selected pins.
+This does not certify CUDA or protein extraction. WISDOM still must declare its reviewed target
+runtime, supply a standalone extraction entrypoint, replace the in-process SLAE import with the
+public tool call, and validate every restored/output scientific file. Coordinate a small real
+extraction before claiming adapter acceptance. No WISDOM edit or cluster execution is performed
+by this framework implementation. The consumer's existing failed Job must use native recovery
+only after that integration and compatible-code acknowledgement, not a fresh silent restart.
+
 ## 5. YAML reference
 
 Allowed top-level fields are `name`, `run`, `with`, `resources`, `seeds`, `search`, `objective` and
@@ -580,10 +787,14 @@ For older retained indexes, explicitly prepare the original declaration with
 
 `lf datasets replicate NAME@VERSION --source SOURCE --destination TARGET` previews; `--apply`
 copies exact bytes and registers the verified placement on the target and controller.
-`--route auto|direct|relay` prefers site SSH or explicitly requires direct/compressed relay.
+`--route auto|direct|relay` probes site SSH push then pull; controller relay requires explicit consent.
 Site SSH never forwards controller credentials; relay uses no local disk staging. Console
 **Datasets → DatasetVersion → Replicate…** uses the same service, confirmation and background
-progress. Keep the session open until completion. The target needs `storage.dataset_root` and
+progress. `--apply` acknowledges a durable operational Job; it does not claim the copy is already
+verified. You may close LF after acknowledgement. Direct SSH copies run on the source cluster
+without the PC; relay copies run under a detached local supervisor and need that PC online.
+Reconnect with `lf datasets transfers [NAME@VERSION]` or `lf datasets transfer-status JOB_ID`.
+The target needs `storage.dataset_root` and
 an available LambdaForge runtime, not a scientific Work/GPU claim. Checksums, safe staging,
 destination-volume admission and immutable identity remain mandatory. Conflicts fail closed;
 identical destinations are reused. See [replication](#guide-dataset-reconstruction-publish-once-replicate-exact-content).
@@ -1210,7 +1421,15 @@ CPU-only studies.
 
 Worker PID/process-tree VRAM is attributed through NVML when available and reconciled against
 physical used memory on every sample. Allocator heartbeats add phase, checkpoint and short-spike
-evidence; aggregate fallback remains explicitly censored. OOM evidence separates intrinsic
+evidence; aggregate fallback remains explicitly censored. LF separates intrinsic Run
+usage from device-wide reserve: a live worker absent from a complete, fresh process inventory
+is observed as zero CUDA usage during CPU initialization. Missing/incomplete process observation,
+unknown per-PID bytes, reused lifetimes or conflicting positive allocator evidence never become
+zero. Driver-reserved and other processes' memory stay outside that Run while physical free VRAM
+remains authoritative. Zero usage during data loading does not validate a low future training
+envelope or bypass the protected progress lane. A long CPU-side Work initialization may leave
+GPU utilization at zero; check Work logs before treating it as stalled GPU admission.
+OOM evidence separates intrinsic
 resident-plus-requested bytes from a failed placement signature. Consequently a failed
 `heavy+heavy` packing cannot reduce a global GPU concurrency ceiling or prohibit `heavy+small`.
 Scientific termination is separate from resource completeness. Resource-relevant phases are
@@ -1227,13 +1446,42 @@ An atomic bounded active-evidence snapshot survives controller interruption as s
 knowledge. It can warm uncertainty after restart, but is never restored as a live process or exact
 peak; terminal evidence supersedes it and normal completion clears it.
 
+Resource telemetry recursively materializes independent built-in JSON mappings/lists before
+serialization, including immutable nested Work parameters. It does not modify those parameters,
+their identities or their original immutable containers. Active/terminal evidence, admission,
+commitment ledgers and traces share that serialization boundary. Unsupported non-JSON values
+still raise explicitly; persistence failures are not hidden and GPU safety monitoring stays enabled.
+
+After a framework serialization fix, updating the controller alone does not patch a managed
+remote runtime. Install/use the corrected LambdaForge in the consumer's local environment,
+then, from that project, explicitly run `lf clusters bootstrap CLUSTER --project .` (optionally
+preview with `--dry-run`). Managed environments are keyed by exact framework wheel bytes, not
+just the displayed version; a verified new prefix replaces the active reference without editing
+old immutable environments. Normal retry preparation also stages the current framework wheel.
+Inspect `lf retry JOB_ID --dry-run --json` before `lf retry JOB_ID`; do not submit a fresh Work
+to recover a previous Study. Recovery reuses authoritative completed results and resumes only
+eligible interrupted/failed/pending logical Runs. A final evaluation log or epoch number alone
+does not prove successful completion. Checkpoint-level continuation requires consumer support;
+otherwise the affected Run restarts without repeating the completed siblings. Never edit the
+original records/checkpoints or waive scientific identity to work around a telemetry failure.
+
 ARI v3.1 separates the display trajectory from `ResourceTrajectoryStatistics`. The former remains
 bounded; the latter incrementally retains progress/optimizer cycles, phase visits and maxima,
 material peaks, robust growth/noise/allocator residual sketches and checkpoint cadence. Hazard is
 updated by progress and allocation events rather than polling count, so duplicate monitor samples
-do not create confidence. Exact weighted convolution preserves rare discrete tails in P(fit), with
+do not create confidence. Bounded weighted convolution preserves rare discrete tails in P(fit), with
 a small explicit independent/shared-epistemic ensemble for multiple Runs. Subsequent placement
 outcomes calibrate probability bins without contaminating the scientific objective.
+
+Live posterior mixtures and convolution inputs are bounded to 128 weighted support points;
+this is an internal numerical/work-size bound, not a concurrency or risk threshold. Small
+supports remain exact. Larger supports retain endpoint masses and merge interior bins upward,
+so compression cannot increase an admission fit probability. Historical residual weights are
+carried through live updates rather than turning rare tails into equally likely samples.
+The shared-uncertainty ensemble sweeps CDF events once instead of sorting at each quantile.
+Thus long-running Studies cannot grow the resource posterior indefinitely and starve Future
+collection, worker cleanup, telemetry or admission. Physical free-memory, OOM lower bounds and
+grant checks remain authoritative. Already-running immutable runtimes do not hot-load this fix.
 
 WaitRegret is a versioned atomic integral. A changed frontier closes the previous segment at its
 previous idle fraction and scientific-value rate; it does not erase accumulated opportunity loss.
@@ -1753,6 +2001,82 @@ original byte count and SHA-256, so compactness cannot be mistaken for missing e
 
 ## 10. Clusters and jobs
 
+<a id="guide-execution-queues"></a>
+
+### Sequential execution queues
+
+Use `--queue` to prepare a Work/Study now but execute its scientific process only after earlier
+Jobs finish on the same project/cluster. It supports many entries, not just one successor:
+
+**The queue orders whole submissions, not Runs.** Once a Study is admitted, its Trials/seeds
+retain normal concurrent dispatch and the authored resource/execution limits. `--queue` does not
+set `max_parallel: 1`, reduce the GPU request or make a sweep sequential. A Run marked active
+may still be preparing its consumer inputs on CPU before CUDA allocation; admission waits for
+its live resource evidence rather than launching unlimited additional unmeasured Runs.
+
+```bash
+lf run experiments/a.yaml --on citius-ctgpgpu16 --queue
+lf run experiments/b.yaml --on citius-ctgpgpu16 --queue
+lf run experiments/c.yaml --on citius-ctgpgpu16 --queue
+lf queue --on citius-ctgpgpu16
+lf queue --on citius-ctgpgpu16 --all --json
+```
+
+If A is already running from an ordinary submission, submitting B/C with `--queue` also works.
+FIFO order is assigned atomically on the target at registration; parallel callers use that arrival
+order. A later entry cannot overtake an earlier one merely because its preparation finishes first.
+Without `--queue`, submission retains the existing concurrent behavior: a later ordinary Job is
+not automatically serialized or cancelled. Queue scope is project/placement, not other projects
+or users. Ordinary resource/GPU admission still protects against external occupancy.
+
+In bare `lf`, open **Run Work**, choose the YAML/cluster and tick **Queue after earlier Studies / Works**.
+**View execution queue…** shows order, names, admission phase and the last recorded Job state,
+with explicit Refresh and Back controls. This is metadata, not a fresh liveness probe or Study/Run history.
+The ordinary Work/Study views show provider `queued` state and retain logs/cancel controls.
+
+Preparation is still the normal detached submission lifecycle: validation, bundle, exact inputs
+and managed environment are prepared before provider acknowledgement. The queued YAML is pinned;
+editing it during preparation rejects that submission rather than changing its intended revision.
+You may close the Console while its detached preparer runs, but **keep this PC online until every
+desired Job has reached provider `queued` or `running`**. After that hand-off, supervisors and FIFO
+metadata live on the cluster: no laptop dispatcher or open terminal is needed. A `preparing`
+ticket is not a promise that all inputs/code have already reached the remote host.
+
+The existing native ProcessSupervisor applies the gate before CPU/RAM/GPU/storage reservation
+or scientific launch. Waiting supervisors hold no training slots or GPU contexts on behalf of
+the queue. Only terminal predecessors with released owned processes/resources permit admission;
+unknown, missing or uninspectable ownership blocks safely. Successful cleanup writes a release
+receipt so native cleanup can later remove old Job workspaces without losing ordering evidence.
+Queue predecessors and prepared code/environments remain protected while needed. Queue waiting
+does not consume scientific training wall-time; native resource limits apply once admitted.
+
+The next entry runs after **any terminal outcome** (success, failure, cancellation or timeout),
+not only success. This is scheduling, not a scientific dependency DAG or automatic retry. To cancel
+an entry use the existing confirmed Console action or native selector lifecycle, for example:
+
+```bash
+lf cancel JOB_ID --dry-run
+lf cancel JOB_ID --apply
+```
+
+An abandoned **unstarted** ticket, whose preparer cannot finish, can be explicitly retired with
+`lf queue --on CLUSTER --remove-pending JOB_ID --apply`; this never signals a running Job.
+Acknowledged/dispatched Jobs must use native cancellation. Recovery creates a new Job lifetime,
+not a replay of its old FIFO ticket; `--queue` currently applies to fresh `lf run` submissions,
+not recovery actions. Do not relaunch a completed Study as a substitute for recovery.
+Do not delete/edit queue metadata to unblock it: missing/corrupt manifests fail closed.
+
+Current support: POSIX direct-process clusters (local or SSH), including `gpu exec` placements.
+SLURM/Fleet queue admission is explicitly rejected, never emulated by another runner. Old existing
+worker environments must be updated; runtime capability is checked before dispatch so they cannot
+silently ignore the gate. Registration/history are bounded to 10,000 tickets and 8 MiB of queue
+metadata; this is an operational safety bound, not a one-entry execution limit. Automatic restart
+of lost preparers/supervisors, priority reordering and cross-project queues are not provided.
+The queue does **not** claim/renew site GPU reservations or override provider expiry/revocation;
+normal grant discovery and safe admission remain authoritative.
+
+### Cluster configuration and Fleet targets
+
 Fleet discovery: `lf fleets list/show/offers`; operator catalog controls:
 `lf fleets drain/disable/enable FLEET CLUSTER [--apply]`. Observations do not grant GPUs and these
 controls never stop active Jobs. `lf run CONFIG --on-fleet NAME [--dry-run]` uses a durable local
@@ -1952,14 +2276,105 @@ exact name/version/build/channel/subdir inventory and places it in `EnvironmentI
 with specification bytes, platform, manager version, exact framework/consumer/wheelhouse bytes,
 Python requirement, Torch plan and online/offline policies.
 
-The final environment is one prefix, not an activated base plus an opaque PATH overlay. Micromamba
-creates a temporary Conda prefix from the exact solve; that prefix's Python then installs Torch and
-the exact wheels. LambdaForge runs `pip check`, rechecks Conda inventory, TLS, framework/Torch/CUDA
-and every required executable before writing a receipt and atomically renaming the prefix. The
+Micromamba creates the dependency prefix from the exact solve at its **final lifetime path**;
+that prefix's Python then installs Torch and the exact wheels. Conda prefixes, Python console
+scripts and shell launchers are not assumed relocatable. LambdaForge runs `pip check`, rechecks
+Conda inventory, TLS, framework/Torch/CUDA and every required executable **at that final path**,
+then atomically publishes the readiness receipt. It never renames an installed environment. The
 receipt records executable path/version plus its owning Conda package, package version, build,
 channel and subdir. Concurrent builders share a bounded per-identity lock; only a complete verified
 prefix is reusable. `ToolService` searches the active Python prefix first, so `self.tools.require()`
 remains a check rather than an installer.
+
+**Publication and managed recovery.** The `stable-prefix-v1` publication contract participates in
+environment/dependency identities. Prefixes from the old rename-based contract are preserved, not
+patched, overwritten or silently reused. Bootstrap/current submission builds a distinct prefix;
+when the previous dependency contract has a valid frozen resolution receipt, its exact Python
+dependency pins are carried forward and native package inventory remains exact. A corrupt or
+incompatible receipt fails closed. A new operational binding is recorded without changing input,
+dataset or scientific parameter identities.
+
+The per-identity build/GC lease covers reservation, installation, final-path checks and publication.
+Micromamba receives an empty destination; reservation metadata lives in the build lease, not inside
+that destination. An unsealed prefix is never selected as ready/active. Failed builds retain
+`.lambdaforge-publication.json` with a redacted error and no readiness marker. A subsequent call
+does not repair it in place. Explicit `lf clean --on CLUSTER --environments-only --json` previews
+collection; `--apply` only collects an unreferenced failed/obsolete prefix after native ownership
+and lease checks. Active Jobs, process observations and recovery dependencies remain protected;
+if GC retains it, do not bypass that protection. Interrupted builds without trustworthy failure
+evidence remain protected as unresolved ownership, not guessed to be disposable.
+
+After installing the corrected LF on the controller, a preparation-only failure can be retried
+without changing the consumer YAML. For example, **review before applying**:
+
+```bash
+cd /home/david/Escritorio/WISDOM
+lf clusters bootstrap citius-ctgpgpu16 --project . --dry-run
+lf clusters bootstrap citius-ctgpgpu16 --project .
+lf retry job-20261113230941-0a6d159f --config experiments/preprocess/enrich_physics.yaml --accept-code-change --dry-run --json
+lf retry job-20261113230941-0a6d159f --config experiments/preprocess/enrich_physics.yaml --accept-code-change --json
+```
+
+Bootstrap provisions/verifies runtimes; it does not run the scientific Work. `retry` preserves
+owned Execution/Run/checkpoints if science had begun; for a failure before any Execution it retries
+preparation rather than inventing checkpoint continuation. Code acknowledgement never waives
+scientific identity checks. Do not run a fresh `lf run` to recover an existing Execution, manually
+edit launchers, delete protected prefixes or use `--rerun` to hide this infrastructure failure.
+
+Bootstrap, automatic submission preparation and cached-prefix reuse share the same native version
+probe policy. Normally a nonempty version response must exit zero. APBS additionally needs an
+`APBS <package version>` banner matching its owning `apbs` Conda package; only APBS **3.4.1** with
+`--version` may exit **13** instead of zero. This documented tool-specific behavior does not apply
+to scientific execution, other arguments, versions or executables. Receipts retain the chosen probe
+argv, exit status, bounded stdout/stderr and policy alongside package/version/build provenance.
+Failed probes report both attempted argument vectors, statuses and bounded captured diagnostics,
+including process-start errors/timeouts. Executable ownership and exact inventory checks remain
+mandatory. Deploy the corrected LambdaForge on the controller before preparing/bootstraping the
+managed environment again; do not patch historical immutable prefixes or change scientific YAML.
+
+**Native shared-library selection.** For managed Conda environments, LF binds the process-scoped
+`native-prefix-libraries-v1` policy to the selected dependency prefix's `lib` directory. Execution
+code venvs use their bound dependency base, not an invented `lib` below the code venv. An isolated
+stdlib-only launcher (`-I -S`) sets the loader path and `exec`s the original command: selection
+therefore precedes Torch, SciPy and target `sitecustomize` imports. No global shell export, import
+reordering, package downgrade, binary patch or cluster-specific path is needed.
+
+Preparation, cache reuse, native executable probes, supervised/SLURM execution and ordinary
+descendants retain that policy. It runs **inside** the provider GPU wrapper, preserving its GPU
+grant and absolute driver-library paths after the selected prefix. Empty/relative inherited
+loader entries are omitted; duplicate paths are removed. The policy does not set GPU visibility
+or force `LD_PRELOAD`. Conflicting preloads or libraries actually loaded from another C++ runtime
+fail verification rather than being reported as compatible. `tools.run(env=...)` cannot override
+loader variables while this policy is active. Entering a separately declared isolated tool runtime
+removes the consumer's injected paths/marker, retaining provider driver paths and GPU grants.
+
+Before readiness/reuse, fresh processes check Torch → SciPy and SciPy → Torch (SciPy when installed),
+small CPU tensor/KDTree operations, and actual `/proc/self/maps` origins of the selected C++/GCC
+runtimes when present. Successful imports alone are not proof of the library used. Bootstrap JSON,
+Job metadata and newly sealed environment receipts include `native_library_policy`/`native_libraries`;
+each Run's `environment.json` captures its actual loaded native libraries. Runtime capture also
+rejects incompatible loaded origins when the policy is active. Old immutable receipts/Run evidence
+are not rewritten; cache reuse produces a current operational attestation without claiming that
+historical Runs passed these new checks. Compatible dependency caches need not be rebuilt just to
+activate the loader policy. Non-native/existing environments are not assigned guessed library paths.
+Invoking a cached Python path manually outside LF is not equivalent to this managed launch.
+
+To deploy a controller fix without touching WISDOM's science, activate the Python environment used
+for LF, then review each preview before its applying command:
+
+```bash
+python -m pip install --force-reinstall --no-deps /home/david/Escritorio/SimpleLambda/LambdaForge
+cd /home/david/Escritorio/WISDOM
+lf clusters bootstrap citius-ctgpgpu16 --project . --dry-run
+lf clusters bootstrap citius-ctgpgpu16 --project .
+lf retry job-20261113234529-a34c00f4 --accept-code-change --dry-run --json
+lf retry job-20261113234529-a34c00f4 --accept-code-change --json
+```
+
+This uses the normal exact-wheel managed preparation, not remote pip edits of active prefixes.
+Do not delete dependency environments or use a new `--rerun` experiment to recover the failed Job.
+Retry still verifies scientific identity, checkpoints and compatibility; it does not waive those
+checks or promise training continuation without consumer checkpoint support.
 
 Installed inventory verification enriches `micromamba list --json` with the regular records under
 the prefix's `conda-meta`; this preserves the real `linux-*` versus `noarch` subdir even with manager
@@ -2148,6 +2563,8 @@ than a name factory, and custom behavior extends the small `Clusterer` ABC direc
 
 All clusterers accept a finite, nonempty NumPy array or PyTorch tensor of shape `[N, F]`. Tensors are
 explicitly detached and normalized through CPU because sklearn clustering is non-differentiable.
+Compatible algorithms additionally accept explicit `[N,N]` inputs with
+`distance="precomputed"`; see [validation and memory policy](#precomputed-dissimilarities).
 For a custom `Distance`, pairwise evaluation follows that module's parameter/buffer device and
 dtype, then detaches the matrix to CPU for the backend. Every class
 implements `cluster(X) -> ClusteringResult`. The immutable result has `labels`, `n_clusters`,
@@ -2158,8 +2575,8 @@ implements `cluster(X) -> ClusteringResult`. The immutable result has `labels`, 
 |---|---|---|---|
 | `KMeans` | `n_clusters`, `seed`, `n_init`, `max_iter`, `threads` | Euclidean or squared-Euclidean semantics only | centers, inertia |
 | `MiniBatchKMeans` | KMeans fields plus `batch_size` | Euclidean or squared-Euclidean semantics only | centers, inertia |
-| `DBSCAN` | `eps`, `min_samples`, `threads` | Euclidean, Manhattan, Minkowski, Chebyshev, cosine; `Distance` precomputed | noise |
-| `HDBSCAN` | cluster size/samples/selection, `threads` | same density native set; `Distance` precomputed | noise, probabilities |
+| `DBSCAN` | `eps`, `min_samples`, `threads` | Euclidean, Manhattan, Minkowski, Chebyshev, cosine; explicit precomputed or `Distance` | noise |
+| `HDBSCAN` | cluster size/samples/selection, `threads` | same density native set; explicit precomputed or `Distance` | noise, probabilities |
 | `Agglomerative` | `n_clusters`, `linkage`, threshold | Ward: Euclidean only; other linkages use declared native/precomputed | labels |
 
 String aliases are case-insensitive and canonical (`l1/cityblock`, `l2`, `sqeuclidean`). There is
@@ -2186,7 +2603,7 @@ import from documented namespaces. `lambdaforge.nn.models` re-exports the public
 | Family | Public choices |
 |---|---|
 | general/dense | `Model`, `MLP`, `CNN2D`, `ECMP`, `BatchedKNN` |
-| graph | `GCN`, `GAT`, `GATv2`, `GIN`, `GraphSAGE`, `PNA`, `RelationalGCN`, `GraphTransformer`, `EGNN`, `TensorFieldNetwork`, their public layers, `GraphReadout` |
+| graph | `GCN`, `GAT`, `GATv2`, `GIN`, `GraphSAGE`, `PNA`, `RelationalGCN`, `GraphTransformer`, `EGNN`, `TensorFieldNetwork`, `GINE`, `NNConv`, `SchNet`, `GVPGNN`, `PaiNN`, `DimeNet`, `StructuralGraphTransformer`, public layers, `GraphReadout` |
 | sequence | `RNNModel`, `GRUModel`, `LSTMModel`, `TemporalConvNet`, Transformer encoder/decoder/seq2seq, `ConformerModel`, `StateSpaceAdapter` |
 | sets | `DeepSets`, `SetTransformer` |
 | tabular | `ResidualMLP`, `FTTransformer`, `TabNet`, `SAINT`, `AutoInt`, `DeepFM` |
@@ -2212,6 +2629,344 @@ would hide scientifically material topology, aggregation, readout, equivariance 
 decisions while duplicating tested classes. Domain architectures remain ordinary project modules;
 reusable missing primitives should be added only with a precise tensor contract and conformance
 tests.
+
+### Sparse simplex activation: Entmax15
+
+`lambdaforge.nn.activations.Entmax15(dim=-1, force_float32=True)` implements alpha=1.5
+entmax, not softmax. Its sparse probabilities and constructor/state-dict contract are unchanged.
+The backward uses the analytic simplex Jacobian, with `s = sqrt(p)`:
+`grad_x = s * (grad_p - sum(s * grad_p) / sum(s))`, reducing over `dim`.
+It does not differentiate unused support-threshold candidates whose `sqrt(0)` derivative could
+otherwise create NaNs even for finite logits such as `[0, 0, -2, -2]`. Sparse zeros have zero
+sensitivity; no epsilon, probability smoothing, gradient clipping or `nan_to_num` is introduced.
+Higher derivatives are supported within fixed-support regions, not asserted at support transitions.
+
+Half/bfloat16 threshold/backward computation still uses float32 by default and restores the input
+dtype. Negative-infinity masked logits retain zero probability and sensitivity when the slice has
+valid unmasked logits. NaN/+inf or entirely masked slices are not repaired into fabricated evidence.
+Regression tests compare the unchanged forward and analytic gradients on CPU/CUDA, plus numerical
+first/second derivatives and a small synthetic optimizer step. Mathematical reference:
+[Peters, Niculae and Martins, 2019, Proposition 2](https://aclanthology.org/P19-1146/).
+
+Existing managed Jobs retain their pinned LF runtime. Deploy the corrected LF build through normal
+managed preparation before explicitly recovering failed Runs; changing a checkout does not patch
+an old remote environment, and already corrupted model/optimizer state is not repaired by this fix.
+
+<a id="graph-encoders"></a>
+
+### Generic edge, radial, directional and vector graph encoders
+
+The public graph catalog now includes the following independent building blocks and node encoders.
+Each class lives in its own module. Import from `lambdaforge.nn.models.graph` (also re-exported by
+`lambdaforge.nn.models` and `lambdaforge.nn`); no consumer project or dataset is imported.
+
+| Mechanism | Public API | Precise scope |
+|---|---|---|
+| Receiver/sender/edge MPNN | existing `ECMP` | Arbitrary scalar edge features and optional relation embedding; not a separate MLP per relation |
+| Edge-aware GIN | `GINE`, `GINELayer` | `MLP((1+epsilon)x + sum ReLU(x_sender + E(edge)))`; bias-free edge projection; optional learned epsilon |
+| Edge-conditioned matrix | `NNConv`, `NNConvLayer` | Full matrices or explicit `num_bases` restriction, sum/mean, optional root; zero-centered basis conditioner available |
+| Continuous radial filters | `SchNet`, `SchNetLayer` | Gaussian radial features, SiLU filter/update, explicit optional cutoff, scalar edge conditioning |
+| Persistent geometric channels | `GVP`, `GVPGNN`, `GVPGNNLayer`, `VectorDropout` | Scalar and polar-vector messages; channel-wise equivariant dropout; final invariant node readout |
+| Radial/vector interactions | `PaiNN`, `PaiNNLayer` | Sinusoidal radial filters, vector transport/direction messages and local invariant mixing |
+| Directional edge messages | `DimeNet`, `DimeNetInteraction`, `DimeNetPlusPlusInteraction` | Distinct bilinear and factorized interactions; Bessel/real spherical bases; typed directed triplets |
+| Structural global attention | `StructuralGraphTransformer`, `StructuralGraphTransformerLayer`, `GraphStructuralEncoding` | Graphormer-inspired degree/path biases, independent padded graphs, explicit edge bias; not the original whole-graph-token recipe |
+
+GCN, GraphSAGE, GIN, R-GCN, PNA, GATv2, the sparse GraphTransformer and fixed/moving-coordinate
+EGNN already exist and are not duplicated. These components enable experimental architecture
+composition; they do **not** implement a consumer's V9 campaign, scientific gates, relation-specific
+wrappers, chemical featurization, labels, losses, training protocol or fairness controls. `ECMP`'s
+relation embedding is not represented as identical to a per-relation message MLP. Separate relation
+branches can compose concrete layers using each relation's explicit edge subset; a pair present
+under two relations remains two incidences. No operator silently coalesces those incidences.
+
+**Tensor and geometry contract.** Sparse edges are `(2,E)` integer `source -> destination`; scalar
+nodes `(N,F)`, scalar edge attributes `(E,A)` with matching row order. Outputs preserve node order.
+`edge_geometry(coordinates[N,3], edges)` returns `(distances[E], directions[E,3])`, with unit
+directions pointing **from receiver to sender**. It rejects nonfinite/zero-length geometry and
+does not add neighbours, update coordinates or choose physical units. GVP accepts explicit polar
+edge vectors `(E,C_edge,3)`; its latent vectors have shape `(N,C_vector,3)`. PaiNN uses equal scalar
+and vector channel counts. `forward_with_vectors` exposes persistent states; ordinary `forward`
+returns scalar node embeddings. Norms/channel mixing preserve O(3) (including reflections), not
+scale equivariance or guaranteed chirality discrimination. Scalar node descriptors must themselves
+be invariant and edge vectors polar for this guarantee. Validation respects bf16/fp16 rounding;
+this does not promise bitwise rotation equivariance in reduced precision.
+
+```python
+from lambdaforge.nn.models.graph import GINE, NNConv, SchNet, GVPGNN, PaiNN, edge_geometry
+
+# x: (N,F), edges: (2,E), attributes: (E,A), coordinates: (N,3).
+F, A, D = x.shape[1], attributes.shape[1], 64
+distance, direction = edge_geometry(coordinates, edges)
+gine = GINE(F, D, A, hidden_channels=(64, 64))
+ecc = NNConv(F, D, A, num_bases=4, center_conditioner=True)
+radial = SchNet(F, D, edge_channels=A, radius=6.0, cutoff=6.0)
+vector = GVPGNN(F, D, edge_channels=A)
+painn = PaiNN(F, D, edge_channels=A, radius=6.0, cutoff=6.0)
+h_gine = gine(x, edges, attributes)
+h_ecc = ecc(x, edges, attributes)
+h_radial = radial(x, edges, distance, attributes)
+h_vector = vector(x, edges, direction[:, None, :], attributes)
+h_painn = painn(x, edges, distance, direction, attributes)
+```
+
+Distances are explicit inputs, never recomputed secretly inside radial/directional models.
+`GaussianRadialBasis`, `SineRadialBasis` and `CosineCutoff` are separately reusable. `radius` sets
+basis scale; a separate `cutoff` controls compact support. SchNet/PaiNN default `cutoff=None`
+preserves supplied long-distance relations instead of silently applying the spatial branch's
+radius to another relation. The caller owns any source gate: zero distance is not a universal
+"disable geometry" value (DimeNet requires positive lengths). Closing a descriptor source must
+close its derived basis route too; directions/angles are additional explicit geometric inputs.
+Closing a relation/global branch must suppress the whole contribution, not just an attention bias.
+
+**DimeNet / DimeNet++.** Install the explicit optional `lambdaforge[graph-directional]` extra if
+needed. SciPy is used only at basis construction for spherical Bessel root constants; no PyG,
+torch-scatter or SymPy runtime is required and no dependency is auto-installed. Forward bases and
+gradients are Torch operations. Validated dimensions: at most 64 radial and 8 spherical orders.
+The polynomial envelope and real m=0 harmonics are explicit; strictly positive edge distances
+avoid inventing angles for degenerate geometry. Generic node features replace atomic-number
+embeddings; SiLU residual blocks use normal Torch initialization and node-wise readouts, not
+pretrained molecular energies, forces or benchmark-equivalent training.
+
+```python
+from lambdaforge.nn.models.graph import DimeNet, GraphTriplets
+
+triplets = GraphTriplets.from_edges(edges, len(x), max_triplets=1_000_000)
+angles = triplets.angles(coordinates, edges)
+encoder = DimeNet(F, D, edge_channels=A, cutoff=6.0,
+                 interaction_type="factorized")  # DimeNet++ interaction equation
+h = encoder(x, edges, distance, triplets, angles, attributes)
+# interaction_type="bilinear" selects original DimeNet interactions.
+```
+
+Triplets are explicit `k->j->i`, excluding `k=i` and self-loops, retaining duplicate typed edges.
+No radius graph is generated. Offline construction is bounded by `max_triplets`; directional
+forward checks `max_triplet_bytes` before bases/interaction expansion. It bounds principal
+triplet tensors, not all retained autograd activations or optimizer memory. Full NNConv chunks
+bound temporary matrices; they likewise do not make total backward memory constant.
+
+**Global structural attention.** Inputs are `(B,N,F)`, path codes `(B,N,N)`, directed in/out degrees
+`(B,N)` and optional Boolean `valid_nodes[B,N]`. Code `0` means unreachable; hop length `d` uses
+`d+1`, including self code `1`; last path code saturates explicitly in preprocessing. Degrees
+exceeding the configured embedding codebook are rejected, not silently clipped. `edge_bias`, if
+provided, is finite `(B,H,N,N)` and must be permutation-equivariant. The framework does not select
+one index-dependent shortest path to populate attributes. `GraphStructuralEncoding.from_edges`
+uses directed BFS hop lengths, independent of path ties, with explicit O(N*(N+E)) CPU preprocessing
+and an O(N²) matrix byte limit. Attention never crosses batch elements; masked outputs are zero.
+Use disconnected unions for **sparse** models and separate batch elements for global models.
+
+```python
+from lambdaforge.nn.models.graph import GraphStructuralEncoding, StructuralGraphTransformer
+
+encoding = GraphStructuralEncoding.from_edges(edges, len(x), num_spatial_codes=32)
+global_encoder = StructuralGraphTransformer(F, D, num_heads=4, num_spatial_codes=32)
+h = global_encoder(x[None], encoding.spatial_indices[None],
+                   encoding.in_degree[None], encoding.out_degree[None])[0]
+```
+
+`max_attention_bytes` rejects unsafe dense score allocation before materialization; it is not a
+total training-memory forecast. Global attention genuinely changes communication reach; a sparse
+substitute is not silently called the same architecture. The structural stack adds degree/path
+conditioning at each block as an explicit generic variant. No original Graphormer molecular
+centrality/path-edge training recipe or arbitrary path selection is claimed.
+
+Runnable synthetic example: `python examples/graph_encoders.py [--directional]` (no Work/job or
+dataset mutation). CPU tests cover exact operator references, O(3) invariance/equivariance,
+permutation/multiplicity, empty/isolated graphs, finite backward and bf16 autocast, native state
+dict roundtrips, malformed geometry, memory guards and optional dependency boundaries. No WISDOM
+training, GPU performance, CUDA numerical conformance or empirical predictive improvement is
+implied by these tests.
+
+Primary formulation references: [GINEConv](https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.conv.GINEConv.html),
+[edge-conditioned filters](https://openaccess.thecvf.com/content_cvpr_2017/html/Simonovsky_Dynamic_Edge-Conditioned_Filters_CVPR_2017_paper.html),
+[SchNet](https://arxiv.org/abs/1706.08566), [GVP authors' reference](https://github.com/drorlab/gvp-pytorch),
+[PaiNN authors' implementation](https://schnetpack.readthedocs.io/en/latest/_modules/representation/painn.html),
+[DimeNet](https://arxiv.org/abs/2003.03123), [DimeNet++](https://arxiv.org/abs/2011.14115),
+[Graphormer](https://arxiv.org/abs/2106.05234). Generic adaptations are distinguished above from
+the original full application models; no original weights or source code are vendored.
+
+<a id="graph-operator-controls"></a>
+
+### Public message composition and geometric source controls
+
+These interfaces complete the generic composition boundary; consumers still own relation
+definitions, source/modulator values, chemical normalization and experimental policies.
+
+| Capability at audit | Existing / missing | Public resolution |
+|---|---|---|
+| GCN / GraphSAGE propagation | Operators existed; aligned scalar modulation missing | Optional `message_weights` in layers and stacks |
+| GIN / GINE relation composition | Equations existed; common-update split missing | `messages`, `aggregate`, `update` on existing layers |
+| Receiver/sender/edge MPNN | ECMP already exists; public stages missing | `project_inputs`, `messages`, `aggregate`, `update`, with explicit `layer_index` |
+| PNA statistics/scalers | Already present, including authored degree statistics | Expose pre-MLP, statistical aggregation, common post-MLP; no new PNA equation |
+| Gaussian/sinusoidal features/cutoffs | Primitives existed; complete source control missing | `distance_weights`, public `radial_inputs`, layer `forward_from_radial` |
+| Directed/mixed typed triplets | Already retained, no implicit coalescing | Add differentiable stage-wise `message_weights` to DimeNet and both interactions |
+| Directional basis support | Native basis existed, injection missing | `DimeNet.forward_from_basis` for explicit per-relation bases/supports |
+| Global structural attention | Already implemented, including independent batching | Keep architecture; clarify consumer dense-matrix policy and promoted-dtype score guard |
+
+#### Scalar message modulation is not weighted adjacency
+
+The unchanged constructors/state keys now accept these additional forward arguments:
+
+```python
+GCNLayer.forward(x, edge_index, message_weights=None)
+GraphSAGELayer.forward(x, edge_index, message_weights=None)
+GCN.forward(x, edge_index, message_weights=None)
+GraphSAGE.forward(x, edge_index, message_weights=None)
+```
+
+`message_weights` is finite floating `(E,)`, aligned with original incidences, possibly signed,
+never detached/clipped/normalized. GCN multiplies its original normalized message by `a_e`:
+`a_e * w_topological / sqrt(D_out(source)*D_in(destination))`. Degrees still use original
+incidences and the declared canonical self-loop weight. This **differs from weighted-adjacency
+GCN**, which would recompute degrees from weights; negative modulation never defines a degree.
+With `add_self_loops=True`, supplied loops and their modulators are removed and replaced by one
+canonical loop per node with modulation **one**. With it disabled, supplied loops are ordinary
+modulated incidences. No extra residual/root is invented; bias remains once after aggregation.
+GraphSAGE modulates neighbour messages before its reducer; Mean divides by incidence count,
+**not** the sum of weights. Its separate root is unaffected, and no loops are added. Explicit
+self-edges already in the input and `root_weight=True` are distinct caller-declared contributions.
+`None` and all-one modulation preserve original propagation. Duplicate edges keep their counts.
+
+```python
+# C is authored by the consumer; its centered scalar output may be signed.
+a = 1 + C(edge_attributes).squeeze(-1) - C(torch.zeros_like(edge_attributes)).squeeze(-1)
+h_gcn = gcn_layer(x, edges, message_weights=a)
+h_sage = sage_layer(x, edges, message_weights=a)
+```
+
+#### Compose messages, then apply one update
+
+Public layer signatures (all tensor widths are validated):
+
+```python
+GINLayer.messages(x, edge_index)                         # (E,F)
+GINELayer.messages(x, edge_index, edge_features=None)     # (E,F)
+GINLayer.aggregate(messages, edge_index, num_nodes)       # (N,F), sum
+GINELayer.aggregate(messages, edge_index, num_nodes)      # (N,F), sum
+GINLayer.update(x, aggregated)
+GINELayer.update(x, aggregated)
+ECMP.project_inputs(x)                                  # raw -> (N,H)
+ECMP.messages(h, edge_index, edge_attr=None, edge_type=None, *, layer_index=0)
+ECMP.aggregate(messages, edge_index, num_nodes)          # configured reducer
+ECMP.update(h, aggregated, *, layer_index=0)
+PNALayer.messages(x, edge_index, edge_features=None)      # (E,M)
+PNALayer.aggregate(messages, edge_index, num_nodes, *, degree_dtype=None)
+PNALayer.update(x, aggregated)
+```
+
+GIN/GINE update owns exactly `(1+epsilon)*x` and one MLP. GINE messages own the per-edge ReLU and
+bias-free attribute projection. ECMP messages keep existing `[sender,receiver,edge,relation]`
+ordering; its update owns the existing MLP, normalization, dropout and optional residual. PNA
+messages keep `[receiver,sender,edge]`; its aggregate uses original degrees and scaler-major,
+then aggregator-major concatenation. PNA update owns one root concatenation, post-MLP and dropout.
+For exact AMP decomposition, pass `degree_dtype=x.dtype`, as forward does; otherwise degrees use
+the message dtype. Authored average degree/log-degree statistics still come from training only.
+
+```python
+# Separate concrete operators may own different relation message parameters.
+ac = c.aggregate(c.messages(x, edges_c, attrs_c), edges_c, len(x))
+as_ = s.aggregate(s.messages(x, edges_s, attrs_s), edges_s, len(x))
+h = c.update(x, z_c * ac + z_s * as_)  # one shared GINE/PNA node update
+
+# ECMP inputs must first be projected; layer_index selects an existing stage.
+h0 = c_mpnn.project_inputs(x)
+ac = c_mpnn.aggregate(c_mpnn.messages(h0, edges_c, attrs_c), edges_c, len(x))
+as_ = s_mpnn.aggregate(s_mpnn.messages(h0, edges_s, attrs_s), edges_s, len(x))
+h = c_mpnn.update(h0, z_c * ac + z_s * as_)
+```
+
+Choose matching hidden/layout widths; for PNA also matching ordered aggregator/scaler layouts.
+Multiply the **whole relation aggregate** after reductions: scaling before min/max/std is not
+equivalent. Neither summing complete node encoders nor averaging their root terms implements this
+operation. Separate relation objects retain unused projection/update parameters if those stages
+are not called; capacity accounting/optimizers must distinguish executed parameters, not claim all
+registered parameters participate. Attribute zeroing is different: GINE still emits `ReLU(x_sender)`.
+A zero relation multiplier removes every contribution of that relation but leaves the shared root.
+To omit GIN/GINE's root term, explicitly fix `epsilon=-1`; PNA/ECMP can pass zero root states to
+`update` after computing messages from original states. ECMP `residual=False` alone removes the
+residual, **not** the root state inside its update MLP. Update biases may still yield a constant.
+
+#### Close derived distance routes without changing valid physical geometry
+
+```python
+SchNet.forward(x, edge_index, distances, edge_features=None, *, distance_weights=None)
+SchNetLayer.forward(x, edge_index, distances, edge_features=None, *, distance_weights=None)
+PaiNN.forward(x, edge_index, distances, directions, edge_features=None, *, distance_weights=None)
+PaiNN.forward_with_vectors(x, edge_index, distances, directions, edge_features=None, *, distance_weights=None)
+PaiNNLayer.forward(scalars, vectors, edge_index, distances, directions,
+                  edge_features=None, *, distance_weights=None)
+SchNetLayer.radial_inputs(distances, *, distance_weights=None)
+PaiNNLayer.radial_inputs(distances, *, distance_weights=None)
+SchNetLayer.forward_from_radial(x, edge_index, radial, support=None, edge_features=None)
+PaiNNLayer.forward_from_radial(scalars, vectors, edge_index, radial, directions,
+                              support=None, edge_features=None)
+```
+
+`distance_weights=g` is a finite differentiable scalar tensor or `(E,)`; no range clipping occurs.
+SchNet/PaiNN compute `radial = g*R(d)` and `support = (1-g)+g*cutoff(d)` (cutoff defaults to one
+when absent). At `g=0`, both radial and cutoff dependence on distance vanish exactly; valid lengths
+are still validated. Filter biases, other attributes and node-local/root operations remain.
+LF cannot infer which arbitrary attribute column also represents distance: the consumer must
+apply its source control to any such duplicate scalar input as well.
+PaiNN's separately supplied unit directions **remain active**: distance-source removal does not
+claim to remove all geometry. No invalid zero-distance sentinel is used.
+
+The public `forward_from_radial` layer boundary consumes `(E,R)` features and optional `(E,)`
+complete filter multipliers, with **no cutoff reapplied**. It allows native bases/supports from
+different relations to be concatenated before one interaction/node update, including a long-range
+relation outside another relation's spatial cutoff. `support=None` means identity. Multiplying
+support by a relation's scalar disables that edge's whole scalar/vector message, while node-local
+mixing and zero-message update biases remain. Precomputed callers own the provenance/geometry of
+their features; this boundary validates tensors, not a hidden geometric source it never receives.
+
+#### Directional source and typed-path weighting
+
+```python
+DimeNetBasis.forward(distances, angles, triplets, *, distance_weights=None)
+DimeNet.forward(x, edge_index, distances, triplets, angles, edge_features=None,
+                *, distance_weights=None, message_weights=None)
+DimeNet.forward_from_basis(x, edge_index, radial, spherical, triplets,
+                           edge_features=None, *, message_weights=None)
+DimeNetInteraction.forward(x, radial, spherical, triplets, *, message_weights=None)
+DimeNetPlusPlusInteraction.forward(x, radial, spherical, triplets, *, message_weights=None)
+```
+
+DimeNet uses a constant-**one** neutral radial representation: `rbf_g=(1-g)+g*rbf(d)` and
+`sbf_g=[(1-g_in)+g_in*Bessel_envelope(d_in)]*Y(angle)`. At `g=0` every radial/envelope/cutoff
+distance route is closed, while angles remain explicit and nontrivial. Constant zero would
+silently disable angle/message/readout processing through the bias-free radial filters. Biases,
+node features and angle information therefore remain; distance-source removal is not pruning.
+Original strictly positive finite distances are required even when closed.
+
+For typed relation weight `m_e` per directed incidence: initial edge states are multiplied by
+`m_e`; each triplet interaction carries **`m_in*m_out`**; each interaction's final edge state is
+multiplied by `m_out` (including its affine/residual branches); each edge-to-node readout message
+is multiplied by `m_e`. This prevents affine biases from resurrecting a closed edge or mixed path.
+No detach, threshold, index filtering, rebuilt topology or new neighbours occurs. Fractional/
+signed factors compound over stages/depth; they are not a one-time importance weight or probability.
+All-one weights reproduce the original computation. All-zero weights leave `root(x)` plus the
+legacy sum of zero-input node-readout constants, **not** information from closed relations.
+
+`forward_from_basis` takes native `(E,R)` radial and `(T,L*R)` spherical features. Build separate
+`DimeNetBasis` objects with authored relation supports, then select each edge's radial row and
+each triplet's **incoming-edge** spherical row. Mixed-type triplets remain in the original list;
+`message_weights` suppresses paths involving either closed relation. This avoids incorrectly
+applying one spatial cutoff to every relation. Memory/shape checks still apply before expansion.
+
+Executable minimal examples, including independent message operators and one update:
+`python examples/graph_operator_controls.py [--directional]`. No private module mutation or graph
+message equations are needed in consumer code. Framework constructors, default forwards and
+state_dict keys are preserved; ECMP now rejects invalid floating/Boolean topology and invalid
+relation IDs instead of truncating them. No historical checkpoint or scientific identity is
+rewritten by these runtime composition APIs.
+
+**Global policy boundary.** StructuralGraphTransformer remains dense with directed degrees, BFS
+hop codes and optional caller-supplied path/edge biases, not the original Graphormer path-edge
+recipe. Scores never cross independent batch elements; valid padding is masked. Score byte checks
+include dtype promotion by structural biases under autocast. They do **not** bound all concurrent
+attention tensors, backward/optimizer memory or caller-owned encodings. BFS checks its own path
+matrix, not every Python adjacency/queue object. A consumer prohibiting dense N×N matrices must
+explicitly revise that policy for a global experiment, or record it unsupported/infeasible. LF
+does not waive that rule, invent path-edge encodings or call a sparse fallback the same model.
 
 ## 15. Architecture and extension boundaries
 
@@ -3803,19 +4558,163 @@ the final publisher still checks identity under the registry lock.
 lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --json
 # Review the route, size and destination, then apply:
 lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --apply
+# Require a host-to-host route (push OR pull), without controller relay:
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --route direct --apply
+# Only after accepting the PC/network dependency, explicitly request relay:
+lf datasets replicate corpus@7 --source gpu12 --destination gpu16 --route relay --apply
 ```
 
 In bare `lf`, open **Datasets → DatasetVersion → Replicate…**, choose endpoints, review the native
-preview and confirm. The Console stays responsive; inline phases/elapsed time and compressed byte
-counts (on the relay route) show progress. Keep the session open until completion. Locations updates
+preview and confirm. The route selector offers **Direct only · no laptop required** (default for a
+remote source), Automatic and explicit Relay. Direct only blocks when neither SSH direction works;
+a readable error explains the host-key/authentication/tool failure instead of offering an implicit
+local copy. The execution host is derived from the actual route, not a freely editable label:
+source for direct push, destination for direct pull, controller for relay. Existing relay Jobs keep
+their original route; selecting Direct only does not migrate or cancel a transfer already submitted.
+The Console stays responsive; inline phases/elapsed time and compressed byte
+counts show progress. **Transfers** retains Job ID, endpoints, state, phase, compressed bytes,
+execution host and selected logs across Console sessions. Closing a Dataset panel or LF does not
+cancel an acknowledged transfer. Locations updates
 after registration. The target needs `storage.dataset_root` and a usable LambdaForge runtime
 (existing or bootstrapped); no scientific Work or GPU claim runs. Effective roots remain project-scoped.
 
-`--route auto` probes site SSH from source to destination with trusted host-key checking, without
-prompts or agent/credential forwarding. If available, bytes travel directly between hosts.
-Configure site-authorized noninteractive authentication and trusted host keys on the source host
-to enable it; LambdaForge never installs keys or copies controller credentials. `--route direct`
-requires that connection. `--route relay` uses existing authenticated controller transports with
+`--route auto` first probes source-to-destination SSH push, then destination-initiated SSH pull.
+The bounded, read-only checks verify authentication, trusted host keys, the required interpreter
+and imports, readable source and safe/writable destination planning; they do not copy asset bytes.
+The preview reports each direction's classified diagnostic: authentication, host-key, network,
+timeout, permissions, tools or indeterminate. An inconclusive probe is not proof of no connectivity.
+These are point-in-time prerequisites, not a guarantee that a later connection will succeed.
+Automatic probes do not prompt, forward agents/private keys or weaken host-key checks. An
+interactive authentication failure can separately offer the explicit one-use password path below.
+
+**First-use host fingerprints.** SSH trust belongs to the initiating host: accepting a fingerprint
+on your laptop does not authorize 16 → 12. A manual login from 16 to the exact host/IP and user LF
+uses can resolve the unknown-host-key error, but password-based interactive login does not prove
+noninteractive authentication works. Aliases and IP addresses can have separate known_hosts entries.
+
+If fingerprints have been accepted and the diagnostic is now `authentication / Permission denied`,
+trust has succeeded but automatic login authorization has not. Configure site-approved
+noninteractive access in either direction, or explicitly enter a destination password for a
+source-initiated copy. LF does not install keys or automatically reuse/forward controller secrets.
+Password-SSH relay uses binary readers for both header and compressed payload.
+
+**One-use direct password authentication.** No SSH key setup or saved OS credential is required:
+
+```bash
+lf datasets replicate NAME@VERSION --source CLUSTER16 --destination CLUSTER12 \
+  --route direct --ask-password --apply
+```
+
+The hidden CLI prompt explains that the destination password is delivered over authenticated,
+encrypted SSH to the source host. It is kept in process memory, sent to the detached native
+supervisor/worker through anonymous pipes, and never placed in argv, environment, requests,
+Job records or LF logs. The source then connects directly to the destination using native
+PasswordSshTransport; the same compressed archive, identity verification and atomic publication
+engine is used. No Dataset bytes pass through the laptop. Keep it online until Job acknowledgement;
+afterwards the source-host Job does not depend on it. LF does not persist the password in a keyring.
+
+Interactive CLI failures classified as authentication offer this prompt automatically; JSON and
+unattended invocations never prompt or read secrets from CLI arguments. Preview authenticates and
+checks permissions but copies no Dataset bytes. In LF use **Direct · ask destination password**,
+or accept the password dialog after automatic authentication fails. Input is masked, cleared on
+accept/cancel, and excluded from the subsequent replication confirmation. Copying still needs
+that confirmation. Unknown/changed host fingerprints remain a separate trust decision; a password
+does not override it. A wrong password does not trigger automatic repeated attempts or relay.
+
+The source runtime must have this LF version's ephemeral Job-input capability and the optional
+`lambdaforge[cluster-password]`/Paramiko dependency. Preflight checks both before sending a secret;
+missing support requires explicit runtime bootstrap/update, never modifying an immutable prefix in
+place or installing on import. The destination needs its normal LF receiver, not Paramiko. Only
+source→destination password authorization is supported; LF never tries it in the reverse direction.
+MFA/keyboard-interactive challenges are not implemented. Passwords are memory-only and cannot be
+recovered after a process/host crash. Generic Job retry therefore refuses credential-bearing Jobs;
+repeat `datasets replicate --ask-password` with preview/apply to supply a fresh credential. Native
+active-transfer duplicate guards and exact destination verification still apply.
+
+For a Direct-only preview blocked by host trust, the Console offers a separate fingerprint modal.
+It shows initiating cluster, peer address/port, SHA256 fingerprints and the remote trust-file path.
+Verify the offered fingerprints with an administrator/another trusted channel, then confirm or cancel.
+`ssh-keyscan` observations are not authenticated; see the [OpenSSH security warning](https://man.openbsd.org/ssh-keyscan).
+Confirmation re-scans/pins all offered fingerprints and adds only previously unknown keys to the
+initiator's effective user known_hosts file, using hashed host labels, locking and atomic replacement
+that preserves original entries/permissions. Existing different/revoked/certified keys are never
+overwritten. The Console then repeats the ordinary preview; **copy submission needs its own
+confirmation**. Cancel changes neither trust nor datasets. Trust alone grants no login permission.
+
+The same native operation is scriptable, independently of any dataset:
+
+```bash
+# Read-only: inspect fingerprints offered to the initiating cluster.
+lf datasets trust-ssh --source gpu16 --destination gpu12 --json
+# Only after verification: repeat --fingerprint for EVERY key displayed in that preview.
+lf datasets trust-ssh --source gpu16 --destination gpu12 \
+  --known-hosts-file /home/USER/.ssh/known_hosts \
+  --fingerprint SHA256:VERIFIED_FINGERPRINT --apply
+```
+
+Use the exact remote path printed by preview, not a local path. Python uses
+`DatasetService.replication_ssh_trust(initiator, peer, ...)`; apply requires reviewed fingerprints
+and `expected_file`. No normal replication probe writes host trust automatically. Proxied SSH,
+HostKeyAlias, special path expansions or non-user-owned/unsafe trust files require administrator
+management instead of guessing. SSH/keyscan/keygen and an existing LF interpreter must be available
+on the initiator; no package installation, private-key/password forwarding or SSH policy weakening.
+
+The transfer uses the existing native Job/scheduler lifecycle as `dataset-replication`, not an
+executable scientific Work or a fake Study. A direct push is submitted on the source; a direct pull
+on the destination. Its supervisor, progress, result and logs survive controller shutdown. The destination
+registers only checksum-verified content. The controller reconciles the returned exact placement
+metadata when you reconnect; conflicting controller identities require explicit reconciliation.
+If neither direct direction is usable, auto **proposes**, but never silently starts, a relay Job.
+CLI interactive apply asks for consent after displaying the data path, diagnostic, original dataset
+size and controller dependency. Noninteractive/JSON callers must explicitly select `--route relay`;
+Console requires the same warning/confirmation. Original bytes are not a compressed transfer total.
+The approved direction is pinned; a changed route before dispatch requires another review, never a
+silent relay fallback. A relay Job runs on the controller PC. Closing the Console
+is safe, but shutting down/suspending the PC or losing its network can interrupt the relay. The
+preview reports this dependency (`requires_controller_online` means the host, not the UI).
+Detached relay authentication requires OpenSSH or a saved credential reference, never a password
+prompt or serialized password. Relay never forwards credentials/SSH agents between clusters;
+explicit one-use direct-password delivery is a separate source-host operation described above.
+
+```bash
+lf datasets transfers corpus@7 --json
+lf datasets transfer-status job-YYYYMMDDHHMMSS-ID --json
+lf jobs logs job-YYYYMMDDHHMMSS-ID --tail 100
+```
+
+Transfer rows distinguish process state from its last confirmed observation/age and last compressed
+byte advancement/age. An unreachable/stale host shows an unconfirmed last state, not confirmed running
+or invented failure. Verification/publication phases can legitimately have no byte advancement;
+transfer without new bytes means transferring-or-waiting, not a proven stall. No percentage is inferred
+without a known compressed total. Native terminal outcomes are retained and refreshed through Dataset
+list/Transfers observation as well as transfer-status; failed rows include a redacted cause/log command.
+Peer EOF/BrokenPipe diagnostics preserve the original error and available bounded peer stderr/exit
+status. Missing exit evidence cannot distinguish a network loss from a receiver exit.
+
+Repeated/concurrent requests for the same active exact copy reuse its Job; unknown ownership
+does not authorize another copy. Metadata observation never downloads archives or scans assets.
+Transfers protect their source/destination from native Dataset deletion while active. A failed
+copy is not automatically retried forever and is never registered as valid; explicitly replicate
+again after correcting the cause. This restarts an incomplete byte stream, not byte-offset resume.
+An already verified destination is reused. Existing transfers started in an older LF session are
+not retroactively detached. Python callers use `DatasetService.replication_preview()`,
+`enqueue_replication()`, `replications()` and `replication_status()`; low-level `replicate()` remains
+the explicit synchronous copy used by the native relay worker. No second transfer engine exists.
+Before staging a detached transfer, LF anchors local workspace/storage and explicit interpreter
+paths to the pinned controller project. The request file and serialized local profile paths are
+absolute, independent of the worker's `work_dir`; SSH host paths are never resolved on the PC.
+Failed transfer status/history include a bounded, redacted stderr cause and `logs_command`, even
+if the worker exited before writing progress or a result. Old empty failure caches refresh once.
+After fixing such a launch error, explicitly run the same `datasets replicate ...` preview and
+then `--apply` again: native active/unknown Jobs still block duplicate dispatch, exact completed
+destinations are reused, and the failed Job/logs remain in history. No dataset rebuild is needed.
+For automatic key/Kerberos routes, ask the administrator to authorize SSH and host keys on the initiating
+host (source for push, destination for pull), and ensure both endpoints have usable LF runtimes and
+filesystem permissions. LambdaForge can record explicitly approved first-use public host keys as
+above, but never silently configures trust, replaces existing keys or distributes private keys.
+`--route direct` accepts either direction and
+guarantees no controller relay; it fails before copying if neither is available. `--route relay`
+explicitly accepts the controller dependency and uses existing authenticated controller transports with
 a bounded **compressed in-memory stream**, not an archive staged on your computer or in `/tmp`.
 
 Streaming tar/gzip (level 3) verifies the complete source, rejects symbolic/special entries and
@@ -4266,14 +5165,102 @@ Attempt results, logs, metrics and history remain. Corrupt/missing retention evi
 
 Run-root admission and managed publication-copy reservations are implemented. Bundle staging and
 dependency provisioning do not yet have separate byte reservations on their destination volumes.
-Dataset index/manifest generation is not a disk quota. Managed environments
-still use identity v2 with exact wheel hashes: dependency environments and independent code layers
-have **not** yet been separated. Build markers are conservatively protected, but cross-host orphan
-proof remains conservative. Both Python-runtime and managed-environment build markers now use
+Dataset index/manifest generation is not a disk quota. New managed environments use identity v3:
+an immutable dependency base and a small, independently installed exact-code layer (see below).
+Existing v2 prefixes are retained unchanged; they are never upgraded in place. Cross-host orphan
+proof remains conservative. Both Python-runtime and managed-environment build markers use
 the same atomic GC handshake and bounded heartbeat, including reuse verification. Invalid complete
 environment prefixes are preserved rather than replaced underneath referenced Jobs. Explicit
 `lf storage reconcile` provides a diagnostic measurement ledger, not a complete per-write allocation
 ledger. Do not treat cleanup as protection against every ENOSPC during preparation.
+
+<a id="guide-storage-environment-layers"></a>
+
+### Dependency reuse, explicit environment collection and reference repair
+
+New submissions and bootstrap share the native `ManagedEnvironmentProvider`. A `deps-*` prefix
+resolves and freezes the heavy dependencies once. Its contract includes wheel `Requires-Dist`,
+Python requirements/extras, the selected Python/runtime/platform, exact Torch/CUDA policy, native
+package resolution and offline-wheel checksums. A changed code body, YAML, seed or hyperparameter
+does not create another heavy installation if those dependency contracts are unchanged. Native
+environment-file comments/names and discovery-only reuse notes do not invalidate an identical
+package resolution. Real dependency, Python/ABI, native package or Torch/CUDA policy changes do.
+Driver/device observations and the current Job's CUDA-probe requirement are validation evidence,
+not installed package bytes; current provider-owned GPU grants are still verified on reuse.
+
+The dependency base retains its initial installer/bootstrap wheels and records its resolved package
+inventory; it is **not** the selected scientific execution code. Each `env-*` execution layer installs
+the exact framework/project wheels with `--no-deps --ignore-installed` into its own venv. Its
+site-path includes the frozen dependency base; current execution packages take precedence. It never
+upgrades the base, and verifies the combined dependency contract before atomic publication. Python
+dependency entry points use the execution interpreter; native binaries retain their immutable
+base paths. Code wheel hashes remain part of the execution-layer identity and scientific provenance.
+The active pointer changes only after verification. No new dependency is installed on normal import.
+The first compatible resolution is reused, not silently refreshed to whatever an index serves later.
+`state/dependency-resolutions/<contract>.json` retains the sealed dependency inventory and its
+`dependency_resolution_id` independently of cache collection. Rebuilding an evicted base applies
+those exact version constraints and rejects inventory drift before publication. Corrupt receipts
+are an actionable error, not permission to resolve afresh. The resolved identity is recorded on
+the prepared environment and Job; changing a dependency/resolution contract produces a distinct
+binding. Initial bootstrap-code packages are separate from the pinned shared dependency inventory.
+Existing monolithic prefixes are not deduplicated or rewritten underneath Jobs.
+One native reference lease retains environment/bundle/runtime through staging and provider hand-off,
+including the gap between finishing installation and publishing request.json. It does not rely only
+on the active pointer, which another concurrent preparation can replace.
+
+```bash
+lf clean --on CLUSTER --environments-only --json          # read-only inventory/plan
+lf clean --on CLUSTER --environments-only --apply --json  # only after reviewing it
+```
+
+Explicit cleanup selects obsolete, unreferenced complete environment prefixes even when no quota
+or age was authored. This mode never compacts Jobs, artifacts or checkpoints. Active pointers,
+invoked/live process environments, native build markers, failed/cancelled recovery environments,
+explicit recovery dependencies and Study-series references remain protected. A retained code layer
+retains its dependency base. If every consumer layer is obsolete, explicit cleanup removes code
+before its base in the same GC transaction. Automatic cleanup still uses retention/quota/pressure;
+configure `storage.cache_max_size` and `storage.cache_max_age` in the cluster profile. The existing
+size quota is expressed in **apparent file bytes**; it is not a promise of physical blocks freed.
+
+The plan reports environment count, apparent bytes, unique allocated **file** blocks and an estimate
+of releasable blocks. Hard links are counted once, and their blocks are not reclaimable if any link
+survives outside the selection. Directory metadata/reflink sharing and unrelated filesystem activity
+can make free-space changes differ from that estimate. Apply rechecks references/build ownership
+under the native GC lock, journals exact removals, and reports actual removed apparent bytes plus
+the observed free-byte delta per filesystem; the latter is an observation, not exclusive attribution
+to LF. A no-op is `outcome=no-change`, not a claim that the preview's bytes were freed.
+
+A missing/corrupt Job state with a readable request protects its **specific** environment, rather
+than all environments. A missing request with no attributable owner still fails closed and names
+the blocking Job. Explicitly review/retire an abandoned operational reference through:
+
+```bash
+lf storage repair --on CLUSTER --retire-job job-EXACT-ID --json
+lf storage repair --on CLUSTER --retire-job job-EXACT-ID --apply --json
+```
+
+This operation never changes Job outcome, Execution, Run, Attempt or scientific files. It records
+an operational snapshot in `state/storage-reference-repairs.json`; changed state/request bytes or
+new live ownership invalidate the retirement. Process inspection must be available, and scheduler
+ownership cannot be guessed. Remote Jobs absent from the controller catalog remain part of the host
+inventory. Recovery argv also retains its original owned Job/environment even without a local record.
+
+`--release-build .environment-build-env-EXACT-ID.lock` can be repeated on `storage repair`. The
+controller's PID/birth/death is checked **on its recorded host**, and installer descendants are
+independently checked on the build host. Fresh/alive, unreadable or foreign-unverified owners are
+not removed. Old age, a remote-host PID lookup or an unreadable marker is not death evidence.
+The repair audit records intent before exact marker removal; it never deletes a build prefix itself.
+Orphan temporaries become ordinary GC candidates after verified release. An illegible legacy marker
+may remain protected until its ownership can be established; it does not block unrelated prefixes.
+
+Repair preview additionally reports a clearly labelled hypothetical environment-cleanup plan after
+the selected repairs. That preview **cannot** authorize deletion. After approved repair, run `lf clean`
+again for current candidates before applying. The Console exposes **Clusters → Storage → Repair
+references…**, with exact selection, preview and separate confirmation; **Clear storage…** uses the
+same domain service. A zero-candidate preview explains the blocker instead of offering a fake cleanup.
+Frequent Console refreshes use cached measurement metadata and live filesystem capacity, not a deep
+environment walk. Use explicit clean/reconcile for deep measurements. Remote operational collectors
+use the controller's current code without rewriting immutable scientific worker environments.
 
 
 <a id="guide-managed-reports"></a>
@@ -5142,6 +6129,15 @@ permission to launch scientifically dependent downstream work or uninformative r
 
 [Español](MANUAL.es.md#guide-operational-reliability) · English
 
+**Orphan preparation locks.** A stopped controller can leave a managed environment/runtime build
+marker even with no running Study. New preparation checks the originating controller host and
+process lifetime, then checks for remaining exact-prefix installers on the target. It reclaims
+only the unchanged orphan marker under the native GC lock, never the environment or scientific
+files. A heartbeat age alone is insufficient: live, foreign, unreadable or changing ownership
+stays protected. This automatic repair needs the updated controller; existing failed Jobs are
+not silently relaunched. If failure was entirely during preparation, submit the YAML again;
+there is no scientific Execution to resume. Actual training recovery remains native `lf retry`.
+
 Logical execution state, scientific evidence and operational health are different facts.
 An old `running` record is not a current process observation. `UNKNOWN` means ownership or
 observation is unresolved, not that science failed or that starting a duplicate is safe.
@@ -5342,6 +6338,109 @@ lf retry STUDY --config experiments/moved.yaml
 # Only after explicitly reviewing whether earlier evidence/checkpoints remain valid:
 lf retry STUDY --config experiments/moved.yaml --accept-code-change
 ```
+
+#### Sequential Work recovery
+
+`lf retry JOB --config pipeline.yaml --dry-run --json` also supports `steps` containing one
+unseeded executable Work per sequential level. The same Console **Retry / Recover Work** action
+uses this plan. `strategy: sequential` lists each step as `reuse`, `retry` or `pending`, its original
+Run, next Attempt and registered checkpoint inventory. No adaptive state is fabricated.
+
+The original Execution and Run checkpoints stay in place. Successful predecessors are restored
+from persisted named values, artifacts and dataset outputs, not by rerunning Python to recover a
+return value. Native output hashes and exact input identities are checked before scientific reuse;
+metadata preview does not download/hash large assets. Failed/interrupted steps create a new Attempt
+of the same Run. Later steps remain pending until their predecessor succeeds. Native `resume_map`
+restores valid completed items and checks dependencies/validators; it recomputes missing or invalid
+items. This does not promise epoch continuation or universal application checkpoint compatibility.
+
+Scientific identity, root/per-step resource requests and spent budgets remain unchanged.
+`--accept-code-change` acknowledges an implementation fix only, never changed science. Controller
+and recovery locks, provider ownership checks and cleanup dependencies apply unchanged. Parallel
+levels and compositions containing Studies are explicitly unsupported, not classified as corrupt.
+Old interrupted Attempts without sufficient request ownership fail with a diagnostic, never restart
+silently. Deploy the corrected LF runtime through normal managed preparation; do not patch the
+original environment or move checkpoints manually. Review the plan before applying:
+
+```sh
+lf retry JOB --config pipeline.yaml --accept-code-change
+```
+
+#### A single Work with durable file producers
+
+**Historical bounded-file staging names.** Native retry uses the versioned `bounded-role-v1`
+compatibility contract when the original bundle receipt and Attempt inputs prove a role-bound
+file rename (for example `train.txt` → `inputs/0000-train.txt`). It verifies original staged bytes
+against the bundle's raw SHA-256, the persisted role/configuration binding and original historical
+fingerprint. The selected local YAML or newly staged recovery file must match those exact bytes;
+LF reconstructs the old filename-bound identity without renaming data, rewriting the immutable
+Execution, or changing the global meaning of legacy digests. Duplicate basenames in distinct roles
+are never matched by name alone. Directory relative-member names remain scientific content.
+Preview reports each historical logical name, raw digest and role; content failures report expected
+and observed raw digests. Missing/corrupt provenance cannot authorize a filename compatibility
+mapping. The preview, dependency inspection and actual worker use the same authority; compatible
+code acknowledgement remains separate and cannot waive content/design checks. Original checkpoint
+collections remain owned by the same Run and are verified by native access/application validators.
+
+Repeated recovery keeps the authoritative **Attempt 1** binding anchored to the origin bundle.
+Later Attempts are not required to point into that original Job: each must prove its own staged
+bundle/configuration/roles and exact content, a same-placement Job request targeting the original
+Execution, and an accepted native recovery-history entry. Paths remain contained and symlink-free;
+no later Attempt is skipped merely because another one passes. Legacy v3/v4 bundle receipts and
+historical-basename fingerprints remain supported when their ownership and content are provable.
+Missing origin evidence, foreign Job lineage or changed bytes block recovery with Attempt/owner/
+role diagnostics, not instructions to edit scientific YAML. Original manifests/results stay intact.
+
+Preview ships the current read-only helper to older hosts; it does **not** upgrade that runtime.
+Before scientific handoff the prepared interpreter must advertise `bounded-role-chain-v2`.
+Normal managed preparation installs the current exact LF wheel in a separate immutable environment;
+an obsolete/existing interpreter is rejected with an update/bootstrap diagnostic before Job launch.
+
+`lf retry JOB --dry-run --json` also supports a single executable Work with no seeds, search
+or sweep. The native Execution/resolved configuration and Run/Attempt records establish its
+design; no HPO controller or fake Study metadata is required. A failed or interrupted Run creates
+a new Attempt of the **same logical Run in the original owned Execution**. The Work re-enters
+`run(...)` and receives the original public `self.checkpoints` collection. Completed producers
+must be restored with `checkpoints.file(..., validate=...)`; missing/failed producers can be built.
+This is Work recovery, not an assertion of epoch continuation or automatic understanding of an
+application's producer graph. A preventive application allocation guard is not proof of OS OOM.
+
+The metadata-only plan reports `strategy: single`, `work_status`, owner Job/Execution/Run,
+`next_attempt`, registered file count/bytes, missing/size-invalid files, code acknowledgement,
+`effective_resources` and `resource_changes`. Payload hashes are **not checked** by preview;
+normal managed access verifies exact hashes and Work validation checks physical/schema semantics.
+It cannot infer the number of missing proteins/producers from opaque checkpoint keys. Foreign,
+unsafe or corrupt receipts block recovery; same-size payload corruption is detected on access,
+never silently accepted. Failed file production does not publish a partial dataset: only after
+all producers have passed validation should the Work publish, using the native
+`outputs.dataset(..., source_checkpoint="producers")` when the assets are checkpoint files.
+
+For this single-Work route, an explicitly selected/reviewed YAML may change operational
+`resources.cpu`, `resources.memory` and `resources.time`. The new Job **and** Work runtime use
+those requests, and the recovery audit records them; the immutable origin keeps its old values.
+GPU/process/storage topology changes are not enabled by this policy. Scientific parameters,
+typed input bytes, dataset content identity, objective, design and publication contracts must
+remain unchanged, even with `--accept-code-change`. An equivalent YAML renamed by staging to
+`config.yaml` normalizes its historical display namespace, without changing input resolution or
+waiving any scientific check. Compatible implementation/default feasibility-guard changes still
+require explicit code-change acknowledgement; LF does not reinterpret changed physical parameters
+as operational guards on the consumer's behalf.
+Original `execution.max_runs`/`execution.max_time` budgets are not reset: exhausted budgets block
+recovery. Changing the operational per-Attempt `resources.time` does not refund prior work.
+
+```sh
+# Inspect only; no Job creation, environment solve/preparation or checkpoint downloads.
+lf retry JOB --config experiments/preprocess/enrich_structures.yaml --dry-run --json
+# Only after reviewing code compatibility/resources and deciding to launch:
+lf retry JOB --config experiments/preprocess/enrich_structures.yaml --accept-code-change
+```
+
+An unprepared exact native environment is a later preparation requirement, not evidence that
+owned checkpoints are unrecoverable. Apply still prepares a reviewed LF/consumer runtime and
+rechecks provider ownership, native controller lock, pinned YAML and duplicate recovery under
+the existing lock. Retained owner/dependency Jobs remain protected from cleanup. The Console's
+Work workspace offers **Recover Work…** with the same plan, YAML picker and explicit code checkbox;
+the initial click inspects only, and both rejection and accepted preparation remain visible.
 
 The Console's **Resume Study…** offers the historical path, a YAML picker and Validate recovery
 plan. Missing historical YAML is not a reason to replay the full experiment. A selected YAML is
@@ -5567,6 +6666,32 @@ values are excluded from prediction updates/admission and visibly qualified as u
 
 ### Cross-Study startup
 
+**Live inference and slow initialization.** A native Run can spend a long time loading or
+scientifically validating consumer data before its first CUDA allocation. Exact zero usage in
+that phase is not a zero-footprint GPU demand sample. It remains a live, owned Run with an
+unvalidated future allocation; it is not permission to release its slot or launch unlimited
+additional workers. Admission diagnostics distinguish `materialized_runs` from
+`unmaterialized_runs`, include each resident's `elapsed_seconds`, and expose
+`capacity_wait_reason` from the actual planner (for example `UNVALIDATED_LADDER_STEP` or
+`PROTECTED_LANE`). The throttled waiting log also reports unmaterialized workers.
+
+Raw per-Run trajectories own live inference. Their previous forecast is **not** independent
+historical evidence: only recorded compatible outcomes supply the trajectory's historical
+residual prior, once. Identical allocation/progress polls therefore cannot recursively change
+its memory posterior. The placement predictor still shares measured, right-censored live
+prefixes across compatible candidates/GPUs and reports their weighted-median point prediction,
+without converting it into an exact peak or hard neighbouring OOM bound. Unmaterialized workers
+do not contaminate that prediction. Unknown late-phase tails remain represented; an upper
+envelope extending to device capacity is not a physical allocation. Physical free memory,
+authored floors, exact failed packings, protected exploration and fresh launch checks still apply.
+
+These changes do not speed up scientific validation inside a consumer's `Work.run`. Such code
+should report its native progress and avoid redundantly decoding/revalidating the same immutable
+assets where its scientific contract permits; LF must not skip those checks implicitly. Existing
+Jobs use immutable managed runtimes and do not hot-reload a source-checkout correction. Deploy the
+corrected LF wheel through normal managed preparation before an explicitly requested recovery;
+do not edit the active environment, scientific records or consumer data to force admission.
+
 Both `shared` and `command` modes coordinate starts using short per-GPU/MIG UUID locks.
 The existing `GPUPlacementPlanner` remains authoritative; it rechecks fresh physical headroom
 under that lock. A temporary startup commitment is persisted **before** spawning, with native
@@ -5578,6 +6703,11 @@ VRAM already excludes resident bytes; do not subtract them again. The current co
 future envelopes already cover its own Runs. Confirmed dead worker lifetimes are reconciled;
 unresolved owners remain protected, and a missing worker record alone proves nothing. Orphan
 reconciliation can use the native Job ownership observation; a timestamp does not prove absence.
+If the entire old Job directory was deleted, the operational startup entry can still be retired
+only after verifying its controller lifetime is dead/reused and a native host process scan finds
+neither surviving Job-marked descendants nor relevant unresolved processes. This does not recreate
+Job records, authorize recovery, or waive GPU grants and fresh physical capacity checks. Missing
+individual records in an existing Job directory remain uncertain/corrupt, not an absence proof.
 The default 60 s startup window for an attested live worker is finite, not a permanent reservation
 of `gpu_memory` per resident. Compatible learned time-to-envelope may extend it (bounded to one
 hour). A peer's pending startup cannot be bypassed by baseline or exploration. Packing ceilings
@@ -6166,3 +7296,760 @@ conversations remain explicit gates in the ledger.
 Standards: [MCP](https://modelcontextprotocol.io/specification/latest),
 [official Python SDK](https://py.sdk.modelcontextprotocol.io/),
 [Agent Skills](https://agentskills.io/specification).
+
+<a id="guide-graph-science"></a>
+
+## 34. Graph topology and independent-control calibration
+
+These generic NumPy algorithms are usable directly from Python, without a Work, Job, GPU,
+consumer-specific geometry or training framework. `topology` and `stats` use lazy exports;
+using these components does not import Torch, scikit-learn or POT. They do not introduce an
+execution engine or storage system. A native Work can call the same public APIs.
+
+### Precomputed dissimilarities
+
+DBSCAN, HDBSCAN and Agglomerative with `single`, `average` or `complete` accept
+`distance="precomputed"`. Ward and ordinary KMeans/MiniBatchKMeans reject it. Features `[N,F]`
+and custom neural `Distance` objects retain their existing contracts.
+
+```python
+from lambdaforge.clustering import HDBSCAN, silhouette_score
+from lambdaforge.distances import validate_dissimilarity
+
+# D is a dense [N,N] dissimilarity matrix, for example from fgw.pairwise(..., symmetric=True).
+D = validate_dissimilarity(D, max_pairwise_bytes=512 * 1024**2)
+clusters = HDBSCAN(min_cluster_size=10, distance="precomputed").cluster(D)
+score = silhouette_score(D, clusters, distance="precomputed")
+```
+
+Validation requires nonempty square, real numeric, finite, nonnegative values and an **exact
+zero diagonal**. Default symmetry tolerances are `atol=1e-10`, `rtol=1e-8`; the check changes
+no data. These tolerances do not make a matrix a metric or assert the triangle inequality.
+For approximate FGW asymmetry, choose explicitly:
+
+```python
+D = validate_dissimilarity(D, symmetry="average")  # changes both directions to their mean
+```
+
+An arithmetic mean changes the discrepancy, does not improve the local solver's accuracy and
+must be a scientific choice. Nothing clips negatives, zeros self-costs or fills missing entries.
+Do not pass partial NaN matrices to clustering. The float64 `N*N*8` guard runs **before**
+conversion/CPU transfer; it bounds the input/output matrix, not the backend's entire workspace.
+HDBSCAN explicitly copies input internally to avoid its backend modifying caller data.
+Silhouette retains noise as label `-1`; remove those rows/columns and labels explicitly if
+your intended statistic excludes noise. It still needs 2 to N-1 distinct labels.
+
+### H0 superlevel merge trees
+
+```python
+import numpy as np
+from lambdaforge.topology import SuperlevelMergeTree
+
+tree = SuperlevelMergeTree().fit(
+    values=np.array([5., 2., 4., 1., 3.]),
+    edges=np.array([[0, 1], [1, 2], [2, 3], [3, 4]]),  # [E,2], undirected
+    vertex_weights=np.array([1., 2., 3., 4., 5.]),
+)
+tree.persistence_diagram()  # ((5., None), (4., 2.), (3., 1.))
+tree.components_at(2.)     # active graph: values >= 2
+tree.region_at(1, 3.)      # branch 1 before its merge/death
+tree.mass_curve(0)         # descending event levels, weighted post-event mass
+```
+
+Edges use `[E,2]`, including `np.empty((0,2), dtype=int)` for no edges. Duplicate edges and loops
+are harmless. Values must be finite real scalars; weights are finite nonnegative masses with
+positive finite total. A field span or total mass exceeding float64 is rejected, not rescaled.
+
+Union-find processes whole equal-valued plateaus together. An older branch (higher birth) survives
+a merge; equal births use the smallest birth-plateau vertex ID. This deterministic tie policy
+may rename tied branches after vertex permutation; connected partitions and the persistence
+multiset remain invariant. A strictly increasing field transform preserves topology, not numerical
+persistence. `death=None`, `persistence=None`, `essential=True` explicitly identify the surviving
+branch of each disconnected component. No arbitrary infinite/zero essential persistence is stored.
+An ordinary branch exists at `death < threshold <= birth`; querying its death or below is an error.
+After absorbing a younger branch the elder continues as the combined region.
+
+`branches` retain birth plateaus, parents, children and merge-event IDs; `events` retain growth
+and fusion hierarchy. Each vertex is stored once in an event and once in a contiguous subtree
+index. Construction is O(N log N + E alpha(N)) with deterministic ordering overhead and O(N+E)
+storage; region output is proportional to its vertex count, not to a rebuilt graph. These are
+topological prominence and connectivity, **not** HDBSCAN density or statistical confidence.
+
+### Stable regions and threshold membership
+
+```python
+from lambdaforge.topology import StableRegionSelector, uniform_membership, weighted_iou
+
+selection = StableRegionSelector(
+    min_persistence=1., min_mass=1., min_width=1., min_samples=2,
+    min_iou=.8, overlap="disjoint",
+).select(tree)
+for region in selection.regions:
+    print(region.branch_id, region.interval, region.mass, region.membership)
+print(selection.rejected)  # reason per unselected branch; no fabricated interval
+phi = uniform_membership(tree, branch_id=1, lower=2., upper=4.)
+```
+
+The selector searches branch event levels plus the observed floor/death boundary, choosing the
+**widest** interval satisfying all constraints, not a tiny interval maximizing IoU. Width ties
+prefer larger endpoint IoU, then higher upper level. The core at the upper level must meet
+`min_mass`. Stability is core mass / support mass, the weighted IoU of nested endpoint regions.
+The lower endpoint is open: support is the limit **above** that level, never the post-merge region.
+`min_samples` counts candidate threshold endpoints, **not independent observations**. Essential
+branches use the observed field floor/span; this does not assign them finite persistence.
+
+For uniform thresholds on `(lower,upper]`, `membership[i]` is the exact normalized integral of
+`1[i in region(u)]`. Event subtrees entering a branch determine membership; scalar intensity
+alone is insufficient after a merge. A death boundary may be an integration endpoint of measure
+zero, never crossed. `discrete_membership(tree, branch_id, thresholds, weights)` instead uses
+an explicitly normalized discrete threshold distribution; all levels must be inside the lifetime.
+These are spatial memberships, **not probabilities of a scientific event**.
+
+`overlap="allow"` explicitly keeps possibly overlapping parent/child supports. Default `disjoint`
+greedily accepts widest intervals first and rejects any later overlapping support; it is not a
+global packing optimum and never trims masks or silently redistributes mass. Dense memberships
+have an explicit `max_membership_bytes` guard (default 256 MiB, retained N-vectors only).
+
+`weighted_iou(a,b,weights=w)` is `sum(w*min(a,b))/sum(w*max(a,b))`; binary indicators give
+weighted set IoU. `weighted_dice` is `2*sum(w*min(a,b))/sum(w*(a+b))`. Fractional inputs give
+fuzzy spatial overlap. Empty union/total uses explicit `empty_value` (default 1), not missing
+scientific evidence. All memberships are in `[0,1]`; vertex alignment is the caller's responsibility.
+
+### Independent negative controls and resampling
+
+```python
+from lambdaforge.stats import EmpiricalNullCalibrator, bootstrap_quantile
+
+null = EmpiricalNullCalibrator(tail="upper", alpha=.05).fit(reference_scores)
+result = null.evaluate(new_score)
+# Or: one null sample per independent object, NOT one per dependent candidate:
+null.fit_groups(candidate_scores, object_ids, reducer="max")
+result = null.evaluate_group(new_object_scores)
+interval = bootstrap_quantile(reference_object_maxima, .95, seed=42, n_resamples=1000)
+```
+
+Upper-tail `p=(1+count(reference >= score))/(n+1)`; lower-tail uses `<=`. Ties are inclusive and
+reported. `reject` means `p <= alpha`. Resolution/minimum p is `1/(n+1)`; a warning explains when
+alpha makes rejection impossible. `reference_level` is a descriptive empirical quantile, **not**
+an alternative decision threshold: the rank/p-value owns the decision. Results retain tail,
+alpha, ties, group sizes and calibration unit. `fit_groups` allows explicit `max` or `min` and
+`evaluate_group` applies that same statistic to the new object.
+
+Score definition, candidate generation and selection must be fixed before calibration, with
+independent, exchangeable negative objects. Group maxima address any false detection in a negative
+object under those assumptions, **not** the proportion of false regions in positive objects,
+posterior truth, arbitrary distribution shifts or conditional error guarantees. This API does not
+reuse regression `ConformalPredictionInterval` or infer a functional interpretation from persistence.
+
+`bootstrap_statistic(values, statistic, group_ids=..., strata=..., seed=...)` resamples whole
+independent groups with replacement, retaining all rows and multiplicity. A statistic on pooled
+rows is affected by unequal group sizes; first reduce each object to a scalar for equal-object
+weight. Every group must belong to one stratum; strata preserve unit counts, not conditional
+validity. Results report estimate, approximate percentile CI, confidence level, resamples, seed,
+sampling unit/count and degeneracy. Percentile bootstrap is not an exact finite-sample guarantee;
+small/degenerate control collections remain weak evidence. `bootstrap_quantile` uses the same
+unit policy and NumPy linear empirical quantiles. No multiple-testing correction is implicit.
+
+Runnable examples: [graph and controls](../examples/graph_regions_calibration.py) and
+[scaling benchmark](../examples/benchmark_merge_tree.py). References:
+[GUDHI persistence](https://gudhi.inria.fr/doc/latest/group__persistent__cohomology.html),
+[Phipson and Smyth, nonzero empirical p-values](https://gksmyth.github.io/pubs/PermPValuesPreprint.pdf),
+[scikit-learn HDBSCAN](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.HDBSCAN.html).
+Additional clustering/prototype-assignment extensions remain tracked in the acceptance ledger.
+
+<a id="fgw-blocks"></a>
+
+### Bounded and resumable FGW matrices
+
+`FGWMatrixBuilder` reuses the existing FGW solver; it is not another Work runner or cache.
+It accepts square and rectangular object collections, enumerates row-major pairs deterministically,
+and bounds block size and numerical thread pools explicitly (default 32 comparisons, one thread).
+
+```python
+from lambdaforge.distances import FGWMatrixBuilder, FusedGromovWassersteinDistance
+
+builder = FGWMatrixBuilder(FusedGromovWassersteinDistance(alpha=.5), block_size=32)
+square = builder.build(objects, symmetric=True)
+cross = builder.build(new_objects, prototypes)  # [len(new_objects), len(prototypes)]
+for block in builder.blocks(objects, symmetric=True):
+    print(block.pairs, block.values, block.complete, block.diagnostics)
+```
+
+`symmetric=True` is an explicit assumption about the feature metric: only the upper triangle,
+including self comparisons, is solved and reflected. This does not claim both local solver
+orientations are numerically equal. Two supplied collections are rectangular and cannot request
+reflection, even if their lengths match. With one collection and `symmetric=False`, each
+orientation is computed. Existing `distance.pairwise(...)` behavior/signature is unchanged.
+
+`blocks()` streams bounded comparison blocks without allocating an entire result matrix.
+`build()` returns `FGWMatrixResult`: read-only `values`, exact operation `identity`, `symmetric`
+and bounded diagnostics per block (pair range/count, convergence count, total iterations, maximum
+marginal residual, failure count and at most eight shortened errors). No dense transports are
+retained for the complete matrix; use `distance.solve` for selected coupling details.
+
+Default `error_policy="raise"` propagates the first failed comparison. Explicit `"record"`
+continues with **NaN**, never a fabricated distance, for a failed comparison. `complete` means
+finite comparisons, **not** every solve converged or found a global optimum. Missing dependencies
+and memory-budget errors always propagate. Consumers must check completeness before clustering,
+publishing or returning strict JSON. Partial matrices are rejected by dissimilarity validation.
+Checkpoint JSON stores failed values as `null` with an error record; NaN is restored only in memory.
+
+The default `max_memory_bytes` is 512 MiB. Estimates include dense geometry/transport workspace,
+numeric feature conversion, block scratch space, identity metadata, accumulated bounded summaries
+and two output buffers for `build()`. This is not a hard RSS cap or a bound on arbitrary user
+feature callbacks/encoders. Input objects themselves are already resident. For large collections,
+stream `blocks()` into your native managed outputs rather than increasing the dense budget blindly.
+
+Inside an executing native Work, the exact same API supports:
+
+```python
+result = builder.build(objects, symmetric=True, work=self)
+```
+
+Every block uses `self.resume_map(..., workers=1, retries=0)` and native safe JSON checkpoints.
+No machine paths, pickle, extra lock system or parallel filesystem cache is introduced. Completed
+blocks survive interruption; only the interrupted block is repeated. Missing, malformed, incomplete,
+checksum-invalid or wrong-identity blocks are recomputed; failed recorded blocks are not reused.
+Operation identity includes versioned encoding, exact structures/features/weights and original total
+masses, relational mode, ordered collections, symmetry, solver parameters/class, thread count and
+LambdaForge/POT/NumPy/SciPy versions. Block size/memory limit are operational, not scientific identity.
+
+Numeric features are identified by exact dtype/shape/canonical-endian bytes. Opaque features require
+`feature_encoder(features) -> bytes` defining an exact deterministic encoding. Callable metrics
+require `metric_identity="my-metric/implementation-revision"`; update that authored identifier when
+their scientific implementation changes. LambdaForge does not guess closure equivalence or serialize
+arbitrary Python objects. The checksum detects corruption, not malicious rewriting with a new hash.
+Native Work identity, recovery ownership and compatible-code-change checks still apply independently.
+This API checkpoints comparisons; it does not promise resumable internal iterations of a POT solve.
+
+<a id="fgw-barycenters"></a>
+
+### Real FGW barycenters and relational structures
+
+`FGWBarycenter` calls the actual optional POT `ot.gromov.fgw_barycenters`, not an arithmetic
+average of unmatched nodes. It optimizes a **local synthetic relational prototype** with authored
+support size. A medoid is instead a real observation; a synthetic barycenter need not correspond
+to any physically realizable object. The number of support nodes is not selected as an optimum.
+
+```python
+from lambdaforge.distances import FGWBarycenter
+
+result = FGWBarycenter(n_support=16, alpha=.5, seed=42, n_init=3).fit(
+    objects, object_weights=None, support_weights=None,
+    init_structure=None, init_features=None,
+)
+prototype = result.prototype
+print(result.objective, result.converged, result.warnings)
+```
+
+All objects must have finite numeric `[N,F]` features in a common dimension. This version supports
+strictly `0 < alpha < 1`, balanced probability masses, squared structural loss and squared-Euclidean
+feature cost. It rejects custom feature metrics/opaque features and endpoint-alpha barycenter claims.
+Object weights are normalized explicitly; positive total is required. Support weights must be strictly
+positive because POT divides by them during updates. Source measures may have nonuniform weights.
+No automatic rescaling is performed; alpha mixes components whose units/scales must be chosen deliberately.
+To make a cluster prototype, pass exactly the selected cluster's objects and explicit object weights.
+
+Default `StructuredMeasure` validation remains symmetric/nonnegative/zero-diagonal. Explicit
+`StructuredMeasure(..., relational=True)` permits a nonzero diagonal for symmetric relationships.
+POT's barycenter structure is retained in that mode, **without zeroing its diagonal**. Such a relation
+is not asserted to be a metric. The same FGW distance/block builder accepts it afterwards. Complex
+geometry/masses are rejected rather than silently cast to real; arbitrary features remain supported
+by the ordinary distance API, not by this numeric barycenter formulation.
+
+Controls: `n_support`, `alpha`, `max_iter=100`, `tol=1e-7`, `seed`, `n_init=1`, `threads=1`,
+`max_memory_bytes=512 MiB`, `transport_max_iter=200` and `transport_tol=1e-9`. The last two apply
+to **post-optimization** transport checks; POT's inner barycenter solves also use `max_iter`.
+Explicit initial C `[support,support]` and X `[support,F]` apply to every restart. Both supplied
+initializations can make restarts identical; no unrequested perturbation is added. Otherwise POT's
+seeded structural initialization is used. The result records every generated start seed. Sequential
+multistart chooses the smallest observed valid weighted final-prototype objective, not a global optimum
+or necessarily a converged start. Invalid starts have explicit failure diagnostics; all invalid raises.
+
+The result retains the relational `prototype`, normalized object weights, selected start seed,
+restart summaries, parameter-change histories, iterations, warnings and final-object comparisons.
+`objective` is explicitly **postchecked** as `sum(lambda[k] * FGW(final_prototype, object[k]))`.
+Its `comparisons` contain newly solved feasible couplings and objective histories at the **final**
+prototype. They are not mislabeled as POT's lagging pre-update transports. POT's parameter-change
+logging mode does not provide a weighted final objective history; `backend_objective=None` says so.
+
+In tested POT 0.9.6 and 0.9.7.post1, the barycenter stopping test accepts either small feature
+change **or** small structure change. The wrapper does not silently call that full convergence:
+`converged` requires **both** changes below tolerance and converged final comparisons. Otherwise
+it returns honest nonconvergence and a warning, even when POT stopped early. This still does not
+prove a global minimum or identify a unique node ordering. Memory estimates include POT's logged
+per-iteration transports; excessive support/object/iteration combinations fail before solving.
+
+Run [the weighted matrix/barycenter example](../examples/fgw_barycenter.py). Numerical contracts
+are tested against both backend versions described above. Reference:
+[POT FGW barycenters](https://pythonot.github.io/gen_modules/ot.gromov.html#ot.gromov.fgw_barycenters).
+
+<a id="guide-scientific-authoring"></a>
+
+## Scientific authoring: operation contracts, samples and ETL
+
+LambdaForge owns scientific operations, typed evidence and the native Work lifecycle. A visual
+client owns its canvas, generic expressions/branches/loops and Python generation. There is no
+node interpreter, second dataset registry, graph executor or additional HPO engine here.
+Generated classes subclass `Work` and implement ordinary `run(...)`; they work without a GUI.
+The existing GraphSAGE, NNConv, PNA, GINE, GVP/GVPGNN, PaiNN, SchNet, DimeNet and structural
+Transformer implementations are reused, not replaced by visual-specific models.
+
+### Discover and select operations
+
+```sh
+lf catalog --json
+lf catalog PaiNN --kind model --json
+lf catalog --kind etl --json
+```
+
+```python
+from lambdaforge.catalog import OperationCatalog, ComponentFactory, ContractError
+
+catalog = OperationCatalog()
+description = catalog.describe("PaiNN", kind="model")
+catalog.validate("MLP", {"in_features": 2, "out_features": 1}, kind="model")
+selected_class = catalog.resolve(description["id"])
+```
+
+`operation-catalog-v1` ships as package JSON; discovery reads metadata, not Torch, sklearn,
+sample arrays, networks or plugin implementations. Resolution imports only the selected
+implementation and its actual dependencies. IDs are fully qualified `module:Class`, or
+`plugin:KIND:NAME`; short aliases ignore case, hyphens and underscores. Ambiguities require an
+exact ID. `ComponentRegistry.aliases("activation"|"normalization")` exposes registered aliases
+publicly, including process-local registrations. Native short aliases retain their historical
+precedence in ComponentRegistry; the metadata catalog requires namespaces when names collide.
+Runtime-only custom aliases are not portable declarations: distribute a plugin entry point.
+
+Descriptors include provider/version, translatable description/translation key, constructor
+annotations/defaults, explicit factory configuration ports, method ports, state/instance policy
+and native documentation. Not every operation has a fully machine-readable tensor equation:
+`shape_status="see-native-docstring"` and `contract_status="native-signature"` explicitly mean
+unresolved, **not** guaranteed compatible. Core MLP and graph encoders have curated tensor
+ports; PaiNN/GVPGNN expose invariant node output separately from latent polar-vector state
+`[N,C,3]`. GVP returns a scalar/vector tuple. Structural attention preserves `[B,N,F]` and
+padding. Geometry/topology and units come from the consumer; no protein assumptions or inferred
+neighbors. Symmetry descriptions are only asserted for the documented operators.
+
+`check_ports(source, target)` rejects explicit kind/dtype/units/rank/fixed-dimension conflicts;
+it is not symbolic shape solving. `validate` binds the selected Python constructor and checks
+declared primitive argument types without constructing a model; constructor-specific ranges,
+cross-parameter constraints and runtime tensor checks still belong to the native implementation.
+A GUI must not claim unresolved constraints were proved or execute constructors during discovery.
+The JSON Schema is packaged at `schemas/operation-catalog-v1.json`.
+
+Plugins use the existing PluginRegistry entry points and provenance checks. A provider may put
+`lambdaforge.operations.json` alongside its distribution `METADATA`, using the same schema and
+exact `plugin:KIND:NAME` ID. The installed entry point owns implementation/provider/version,
+not an arbitrary redirect in the JSON. Absent sidecars are `contract_status="undeclared"`;
+do not invent ports. Metadata is limited to 1 MiB per provider. Invalid/unsupported declarations
+fail explicitly. `ContractError.to_dict()` contains `code`, `message`, `details`; CLI catalog
+errors return exit 2 and `operation-error-v1`. Codes include `UNKNOWN_OPERATION`,
+`AMBIGUOUS_ALIAS`, `CONTRACT_VERSION`, `INVALID_CONTRACT`, `INVALID_PARAMETERS`,
+`MISSING_DEPENDENCY`, `ABSTRACT_OPERATION`, `INCOMPATIBLE_PORT`, `INCOMPATIBLE_SHAPE`.
+
+Factories are portable class/kwargs specifications, not shared modules:
+
+```python
+from lambdaforge.nn import MLP
+
+activation = ComponentFactory("prelu", "activation", {"num_parameters": 1})
+normalization = ComponentFactory("layernorm", "normalization", {"eps": 1e-6})
+model = MLP(2, 1, hidden=[4, 8],
+            activation=activation.component_type(), activation_kwargs=activation.kwargs,
+            normalization=normalization.component_type(), normalization_kwargs=normalization.kwargs)
+a, b = normalization.build(features=4), normalization.build(features=8)
+provenance = activation.provenance()
+```
+
+Each construction/build creates independent parameters; reusing an instance intentionally
+shares weights and mutable buffers. Train/eval is explicit. Normalization factories reject
+authored feature widths; the receiving layer supplies its width. MLP, ResidualMLP, CNN2D,
+GCN and GraphSAGE support documented class/kwargs pairs. Check `configuration_ports` for each
+selected constructor: fixed-activation architectures such as PaiNN do **not** acquire arbitrary
+injection through this API. Gated activations can change widths; the client must account for it.
+
+### Identified multi-asset samples
+
+`from lambdaforge.data.samples import FieldSpec, SampleSchema, SampleDataset, collate_samples,
+collate_graphs` exposes a lazy reader over the **existing** DatasetArtifact/member index.
+Pass a native resolved `{dataset: NAME@VERSION}` Work input root; native DatasetService handles
+placement/materialization, not this loader. No hidden downloads or registration happen here.
+[`examples/sample-schema.json`](../examples/sample-schema.json) is an actual versioned example;
+`schemas/sample-schema-v1.json` is packaged. The same mapping can live in YAML or declared
+dataset metadata; the consumer chooses it explicitly instead of guessing from filenames.
+
+Each field declares logical asset, format (`npz`, `npy`, `json`, `csv`), selected array/key/index
+path, dtype, sample shape (excluding batch), axes/units, role and missing/collate policy. Metadata,
+targets, partitions and id may be selected without opening assets. Roles distinguish model input,
+target/loss, metadata, masks, indices, coordinates and vector channels. Named `bindings` map model
+argument → field; targets/loss/metadata cannot be bound as inputs. Field selection is ordinary
+consumer Python and can be a native sweep/search parameter, not an additional optimizer.
+
+```python
+from lambdaforge.data.samples import SampleSchema, SampleDataset, collate_samples
+
+schema = SampleSchema.from_mapping(declared_mapping)
+train = SampleDataset(resolved_dataset_path, schema, partitions={"split": "train"})
+report = train.preflight()                 # declarations/index only, not decoded arrays
+small = train.preview(samples=2, max_bytes=1_048_576, max_seconds=2)
+batch = collate_samples([train[0], train[1]], schema)
+inputs = schema.model_inputs(batch["fields"])
+```
+
+Construction verifies the exact index checksum and scans bounded member metadata (default
+100,000 members, 64 MiB index, 1 MiB declaration), never sample bytes. Preflight reports required
+asset declarations, not proof of value compatibility. Access validates selected asset SHA-256,
+dtype and shape; defaults never excuse corruption/disappeared declared bytes. Missing optional
+declarations/keys use `none` or an explicit JSON default and always retain a presence mask.
+IDs, exact content identity, selected assets and partitions remain in sample provenance.
+
+Per-sample default limits are 32 MiB encoded/decoded budget and a cooperative 5-second deadline;
+preview uses one shared byte/time budget and 0–20 samples. These are conservative read/allocation
+guards, not an OS RSS quota or preemption of a blocked native filesystem call. NPY versions 1/2
+and non-object arrays only; NPZ selected-member expansion is checked before decode. Paths cannot
+traverse symlinks or escape the native root; remote URI assets require native placement first.
+CSV values stay strings unless the recipe explicitly converts them. Unsupported types fail,
+not pickle or implicit dtype coercion. Large inventories beyond these explicit limits require
+a different batching/index access design; this version does not silently truncate them.
+
+`collate_samples` requires equal dtype/shape for `stack`, keeps `ragged`/`list`, or explicitly
+zero-pads only the first sample axis with `masks["FIELD:padding"]`. Presence masks are separate.
+`collate_graphs(graphs, node_fields=(...), edge_fields=(...))` concatenates disjoint graphs,
+validates local edge bounds/cardinality, offsets edges and returns `batch`, `ptr`, ids/provenance.
+Vector axes remain `[N,C,3]`; no flattening. Nothing silently joins graphs or promotes dtypes.
+NumPy batches can be explicitly converted to tensors by the consumer.
+
+### Ordinary ETL and train-only learned state
+
+`lambdaforge.etl` provides `ListFiles`, `ReadRecords`, `WriteRecords`, `SelectFields`,
+`JoinRecords`, `PartitionRecords`, `WriteSampleAssets`, `ValidateRecords`, `TrainStandardizer`, `Download`.
+Call these from Python; generic derive expressions, branches and loops remain ordinary Python.
+Readers/writers support the formats above; writers refuse overwrite/object arrays and write only
+the explicitly supplied managed output/checkpoint staging path. They are not independent
+publishers. `ValidateRecords` streams identified decoded rows through SampleSchema's shared
+field dtype/shape checks, preserving original values/partitions without implicit imputation.
+`JoinRecords` permits explicit left/inner one-to-one joins, bounded right inventory,
+unique IDs, no column collisions and equal partition labels. Rename first; many-to-many joins
+are deliberately unsupported. `SelectFields` preserves id/partitions and filters explicit equality.
+`PartitionRecords` hashes seed + explicit group/id deterministically, preserves group isolation
+and refuses overwriting split labels. Fractions are expected proportions, not exact stratification.
+
+`TrainStandardizer.fit(values, ids=..., splits=["train", ...], fold="cv-1")` fits once on
+identified finite 2D training data; `transform(..., fold="cv-1")` cannot refit or cross folds.
+`state_dict`/`from_state_dict` are portable JSON. Create one state per fold/trial; do not fit on
+validation/test, concatenate folds, or reuse fitted state across incompatible inputs. This is a
+guarded explicit API, not proof the caller's authored split labels are truthful. Other learned
+transformers/tokenizers must obey the same training-only contract; no generic tokenizer engine
+is claimed. See [sklearn data leakage guidance](https://scikit-learn.org/stable/common_pitfalls.html#data-leakage).
+
+`Download(timeout=30, retries=3, max_bytes=268435456, credential=None)` calls native
+`work.cache.fetch`, with required exact SHA-256, bounded decoded bytes, atomic cache publication
+and cancellation between reads/retries. Socket timeout still bounds blocked I/O; it is not
+instantaneous preemption. Credential-bearing/query URLs are refused. Optional `env:NAME` or
+`keyring:IDENTIFIER` bearer references use CredentialService, require HTTPS and cannot redirect
+outside their exact origin. Configure the reference on the execution host through native
+credential mechanisms; LambdaForge never forwards a laptop secret implicitly. Secrets are not
+persisted in cache records or echoed authenticated HTTP failure reasons. Discovery never makes
+requests. Native cache also accepts `max_bytes`, `cancelled` and `credential` explicitly.
+
+Use `Work.resume_map` for per-member checkpoints and `outputs.dataset(...)` for atomic
+publication, targets/global assets/content/lineage and native registry visibility. A recipe must
+not publish after cancellation. The reference example writes managed checkpoint files and stores
+logical dependencies, not machine paths, in resumable-map state; publication uses its explicit
+`source_checkpoint`. Failure preserves checkpoints, publishes no partial dataset and native retry
+reuses valid items. These operations do not bypass scientific identity or recovery checks.
+
+### Classical estimators, not differentiable modules
+
+Install optional `lambdaforge[estimators]`. `SklearnEstimator(algorithm, parameters=None,
+seed=0, threads=1)` lazily wraps sklearn decision trees, random forests, conventional gradient
+boosting classifiers/regressors and SVC/SVR. `capabilities` declares fit/predict/probability,
+no transform, CPU and non-differentiability. SVC probabilities require explicit `probability=True`.
+Use native Work metrics/objectives/HPO; there is no second trainer. Random state/thread policy
+is explicit rather than hidden backend overrides. GradTree/NODE/GRANDE remain different models.
+
+Persistence is optional `lambdaforge[estimator-persistence]`: `save(path)`,
+`inspect_file(path)` and `load(path, trusted_types=reviewed_types)` use skops, never pickle.
+Review the exact unknown types first; do not blindly trust attacker-provided lists. Checkpoint
+and output files remain owned by native Work services. This extra is not installed automatically.
+Backend version compatibility and artifact trust remain explicit operator responsibilities;
+see [sklearn persistence](https://scikit-learn.org/stable/model_persistence.html).
+
+### CPU reference and distribution to a visual client
+
+Copy `visual_research.py`, `visual_prepare.yaml`, `visual_train.yaml`, `visual_search.yaml`
+from the shipped examples into a new disposable, installed/importable Python project. Change
+`run` module names only if needed. From that project:
+
+```sh
+python visual_research.py raw                 # synthetic CSV + JSON, refuses existing directory
+lf run visual_prepare.yaml                    # native ETL Work + atomic visual-demo@1
+lf run visual_train.yaml                      # exact field/activation sweep
+lf run visual_search.yaml                     # same operations, native adaptive planner
+```
+
+The two-input model binds numeric NPZ features plus a JSON sidecar; an optional field carries a
+default/presence mask, targets stay out of inputs, and train-only scaler state/previews are native
+artifacts. `use_context` and activation are selectable through the existing design mechanism.
+The example is CPU/synthetic; it does not alter a consumer project or contact clusters.
+
+Build from the **actual working tree**, including new package files, not its HEAD alone:
+
+```sh
+python tools/build_operation_catalog.py
+python tools/build_scientific_wheel.py /absolute/new/output-directory
+```
+
+The builder uses installed setuptools/wheel offline, verifies catalog freshness, fixes
+SOURCE_DATE_EPOCH/PYTHONHASHSEED and writes `build-receipt.json`: framework version, actual HEAD,
+dirty flag, wheel SHA-256, packaged-content SHA-256 and member hashes. Use an empty directory;
+two builds of unchanged content with the same epoch must have the same wheel hash. No dependency
+installation or editable payload is performed by the builder. The version remains 0.19.0 until
+an explicit release; content identity, HEAD and release version are not interchangeable.
+Install this wheel into the client's reviewed runtime/bundle, pin its exact SHA-256, run
+catalog/CPU integration checks there, then rebuild the client payload through its own packaging
+process. An older 0.17.1 bundle does not acquire these APIs by opening this checkout. This task
+does not change SimpleAIStudio or claim its UI integration shipped. Unknown schema major versions
+must fail; no silent migration/fallback to guessed ports is supported.
+
+<a id="guide-tabular-connectors"></a>
+
+## Incremental tables, SQL and preview effects
+
+This is an additive extension of `operation-catalog-v1`; defaults for existing CSV readers remain
+comma + one header row + UTF-8 + string values. The client still generates ordinary Python/Work,
+not a LambdaForge node interpreter. `lf catalog --kind etl --json` discovers installed operations
+without importing optional database backends, opening sources, downloading datasets or training.
+
+### Delimited files and column types
+
+```python
+from lambdaforge.etl import ReadRecords, WriteRecords, PreviewBudget, PreviewSession
+from lambdaforge.etl.tables import Column, TableSchema
+
+schema = TableSchema([
+    Column("id"),
+    Column("amount", "number", nullable=True, null_values=("", "NA")),
+    Column("measured_at", "datetime", date_format="%Y-%m-%d", timezone="UTC"),
+], keys=["id"])
+reader = ReadRecords("csv", csv={"delimiter": ";", "decimal": ",", "bom": "strip"},
+                     schema=schema.to_dict(), columns=["id", "amount"], max_rows=50)
+for row in reader.iter_records(source):
+    consume(row)                              # close abandoned generators explicitly
+preview = reader.preview(source, budget=PreviewBudget(max_rows=10, max_bytes=64_000))
+```
+
+`csv` is a `CsvOptions` mapping: delimiter, header_rows, columns, encoding, bom
+(`preserve|strip|error`), quotechar/escapechar (null disables quoting/escaping), doublequote,
+comment, skip_rows, decimal and parse_errors (`error|skip`). TSV selects tab by default. Header
+rows are records; the **last** header row supplies names, or explicit names override them.
+Headerless input requires names. `skip_rows` counts initial physical lines, comments are skipped
+only at record boundaries, and quoted multiline values are not corrupted by comment handling.
+Blank physical records are ignored, matching native DictReader defaults. Duplicate/empty names,
+wrong widths and invalid encoding fail explicitly; skipped malformed records are diagnosed in
+bounded preview diagnostics. Conversion failures use each column's independent policy.
+
+The reader's `columns` projection and `max_rows` are enforced while reading; it does not decode
+the entire file before selecting rows. `__call__` keeps the historical materialized return and
+internal `path` selection, with an explicit retained-memory guard. `iter_records`/`preview`
+require CSV/TSV without an internal path. Whole JSON is not falsely advertised as incremental.
+`compression="gzip"` reads delimited streams with decoded byte/record bounds. No extension-based
+compression guessing; NPZ has its own numeric reader. Python CSV's native field-size bound also
+applies; this API never changes that process-global setting behind other readers.
+
+`WriteRecords("csv"|"tsv", csv=...)` uses the same delimiter/columns/encoding/quote/escape/decimal
+settings, header_rows 0 or 1 and explicit `write_bom=True` when desired. Reader-only skipping,
+comments, multi-header and error-skipping options are rejected by writers. No overwrite, raw
+source deletion or implicit publication; use a native managed staging/checkpoint/output path.
+The row iterator is written progressively. NPY/NPZ/JSON default writing is unchanged.
+
+`table-schema-v1` is a portable scalar column contract; see
+[`examples/table-schema.json`](../examples/table-schema.json) and installed
+`schemas/table-schema-v1.json`. Types are string/integer/number/boolean/datetime/json, with
+nullable, null_values, invalid (`error|null`), categories, date_format and timezone.
+No guessing from a preview. Empty strings become null only if declared; fractions cannot silently
+truncate to integers. Invalid-to-null requires nullable. Dates use explicit formatting/ISO and a
+timezone for naive values; ambiguous/nonexistent local times are refused. Structured arrays and
+geometry are not flattened into scalar columns. `TableSchema.convert` preserves extra fields;
+`keys` describe nonnullable key columns, while `FromRows`/SQL writers enforce key uniqueness.
+
+Ordinary callable transformations:
+
+| Operation | Contract |
+| --- | --- |
+| `CastTable(schema)` | Declared conversions; cannot rewrite id, partitions or provenance. |
+| `FillNulls(values)` | Explicit constant fill, **not** a fitted imputer; protected fields unchanged. |
+| `FilterTable(predicate, keep=True)` | Scalar eq/ne/lt/le/gt/ge/in/is_null/not_null, bounded all/any/not; no eval. Null comparisons are false except explicit null operators; `not` is ordinary Boolean negation. |
+| `SelectTable(columns, drop=(), rename=None)` | Project/drop/rename, automatically retaining protected fields; collisions fail. |
+| `SortTable(by, descending=False, nulls="last")` | Stable bounded materialization, explicit null order, not an external/streaming sort. |
+| `DeduplicateTable(keys, keep="first")` | Explicit first/last; refuses merging different id/partition/provenance evidence. |
+| `AggregateTable(by, aggregations, identity="derive")` | New deterministic group IDs and full bounded member-ID lineage; partition labels are part of grouping. Count/sum/mean/min/max; null values excluded, never zeros. |
+| `ConcatTables()` | Exact column sets, duplicate identified rows rejected, not implicit schema union. |
+| `FromRows(schema)` | Explicit portable rows, declared keys/conversions; bounded materialization. |
+
+The `identity="derive"` aggregation argument is required, not an implicit rewrite of input IDs.
+Example predicate: `{"all": [{"column": "amount", "op": "not_null"},
+{"column": "amount", "op": "gt", "value": 0}]}`. Example aggregation:
+`{"mean_amount": {"column": "amount", "op": "mean"}}`. Stateful/materializing operations
+default to 10,000 rows and 8 MiB guards; overflow fails rather than sampling silently. Pure
+streaming transforms consume their supplied iterator; generated Python should pass bounded
+sources/check cancellation. `TrainStandardizer` remains train-only/fold-scoped. Calibration
+components use their **held-out calibration** contract, not test or training fit.
+
+### Shared preview budget and temporary staging
+
+```python
+from lambdaforge.etl import PreviewArray
+
+budget = PreviewBudget(max_rows=20, max_bytes=1_048_576, max_seconds=5,
+                       max_memory=8_388_608, max_files=4, cancelled=stop_requested)
+session = PreviewSession([approved_input_root], budget)
+table = session.records(reader, source)
+array = session.array(PreviewArray("npz", key="features"), array_source)
+with session.staging_directory() as scratch:
+    # If the generated recipe explicitly needs temporary output, never a publication.
+    inspect_temporary(scratch)
+```
+
+One budget covers rows, encoded/decoded bytes actually read, source count, deadline and retained
+preview allocations across calls. No symlinks/traversal/out-of-root paths. `table-preview-v1` and
+`array-preview-v1` report **prefix**, complete (conservative false when a row ceiling was reached),
+provenance/row ordinals or source line ranges, effective counters and `content_identity=null`.
+A prefix hash is not a file/dataset identity. No statistical estimates are manufactured.
+
+NPY uses read-only mmap for selected first-axis rows; NPZ streams only one selected C-order array
+prefix, bounding decoded data rather than trusting compressed size. Header dtype/shape and full
+decoded extent are reported; object/structured dtype and Fortran-order multi-axis NPZ are refused.
+Fortran NPY works via mmap. These reads do not verify unread asset bytes: immutable dataset
+verification/materialization remains native DatasetService's responsibility, not a GUI shortcut.
+No remote dataset is downloaded merely to discover its operation descriptor.
+
+Reader-level prefix I/O is separate from native Work input sealing: a typed `{file: ...}`
+Work input still undergoes exact content fingerprinting before execution, which may read all
+its bytes. Preview utilities do not waive that identity check. A visual client must scope
+its separate preview access appropriately and must not claim full Work launch is prefix-only.
+
+These are cooperative limits, **not an OS RSS sandbox**. Returned row object sizes and decoded
+chunks are guarded; parsers/drivers allocate some objects before checks. Blocking filesystem,
+DNS, database and native calls need their provider timeout. In particular, PostgreSQL may return
+a large single value before a Python guard, and Python 3.10 SQLite has no `setlimit`; Python
+3.11+ additionally caps SQLite value length before retrieval. Projection/small chunks and
+resource-limited Work execution are still required for adversarial inputs. Close partial
+iterators; context exits close files/cursors and rollback reads. Temporary scopes remove only
+their own scratch tree, also after failure. They are not a plugin isolation or code permission system.
+
+### SQL, mutable sources and deliberate writes
+
+SQLite uses the standard library; PostgreSQL is lazy optional `lambdaforge[sql-postgresql]`
+(Psycopg 3). No auto-install or network call during construction/discovery.
+
+```python
+from lambdaforge.etl import ReadSQL
+
+sqlite = ReadSQL("sqlite", file="source.sqlite", table="measurements",
+                 columns=["id", "amount"], order_by=["id"], chunk_size=100)
+rows = sqlite.iter_records(budget=PreviewBudget(max_rows=1000))
+postgres = ReadSQL("postgresql", credential="env:PROJECT_DB", table="measurements",
+                   columns=["id", "amount"], order_by=["id"], sslmode="verify-full")
+# Explicit operator network authority; no controller credential forwarding.
+remote_preview = PreviewSession([approved_input_root], allow_network=True).sql(postgres)
+```
+
+The credential reference resolves through CredentialService on the execution host to a JSON
+object with host/port/dbname/user/password/sslrootcert as needed. Do not write that secret JSON
+into YAML, operation metadata or logs. Non-reference connection values and disabled TLS are
+rejected. Connect/statement timeouts are explicit. SSL defaults to verify-full; require/verify-ca
+are explicit weaker policies, not silently selected fallbacks. Driver errors are redacted without
+chained DSN/password exceptions. Use a database role restricted to the intended read/write scope.
+
+Choose **query OR table**. Table/column/order identifiers are validated simple unqualified names
+and quoted; schema-qualified/complex expressions require authored query text, not identifier
+interpolation. Bind parameters separately: SQLite `?`/`:name`, PostgreSQL `%s`/`%(name)s`.
+There is no raw-string substitution. Query owns projection/order. Output aliases must be unique.
+SQLite opens an existing database mode=ro and an authorizer refuses DDL/mutation/extension
+loading; PostgreSQL uses a read-only repeatable-read transaction and server cursor. Both fetch
+bounded chunks. SQLite progress checks cancellation/deadline. PostgreSQL blocked statements use
+statement_timeout; cancellation is checked between calls. These are not arbitrary-SQL sandboxes:
+server functions may have external effects, so database credentials/query authors need trust.
+
+Each iterator sees one read transaction, not a reusable cross-run snapshot. Preview records backend,
+isolation, authored-query fingerprint and the exact **observed prefix** hash separately. A mutable
+database returning different content is not the same scientific input because the SQL text stayed
+constant. For reproducible training, materialize exact selected rows to managed checkpoint/staging,
+retain extraction recipe/dependency provenance and publish with `Work.outputs.dataset`; then use
+the immutable typed Dataset input. Do not expose a query hash as a scientific dataset identity.
+
+`WriteSQL(dialect, table, schema, ..., mode="insert"|"upsert"|"replace", create=False)` accepts
+only declared table writes. Existing SQLite files are required; it never silently creates a
+database path. TableSchema keys are mandatory; duplicate input keys fail. Upsert uses the actual
+database unique constraint and is idempotent on those keys. Replace deletes **rows**, not tables.
+DDL to create a declared table needs separate authorization. All rows/DDL are one transaction;
+conversion/schema/key/budget/cancellation failure rolls everything back. No automatic retries.
+JSON columns require an explicit future backend adapter; no silent string flattening.
+
+```python
+from lambdaforge.etl import WriteSQL, SQLWritePolicy
+
+# Created only by trusted operator/session code after human review, not from a node boolean.
+authorization = SQLWritePolicy(allow_insert=True, allow_update=True)
+writer = WriteSQL("sqlite", "measurements", schema.to_dict(), file="target.sqlite", mode="upsert")
+receipt = writer(validated_rows, policy=authorization)
+```
+
+`SQLWritePolicy` is an explicit API trust boundary, not a sandbox against unrestricted Python.
+The client must keep authorization operator-owned. A preview session refuses writers and never
+publishes, deletes/replaces external data or performs DDL. PostgreSQL tests against a real ephemeral
+TLS instance are opt-in via `LAMBDAFORGE_TEST_EPHEMERAL_PG_REF`; absent it, tests skip without
+contacting any database. SQLite transaction/rollback/snapshot behavior is covered by local fixtures.
+Other dialects are unsupported: adding one requires a mature DB-API backend adapter with read-only,
+snapshot, placeholder, timeout, identifier, transaction and evidence tests, not a renamed command.
+References: [SQLite Python](https://docs.python.org/3/library/sqlite3.html),
+[Psycopg transaction characteristics](https://www.psycopg.org/psycopg3/docs/basic/transactions.html).
+
+### Effects, structured models and provider configuration
+
+Descriptors now include `operation-effects-v1`: read-data/read-metadata, network (conditional for
+SQL), learn-state, instance-state, write-cache, write-staging, modify-external-source and conditional
+DDL. `preview.supported` declares a specific native bounded entrypoint, not blanket permission.
+Plugins have preview disabled by default even with metadata; native PreviewSession never invokes
+arbitrary plugin/subclass code. `ContractError.to_dict()` includes a stable translation_key plus
+code/message/details. Consumers translate codes without parsing exception text.
+
+`OperationCatalog.validate_descriptor(ID)` imports only the selected class and compares constructor
+names/defaults/required fields, advertised method ports and abstract/concrete status with installed
+signatures. It never constructs modules or proves general tensor equations. `audit(kind="model")`
+is metadata-only and separates abstract, declared-structure and signature-only components.
+The inspected inventory has 93 model descriptors: 1 abstract, 15 with declared output structures
+and 77 signature-only; declared structure alone is **not** full composability proof. Existing
+models are reused, not duplicated. Ensembles explicitly retain supplied modules/share weights,
+multitask returns named tensors, mixtures expose expert outputs and still evaluate all experts
+under top-k, NeuralODE declares dynamics(t,y), trajectory/state shape and fixed-step semantics,
+and uncertainty/calibration declares held-out mutable fit state and structured output.
+
+Discover schemas with `ConfigurationSchemas.schema("work"|"cluster")` or
+`lf config schema --kind cluster --json` (default remains Work). The installed
+`cluster-profile-v1.json` contains current native policy fields, options/conditions/defaults,
+unit annotations and secret references; `resolve_cluster(name, mapping)` uses schema checking
+then the **same ClusterProfile normalizer**, exposing effective defaults without connecting or
+claiming resources. Cross-field/ownership restrictions still belong to native validation.
+Work schema remains static authoring guidance; selected Work.run signatures require the existing
+native authorized Python validation. No second YAML normalization engine.
+
+Synthetic fixtures cover `command_prefix: [gpu]` → `gpu executable args`, `[gpu, exec]` and other
+explicit argv wrappers with declared visibility probes. Neither prefix implies a protocol or a
+free physical GPU grant. Existing process/SLURM services own submit/receipt/identity, inventory,
+logs, cancel and declared pause/resume capabilities. Bare claim/release argv remains refused
+without Job-owned reservation proof; sibling/manual allocations are protected. There is **no new
+arbitrary scheduler backend** or repurposed SLURM parser. A new provider would need the complete
+native Scheduler/ownership contract and recovery tests, not an sbatch replacement.
+
+Migration: all changes are additive; old CSV defaults and scientific identities are preserved,
+new table/effects/preview schemas are versioned. Additional machine-readable tensor equations,
+Parquet/Arrow codecs and other SQL dialects remain explicit follow-ups, not advertised endpoints.
+The native [table preview Work](../examples/tabular_preview.py) and
+[YAML](../examples/tabular_preview.yaml) are a CPU reference alongside the existing full
+ETL→dataset→model→sweep/HPO example. Build the working-tree wheel as above, first regenerating
+both `tools/build_operation_catalog.py` and `tools/build_cluster_schema.py`; builder freshness
+checks include both installed contracts. The wheel receipt pins actual packaged bytes/HEAD/dirty
+state without claiming the client's application bundle was updated.

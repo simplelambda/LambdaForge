@@ -50,6 +50,21 @@ def run_job_command(arguments: argparse.Namespace) -> int:
     selected_job_id: str = (
         jobs.resolve_selector(arguments.job_id) if hasattr(arguments, "job_id") else ""
     )
+    if arguments.job_command == "recovery-dependencies":
+        plan = jobs.recovery_dependencies(
+            selected_job_id, apply=arguments.apply, limit=arguments.limit
+        )
+        if arguments.json:
+            print(json.dumps(plan, indent=2))
+        else:
+            print(
+                f"Original inputs · present/unverified {plan['present']} · "
+                f"artifact candidates {plan['copy_candidates']} · "
+                f"unavailable {plan['unavailable']} · "
+                f"source-unbound records {plan['source_unbound_records']}"
+            )
+            print(plan["policy"])
+        return 0
     if arguments.job_command == "recovery":
         audit = jobs.recovery_history(
             selected_job_id, offset=arguments.offset, limit=arguments.limit

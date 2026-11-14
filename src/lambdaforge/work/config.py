@@ -218,9 +218,13 @@ class WorkConfig:
     levels: tuple[WorkLevel, ...]
     source: Path | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
+    recovery_file_bindings: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "raw", immutable_mapping(self.raw))
+        object.__setattr__(
+            self, "recovery_file_bindings", immutable_mapping(self.recovery_file_bindings)
+        )
 
     @classmethod
     def from_yaml(
@@ -1198,7 +1202,12 @@ def _sweep(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None, float | N
     if not isinstance(value, Mapping):
         raise TypeError("sweep must be a mapping containing space.")
     unknown = set(value) - {
-        "space", "reference", "replicates", "sequential_alpha", "include", "candidates"
+        "space",
+        "reference",
+        "replicates",
+        "sequential_alpha",
+        "include",
+        "candidates",
     }
     if unknown:
         forbidden = sorted(unknown)
@@ -1309,7 +1318,8 @@ def _explicit_sweep_variants(
         point = dict(raw)
         if any(
             not (value is None or isinstance(value, (str, bool, int, float)))
-            or isinstance(value, float) and not math.isfinite(value)
+            or isinstance(value, float)
+            and not math.isfinite(value)
             for value in point.values()
         ):
             raise ValueError(f"sweep.{mode} candidate values must be finite JSON scalars.")

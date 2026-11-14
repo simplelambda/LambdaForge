@@ -117,13 +117,15 @@ def owned_path(root: Path, value: str | Path, *, must_exist: bool = False) -> Pa
     return resolved
 
 
-def fingerprint(path: Path) -> tuple[str, int]:
+def fingerprint(path: Path, *, file_name: str | None = None) -> tuple[str, int]:
     """Return the historical SHA-256 and byte count for compatible persisted data.
 
     Ordering is explicitly based on UTF-8 path components rather than host
     ``Path`` ordering. This preserves existing POSIX identities while removing
     locale, directory-enumeration and operating-system ordering differences.
     New cross-machine input contracts use :func:`canonical_fingerprint`.
+    ``file_name`` supplies the original logical basename for staged-file validation or
+    exact historical byte repair; the default persisted identity format is unchanged.
     """
     if path.is_symlink() or (not path.is_file() and not path.is_dir()):
         raise ValueError(f"Managed content must be a regular file or directory: {path}")
@@ -131,7 +133,11 @@ def fingerprint(path: Path) -> tuple[str, int]:
     size = 0
     entries: tuple[tuple[str, Path], ...]
     if path.is_file():
-        entries = ((path.name, path),)
+        if file_name is not None and (
+            Path(file_name).name != file_name or file_name in {"", ".", ".."}
+        ):
+            raise ValueError("A logical file name must be a single safe basename.")
+        entries = ((file_name or path.name, path),)
     else:
         entries = tuple(
             (raw_relative, item)
@@ -215,6 +221,16 @@ class ManagedFile(os.PathLike[str]):
             "key": self.key,
             "sha256": self.sha256,
             "size_bytes": self.size_bytes,
+            **(
+                {"namespace": self.metadata["cache_namespace"]}
+                if "cache_namespace" in self.metadata
+                else {}
+            ),
+            **(
+                {"observed": bool(self.metadata.get("external_observation"))}
+                if self.scope == "cache"
+                else {}
+            ),
         }
 
 
@@ -325,7 +341,7 @@ class ManagedFileStore:
                     raise FileNotFoundError(
                         f"Producer for managed {self.scope} file {selected!r} created no safe file."
                     )
-                digest, size = fingerprint(candidate_path)
+                digest, size = fingerprint(candidate_path, file_name=destination.name)
                 candidate = ManagedFile(selected, candidate_path, digest, size, self.scope, {})
                 if validate is not None and not bool(validate(candidate)):
                     raise ValueError(

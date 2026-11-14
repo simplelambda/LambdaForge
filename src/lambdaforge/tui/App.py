@@ -42,6 +42,7 @@ from lambdaforge.tui.models import PALETTE_ACTIONS, ConsoleAction
 from lambdaforge.tui.screens.Base import DataScreen, EntitySelected
 from lambdaforge.tui.screens.ClusterScreen import ClusterScreen
 from lambdaforge.tui.screens.DatasetScreen import DatasetScreen
+from lambdaforge.tui.screens.ExecutionQueueDialog import ExecutionQueueDialog
 from lambdaforge.tui.screens.OverviewScreen import OverviewScreen
 from lambdaforge.tui.screens.ProductScreen import (
     ProductScreen,
@@ -891,6 +892,15 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
                         value="local" if "local" in clusters else clusters[0],
                         id="launch-cluster",
                     )
+                yield Checkbox(
+                    "Queue after earlier Studies / Works · Runs stay parallel",
+                    id="launch-execution-queue",
+                    tooltip=(
+                        "Wait for earlier submissions on this cluster. Once admitted, this "
+                        "Study keeps its normal parallel Trials/seeds and resource limits."
+                    ),
+                )
+                yield Button("View execution queue…", id="launch-view-execution-queue")
                 with Horizontal(classes="workspace-actions"):
                     yield Input(
                         placeholder="Input parameter name, e.g. model", id="launch-input-name"
@@ -933,6 +943,11 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
             return
         if event.button.id == "launch-cancel":
             self.dismiss(None)
+            return
+        if event.button.id == "launch-view-execution-queue":
+            target = self.query_one("#launch-cluster", Select).value
+            if target is not Select.BLANK:
+                self.app.push_screen(ExecutionQueueDialog(self.services, str(target)))
             return
         if event.button.id == "launch-browse":
             self.app.push_screen(YamlFilePicker(Path.cwd()), self._yaml_picked)
@@ -1095,12 +1110,15 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
             return
         if not already_busy:
             self._set_busy(True, f"Submitting {path.name} to {cluster}…")
+        queued = self.query_one("#launch-execution-queue", Checkbox).value
 
         def run() -> None:
             try:
-                options = (
+                options: dict[str, Any] = (
                     {"input_bindings": dict(self._input_bindings)} if self._input_bindings else {}
                 )
+                if queued:
+                    options["execution_queue"] = True
                 result = self.services.submit_work(path, cluster, **options)
             except Exception as error:
                 self.app.call_from_thread(self._preview_failed, error, "submission")
@@ -1116,6 +1134,8 @@ class WorkLaunchDialog(ModalScreen[dict[str, Any] | None]):
         self.query_one("#launch-dependency", Button).disabled = busy
         self.query_one("#launch-input-name", Input).disabled = busy
         self.query_one("#launch-cluster", Select).disabled = busy
+        self.query_one("#launch-execution-queue", Checkbox).disabled = busy
+        self.query_one("#launch-view-execution-queue", Button).disabled = busy
         self.query_one("#launch-config", Input).disabled = busy
         self.query_one("#launch-submit", Button).disabled = busy or not bool(
             self.query_one("#launch-config", Input).value.strip()
@@ -1454,8 +1474,13 @@ class LambdaForgeApp(App[None]):
         if result is None:
             return
         self.notify(
-            f"Submission accepted: {result.get('job_id', result)}",
-            title="Work queued",
+            (
+                "Queue accepted · preparing (keep this PC online): "
+                if result.get("execution_queue")
+                else "Submission accepted: "
+            )
+            + str(result.get("job_id", result)),
+            title="Sequential execution" if result.get("execution_queue") else "Work queued",
         )
         self.query_one("#overview", OverviewScreen).reload()
         self.query_one("#work", WorkScreen).reload()

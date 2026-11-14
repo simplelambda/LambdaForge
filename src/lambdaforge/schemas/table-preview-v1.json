@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.github.io/lambdaforge/schemas/table-preview-v1.json",
+  "type": "object", "required": ["schema_version", "rows", "scope", "complete", "content_identity", "budget", "provenance"],
+  "properties": {
+    "schema_version": {"const": "table-preview-v1"},
+    "rows": {"type": "array", "items": {"type": "object"}},
+    "scope": {"const": "prefix"}, "complete": {"type": "boolean"},
+    "content_identity": {"type": "null"},
+    "budget": {"type": "object", "required": ["schema_version", "rows", "bytes", "files", "limits"],
+               "properties": {"schema_version": {"const": "preview-budget-v1"}}},
+    "provenance": {"type": ["array", "object"]},
+    "diagnostics": {"type": "array"}
+  }
+}

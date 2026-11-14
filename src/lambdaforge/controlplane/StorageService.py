@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import PurePosixPath
 from typing import Any
@@ -32,11 +32,13 @@ class StorageService:
         self.jobs = jobs or JobService(self.catalog, factory=self.factory)
         self.max_parallel = max(1, int(max_parallel))
 
-    def status(self, cluster: str = "local") -> StorageReport:
+    def status(self, cluster: str = "local", *, metadata_only: bool = False) -> StorageReport:
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
         try:
-            categories = self._invoke(cluster, "status", profile.storage.to_dict())
+            categories = self._invoke(
+                cluster, "status", {**profile.storage.to_dict(), "metadata_only": metadata_only}
+            )
             filesystems = categories.pop("filesystems", {})
             return StorageReport(cluster, True, categories, filesystems=filesystems)
         except Exception as error:
@@ -60,11 +62,22 @@ class StorageService:
             **self._invoke(cluster, "reconcile", profile.storage.to_dict(), apply=apply),
         }
 
-    def gc(self, cluster: str = "local", *, apply: bool = False) -> StorageGcPlan:
+    def gc(
+        self,
+        cluster: str = "local",
+        *,
+        apply: bool = False,
+        environments_only: bool = False,
+        reference_preview: Mapping[str, Any] | None = None,
+    ) -> StorageGcPlan:
         profile = self.catalog.get(cluster)
         assert profile.storage is not None
         records = self.jobs.list(cluster=cluster, refresh=False)
-        active = tuple(record for record in records if not record.state.terminal)
+        active = tuple(
+            record
+            for record in records
+            if not record.state.terminal or record.state.value in {"failed", "cancelled", "timeout"}
+        )
         retained = {
             job_id
             for record in records
@@ -99,8 +112,20 @@ class StorageService:
                 and record.job_id not in retained
             ],
         }
+        for record in (*active, *dependency_records):
+            for binding in record.metadata.get("tool_runtimes", ()):
+                references["environments"].append(str(binding["environment_id"]))
+                references["bundles"].append(str(binding["entrypoint_bundle_id"]))
         payload = self._invoke(
-            cluster, "gc", profile.storage.to_dict(), references=references, apply=apply
+            cluster,
+            "gc",
+            {
+                **profile.storage.to_dict(),
+                "environments_only": environments_only,
+                "reference_repair_preview": reference_preview,
+            },
+            references=references,
+            apply=apply,
         )
         candidates = tuple(item for item in payload["candidates"] if isinstance(item, dict))
         return StorageGcPlan(
@@ -115,10 +140,84 @@ class StorageService:
             quota_unresolved_bytes=int(payload.get("quota_unresolved_bytes", 0)),
             filesystems_before=payload.get("filesystems_before", {}),
             filesystems_after=payload.get("filesystems_after", {}),
+            reference_issues=tuple(payload.get("reference_issues", ())),
+            environment_count=int(payload.get("environment_count", 0)),
+            environment_usage=payload.get("environment_usage", {}),
+            reclaimable_allocated_bytes=int(payload.get("reclaimable_allocated_bytes", 0)),
+            outcome=str(payload.get("outcome", "preview")),
+            hypothetical_after_repairs=bool(payload.get("hypothetical_after_repairs", False)),
+            observed_free_bytes_delta=payload.get("observed_free_bytes_delta", {}),
         )
 
+    def repair(
+        self,
+        cluster: str = "local",
+        *,
+        retire_jobs: Sequence[str] = (),
+        release_builds: Sequence[str] = (),
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Retire explicitly selected operational references after native ownership checks."""
+        from lambdaforge.controlplane.CacheBuildLease import CacheBuildLease
+
+        profile = self.catalog.get(cluster)
+        assert profile.storage is not None
+        descriptor = {**profile.storage.to_dict(), "reconciliation_scheduler": profile.scheduler}
+        report = self._invoke(cluster, "reference-report", descriptor)
+        by_name = {item["name"]: item for item in report["builds"]}
+        builds = []
+        for name in release_builds:
+            item = by_name.get(name)
+            if item is None:
+                raise ValueError(f"Build marker not found: {name}")
+            owner = item.get("owner")
+            # A PID is checked ONLY on its controller host. Remote installer children
+            # are checked independently by the build-host operation under the GC lock.
+            if not isinstance(owner, dict) or not (
+                item["orphan_on_build_host"] or CacheBuildLease._controller_dead(owner)
+            ):
+                raise ValueError(
+                    f"Cannot prove controller death for {name}; "
+                    f"owner host: {(owner or {}).get('host', 'unreadable')}. "
+                    "No lock was removed."
+                )
+            builds.append(
+                {
+                    "name": name,
+                    "owner": owner,
+                    "controller_proof": {
+                        "status": "dead-or-reused",
+                        "host": owner.get("host"),
+                        "pid": owner.get("pid"),
+                    },
+                }
+            )
+        # Local catalog absence is not proof of remote death; the host operation
+        # independently checks exact Job/process/scheduler evidence for every selection.
+        result = {
+            "cluster": cluster,
+            **self._invoke(
+                cluster,
+                "repair",
+                descriptor,
+                references={"retire_jobs": list(retire_jobs), "release_builds": builds},
+                apply=apply,
+            ),
+        }
+        if not apply and (result["retired_jobs"] or result["released_builds"]):
+            result["cleanup_preview"] = self.gc(
+                cluster, environments_only=True, reference_preview=result
+            ).to_dict()
+        return result
+
+    def references(self, cluster: str = "local") -> dict[str, Any]:
+        """Inspect current bounded ownership issues without a recursive disk measurement."""
+        profile = self.catalog.get(cluster)
+        assert profile.storage is not None
+        return self._invoke(cluster, "reference-report", profile.storage.to_dict())
+
     def environments(self, cluster: str = "local") -> tuple[dict[str, Any], ...]:
-        report = self.status(cluster)
+        report = self.status(cluster, metadata_only=True)
         if not report.online:
             return ()
         profile = self.catalog.get(cluster)
@@ -228,6 +327,12 @@ class StorageService:
         apply: bool = False,
     ) -> dict[str, Any]:
         if cluster == "local":
+            if operation == "reference-report":
+                return StorageOperations.reference_report(descriptor)
+            if operation == "repair":
+                return StorageOperations.repair_references(
+                    descriptor, references or {}, apply=apply
+                )
             if operation == "status":
                 return StorageOperations.status(descriptor)
             if operation == "reconcile":
@@ -249,14 +354,49 @@ class StorageService:
             return StorageOperations.gc(descriptor, references or {}, apply=apply)
         profile = self.catalog.get(cluster)
         transport = self.factory.transport(profile)
+        import inspect
+        import sys
+
+        # Execute this controller's current bounded operational collector, rather
+        # than an arbitrary old immutable scientific environment's cleanup code.
+        source = inspect.getsource(sys.modules[StorageOperations.__module__])
+        from lambdaforge.work.recovery_dependencies import (
+            cache_recovery_references,
+            recovery_namespaces,
+        )
+
+        # Old immutable hosts lack this helper. Ship the same pure metadata implementation
+        # beside the existing collector, never install or patch the scientific runtime.
+        helper = (
+            inspect.getsource(recovery_namespaces)
+            + "\n"
+            + inspect.getsource(cache_recovery_references)
+        )
+        source = source.replace(
+            "        from lambdaforge.work.recovery_dependencies import cache_recovery_references",
+            "",
+        )
+        source = source.replace("class StorageOperations:", helper + "\n\nclass StorageOperations:")
         arguments = [
             self._python(profile, transport),
-            "-m",
+            "-c",
+            source.replace(
+                "raise SystemExit(StorageOperations.main())",
+                "sys.argv.pop(1)\n    raise SystemExit(StorageOperations.main())",
+            ),
             "lambdaforge.controlplane.StorageOperations",
             operation,
             json.dumps(descriptor, separators=(",", ":")),
         ]
-        if operation in {"gc", "prune-environments", "delete-job", "compact-job", "reconcile"}:
+        if operation in {
+            "gc",
+            "prune-environments",
+            "delete-job",
+            "compact-job",
+            "reconcile",
+            "repair",
+            "reference-report",
+        }:
             arguments.extend(
                 (json.dumps(references or {}, separators=(",", ":")), str(apply).lower())
             )

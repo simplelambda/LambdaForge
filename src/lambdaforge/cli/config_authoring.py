@@ -12,7 +12,9 @@ from lambdaforge.configuration.ConfigurationGuidance import ConfigurationGuidanc
 
 def run_config_authoring(arguments: argparse.Namespace) -> int:
     if arguments.config_command == "schema":
-        value = ConfigurationGuidance.schema()
+        from lambdaforge.configuration.ConfigurationSchemas import ConfigurationSchemas
+
+        value = ConfigurationSchemas.schema(getattr(arguments, "kind", "work"))
         text = json.dumps(value, indent=2, ensure_ascii=False) + "\n"
         if arguments.output is not None:
             path = Path(arguments.output).expanduser().absolute()

@@ -46,6 +46,7 @@ class SubmissionService:
         input_bindings: Mapping[str, Any] | None = None,
         job_id: str | None = None,
         config_sha256: str | None = None,
+        execution_queue: bool = False,
     ) -> JobHandle:
         """Persist and launch preparation without blocking on the selected execution target."""
         source = Path(config).expanduser().resolve()
@@ -53,6 +54,8 @@ class SubmissionService:
         pin = config_sha256 or (
             recovery_config.get("sha256") if isinstance(recovery_config, Mapping) else None
         )
+        if execution_queue and pin is None:
+            pin = hashlib.sha256(source.read_bytes()).hexdigest()
         if pin is not None and hashlib.sha256(source.read_bytes()).hexdigest() != pin:
             raise ValueError("Recovery YAML changed after preview; no Job was enqueued.")
         if self.catalog.project is not None and not self.catalog.project.owns_source(str(source)):
@@ -62,6 +65,10 @@ class SubmissionService:
         if not source.is_file():
             raise FileNotFoundError(f"Configuration does not exist: {source}")
         profile = self.catalog.get(cluster)
+        if execution_queue and (fleet is not None or profile.scheduler != "local"):
+            raise ValueError(
+                "Sequential queues support direct process clusters only, not Fleet/SLURM."
+            )
         if input_bindings:
             from lambdaforge.work.dependency_bindings import pin_bindings
 
@@ -120,11 +127,12 @@ class SubmissionService:
                 "submission_phase": "queued-locally",
                 "submission_mode": "asynchronous",
                 "run_arguments": list(run_arguments),
+                **({"execution_queue_requested": True} if execution_queue else {}),
                 **({"input_bindings": dict(input_bindings)} if input_bindings else {}),
                 **dict(metadata or {}),
                 **(
                     {"pinned_scientific_identity": descriptor.scientific_identity}
-                    if config_sha256 is not None
+                    if config_sha256 is not None or execution_queue
                     else {}
                 ),
                 **(
@@ -137,10 +145,40 @@ class SubmissionService:
             group_id=group_id,
             job_id=job_id,
         )
+        if execution_queue:
+            from lambdaforge.controlplane.ExecutionQueueService import ExecutionQueueService
+
+            try:
+                current = self.jobs.store.get(handle.job_id)
+                blockers = [
+                    record.job_id
+                    for record in self.jobs.store.records()
+                    if record.job_id != handle.job_id
+                    and record.cluster == cluster
+                    and not record.state.terminal
+                    and not record.metadata.get("execution_queue_requested")
+                    and record.created_at_utc <= current.created_at_utc
+                ]
+                admission = ExecutionQueueService(
+                    self.catalog, self.jobs.factory, source_dir=source.parent
+                ).register(cluster, handle.job_id, blockers)
+                self.jobs.store.write(
+                    current.with_updates(
+                        metadata={**current.metadata, "execution_queue": admission}
+                    )
+                )
+                # A predecessor can fail before its provider request exists while the
+                # queue registration RPC is in flight. Close that preparation race.
+                for previous_id in blockers:
+                    previous = self.jobs.store.get(previous_id)
+                    if previous.state.terminal and previous.scheduler_id is None:
+                        ExecutionQueueService(
+                            self.catalog, self.jobs.factory, source_dir=source.parent
+                        ).abort(cluster, previous_id)
+            except Exception as error:
+                self.jobs.fail_preparation(handle.job_id, error)
+                raise
         directory = self.jobs.store.root / "submissions" / handle.job_id
-        directory.mkdir(parents=True, mode=0o700, exist_ok=False)
-        os.chmod(directory, 0o700)
-        request_path = directory / "request.json"
         profile_descriptor = profile.to_dict()
         profile_descriptor.pop("name", None)
         payload: dict[str, Any] = {
@@ -172,6 +210,19 @@ class SubmissionService:
                     },
                 }
             )
+        try:
+            self._launch_preparation(directory, source.parent, payload)
+        except Exception as error:
+            self.jobs.fail_preparation(handle.job_id, error)
+            raise
+        return handle
+
+    @staticmethod
+    def _launch_preparation(directory: Path, cwd: Path, payload: Mapping[str, Any]) -> None:
+        """Persist the controller request before detaching; callers own failure reconciliation."""
+        directory.mkdir(parents=True, mode=0o700, exist_ok=False)
+        os.chmod(directory, 0o700)
+        request_path = directory / "request.json"
         temporary = request_path.with_name(f".{request_path.name}.{uuid4().hex}.tmp")
         try:
             temporary.write_text(
@@ -182,25 +233,20 @@ class SubmissionService:
         finally:
             temporary.unlink(missing_ok=True)
         log_path = directory / "controller.log"
-        try:
-            log_path.touch(mode=0o600, exist_ok=False)
-            os.chmod(log_path, 0o600)
-            with log_path.open("ab", buffering=0) as log:
-                subprocess.Popen(
-                    (
-                        sys.executable,
-                        "-m",
-                        "lambdaforge.controlplane.SubmissionWorker",
-                        str(request_path),
-                    ),
-                    cwd=source.parent,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=log,
-                    start_new_session=True,
-                    close_fds=True,
-                )
-        except Exception as error:
-            self.jobs.fail_preparation(handle.job_id, error)
-            raise
-        return handle
+        log_path.touch(mode=0o600, exist_ok=False)
+        os.chmod(log_path, 0o600)
+        with log_path.open("ab", buffering=0) as log:
+            subprocess.Popen(
+                (
+                    sys.executable,
+                    "-m",
+                    "lambdaforge.controlplane.SubmissionWorker",
+                    str(request_path),
+                ),
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+                close_fds=True,
+            )

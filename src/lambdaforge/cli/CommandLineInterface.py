@@ -95,6 +95,24 @@ class CommandLineInterface:
         arguments = parser.parse_args(argv)
         arguments.json = bool(getattr(arguments, "json", False) or json_output)
         arguments.verbose = bool(getattr(arguments, "verbose", False))
+        if arguments.command == "catalog":
+            from lambdaforge.catalog.errors import ContractError
+            from lambdaforge.catalog.OperationCatalog import OperationCatalog
+
+            operation_catalog = OperationCatalog()
+            try:
+                payload = (
+                    operation_catalog.describe(arguments.operation, kind=arguments.kind)
+                    if arguments.operation
+                    else operation_catalog.discover(arguments.kind)
+                )
+            except ContractError as error:
+                print(
+                    json.dumps({"schema_version": "operation-error-v1", "error": error.to_dict()})
+                )
+                return 2
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
         if arguments.command in {"help", "completion", "_complete"}:
             from lambdaforge.cli.discovery import run_discovery_command
 
@@ -161,6 +179,50 @@ class CommandLineInterface:
             cls._render(
                 project.to_dict(),
                 f"Project: {project.project_id}\nRoot: {project.root}",
+                arguments.json,
+            )
+            return 0
+        if arguments.command == "queue":
+            from lambdaforge.controlplane.ExecutionQueueService import ExecutionQueueService
+
+            catalog = ClusterCatalog.load(arguments.clusters)
+            queue_service = ExecutionQueueService(catalog)
+            if arguments.remove_pending:
+                if not arguments.apply:
+                    raise ValueError(
+                        "Removing an unstarted ticket requires --apply. "
+                        "Use lf cancel JOB_ID for an acknowledged Job."
+                    )
+                if not any(
+                    row["job_id"] == arguments.remove_pending
+                    for row in queue_service.snapshot(arguments.on)["entries"]
+                ):
+                    raise ValueError("No such admission ticket in this project/cluster queue.")
+                queue_service.abort(arguments.on, arguments.remove_pending)
+            elif arguments.apply:
+                raise ValueError("--apply requires --remove-pending JOB_ID.")
+            payload = queue_service.snapshot(arguments.on)
+            jobs = JobService(catalog)
+            lines = []
+            payload["entries"] = [
+                row
+                for row in payload["entries"]
+                if arguments.all or row["phase"] not in {"aborted", "released"}
+            ]
+            for index, item in enumerate(payload["entries"], 1):
+                try:
+                    record = jobs.get(item["job_id"], refresh=False)
+                    state = item.get("last_provider_state", record.state.value)
+                    name = record.metadata.get("name", item["job_id"])
+                except (KeyError, FileNotFoundError):
+                    state, name = item.get("last_provider_state", "not observed"), item["job_id"]
+                item.update(position=index, last_known_state=state, name=name)
+                lines.append(f"{index:>3}  {name}  {state}  {item['job_id']} ({item['phase']})")
+            cls._render(
+                payload,
+                ("FIFO order · last recorded Job state (not a liveness probe)\n" + "\n".join(lines))
+                if lines
+                else "No queued Jobs on this project/cluster.",
                 arguments.json,
             )
             return 0
@@ -300,12 +362,28 @@ class CommandLineInterface:
             return 0
         if arguments.command == "clean":
             plan = StorageService(ClusterCatalog.load(arguments.clusters)).gc(
-                arguments.on, apply=arguments.apply
+                arguments.on, apply=arguments.apply, environments_only=arguments.environments_only
             )
             cls._render(plan.to_dict(), cls._clean_summary(plan.to_dict()), arguments.json)
             return 0
         if arguments.command == "storage":
             storage_service = StorageService(ClusterCatalog.load(arguments.clusters))
+            if arguments.storage_command == "repair":
+                repair = storage_service.repair(
+                    arguments.on,
+                    retire_jobs=arguments.retire_job,
+                    release_builds=arguments.release_build,
+                    apply=arguments.apply,
+                )
+                cls._render(
+                    repair,
+                    f"Reference repair {'applied' if arguments.apply else 'preview'}: "
+                    f"{len(repair['retired_jobs'])} Job references, "
+                    f"{len(repair['released_builds'])} build markers. "
+                    "Scientific files are preserved.",
+                    arguments.json,
+                )
+                return 0
             if arguments.storage_command == "status":
                 storage_report = storage_service.status(arguments.on)
                 if arguments.json:
@@ -337,6 +415,17 @@ class CommandLineInterface:
         from lambdaforge.work.dependency_bindings import parse_bindings
 
         bindings = parse_bindings(getattr(arguments, "input_ref", []))
+        queued = bool(getattr(arguments, "queue", False))
+        if queued and (getattr(arguments, "on_fleet", None) or arguments.wait_for_submit):
+            raise ValueError(
+                "--queue uses asynchronous direct-cluster submission, not Fleet/--wait-for-submit."
+            )
+        if queued:
+            from lambdaforge.controlplane.ExecutionQueueService import ExecutionQueueService
+
+            queue_preview = ExecutionQueueService(ClusterCatalog.load(arguments.clusters)).snapshot(
+                arguments.on
+            )
         if getattr(arguments, "on_fleet", None):
             if bindings:
                 raise ValueError("Declare Fleet dependency inputs in the authored Study YAML.")
@@ -385,6 +474,8 @@ class CommandLineInterface:
             bool(os.environ.get("LAMBDAFORGE_JOB_ID"))
             and os.environ.get("LAMBDAFORGE_BUNDLE") == "1"
         )
+        if queued and supervised:
+            raise ValueError("A supervised scientific child cannot enqueue itself.")
         if supervised or (arguments.on == "local" and arguments.dry_run):
             from lambdaforge.work.runner import WorkRunner
 
@@ -414,6 +505,8 @@ class CommandLineInterface:
             payload = outcome.to_dict()
             if arguments.dry_run:
                 payload["target_capacity"] = target_capacity
+                if queued:
+                    payload["execution_queue"] = queue_preview
             if arguments.json:
                 print(json.dumps(payload, indent=2))
             else:
@@ -456,6 +549,8 @@ class CommandLineInterface:
                 payload["target_capacity"] = plane.jobs.store.get(handle.job_id).metadata.get(
                     "target_capacity"
                 )
+                if queued:
+                    payload["execution_queue"] = queue_preview
         else:
             handle = SubmissionService(ClusterCatalog.load(arguments.clusters)).enqueue(
                 arguments.config,
@@ -463,12 +558,16 @@ class CommandLineInterface:
                 run_arguments=run_arguments,
                 allow_duplicate=arguments.allow_duplicate,
                 input_bindings=bindings,
+                execution_queue=queued,
             )
             payload = handle.to_dict()
+            if queued:
+                payload["execution_queue"] = True
         print(
             json.dumps(payload, indent=2)
             if arguments.json
-            else f"Submitted {payload.get('job_id', payload)}"
+            else ("Accepted for sequential queue; preparing " if queued else "Submitted ")
+            + str(payload.get("job_id", payload))
         )
         if arguments.dry_run and not arguments.json:
             print(
@@ -1027,5 +1126,25 @@ class CommandLineInterface:
         if payload.get("quota_unresolved_bytes"):
             lines.append(
                 f"Quota remains exceeded by {payload['quota_unresolved_bytes']} protected bytes."
+            )
+        usage = payload.get("environment_usage", {})
+        if usage:
+            lines.append(
+                f"Environments: {payload.get('environment_count', 0)}; "
+                f"apparent {usage.get('bytes', 0)} bytes; unique allocated "
+                f"file blocks {usage.get('allocated_bytes', 0)} bytes."
+            )
+            lines.append(
+                "Estimated releasable file blocks: "
+                f"{payload.get('reclaimable_allocated_bytes', 0)} bytes "
+                "(hard links counted once)."
+            )
+        if payload.get("blocked_reason"):
+            lines.append(str(payload["blocked_reason"]))
+        for issue in payload.get("reference_issues", ()):
+            lines.append(
+                f"  {issue.get('job_id', issue.get('path', 'ownership'))}: "
+                f"{issue['reason']}. {issue['action']} "
+                f"--on {payload.get('cluster', 'local')}"
             )
         return "\n".join(lines)

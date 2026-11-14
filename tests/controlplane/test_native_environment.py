@@ -491,6 +491,13 @@ class NativeInstallTransport(Transport):
                 )
                 return CommandResult(0, json.dumps(inventory))
             source = " ".join(values)
+            if "LAMBDAFORGE_NATIVE_LIBRARY_REPORT=" in source:
+                from tests.controlplane.test_native_tool_probes import mocked_library_report
+
+                return CommandResult(0, mocked_library_report(values))
+            if "payload.update(publication_contract=contract" in source:
+                self.files[f"{values[-3]}/.lambdaforge-environment.json"] = values[-2]
+                return CommandResult(0)
             if "lambdaforge-conda-meta-inventory" in source:
                 inventory = (
                     self.post_pip_metadata_inventory
@@ -728,7 +735,7 @@ def test_native_environment_is_one_prefix_reused_concurrently_and_records_tools(
     assert len(metadata_reads) == 3  # before pip, after pip and idempotent cache reuse
 
 
-def test_post_pip_inventory_change_fails_and_cleans_only_temporary_prefix(
+def test_post_pip_inventory_change_fails_without_publishing_or_deleting_prefix(
     tmp_path: Path,
 ) -> None:
     transport = NativeInstallTransport()
@@ -748,8 +755,8 @@ def test_post_pip_inventory_change_fails_and_cleans_only_temporary_prefix(
 
     cleanup = [command for command in transport.commands if command[:2] == ("rm", "-rf")]
     assert profile.storage is not None
-    assert cleanup and cleanup[-1][-1].startswith(f"{profile.storage.environment_root}/.env-")
-    assert ".tmp-" in cleanup[-1][-1]
+    assert not cleanup  # Failed stable prefixes belong to reference-aware GC, not blind cleanup.
+    assert not any(path.endswith("/.lambdaforge-environment.json") for path in transport.files)
     assert not any(
         path.endswith("env-native/.lambdaforge-environment.json") for path in transport.files
     )

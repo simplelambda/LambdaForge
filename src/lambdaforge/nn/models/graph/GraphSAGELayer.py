@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn import functional as functional
 
 from lambdaforge.nn.models.Aggregation import Aggregation
+from lambdaforge.nn.models.graph.GraphEdgeData import GraphEdgeData
 from lambdaforge.nn.models.graph.GraphEdgeIndex import GraphEdgeIndex
 from lambdaforge.nn.models.Scatter import Scatter
 
@@ -35,8 +36,14 @@ class GraphSAGELayer(nn.Module):
         self.root_linear = nn.Linear(in_channels, out_channels, bias=False) if root_weight else None
         self.normalize_output = bool(normalize_output)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        """Return inductive node embeddings."""
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, message_weights: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Modulate sender messages by signed (E,) factors before aggregation.
+
+        Mean divides by incidence count, not sum of factors. No loops are added;
+        supplied loops contribute as neighbours, and root_weight remains independent.
+        """
         if x.ndim != 2:
             raise ValueError("x must have shape (N, F).")
         num_nodes = x.shape[0]
@@ -47,8 +54,14 @@ class GraphSAGELayer(nn.Module):
         )
         source, destination = edge_index
         projected = self.neighbor_projection(x)
+        modulation = GraphEdgeData.normalize_message_weights(
+            message_weights, edge_count=source.numel(), reference=projected
+        )
+        messages = projected[source]
+        if modulation is not None:
+            messages = messages * modulation[:, None]
         neighbors = Scatter.reduce(
-            projected[source],
+            messages,
             destination,
             num_nodes,
             self.aggregation,

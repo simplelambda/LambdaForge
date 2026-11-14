@@ -1,0 +1,10 @@
+{
+  "schema_version": "table-schema-v1",
+  "keys": ["id"],
+  "columns": [
+    {"name": "id", "type": "string", "nullable": false},
+    {"name": "value", "type": "number", "nullable": true, "null_values": ["", "NA"], "invalid": "error"},
+    {"name": "measured_at", "type": "datetime", "date_format": "%Y-%m-%d", "timezone": "UTC"},
+    {"name": "group", "type": "string", "categories": ["control", "treated"]}
+  ]
+}

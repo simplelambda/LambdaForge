@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lambdaforge.dev/schemas/sample-schema-v1.json",
+  "title": "Identified multi-asset sample fields",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "fields"],
+  "properties": {
+    "schema_version": {"const": "sample-schema-v1"},
+    "bindings": {"type": "object", "additionalProperties": {"type": "string"}},
+    "fields": {"type": "array", "minItems": 1, "items": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "source": {"enum": ["asset", "targets", "metadata", "partitions", "id"]},
+        "asset": {"type": ["string", "null"]},
+        "format": {"enum": ["npy", "npz", "json", "csv", null]},
+        "path": {"type": "array", "items": {"type": ["string", "integer"]}},
+        "dtype": {"type": ["string", "null"]},
+        "shape": {"type": ["array", "null"], "items": {"type": ["integer", "null"], "minimum": 0}},
+        "axes": {"type": "array", "items": {"type": "string"}},
+        "units": {"type": ["string", "null"]},
+        "role": {"enum": ["input", "target", "loss", "metadata", "mask", "index", "coordinates", "vector"]},
+        "required": {"type": "boolean"}, "missing": {"enum": ["error", "none", "default"]},
+        "default": {}, "collate": {"enum": ["stack", "ragged", "pad", "list"]}
+      }
+    }}
+  }
+}

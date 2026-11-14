@@ -1,0 +1,1109 @@
+{
+  "type": "object",
+  "properties": {
+    "transport": {
+      "type": "string",
+      "default": "local",
+      "enum": [
+        "local",
+        "ssh"
+      ]
+    },
+    "scheduler": {
+      "type": "string",
+      "default": "local",
+      "enum": [
+        "local",
+        "slurm"
+      ]
+    },
+    "host": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "user": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "port": {
+      "type": "integer",
+      "default": 22,
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "auth": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "default": "openssh",
+              "enum": [
+                "openssh",
+                "password"
+              ]
+            },
+            "credential": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null,
+              "pattern": "^(env:|keyring:).+",
+              "x-secret-reference": true
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "enum": [
+            "openssh",
+            "password"
+          ]
+        }
+      ]
+    },
+    "known_hosts": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "ssh_timeout": {
+      "type": "number",
+      "default": 15.0
+    },
+    "connection": {
+      "type": "object",
+      "properties": {
+        "connect_timeout": {
+          "type": "number",
+          "default": 15.0
+        },
+        "auth_timeout": {
+          "type": "number",
+          "default": 15.0
+        },
+        "banner_timeout": {
+          "type": "number",
+          "default": 15.0
+        },
+        "keepalive": {
+          "type": "number",
+          "default": 30.0
+        },
+        "multiplex": {
+          "type": "boolean",
+          "default": true
+        },
+        "persist": {
+          "type": "number",
+          "default": 60.0
+        },
+        "command_timeout": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0,
+          "default": null,
+          "x-unit": "seconds"
+        }
+      },
+      "additionalProperties": false
+    },
+    "workspace": {
+      "type": "string",
+      "default": ".lambdaforge/remote"
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "state_root": {
+          "type": "string",
+          "default": ".lambdaforge/remote/.lambdaforge/state",
+          "x-default-expression": "workspace/.lambdaforge/state"
+        },
+        "cache_root": {
+          "type": "string",
+          "default": ".lambdaforge/remote/.lambdaforge/cache",
+          "x-default-expression": "workspace/.lambdaforge/cache"
+        },
+        "run_root": {
+          "type": "string",
+          "default": ".lambdaforge/remote/.lambdaforge/jobs",
+          "x-default-expression": "workspace/.lambdaforge/jobs"
+        },
+        "dataset_root": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cache_max_size": {
+          "type": [
+            "number",
+            "string",
+            "null"
+          ],
+          "x-unit": "bytes",
+          "default": null
+        },
+        "cache_max_age": {
+          "type": [
+            "number",
+            "string",
+            "null"
+          ],
+          "x-unit": "seconds",
+          "default": null
+        },
+        "safety": {
+          "type": "object",
+          "properties": {
+            "min_free": {
+              "type": [
+                "number",
+                "string"
+              ],
+              "x-unit": "bytes",
+              "default": 0
+            },
+            "min_free_percent": {
+              "type": "number",
+              "default": 5.0
+            }
+          },
+          "additionalProperties": false
+        },
+        "terminal_jobs": {
+          "type": "object",
+          "properties": {
+            "grace_period": {
+              "type": [
+                "number",
+                "string"
+              ],
+              "x-unit": "seconds",
+              "default": 172800
+            }
+          },
+          "additionalProperties": false
+        },
+        "lease_root": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "python": {
+      "oneOf": [
+        {
+          "type": "string",
+          "default": "python"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "default": "existing",
+              "enum": [
+                "auto",
+                "existing",
+                "managed"
+              ]
+            },
+            "executable": {
+              "type": "string",
+              "default": "python3"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "allow_managed_install": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "environment": {
+      "type": "string",
+      "default": "existing",
+      "enum": [
+        "existing",
+        "managed"
+      ]
+    },
+    "wheelhouse": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "pytorch": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "channel": {
+              "type": "string",
+              "default": "auto",
+              "enum": [
+                "auto",
+                "cpu",
+                "cu118",
+                "cu121",
+                "cu124",
+                "cu126",
+                "cu128",
+                "cu130"
+              ]
+            },
+            "require_cuda": {
+              "enum": [
+                true,
+                false,
+                null,
+                "auto"
+              ],
+              "default": "auto"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "enum": [
+            "auto",
+            "cpu",
+            "cu118",
+            "cu121",
+            "cu124",
+            "cu126",
+            "cu128",
+            "cu130"
+          ]
+        }
+      ]
+    },
+    "project_module": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "project_root": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "gpu_access": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "default": "auto",
+              "enum": [
+                "auto",
+                "exclusive",
+                "shared",
+                "scheduler",
+                "command"
+              ]
+            },
+            "command_prefix": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "claim_command": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "release_command": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "visibility_command": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "mode": {
+                    "const": "command"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              "then": {
+                "required": [
+                  "command_prefix"
+                ],
+                "properties": {
+                  "command_prefix": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          ],
+          "description": "Provider owns grants. Bare claim/release argv is not a supported owned reservation contract."
+        },
+        {
+          "enum": [
+            "auto",
+            "exclusive",
+            "shared",
+            "scheduler"
+          ]
+        }
+      ]
+    },
+    "resource_safety": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "string",
+              "default": "balanced",
+              "enum": [
+                "balanced",
+                "throughput",
+                "shared-host",
+                "conservative"
+              ]
+            },
+            "telemetry_ttl": {
+              "type": "number",
+              "default": 5.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "admission_ttl": {
+              "type": "number",
+              "default": 0.5,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "minimum_interval": {
+              "type": "number",
+              "default": 0.25,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "probe_timeout": {
+              "type": "number",
+              "default": 5.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "backoff_initial": {
+              "type": "number",
+              "default": 2.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "backoff_maximum": {
+              "type": "number",
+              "default": 60.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "startup_seconds": {
+              "type": "number",
+              "default": 60.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "fairness_wait_seconds": {
+              "type": "number",
+              "default": 30.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "waiter_ttl_seconds": {
+              "type": "number",
+              "default": 120.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "priority": {
+              "type": "number",
+              "default": 1.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "relative-weight"
+            },
+            "device_backoff_initial": {
+              "type": "number",
+              "default": 5.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            },
+            "device_backoff_maximum": {
+              "type": "number",
+              "default": 120.0,
+              "exclusiveMinimum": 0,
+              "x-unit": "seconds"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "enum": [
+            "balanced",
+            "throughput",
+            "shared-host",
+            "conservative"
+          ]
+        }
+      ],
+      "x-profile-defaults": {
+        "balanced": {
+          "profile": "balanced",
+          "telemetry_ttl": 5.0,
+          "admission_ttl": 0.5,
+          "minimum_interval": 0.25,
+          "probe_timeout": 5.0,
+          "backoff_initial": 2.0,
+          "backoff_maximum": 60.0,
+          "startup_seconds": 60.0,
+          "fairness_wait_seconds": 30.0,
+          "waiter_ttl_seconds": 120.0,
+          "priority": 1.0,
+          "device_backoff_initial": 5.0,
+          "device_backoff_maximum": 120.0
+        },
+        "throughput": {
+          "profile": "throughput",
+          "telemetry_ttl": 3.0,
+          "admission_ttl": 0.5,
+          "minimum_interval": 0.25,
+          "probe_timeout": 5.0,
+          "backoff_initial": 2.0,
+          "backoff_maximum": 60.0,
+          "startup_seconds": 60.0,
+          "fairness_wait_seconds": 20.0,
+          "waiter_ttl_seconds": 120.0,
+          "priority": 1.0,
+          "device_backoff_initial": 5.0,
+          "device_backoff_maximum": 120.0
+        },
+        "shared-host": {
+          "profile": "shared-host",
+          "telemetry_ttl": 10.0,
+          "admission_ttl": 0.5,
+          "minimum_interval": 0.25,
+          "probe_timeout": 5.0,
+          "backoff_initial": 2.0,
+          "backoff_maximum": 60.0,
+          "startup_seconds": 60.0,
+          "fairness_wait_seconds": 15.0,
+          "waiter_ttl_seconds": 120.0,
+          "priority": 1.0,
+          "device_backoff_initial": 5.0,
+          "device_backoff_maximum": 120.0
+        },
+        "conservative": {
+          "profile": "conservative",
+          "telemetry_ttl": 5.0,
+          "admission_ttl": 0.5,
+          "minimum_interval": 0.25,
+          "probe_timeout": 5.0,
+          "backoff_initial": 2.0,
+          "backoff_maximum": 60.0,
+          "startup_seconds": 120.0,
+          "fairness_wait_seconds": 30.0,
+          "waiter_ttl_seconds": 120.0,
+          "priority": 1.0,
+          "device_backoff_initial": 10.0,
+          "device_backoff_maximum": 120.0
+        }
+      }
+    },
+    "data_environment": {
+      "type": "string",
+      "default": null
+    },
+    "ssh_options": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "command_prefix": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "scheduler_options": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": true
+    },
+    "resource_mapping": {
+      "type": "object",
+      "properties": {
+        "processes": {
+          "type": "object",
+          "properties": {
+            "option": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "omit": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "cpu": {
+          "type": "object",
+          "properties": {
+            "option": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "omit": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "memory": {
+          "type": "object",
+          "properties": {
+            "option": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "omit": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "gpu": {
+          "type": "object",
+          "properties": {
+            "option": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "omit": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "time": {
+          "type": "object",
+          "properties": {
+            "option": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "omit": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "storage": {
+          "type": "object",
+          "properties": {
+            "omit": {
+              "type": "boolean"
+            },
+            "option": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "scheduler_directives": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": true
+    },
+    "scheduler_commands": {
+      "type": "object",
+      "properties": {
+        "submit": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "default": "command"
+                },
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "job_id_pattern": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "default": null
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "executable": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queue": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "default": "command"
+                },
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "job_id_pattern": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "default": null
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "executable": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "accounting": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "default": "command"
+                },
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "job_id_pattern": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "default": null
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "executable": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "default": "command"
+                },
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "job_id_pattern": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "default": null
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "executable": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pause": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "default": "command"
+                },
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "job_id_pattern": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "default": null
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "executable": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resume": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "default": "command"
+                },
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "job_id_pattern": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "default": null
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "executable": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "info": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "default": "command"
+                },
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "job_id_pattern": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "default": null
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "executable": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "job_script": {
+      "type": "object",
+      "properties": {
+        "shell": {
+          "type": "string",
+          "default": "/bin/bash"
+        },
+        "prologue": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "epilogue": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.github.io/lambdaforge/schemas/cluster-profile-v1.json",
+  "title": "Native LambdaForge ClusterProfile YAML",
+  "x-contract-version": "cluster-profile-v1",
+  "x-native-authority": "ClusterProfile.from_mapping",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "transport": {
+            "const": "ssh"
+          }
+        },
+        "required": [
+          "transport"
+        ]
+      },
+      "then": {
+        "required": [
+          "host",
+          "workspace"
+        ],
+        "properties": {
+          "workspace": {
+            "type": "string",
+            "pattern": "^/"
+          },
+          "host": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ]
+}

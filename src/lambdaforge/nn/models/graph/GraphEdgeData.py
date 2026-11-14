@@ -20,6 +20,50 @@ class GraphEdgeData:
     existing self-loops are replaced by one canonical self-loop per node.
     """
 
+    @staticmethod
+    def normalize_message_weights(
+        weights: torch.Tensor | None,
+        *,
+        edge_count: int,
+        reference: torch.Tensor,
+        name: str = "message_weights",
+        allow_scalar: bool = False,
+    ) -> torch.Tensor | None:
+        """Validate finite differentiable real modulators, never adjacency degrees.
+
+        Edge weights are (E,). Source controls may explicitly opt into a scalar
+        tensor broadcast; no detach, clipping, thresholding or normalization occurs.
+        """
+        if weights is None:
+            return None
+        if not isinstance(weights, torch.Tensor) or not weights.is_floating_point():
+            raise TypeError(f"{name} must be a floating-point tensor.")
+        if weights.shape != (edge_count,) and not (allow_scalar and weights.ndim == 0):
+            raise ValueError(
+                f"{name} must have shape ({edge_count},)" + (" or scalar." if allow_scalar else ".")
+            )
+        if not torch.isfinite(weights).all():
+            raise ValueError(f"{name} must be finite.")
+        result = weights.to(reference)
+        if not torch.isfinite(result).all():
+            raise ValueError(f"{name} is not representable in the operator dtype.")
+        return result.expand(edge_count) if result.ndim == 0 else result
+
+    @staticmethod
+    def aggregate_messages(
+        messages: torch.Tensor,
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        aggregation: str = "sum",
+    ) -> torch.Tensor:
+        """Reduce aligned (E,C) messages on original directed incidences."""
+        if messages.ndim != 2 or not messages.is_floating_point():
+            raise ValueError("messages must be floating (E,C).")
+        edges = GraphEdgeIndex.normalize(edge_index, device=messages.device, num_nodes=num_nodes)
+        if len(messages) != edges.shape[1]:
+            raise ValueError("messages must align with edge_index.")
+        return Scatter.reduce(messages, edges[1], num_nodes, aggregation)
+
     @classmethod
     def normalize_features(
         cls,

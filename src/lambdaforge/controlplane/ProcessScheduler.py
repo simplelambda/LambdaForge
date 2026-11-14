@@ -6,14 +6,15 @@ import ast
 import inspect
 import json
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import cast
+from typing import Any, cast
 
 from lambdaforge.controlplane.ClusterProfile import ClusterProfile
 from lambdaforge.controlplane.ClusterStoragePolicy import ClusterStoragePolicy
 from lambdaforge.controlplane.jobs import JobState
+from lambdaforge.controlplane.NativeLibraryPolicy import NativeLibraryPolicy
 from lambdaforge.controlplane.Scheduler import Scheduler
 from lambdaforge.controlplane.SchedulerCapabilities import SchedulerCapabilities
 from lambdaforge.controlplane.SchedulerSubmission import SchedulerSubmission
@@ -47,23 +48,40 @@ class ProcessScheduler(Scheduler):
         work_dir: str | Path,
         dry_run: bool = False,
         job_id: str | None = None,
+        execution_queue: Mapping[str, Any] | None = None,
+        stdin_data: bytes | None = None,
     ) -> SchedulerSubmission:
         """Stage a request, detach its supervisor and return after acknowledgement."""
         if not command:
             raise ValueError("Process jobs require a command.")
+        if stdin_data is not None and (
+            not isinstance(stdin_data, bytes) or not 0 < len(stdin_data) <= 4096
+        ):
+            raise ValueError("Ephemeral Job input must be 1–4096 bytes; never use argv/metadata.")
         if job_id is None:
             raise ValueError("Durable process submission requires a LambdaForge job id.")
         job_dir = PurePosixPath(self.storage.job_root) / job_id
         scientific_work = job_dir / "work"
         source_work = PurePosixPath(str(work_dir))
         request_path = job_dir / "request.json"
+        if execution_queue is not None:
+            from lambdaforge.controlplane.ExecutionQueue import ExecutionQueue
+
+            ExecutionQueue.check_id(job_id)
+            if execution_queue.get("version") != 1 or execution_queue.get("job_id") != job_id:
+                raise ValueError("Queue admission belongs to a different Job.")
         python = self._control_python(command)
-        launch = (
+        library_policy = NativeLibraryPolicy.from_command(command)
+        control_prefix = (
             *self.profile.command_prefix,
+            *(library_policy.launch_prefix(self.profile.python) if library_policy else ()),
+        )
+        launch = (
+            *control_prefix,
             python,
             "-m",
             "lambdaforge.controlplane.ProcessSupervisor",
-            "launch",
+            "launch-input" if stdin_data is not None else "launch",
             str(request_path),
         )
         if dry_run:
@@ -73,9 +91,64 @@ class ProcessScheduler(Scheduler):
                 command=launch,
                 work_dir=str(scientific_work),
             )
+        if stdin_data is not None:
+            supported = self.transport.run(
+                (
+                    *control_prefix,
+                    python,
+                    "-c",
+                    "import inspect;from lambdaforge.controlplane.ProcessSupervisor "
+                    "import ProcessSupervisor;"
+                    "p=inspect.signature(ProcessSupervisor.launch).parameters;"
+                    "raise SystemExit(0 if 'stdin_data' in p else 2)",
+                ),
+                timeout=30,
+            )
+            if supported.returncode:
+                raise ValueError(
+                    "Target LF runtime lacks ephemeral Job input. "
+                    "Update/bootstrap it before password transfers."
+                )
+        if execution_queue is not None:
+            supported = self.transport.run(
+                (
+                    *control_prefix,
+                    python,
+                    "-c",
+                    "from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor;"
+                    "raise SystemExit(0 if callable(getattr(ProcessSupervisor,"
+                    "'_wait_for_execution_queue',None)) else 2)",
+                ),
+                timeout=30,
+            )
+            if supported.returncode:
+                raise RuntimeError(
+                    "The target LambdaForge runtime cannot honor sequential execution admission. "
+                    "Bootstrap the updated managed runtime, or update the declared existing "
+                    "environment before submitting --queue. No scientific process was launched."
+                )
         created = self.transport.run(("mkdir", "-p", str(job_dir)))
         if created.returncode:
             raise RuntimeError(f"Could not create durable job directory: {created.stderr.strip()}")
+        if execution_queue is not None:
+            guard = self.transport.run(
+                (
+                    *self.profile.command_prefix,
+                    python,
+                    "-c",
+                    "import os,pathlib,sys;root=pathlib.Path(sys.argv[1]);"
+                    "\nif any(p.is_symlink() for p in (root,*root.parents)):"
+                    "raise ValueError('Unsafe queued Job workspace')\n"
+                    "fd=os.open(root/'.queue-provider-submitted',"
+                    "os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.close(fd)",
+                    str(job_dir),
+                )
+            )
+            if guard.returncode:
+                raise RuntimeError(
+                    "Queued Job dispatch is already reserved or unsafe; "
+                    "inspect its native Job before retrying. No duplicate launched."
+                )
         request = {
             "process_request_version": 1,
             "job_id": job_id,
@@ -107,12 +180,25 @@ class ProcessScheduler(Scheduler):
             ),
             "dataset_registry": self._dataset_registry(work_dir),
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            **({"execution_queue": dict(execution_queue)} if execution_queue else {}),
         }
         with tempfile.TemporaryDirectory(prefix="lambdaforge-process-request-") as temporary:
             local = Path(temporary) / "request.json"
             local.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             self.transport.put(local, str(request_path))
-        launched = self.transport.run(launch, timeout=30.0)
+        if stdin_data is None:
+            launched = self.transport.run(launch, timeout=30.0)
+        else:
+            from lambdaforge.controlplane.CommandResult import CommandResult
+
+            with self.transport.stream(launch) as stream:
+                stream.stdin.write(stdin_data)
+                stream.finish_input()
+                response = stream.stdout.read(65537)
+                stream.wait()
+                if len(response) > 65536:
+                    raise RuntimeError("Supervisor acknowledgement exceeds its metadata bound.")
+                launched = CommandResult(0, response.decode(), "")
         if launched.returncode:
             raise RuntimeError(f"Could not launch detached process supervisor: {launched.stderr}")
         return SchedulerSubmission(

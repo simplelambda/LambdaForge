@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -187,9 +187,16 @@ class ConsoleServices:
         return WorkConfig.from_yaml(config, input_bindings=input_bindings).explanation()
 
     def submit_work(
-        self, config: Path, cluster: str, *, input_bindings: Mapping[str, Any] | None = None
+        self,
+        config: Path,
+        cluster: str,
+        *,
+        input_bindings: Mapping[str, Any] | None = None,
+        execution_queue: bool = False,
     ) -> dict[str, Any]:
         if cluster.startswith("fleet:"):
+            if execution_queue:
+                raise ValueError("Sequential queues require a direct process cluster, not Fleet.")
             if input_bindings:
                 raise ValueError("Declare Fleet dependency inputs in the authored Study YAML.")
             fleet = self.catalog.fleet(cluster.removeprefix("fleet:"))
@@ -203,11 +210,43 @@ class ConsoleServices:
                 )
                 .to_dict()
             )
-        return (
-            SubmissionService(self.catalog, self.jobs)
-            .enqueue(config, cluster=cluster, input_bindings=input_bindings)
-            .to_dict()
+        handle = SubmissionService(self.catalog, self.jobs).enqueue(
+            config,
+            cluster=cluster,
+            input_bindings=input_bindings,
+            execution_queue=execution_queue,
         )
+        return {**handle.to_dict(), **({"execution_queue": True} if execution_queue else {})}
+
+    def execution_queue(self, cluster: str) -> dict[str, Any]:
+        """Read FIFO metadata only; do not fetch Study/Run details or trigger a dispatch."""
+        from lambdaforge.controlplane.ExecutionQueueService import ExecutionQueueService
+
+        if cluster.startswith("fleet:"):
+            raise ValueError("Sequential execution queues are not supported for Fleet targets.")
+        result = ExecutionQueueService(self.catalog, self.factory).snapshot(cluster)
+        known = {
+            record.job_id: record
+            for record in self.jobs.store.records()
+            if record.cluster == cluster
+        }
+        rows = []
+        for ticket in result["entries"]:
+            if ticket["phase"] in {"aborted", "released"}:
+                continue
+            record = known.get(ticket["job_id"])
+            rows.append(
+                {
+                    **ticket,
+                    "name": record.metadata.get("name", record.job_id)
+                    if record
+                    else ticket["job_id"],
+                    "last_known_state": ticket.get(
+                        "last_provider_state", record.state.value if record else "not observed here"
+                    ),
+                }
+            )
+        return {**result, "entries": rows}
 
     def recent_work_configs(self, *, limit: int = 12) -> tuple[dict[str, str], ...]:
         """Return recent valid local YAML paths from MRU state and existing Job history."""
@@ -423,6 +462,9 @@ class ConsoleServices:
         return self.resources.diagnostic_report(cluster=name, limit=200)
 
     def dataset_rows(self) -> list[dict[str, Any]]:
+        # Replication Jobs are operational entities, deliberately absent from Work/Study
+        # rows. Refresh their native observations even when no Dataset detail is open.
+        self.datasets.replications()
         records = self.datasets.list(all_clusters=True)
         if not records and self.datasets.discovery_failures:
             from lambdaforge.data.errors import DatasetResolutionError
@@ -801,23 +843,58 @@ class ConsoleServices:
         expected_content_id: str,
         apply: bool = False,
         route: str = "auto",
+        approved_route: str | None = None,
+        approved_diagnostics: list[dict[str, Any]] | None = None,
         progress: Callable[[Mapping[str, Any]], None] | None = None,
+        site_password: str | None = None,
     ) -> dict[str, Any]:
         """Use the native preview/apply placement operation, never a console-only copy."""
-        result = self.datasets.replicate(
+        operation = (
+            self.datasets.enqueue_replication if apply else self.datasets.replication_preview
+        )
+        result = operation(
             selector,
             source=source,
             destination=destination,
-            apply=apply,
             expected_content_id=expected_content_id,
             route=route,
             progress=progress,
+            **({"site_password": site_password} if site_password is not None else {}),
+            **({"approved_route": approved_route} if apply and approved_route else {}),
+            **(
+                {"approved_diagnostics": approved_diagnostics}
+                if apply and approved_diagnostics is not None
+                else {}
+            ),
         ).to_dict()
-        if apply:
+        if apply and not result.get("job_id"):
             result["placements"] = [
                 item.to_dict() for item in self.datasets.registry.get(selector).placements
             ]
         return result
+
+    def dataset_replications(self, selector: str) -> list[dict[str, Any]]:
+        return self.datasets.replications(selector)
+
+    def replication_ssh_trust(
+        self,
+        initiator: str,
+        peer: str,
+        *,
+        apply: bool = False,
+        fingerprints: list[str] | None = None,
+        expected_file: str | None = None,
+    ) -> dict[str, Any]:
+        """Native explicit SSH trust; read-only until the operator confirms fingerprints."""
+        return self.datasets.replication_ssh_trust(
+            initiator, peer, apply=apply, fingerprints=fingerprints, expected_file=expected_file
+        )
+
+    def dataset_replication_logs(self, job_id: str) -> str:
+        record = self.jobs.get(job_id, refresh=False)
+        if record.job_type != "dataset-replication":
+            raise ValueError("Not a Dataset replication Job.")
+        return self.jobs.logs(job_id, tail=100)
 
     def delete_dataset(self, selector: str, *, apply: bool = False) -> dict[str, Any]:
         """Preview or remove an entire DatasetVersion through its domain service."""
@@ -873,7 +950,7 @@ class ConsoleServices:
         return {
             **self.catalog.inspect(name),
             "resources": self.resources.get(name).to_dict(),
-            "storage": self.storage.status(name).to_dict(),
+            "storage": self.storage.status(name, metadata_only=True).to_dict(),
         }
 
     def doctor(self, name: str) -> dict[str, Any]:
@@ -883,6 +960,21 @@ class ConsoleServices:
     def clean_storage(self, name: str, *, apply: bool = False) -> dict[str, Any]:
         """Use exactly the same safe preview/apply authority as native lf clean."""
         return self.storage.gc(name, apply=apply).to_dict()
+
+    def storage_references(self, name: str) -> dict[str, Any]:
+        return self.storage.references(name)
+
+    def repair_storage(
+        self,
+        name: str,
+        *,
+        retire_jobs: Sequence[str] = (),
+        release_builds: Sequence[str] = (),
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        return self.storage.repair(
+            name, retire_jobs=retire_jobs, release_builds=release_builds, apply=apply
+        )
 
     def bootstrap(
         self,

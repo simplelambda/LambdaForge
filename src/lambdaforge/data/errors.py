@@ -71,6 +71,14 @@ class UnsafeDatasetOperationError(DatasetResolutionError):
     """Reject unsafe mutation while preserving recoverable registry/data state."""
 
 
+class DirectTransferUnavailableError(UnsafeDatasetOperationError):
+    """Structured route diagnostics, including actionable first-use host trust."""
+
+    def __init__(self, message: str, diagnostics: tuple[dict[str, object], ...]) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
 class MissingManagedEnvironmentError(RuntimeError):
     """Explain how to prepare project code before a remote dataset operation."""
 

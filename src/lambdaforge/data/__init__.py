@@ -42,6 +42,7 @@ _NAMES = (
     "DatasetRegistry",
     "DatasetResolver",
     "DatasetService",
+    "DatasetValidationCache",
     "ExplicitVersionIdentityProvider",
     "FileDataset",
     "ManifestIdentityProvider",

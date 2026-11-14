@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shlex
 import stat
+import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
@@ -135,13 +136,38 @@ class PasswordSshTransport(Transport):
     @contextmanager
     def stream(self, command: Sequence[str]) -> Iterator[BinaryCommand]:
         """Reuse verified password authentication without exposing/forwarding credentials."""
-        stdin, stdout, stderr = self._connection().exec_command(shlex.join(tuple(command)))
-        stream = BinaryCommand(stdin, stdout, stderr, stdout.channel)
+        connection = self._connection()
+        options = {"timeout": self.command_timeout} if self.command_timeout is not None else {}
+        stdin, stdout, stderr = connection.exec_command(shlex.join(tuple(command)), **options)
+        # SSHClient.exec_command creates ChannelFiles with mode='r'. Paramiko read()
+        # returns bytes there, but readline() decodes to str: a compressed transfer's
+        # header then fails on the receiver's binary stdin. Request genuine binary
+        # channel readers through the public API, keeping the originals alive until close.
+        original_stdout, original_stderr = stdout, stderr
+        channel = stdout.channel
+        stdout = channel.makefile("rb", -1)
+        stderr = channel.makefile_stderr("rb", -1)
+        stream = BinaryCommand(stdin, stdout, stderr, channel)
         try:
             yield stream
         finally:
-            stdin.close()
-            stdout.channel.close()
+            primary_error = sys.exc_info()[1]
+            cleanup_error: Exception | None = None
+            for close in (
+                stdin.close,
+                stdout.close,
+                stderr.close,
+                original_stdout.close,
+                original_stderr.close,
+                channel.close,
+            ):
+                try:
+                    close()
+                except Exception as error:
+                    cleanup_error = cleanup_error or error
+            # A second EOF during SSH shutdown must not replace the write/read failure.
+            if primary_error is None and cleanup_error is not None:
+                raise cleanup_error
 
     def _connection(self) -> Any:
         if self._client is not None:

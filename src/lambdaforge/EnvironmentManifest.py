@@ -8,7 +8,7 @@ import platform
 import subprocess
 import sys
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import torch
 
+from lambdaforge.controlplane.NativeLibraryPolicy import POLICY_VARIABLE, native_library_report
 from lambdaforge.LambdaForgeVersion import LambdaForgeVersion
 from lambdaforge.plugins.PluginDescriptor import PluginDescriptor
 
@@ -35,6 +36,7 @@ class EnvironmentManifest:
     environment: dict[str, str]
     plugins: tuple[PluginDescriptor, ...] = ()
     external_tools: tuple[dict[str, str | None], ...] = ()
+    native_libraries: dict[str, Any] = field(default_factory=dict)
 
     TRACKED_PACKAGES = (
         "lightning",
@@ -86,6 +88,7 @@ class EnvironmentManifest:
                 key: os.environ[key] for key in ("CUDA_VISIBLE_DEVICES",) if key in os.environ
             },
             plugins=plugin_snapshot,
+            native_libraries=native_library_report(verify=POLICY_VARIABLE in os.environ),
             external_tools=tuple(
                 dict(value)
                 for value in sorted(

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simplelambda.github.io/lambdaforge/schemas/csv-options-v1.json",
+  "title": "Native CsvOptions mapping",
+  "type": ["object", "null"], "additionalProperties": false,
+  "properties": {
+    "delimiter": {"type": "string", "minLength": 1, "maxLength": 1, "default": ","},
+    "header_rows": {"type": "integer", "minimum": 0, "default": 1},
+    "columns": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "encoding": {"type": "string", "default": "utf-8"},
+    "bom": {"enum": ["preserve", "strip", "error"], "default": "preserve"},
+    "write_bom": {"type": "boolean", "default": false},
+    "quotechar": {"type": ["string", "null"], "minLength": 1, "maxLength": 1, "default": "\""},
+    "escapechar": {"type": ["string", "null"], "minLength": 1, "maxLength": 1, "default": null},
+    "doublequote": {"type": "boolean", "default": true},
+    "comment": {"type": ["string", "null"], "minLength": 1, "default": null},
+    "skip_rows": {"type": "integer", "minimum": 0, "default": 0},
+    "decimal": {"enum": [".", ","], "default": "."},
+    "parse_errors": {"enum": ["error", "skip"], "default": "error"}
+  },
+  "allOf": [{"if": {"properties": {"header_rows": {"const": 0}}, "required": ["header_rows"]},
+             "then": {"required": ["columns"], "properties": {"columns": {"minItems": 1}}}}]
+}

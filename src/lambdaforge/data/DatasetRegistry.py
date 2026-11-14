@@ -378,6 +378,35 @@ class DatasetRegistry:
             self._records_from(value)
         return value
 
+    @classmethod
+    def decode_inventory(cls, text: str, *, source: str) -> tuple[DatasetRecord, ...]:
+        """Validate transported registry metadata with the same canonical record parser."""
+        try:
+            value = json.loads(text)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise DatasetRegistryCorruptionError(source, str(error)) from error
+        if not isinstance(value, dict):
+            raise DatasetRegistryCorruptionError(
+                source, "the top-level JSON value is not an object"
+            )
+        return cls(source)._records_from(value)
+
+    @staticmethod
+    def inventory_read_script() -> str:
+        """Stdlib-only read, compatible with bootstrap Python; no environment or asset access."""
+        return """# lambdaforge-dataset-registry-read
+import json,sys
+from pathlib import Path
+try:
+ with Path(sys.argv[1]).open('rb') as handle:
+  content=handle.read(64*1024*1024+1)
+ if len(content)>64*1024*1024:
+  raise ValueError('Dataset registry exceeds the 64 MiB metadata limit')
+ sys.stdout.write(content.decode('utf-8'))
+except FileNotFoundError:
+ print(json.dumps({'dataset_registry_version':1,'datasets':{}}))
+"""
+
     def _write(self, value: Mapping[str, object]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.{uuid4().hex}.tmp")

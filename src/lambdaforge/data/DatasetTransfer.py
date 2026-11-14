@@ -12,12 +12,110 @@ import json
 import os
 import shutil
 import stat
-import subprocess
 import sys
 import tarfile
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, cast
 from uuid import uuid4
+
+
+def read_password() -> str:
+    """Read a bounded secret from an encrypted channel or anonymous native Job pipe."""
+    raw = sys.stdin.buffer.read(4097)
+    if not raw or len(raw) > 4096:
+        raise ValueError("A nonempty transient password of at most 4096 bytes is required.")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeError:
+        raise ValueError("Transient password encoding is invalid.") from None
+
+
+def password_transport(peer: dict[str, Any], password: str) -> Any:
+    """Native optional password transport; trust belongs to the initiating host."""
+    from lambdaforge.controlplane.PasswordSshTransport import PasswordSshTransport
+
+    return PasswordSshTransport(
+        peer["host"],
+        user=peer.get("user"),
+        port=int(peer["port"]),
+        password_provider=lambda: password,
+        timeout=10,
+    )
+
+
+@contextmanager
+def peer_stream(command: list[str], peer: dict[str, Any] | None, password: str | None) -> Any:
+    """Use native binary streams and the same archive engine with either authentication."""
+    from lambdaforge.controlplane.BinaryCommand import subprocess_stream
+
+    if password is None:
+        with subprocess_stream(command) as stream:
+            yield stream
+        return
+    if not peer:
+        raise ValueError("Password SSH requires the explicitly approved peer.")
+    transport = password_transport(peer, password)
+    try:
+        with transport.stream(command) as stream:
+            yield stream
+    finally:
+        transport.close()
+
+
+def probe(options: dict[str, Any]) -> None:
+    """Check effective prerequisites without modifying files or opening Dataset asset bytes."""
+    from lambdaforge.controlplane.StorageAdmission import StorageAdmission  # noqa: F401
+    from lambdaforge.data.DatasetRecord import DatasetRecord
+    from lambdaforge.data.DatasetRegistry import DatasetRegistry  # noqa: F401
+    from lambdaforge.work.snapshot import validate_path
+
+    if options.get("password_support"):
+        import importlib.util
+        import inspect
+
+        from lambdaforge.controlplane.ProcessSupervisor import ProcessSupervisor
+
+        if importlib.util.find_spec("paramiko") is None:
+            raise ValueError(
+                "Initiating runtime needs optional lambdaforge[cluster-password]; no password sent."
+            )
+        if "stdin_data" not in inspect.signature(ProcessSupervisor.launch).parameters:
+            raise ValueError(
+                "Update/bootstrap the initiating LF runtime for ephemeral Job input "
+                "before password transfers."
+            )
+
+    role = options.get("role")
+    raw = options.get("root")
+    if raw:
+        root = Path(raw)
+        validate_path(root)
+        if role == "source":
+            if not root.is_dir() or not os.access(root, os.R_OK | os.X_OK):
+                raise PermissionError("Source Dataset directory is not readable.")
+            manifest = root / "dataset-artifact.json"
+            if manifest.is_symlink() or not manifest.is_file() or not os.access(manifest, os.R_OK):
+                raise PermissionError("Source Dataset declaration is not readable.")
+        else:
+            record = options.get("record")
+            if record:
+                value = DatasetRecord.from_mapping(record)
+                candidate = (
+                    root
+                    / value.name
+                    / value.version
+                    / value.dataset_id.removeprefix("sha256:")[:16]
+                )
+                validate_path(candidate)
+                if not candidate.is_relative_to(root):
+                    raise ValueError("Unsafe destination publication path.")
+            parent = root
+            while not parent.exists() and parent != parent.parent:
+                parent = parent.parent
+            if not parent.is_dir() or not os.access(parent, os.W_OK | os.X_OK):
+                raise PermissionError("Destination storage is not writable.")
+    print("LF_DATA_TRANSFER_READY", flush=True)
 
 
 def pack(root: Path, identity: str, output: BinaryIO) -> None:
@@ -56,7 +154,7 @@ def pack(root: Path, identity: str, output: BinaryIO) -> None:
     output.flush()
 
 
-def receive(options: dict[str, Any], source: BinaryIO) -> dict[str, Any]:
+def receive(options: dict[str, Any], source: BinaryIO, progress: Any = None) -> dict[str, Any]:
     """Extract only into owned staging, verify, then lock/commit/register exact bytes."""
     from dataclasses import replace
     from datetime import datetime, timezone
@@ -155,6 +253,8 @@ def receive(options: dict[str, Any], source: BinaryIO) -> dict[str, Any]:
                         raise ValueError("Unexpected data after Dataset archive.")
             if received != total or len(seen) != count:
                 raise ValueError("Incomplete Dataset transfer inventory.")
+            if progress:
+                progress("verify-destination", "Verifying exact destination checksums.")
             verified = DatasetOperations.verify(staging, record.dataset_id)
             if not verified.get("valid"):
                 raise ValueError(
@@ -203,6 +303,8 @@ def receive(options: dict[str, Any], source: BinaryIO) -> dict[str, Any]:
                     ):
                         raise ValueError("Existing Dataset declaration differs.")
                 else:
+                    if progress:
+                        progress("publication", "Publishing verified immutable Dataset content.")
                     os.replace(staging, destination)
                     created = True
                 try:
@@ -217,23 +319,240 @@ def receive(options: dict[str, Any], source: BinaryIO) -> dict[str, Any]:
                 shutil.rmtree(staging)
 
 
+def pull_copy(
+    options: dict[str, Any],
+    sender_command: list[str],
+    progress: Any = None,
+    *,
+    peer: dict[str, Any] | None = None,
+    password: str | None = None,
+) -> dict[str, Any]:
+    """Receive on the destination host using the same archive verification/publication path."""
+    import time
+
+    with peer_stream(sender_command, peer, password) as sender:
+
+        class SourceStream:
+            def __init__(self) -> None:
+                self.count = 0
+                self.last_update = 0.0
+
+            def readline(self, size: int = -1) -> bytes:
+                header = sender.stdout.readline(size)
+                if progress:
+                    progress("transfer", "Receiving compressed bytes directly from source.")
+                return header
+
+            def read(self, size: int = -1) -> bytes:
+                chunk = sender.stdout.read(size)
+                self.count += len(chunk)
+                now = time.monotonic()
+                if chunk and progress and now - self.last_update >= 1.0:
+                    progress(
+                        "transfer",
+                        "Receiving compressed bytes directly from source.",
+                        compressed_bytes=self.count,
+                    )
+                    self.last_update = now
+                return chunk
+
+        def boundary(phase: str, message: str) -> None:
+            if phase == "verify-destination":
+                sender.wait()  # Sender failure must precede any final publication.
+            if progress:
+                progress(phase, message)
+
+        try:
+            return receive(options, cast(BinaryIO, SourceStream()), boundary)
+        except (EOFError, OSError, tarfile.TarError, ValueError) as error:
+            diagnostic = getattr(sender, "diagnostics", None)
+            peer = (
+                diagnostic()
+                if callable(diagnostic)
+                else {"exit_code": None, "stderr": "Peer diagnostic unavailable in host runtime."}
+            )
+            raise RuntimeError(
+                f"Direct sender receive failed: {type(error).__name__}: {error}; peer={peer}"
+            ) from error
+
+
+def push_copy(
+    root: Path,
+    identity: str,
+    receiver_command: list[str],
+    progress: Any = None,
+    *,
+    peer: dict[str, Any] | None = None,
+    password: str | None = None,
+) -> dict[str, Any]:
+    """Direct sender with bounded peer diagnostics and the same exact archive engine."""
+    import time
+
+    with peer_stream(receiver_command, peer, password) as receiver:
+
+        class ProgressStream:
+            def __init__(self) -> None:
+                self.count = 0
+                self.last_update = 0.0
+                self.header_written = False
+
+            def write(self, data: bytes) -> int:
+                count = receiver.stdin.write(data)
+                if not self.header_written:
+                    self.header_written = True
+                    return len(data) if count is None else count
+                self.count += len(data) if count is None else count
+                now = time.monotonic()
+                if progress and now - self.last_update >= 1.0:
+                    progress(
+                        "transfer",
+                        "Streaming compressed Dataset bytes between clusters.",
+                        compressed_bytes=self.count,
+                    )
+                    self.last_update = now
+                return len(data) if count is None else count
+
+            def flush(self) -> None:
+                receiver.stdin.flush()
+
+        try:
+            pack(root, identity, cast(BinaryIO, ProgressStream()))
+            receiver.finish_input()
+        except (EOFError, OSError) as error:
+            diagnostic = getattr(receiver, "diagnostics", None)
+            peer = (
+                diagnostic()
+                if callable(diagnostic)
+                else {
+                    "exit_code": None,
+                    "stderr": "Peer diagnostic unavailable in this host runtime; inspect Job logs.",
+                }
+            )
+            raise RuntimeError(
+                f"Direct receiver stream failed: {type(error).__name__}; peer={peer}"
+            ) from error
+        if progress:
+            progress("verify-destination", "Verifying and registering the remote destination.")
+        # A bounded control response follows the binary input: destination verification and
+        # publication are real receiver observations, not phases guessed by the sender.
+        for _ in range(8):
+            raw = receiver.stdout.readline(65537)
+            if len(raw) > 65536:
+                raise ValueError("Dataset receiver acknowledgement exceeds its metadata bound.")
+            response = json.loads(raw)
+            phase = response.get("transfer_phase")
+            if phase in {"verify-destination", "publication"}:
+                if progress:
+                    progress(phase, str(response.get("message", ""))[:1024])
+            else:
+                break
+        else:
+            raise ValueError("Dataset receiver phase responses exceed their metadata bound.")
+        receiver.wait()
+        if not response.get("verified"):
+            raise ValueError("Destination did not acknowledge verified Dataset content.")
+        return response
+
+
+def direct_job(path: Path) -> None:
+    """Native supervised host-to-host copy; an explicitly supplied password is memory-only."""
+    from lambdaforge.work.atomic import atomic_write_json
+    from lambdaforge.work.snapshot import validate_path
+
+    validate_path(path)
+    request = json.loads(path.read_text(encoding="utf-8"))
+    password = read_password() if request.get("peer_authentication") == "password" else None
+    progress_path = Path(os.environ["LAMBDAFORGE_PROGRESS_PATH"])
+
+    def progress(phase: str, message: str, **values: Any) -> None:
+        from datetime import datetime, timezone
+
+        old = json.loads(progress_path.read_text()) if progress_path.is_file() else {}
+        now = datetime.now(timezone.utc).isoformat()
+        advanced = values.get("compressed_bytes", 0) > old.get("compressed_bytes", 0)
+        atomic_write_json(
+            progress_path,
+            {
+                **old,
+                "phase": phase,
+                "message": message,
+                "updated_at_utc": now,
+                **values,
+                "last_byte_progress_at_utc": now
+                if advanced
+                else old.get("last_byte_progress_at_utc"),
+            },
+        )
+
+    if request.get("direction") == "pull":
+        progress("verify-source", "Source host is verifying exact checksums before sending.")
+        response = pull_copy(request["receive_options"], request["sender"], progress)
+        response.update(
+            {
+                "dataset": request["dataset"],
+                "content_id": request["content_id"],
+                "destination": request["destination"],
+            }
+        )
+        atomic_write_json(Path(os.environ["LAMBDAFORGE_JOB_RESULT_PATH"]), response)
+        progress("completed", "Dataset verified and registered on the destination.")
+        return
+
+    progress("verify-source", "Verifying exact source checksums.")
+    response = push_copy(
+        Path(request["source_root"]),
+        request["content_id"],
+        request["receiver"],
+        progress,
+        peer=request.get("peer"),
+        password=password,
+    )
+    result = {
+        "dataset": request["dataset"],
+        "content_id": request["content_id"],
+        "destination": request["destination"],
+        **response,
+    }
+    atomic_write_json(Path(os.environ["LAMBDAFORGE_JOB_RESULT_PATH"]), result)
+    progress("completed", "Dataset verified and registered on the destination.")
+    print("Verified Dataset replication completed.", flush=True)
+
+
 def main() -> None:
     """Private wire endpoint used by DatasetService, not a second public command."""
     operation = sys.argv[1]
-    if operation == "pack":
+    if operation == "direct-job":
+        direct_job(Path(sys.argv[2]))
+    elif operation == "password-probe":
+        options = json.loads(sys.argv[2])
+        transport = password_transport(options["peer"], read_password())
+        try:
+            result = transport.run(options["command"], timeout=15)
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            if result.returncode:
+                raise SystemExit(result.returncode)
+        finally:
+            transport.close()
+    elif operation == "probe":
+        probe(json.loads(sys.argv[2]))
+    elif operation == "pack":
         pack(Path(sys.argv[2]), sys.argv[3], sys.stdout.buffer)
     elif operation == "receive":
-        print(json.dumps(receive(json.loads(sys.argv[2]), sys.stdin.buffer)))
+        options = json.loads(sys.argv[2])
+
+        def report(phase: str, message: str) -> None:
+            print(json.dumps({"transfer_phase": phase, "message": message}), flush=True)
+
+        print(
+            json.dumps(
+                receive(options, sys.stdin.buffer, report if options.get("report_phases") else None)
+            )
+        )
+    elif operation == "pull":
+        print(json.dumps(pull_copy(json.loads(sys.argv[2]), json.loads(sys.argv[3]))))
     elif operation == "direct":
-        # Only previously probed, host-key-verifying site SSH argv is accepted from the service.
-        with subprocess.Popen(json.loads(sys.argv[4]), stdin=subprocess.PIPE) as process:
-            assert process.stdin is not None
-            try:
-                pack(Path(sys.argv[2]), sys.argv[3], cast(BinaryIO, process.stdin))
-            finally:
-                process.stdin.close()
-            if process.wait():
-                raise RuntimeError("Direct Dataset transfer receiver failed.")
+        print(json.dumps(push_copy(Path(sys.argv[2]), sys.argv[3], json.loads(sys.argv[4]))))
     else:
         raise ValueError("Unknown Dataset transfer endpoint.")
 

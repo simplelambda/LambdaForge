@@ -34,6 +34,7 @@ from textual.widgets import (
     LoadingIndicator,
     RichLog,
     Select,
+    SelectionList,
     Static,
     TabbedContent,
     TabPane,
@@ -41,6 +42,7 @@ from textual.widgets import (
 
 from lambdaforge.analysis.Report import write_html, write_metric_html, write_parameter_html
 from lambdaforge.controlplane.SecretRedactor import SecretRedactor
+from lambdaforge.data.errors import DirectTransferUnavailableError
 from lambdaforge.scientific_format import format_parameter_value
 from lambdaforge.tui.viewmodels import (
     confirmation_text,
@@ -341,7 +343,7 @@ class ExportDirectoryPicker(ModalScreen[Path | None]):
 class ExplanationDialog(ModalScreen[None]):
     """Readable contextual help for one evidence view."""
 
-    def __init__(self, title: str, text: str) -> None:
+    def __init__(self, title: str, text: str | Text) -> None:
         super().__init__()
         self.title_text = title
         self.help_text = text
@@ -3705,12 +3707,23 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
         self.job_id = job_id
         self._valid_config = self.preview.get("configuration", {}).get("selected_exists", True)
         self._config_override: dict[str, Any] = {}
+        configuration = self.preview.get("configuration", {})
+        if configuration.get("sha256") and configuration.get("selected_path"):
+            self._config_override = {
+                "config": configuration["selected_path"],
+                "config_sha256": configuration["sha256"],
+            }
         self._validating = False
         self._confirmed = False
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal-card wide-modal", id="study-retry-dialog"):
-            yield Label("Resume Study", classes="modal-title")
+            yield Label(
+                "Recover Work"
+                if self.preview.get("strategy") in {"single", "sequential"}
+                else "Resume Study",
+                classes="modal-title",
+            )
             with VerticalScroll(id="retry-plan-body"):
                 configuration = self.preview.get("configuration", {})
                 if self.services is not None:
@@ -3748,7 +3761,11 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
                 if rows:
                     yield Static(
                         "\n".join(
-                            f"Trial {row['trial']} · seed {row['seed']} → {row['action']}"
+                            (
+                                f"Step {row['step']} → {row['action']} · Run {row.get('run_id') or 'pending'}"
+                                if "step" in row
+                                else f"Trial {row['trial']} · seed {row['seed']} → {row['action']}"
+                            )
                             for row in rows[:50]
                         )
                         + (
@@ -3804,7 +3821,13 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
                 )
                 with Horizontal(classes="modal-actions"):
                     yield Button("Cancel", id="retry-cancel")
-                    yield Button("Resume Study", id="retry-confirm", variant="success")
+                    yield Button(
+                        "Recover Work"
+                        if self.preview.get("strategy") in {"single", "sequential"}
+                        else "Resume Study",
+                        id="retry-confirm",
+                        variant="success",
+                    )
 
     def on_mount(self) -> None:
         self._sync_confirmation()
@@ -3822,7 +3845,11 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
         elif code_changed and not acknowledgement:
             message = "Action required · review code compatibility and tick the checkbox below."
         else:
-            message = "Ready · Resume Study will preserve completed Runs and submit recovery once."
+            message = (
+                "Ready · Recover Work preserves completed steps and checkpoints; retries unfinished Runs."
+                if self.preview.get("strategy") in {"single", "sequential"}
+                else "Ready · Resume Study will preserve completed Runs and submit recovery once."
+            )
         self.query_one("#retry-submit-status", Static).update(message)
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
@@ -3972,7 +3999,9 @@ class StudyRetryConfirmation(ModalScreen[bool | dict[str, Any] | None]):
             self._confirmed = True
             self.query_one("#retry-confirm", Button).disabled = True
             self.query_one("#retry-submit-status", Static).update(
-                "Submitting recovered Study… previous scientific evidence is preserved."
+                "Submitting recovered Work… original file checkpoints are preserved."
+                if self.preview.get("strategy") in {"single", "sequential"}
+                else "Submitting recovered Study… previous scientific evidence is preserved."
             )
             self.dismiss(
                 {**self._config_override, "accept_code_change": acknowledgement}
@@ -4012,6 +4041,66 @@ class ExactConfirmation(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "exact-apply")
+
+
+class StorageRepairSelection(ModalScreen[dict[str, list[str]] | None]):
+    """Select exact operational references; native preview and confirmation follow."""
+
+    def __init__(self, report: Mapping[str, Any]) -> None:
+        super().__init__()
+        self.report = report
+
+    def compose(self) -> ComposeResult:
+        options = []
+        jobs = set()
+        for issue in self.report.get("issues", ()):
+            job = issue.get("job_id")
+            if job and job not in jobs:
+                jobs.add(job)
+                options.append((f"Job {job}: {issue['reason']}", f"job:{job}", False))
+        for build in self.report.get("builds", ()):
+            owner = build.get("owner") or {}
+            options.append(
+                (
+                    f"Build {build['name']} · owner {owner.get('host', 'unreadable')}",
+                    f"build:{build['name']}",
+                    False,
+                )
+            )
+        with Vertical(classes="modal-card wide-modal"):
+            yield Label(
+                "Repair cache references · preserve scientific files", classes="modal-title"
+            )
+            yield Static(
+                "Select abandoned references to review. This never deletes Jobs or checkpoints. Live, foreign-unverified or unreadable owners remain protected."
+            )
+            yield SelectionList(*options, id="storage-repair-selection")
+            if not options:
+                yield Static("No unresolved Job/build references were found.")
+            with Horizontal(classes="modal-actions"):
+                yield Button("Back", id="storage-repair-back")
+                yield Button(
+                    "Review selected",
+                    id="storage-repair-review",
+                    variant="primary",
+                    disabled=not options,
+                )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "storage-repair-back":
+            self.dismiss(None)
+        elif event.button.id == "storage-repair-review":
+            values = self.query_one("#storage-repair-selection", SelectionList).selected
+            if not values:
+                self.notify("Select at least one exact reference to review.", severity="warning")
+                return
+            self.dismiss(
+                {
+                    "retire_jobs": [value[4:] for value in values if value.startswith("job:")],
+                    "release_builds": [value[6:] for value in values if value.startswith("build:")],
+                }
+            )
 
 
 class OperationResizeHandle(Static):
@@ -4145,6 +4234,8 @@ class ClusterWorkspace(ResearchWorkspace):
                 with TabPane("GPU policy", id="cluster-gpu"):
                     yield Static(id="cluster-gpu-content", classes="workspace-panel")
                 with TabPane("Storage", id="cluster-storage"):
+                    with Horizontal(classes="workspace-actions nested-actions"):
+                        yield Button("Repair references…", id="cluster-storage-repair", flat=True)
                     yield VerticalScroll(Static(id="cluster-storage-content"))
                 with TabPane("Credentials", id="cluster-credentials"):
                     yield Static(id="cluster-credential-content", classes="workspace-panel")
@@ -4295,6 +4386,14 @@ class ClusterWorkspace(ResearchWorkspace):
                 lambda: self.services.clean_storage(self.cluster_name),
                 self._confirm_storage_clear,
             )
+        elif selected == "cluster-storage-repair":
+            self._run_operation(
+                "Inspect cache references",
+                lambda: self.services.storage_references(self.cluster_name),
+                lambda report: self.app.push_screen(
+                    StorageRepairSelection(report), self._review_storage_repair
+                ),
+            )
         elif selected == "cluster-bootstrap-apply":
             self.app.push_screen(
                 ExactConfirmation(
@@ -4346,12 +4445,33 @@ class ClusterWorkspace(ResearchWorkspace):
             self.notify("Cluster updated. Reopen it to use the refreshed service catalog.")
 
     def _confirm_storage_clear(self, preview: Mapping[str, Any]) -> None:
+        if not preview.get("candidates") and not preview.get("reclaimable_bytes"):
+            self.app.push_screen(
+                ExplanationDialog(
+                    "No eligible storage to remove",
+                    confirmation_text(
+                        {
+                            "reason": preview.get("blocked_reason") or "No obsolete cache entries.",
+                            "ownership_issues": preview.get("reference_issues", []),
+                            "protected_entries": len(preview.get("protected_items", ())),
+                            "next_action": "Use Storage → Repair references to inspect exact abandoned references. No deletion was started.",
+                        }
+                    ),
+                )
+            )
+            return
         self.app.push_screen(
             ExactConfirmation(
                 f"Clear safe storage on {self.cluster_name}",
                 {
                     "cluster": self.cluster_name,
                     "reclaimable_bytes": preview.get("reclaimable_bytes", 0),
+                    "estimated_physical_file_blocks": preview.get("reclaimable_allocated_bytes", 0),
+                    "environment_count": preview.get("environment_count", 0),
+                    "environment_usage": preview.get("environment_usage", {}),
+                    "ownership_issues": preview.get("reference_issues", []),
+                    "cleanup_note": preview.get("blocked_reason")
+                    or "Apply rechecks all references.",
                     "categories": preview.get("categories", {}),
                     "protected_entries": len(preview.get("protected_items", ())),
                     "will_preserve": [
@@ -4364,6 +4484,30 @@ class ClusterWorkspace(ResearchWorkspace):
             ),
             self._apply_storage_clear,
         )
+
+    def _review_storage_repair(self, selections: dict[str, list[str]] | None) -> None:
+        if selections:
+
+            def confirm(preview: Mapping[str, Any]) -> None:
+                self.app.push_screen(
+                    ExactConfirmation("Repair exact cache references", preview),
+                    lambda approved: (
+                        self._run_operation(
+                            "Repair references",
+                            lambda: self.services.repair_storage(
+                                self.cluster_name, **selections, apply=True
+                            ),
+                        )
+                        if approved
+                        else None
+                    ),
+                )
+
+            self._run_operation(
+                "Reference repair preview",
+                lambda: self.services.repair_storage(self.cluster_name, **selections),
+                confirm,
+            )
 
     def _apply_storage_clear(self, confirmed: bool | None) -> None:
         if confirmed:
@@ -4581,9 +4725,11 @@ class ClusterWorkspace(ResearchWorkspace):
                 self.app.call_from_thread(log.write, f"{label}: {type(error).__name__}: {error}")
                 self.app.call_from_thread(self._finish_operation, label, failed=True)
                 return
+            no_change = isinstance(value, Mapping) and value.get("outcome") == "no-change"
             self.app.call_from_thread(
                 log.write,
-                f"✓ {label} completed\n{_structured_text(value, limit=20)}",
+                f"{'No change ·' if no_change else '✓'} {label} "
+                f"{'removed no eligible bytes' if no_change else 'completed'}\n{_structured_text(value, limit=20)}",
             )
             if callback is not None:
                 self.app.call_from_thread(callback, value)
@@ -4604,6 +4750,7 @@ class WorkWorkspace(ResearchWorkspace):
         self._log_text = ""
         self._log_initialized = False
         self._log_updated_at: float | None = None
+        self._recovery_busy = False
         super().__init__(f"Work / {work.get('name', 'Work')}")
 
     def compose_workspace(self) -> ComposeResult:
@@ -4620,7 +4767,7 @@ class WorkWorkspace(ResearchWorkspace):
         )
         with Horizontal(classes="workspace-actions"):
             yield Button("Cancel", id="work-cancel", variant="warning")
-            yield Button("Retry latest Attempt", id="work-retry")
+            yield Button("Recover Work…", id="work-retry")
             yield Button("Export Work…", id="work-export", variant="success")
             yield Button("Delete", id="work-delete", variant="error")
         if isinstance(self.work.get("study"), Mapping):
@@ -4739,8 +4886,25 @@ class WorkWorkspace(ResearchWorkspace):
             self.app.push_screen(ExactConfirmation("Cancel Work", preview), self._apply_cancel)
         elif event.button.id == "work-retry":
             job_id = self.work.get("primary_job_id")
-            if job_id:
-                self._operation("Retry", lambda: self.services.retry_job(str(job_id)))
+            if job_id and not self._recovery_busy:
+                self._recovery_busy = True
+                self.query_one("#work-retry", Button).disabled = True
+                self.query_one("#work-operational-health", Static).update(
+                    "Inspecting recovery ownership and checkpoints… nothing submitted yet."
+                )
+                app = self.app
+
+                def inspect_recovery() -> None:
+                    try:
+                        preview = self.services.retry_preview(str(job_id))
+                    except Exception as error:
+                        app.call_from_thread(self._work_recovery_failed, error)
+                    else:
+                        app.call_from_thread(self._work_recovery_preview, preview)
+
+                Thread(
+                    target=inspect_recovery, daemon=True, name="lambdaforge-work-recovery-preview"
+                ).start()
         elif event.button.id == "work-delete":
             self._operation(
                 "Delete preview",
@@ -4749,6 +4913,57 @@ class WorkWorkspace(ResearchWorkspace):
             )
         elif event.button.id == "work-export":
             self.app.push_screen(ExportDirectoryPicker(Path.cwd()), self._export_work)
+
+    def _work_recovery_preview(self, preview: Mapping[str, Any]) -> None:
+        if not self.is_mounted:
+            return
+        self.app.push_screen(
+            StudyRetryConfirmation(
+                preview, services=self.services, job_id=str(self.work["primary_job_id"])
+            ),
+            self._work_recovery_confirmed,
+        )
+
+    def _work_recovery_failed(self, error: Exception) -> None:
+        if not self.is_mounted:
+            return
+        self._recovery_busy = False
+        self.query_one("#work-retry", Button).disabled = False
+        self.query_one("#work-operational-health", Static).update(
+            f"Recovery blocked · {type(error).__name__}: {SecretRedactor.redact(error)[:1000]}"
+        )
+
+    def _work_recovery_confirmed(self, approval: bool | Mapping[str, Any] | None) -> None:
+        if approval is None:
+            self._recovery_busy = False
+            self.query_one("#work-retry", Button).disabled = False
+            self.query_one("#work-operational-health", Static).update(
+                "Recovery cancelled · nothing submitted."
+            )
+            return
+        options = (
+            dict(approval) if isinstance(approval, Mapping) else {"accept_code_change": approval}
+        )
+        self.query_one("#work-operational-health", Static).update("Submitting reviewed recovery…")
+        app = self.app
+
+        def recover() -> None:
+            try:
+                result = self.services.retry_job(str(self.work["primary_job_id"]), **options)
+            except Exception as error:
+                app.call_from_thread(self._work_recovery_failed, error)
+            else:
+                app.call_from_thread(self._work_recovery_submitted, result)
+
+        Thread(target=recover, daemon=True, name="lambdaforge-work-recovery").start()
+
+    def _work_recovery_submitted(self, result: Mapping[str, Any]) -> None:
+        if not self.is_mounted:
+            return
+        self.query_one("#work-operational-health", Static).update(
+            f"Recovery accepted · {result.get('job_id')} · preparation pending; no scientific progress claimed."
+        )
+        # Keep submission disabled until the workspace is reopened with the new native Job.
 
     def _export_work(self, destination: Path | None) -> None:
         if destination is not None:
@@ -4816,6 +5031,9 @@ class DatasetWorkspace(ResearchWorkspace):
         self._replication_started = 0.0
         self._replication_message = ""
         self._replication_app: Any = None
+        self._transfers_loading = False
+        self._transfer_rows: list[dict[str, Any]] = []
+        self._transfer_app: Any = None
         self._management_busy = False
         self._management_started = 0.0
         self._management_message = ""
@@ -4926,6 +5144,21 @@ class DatasetWorkspace(ResearchWorkspace):
                         "Compute physical statistics", id="dataset-show-stats", variant="primary"
                     )
                 yield VerticalScroll(Static(id="dataset-stat-content"))
+            with TabPane("Transfers", id="dataset-transfers"):
+                yield Static(
+                    "Loading transfer history…", id="dataset-transfer-status", markup=False
+                )
+                with Horizontal(classes="workspace-actions"):
+                    yield Button("Refresh transfers", id="dataset-transfer-refresh")
+                    yield Button("Selected transfer logs", id="dataset-transfer-logs")
+                yield DataTable(id="dataset-transfer-table", cursor_type="row")
+                yield VerticalScroll(
+                    Static(
+                        "Select a transfer to inspect its logs.",
+                        id="dataset-transfer-details",
+                        markup=False,
+                    )
+                )
             with TabPane("Integrity", id="dataset-integrity"):
                 with Vertical(classes="dataset-action-state", id="dataset-verify-action"):
                     yield Static(
@@ -4969,6 +5202,12 @@ class DatasetWorkspace(ResearchWorkspace):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         target: str | None = None
         action: Any = None
+        if event.button.id == "dataset-transfer-refresh":
+            self._load_transfers()
+            return
+        if event.button.id == "dataset-transfer-logs":
+            self._load_transfer_logs()
+            return
         if event.button.id == "dataset-manage":
             self._choose_management()
             return
@@ -4999,7 +5238,21 @@ class DatasetWorkspace(ResearchWorkspace):
 
     def on_mount(self) -> None:
         self.query_one("#dataset-member-table", DataTable).display = False
+        self._transfer_app = self.app
         self.set_interval(1.0, self._replication_tick)
+        self.query_one("#dataset-transfer-table", DataTable).add_columns(
+            "Job",
+            "From → To",
+            "Process state",
+            "Phase",
+            "Compressed",
+            "Execution host",
+            "Route",
+            "Observed age",
+            "Byte age",
+        )
+        self._load_transfers()
+        self.set_interval(5.0, self._load_transfers)
         self._apply_logical_summary(self.dataset, exact=False)
         if self.dataset.get("inventory_conflict"):
             self.query_one("#dataset-split-note", Static).update(
@@ -5246,38 +5499,189 @@ class DatasetWorkspace(ResearchWorkspace):
             DatasetReplication(self.selector, sources, targets), self._preview_replication
         )
 
-    def _preview_replication(self, endpoints: tuple[str, str] | None) -> None:
+    def _request_replication_password(self, endpoints: tuple[str, str, str]) -> None:
+        from lambdaforge.tui.screens.DatasetReplication import ReplicationPassword
+
+        if not self._replication_present():
+            return
+        self._replication_password: str | None = None
+        self._set_replication_busy(False, "Direct access needs authentication · no copy started.")
+
+        def entered(secret: str | None) -> None:
+            if secret is None:
+                self._delete_status("Password entry cancelled · no copy started.")
+                return
+            self._preview_replication((endpoints[0], endpoints[1], "direct"), site_password=secret)
+
+        self.app.push_screen(ReplicationPassword(endpoints[0], endpoints[1]), entered)
+
+    def _preview_replication(
+        self, endpoints: tuple[str, str, str] | None, *, site_password: str | None = None
+    ) -> None:
         if endpoints is None or self._replication_busy:
             return
-        source, destination = endpoints
+        self._replication_app = self.app
+        source, destination, route = endpoints
+        if route == "password":
+            self._request_replication_password(endpoints)
+            return
+        self._replication_password = site_password
         identity = str(self.dataset.get("content_id", self.dataset.get("dataset_id", "")))
-        request = dict(source=source, destination=destination, expected_content_id=identity)
+        request = dict(
+            source=source, destination=destination, route=route, expected_content_id=identity
+        )
         self._set_replication_busy(True, "Inspecting source, destination and direct connectivity…")
         app = self.app
         self._replication_app = app
 
         def preview() -> None:
             try:
-                plan = self.services.replicate_dataset(self.selector, **request)
+                plan = self.services.replicate_dataset(
+                    self.selector,
+                    **request,
+                    **({"site_password": site_password} if site_password is not None else {}),
+                )
             except Exception as error:
-                app.call_from_thread(self._replication_failed, error)
+                if (
+                    isinstance(error, DirectTransferUnavailableError)
+                    and site_password is None
+                    and not any(n.get("category") == "host-key" for n in error.diagnostics)
+                    and any(n.get("category") == "authentication" for n in error.diagnostics)
+                ):
+                    app.call_from_thread(self._request_replication_password, endpoints)
+                    return
+                trust = getattr(self.services, "replication_ssh_trust", None)
+                if isinstance(error, DirectTransferUnavailableError) and callable(trust):
+                    notes = [n for n in error.diagnostics if n.get("category") == "host-key"]
+                    if notes:
+                        try:
+                            note = notes[0]
+                            keys = trust(str(note["execution_host"]), str(note["peer"]))
+                            app.call_from_thread(self._confirm_replication_trust, request, keys)
+                        except Exception as trust_error:
+                            app.call_from_thread(self._replication_preview_failed, trust_error)
+                        return
+                app.call_from_thread(self._replication_preview_failed, error)
                 return
-            app.call_from_thread(self._confirm_replication, request, plan)
+            if (
+                plan.get("relay_consent_required")
+                and site_password is None
+                and any(
+                    n.get("category") == "authentication" for n in plan.get("route_diagnostics", ())
+                )
+            ):
+                app.call_from_thread(self._request_replication_password, endpoints)
+            else:
+                app.call_from_thread(self._confirm_replication, request, plan)
 
         Thread(target=preview, daemon=True, name="lambdaforge-dataset-replicate-preview").start()
+
+    def _confirm_replication_trust(self, request: dict[str, Any], preview: dict[str, Any]) -> None:
+        if not self._replication_present():
+            return
+        self._set_replication_busy(False, "SSH host trust needs review · no copy started.")
+        if preview.get("state") == "known":
+            self._replication_preview_failed(
+                ValueError(
+                    "Peer keys are already known, but strict SSH still failed. Review the SSH host "
+                    "algorithm/configuration with the administrator; no keys were changed."
+                )
+            )
+            return
+        if not preview.get("can_add"):
+            self._replication_preview_failed(
+                ValueError(
+                    "The offered host keys differ from existing trust or are marked/revoked. "
+                    "LF will not replace them. Verify this change with the administrator."
+                )
+            )
+            return
+        self.app.push_screen(
+            ExactConfirmation(
+                "Trust SSH host fingerprints · not a Dataset copy",
+                {
+                    "initiating_cluster": preview["initiator"],
+                    "peer_cluster": preview["peer"],
+                    "host": preview["host"],
+                    "port": preview["port"],
+                    "trust_file_on_initiator": preview["known_hosts_file"],
+                    "fingerprints": [f"{k['type']}  {k['fingerprint']}" for k in preview["keys"]],
+                    "notice": preview["notice"],
+                    "next": "Confirm adds only these unchanged first-use keys on the initiating "
+                    "cluster, then repeats the transfer preview. A separate copy confirmation follows.",
+                },
+            ),
+            partial(self._apply_replication_trust, request, preview),
+        )
+
+    def _apply_replication_trust(
+        self, request: dict[str, Any], preview: dict[str, Any], confirmed: bool | None
+    ) -> None:
+        if not confirmed:
+            self._set_replication_busy(False, "Host trust cancelled · no key or Dataset changed.")
+            return
+        self._set_replication_busy(True, "Rechecking and adding approved host fingerprints…")
+        app = self.app
+
+        def apply() -> None:
+            try:
+                self.services.replication_ssh_trust(
+                    preview["initiator"],
+                    preview["peer"],
+                    apply=True,
+                    fingerprints=[k["fingerprint"] for k in preview["keys"]],
+                    expected_file=preview["known_hosts_file"],
+                )
+            except Exception as error:
+                app.call_from_thread(self._replication_preview_failed, error)
+                return
+
+            def repeat() -> None:
+                if self._replication_present():
+                    self._set_replication_busy(
+                        False, "Host fingerprints recorded · rechecking SSH."
+                    )
+                    self._preview_replication(
+                        (request["source"], request["destination"], request["route"])
+                    )
+
+            app.call_from_thread(repeat)
+
+        Thread(target=apply, daemon=True, name="lf-replication-host-trust").start()
 
     def _confirm_replication(self, request: dict[str, Any], plan: Mapping[str, Any]) -> None:
         if not self._replication_present():
             return
+        if (
+            request.get("route") == "direct"
+            and plan.get("action") == "REPLICATE"
+            and plan.get("transfer_route") not in {"direct-ssh", "direct-ssh-pull"}
+        ):
+            self._replication_preview_failed(
+                ValueError("Direct-only policy cannot approve a controller relay. No copy started.")
+            )
+            return
         self._set_replication_busy(False, "Preview ready · replication requires confirmation.")
         # Pin the inspected route; a failed transfer never silently starts a second copy.
-        request["route"] = "direct" if plan.get("transfer_route") == "direct-ssh" else "relay"
+        request["route"] = (
+            "direct" if plan.get("transfer_route") in {"direct-ssh", "direct-ssh-pull"} else "relay"
+        )
+        request["approved_route"] = plan.get("transfer_route")
+        request["approved_diagnostics"] = list(plan.get("route_diagnostics", ()))
         details = dict(plan)
         details["content_id"] = request["expected_content_id"]
         details["notice"] = (
             "Exact checksums are verified before publication. Different existing content "
-            "is never overwritten. No archive is staged on your computer. Keep lf open until completion."
+            "is never overwritten. No archive is staged on your computer. A durable Job continues "
+            "after lf closes. Direct site SSH needs no PC; a controller relay needs this PC online."
         )
+        if plan.get("relay_consent_required"):
+            details["relay_warning"] = (
+                "SOURCE → THIS CONTROLLER COMPUTER → DESTINATION. Direct probes did not "
+                "confirm a usable route; inspect the reasons below. Size is original/uncompressed, "
+                "not a compressed total. Confirming explicitly accepts relay. Closing LF is safe; "
+                "suspending/shutting down or disconnecting this PC may stop the transfer."
+            )
         self.app.push_screen(
             ExactConfirmation(f"Replicate {self.selector}", details),
             partial(self._apply_replication, request),
@@ -5434,8 +5838,11 @@ class DatasetWorkspace(ResearchWorkspace):
 
     def _apply_replication(self, request: Mapping[str, Any], confirmed: bool | None) -> None:
         if not confirmed:
+            self._replication_password = None
             self._delete_status("Replication cancelled · no dataset bytes changed.")
             return
+        site_password = getattr(self, "_replication_password", None)
+        self._replication_password = None
         self._set_replication_busy(True, "Starting verified compressed transfer…")
         app = self.app
         self._replication_app = app
@@ -5461,6 +5868,7 @@ class DatasetWorkspace(ResearchWorkspace):
                     **dict(request),
                     apply=True,
                     progress=progress,
+                    **({"site_password": site_password} if site_password is not None else {}),
                 )
             except Exception as error:
                 if self._replication_present():
@@ -5475,7 +5883,9 @@ class DatasetWorkspace(ResearchWorkspace):
             else:
                 forward(
                     app.notify,
-                    f"Verified {self.selector} replica on {result.get('target_cluster')}.",
+                    f"Replication Job {result['job_id']} submitted."
+                    if result.get("job_id")
+                    else f"Verified {self.selector} replica on {result.get('target_cluster')}.",
                 )
 
         Thread(target=apply, daemon=True, name="lambdaforge-dataset-replicate").start()
@@ -5505,8 +5915,35 @@ class DatasetWorkspace(ResearchWorkspace):
         self._set_replication_busy(False, message)
         self._delete_status(message, error=True)
 
+    def _replication_preview_failed(self, error: Exception) -> None:
+        self._replication_password = None
+        if not self._replication_present():
+            return
+        self._replication_failed(error)
+        self.app.push_screen(
+            ExplanationDialog(
+                "Replication preview blocked · no copy started",
+                Text(
+                    SecretRedactor.redact(error)
+                    + "\n\nFor a direct copy, SSH must be authorized between the clusters, "
+                    "not just between this PC and each cluster. Ask the site administrator to verify "
+                    "host keys and authorize noninteractive access in either direction. LF does not "
+                    "forward private keys or weaken host-key checks. Direct with password can send "
+                    "an explicitly entered one-use password to the source host, in memory only. "
+                    "Relay remains a separate explicit choice requiring this PC."
+                ),
+            )
+        )
+
     def _replication_complete(self, result: Mapping[str, Any]) -> None:
         if not self._replication_present():
+            return
+        if result.get("job_id"):
+            self._set_replication_busy(
+                False, f"Replication submitted · {result['job_id']} · safe to close lf."
+            )
+            self.query_one("#dataset-tabs", TabbedContent).active = "dataset-transfers"
+            self._load_transfers()
             return
         self._set_replication_busy(
             False, f"Verified replica registered on {result.get('target_cluster')}."
@@ -5520,6 +5957,118 @@ class DatasetWorkspace(ResearchWorkspace):
             self.query_one("#dataset-locations Static", Static).update(
                 _structured_text(result["placements"], heading="MANAGED LOCATIONS")
             )
+
+    def _load_transfers(self) -> None:
+        operation = getattr(self.services, "dataset_replications", None)
+        if (
+            not callable(operation)
+            or self._transfers_loading
+            or not self.is_mounted
+            or self._transfer_app is None
+            or self not in self._transfer_app.screen_stack
+        ):
+            return
+        self._transfers_loading = True
+        app = self.app
+
+        def load() -> None:
+            try:
+                rows = operation(self.selector)
+                error = None
+            except Exception as caught:
+                rows, error = [], f"Transfer history could not be refreshed: {caught}"
+            try:
+                app.call_from_thread(self._show_transfers, rows, error)
+            except RuntimeError:
+                pass
+
+        Thread(target=load, daemon=True, name="lf-transfer-observation").start()
+
+    def _show_transfers(self, rows: list[dict[str, Any]], error: str | None) -> None:
+        self._transfers_loading = False
+        if self._transfer_app is None or self not in self._transfer_app.screen_stack:
+            return
+        self.query_one("#dataset-transfer-status", Static).update(
+            error
+            or "Transfer Jobs persist after closing lf. Relay requires its execution host online."
+        )
+        if error or rows == self._transfer_rows:
+            return
+        self._transfer_rows = rows
+        table = self.query_one("#dataset-transfer-table", DataTable)
+        cursor, scroll_x, scroll_y = table.cursor_row, table.scroll_x, table.scroll_y
+        table.clear()
+        for row in rows:
+            table.add_row(
+                row["job_id"],
+                f"{row['source']} → {row['destination']}",
+                row.get("display_state", row["state"]),
+                "Observation unavailable"
+                if row.get("observation_error")
+                else row.get("progress", {}).get("phase", "waiting"),
+                self._bytes(row.get("progress", {}).get("compressed_bytes")),
+                str(row["host"]),
+                "via this PC"
+                if row.get("route") == "controller-stream"
+                else "direct pull"
+                if row.get("route") == "direct-ssh-pull"
+                else "direct push"
+                if row.get("route") == "direct-ssh"
+                else str(row.get("route", "not recorded")),
+                f"{row['observation_age_seconds']:.0f}s"
+                if row.get("observation_age_seconds") is not None
+                else "not observed",
+                f"{row['byte_progress_age_seconds']:.0f}s"
+                if row.get("byte_progress_age_seconds") is not None
+                else "not observed",
+                key=row["job_id"],
+            )
+        if rows:
+            table.move_cursor(row=min(cursor, len(rows) - 1))
+            table.scroll_to(x=scroll_x, y=scroll_y, animate=False)
+        placements = list(self._sequence(self.dataset.get("placements")))
+        for row in rows:
+            placement = row.get("placement")
+            if isinstance(placement, Mapping) and placement not in placements:
+                placements = [p for p in placements if p.get("cluster") != placement.get("cluster")]
+                placements.append(placement)
+        if placements != self.dataset.get("placements", []):
+            self.dataset["placements"] = placements
+            self.query_one("#dataset-location-summary", Static).update(
+                f"LOCATIONS\n{len(placements)} managed\n" + self._location_names()
+            )
+            self.query_one("#dataset-locations Static", Static).update(
+                _structured_text(placements, heading="MANAGED LOCATIONS")
+            )
+
+    def _load_transfer_logs(self) -> None:
+        table = self.query_one("#dataset-transfer-table", DataTable)
+        if not self._transfer_rows:
+            self.query_one("#dataset-transfer-details", Static).update("No transfer selected.")
+            return
+        row = self._transfer_rows[table.cursor_row]
+        self.query_one("#dataset-transfer-details", Static).update("Loading transfer logs…")
+        app = self.app
+
+        def load() -> None:
+            try:
+                text = self.services.dataset_replication_logs(row["job_id"]) or "No log output yet."
+                for warning in ("error", "observation_error", "reconciliation_error"):
+                    if row.get(warning):
+                        text = row[warning] + "\n" + text
+            except Exception as error:
+                text = f"Cannot read transfer logs: {error}"
+
+            def show() -> None:
+                if self._transfer_app is not None and self in self._transfer_app.screen_stack:
+                    self.query_one("#dataset-transfer-details", Static).update(text)
+
+            try:
+                app.call_from_thread(show)
+            except RuntimeError:
+                pass
+
+        Thread(target=load, daemon=True, name="lf-transfer-logs").start()
 
     def _confirm_delete(self, preview: Mapping[str, Any]) -> None:
         self.query_one("#dataset-delete", Button).disabled = False

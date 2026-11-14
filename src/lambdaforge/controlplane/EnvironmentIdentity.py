@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from lambdaforge.controlplane.EnvironmentPublication import PUBLICATION_CONTRACT
 from lambdaforge.ImmutableJson import FrozenJsonMapping
 
 
@@ -49,7 +50,8 @@ class EnvironmentIdentity:
         )
         policy = FrozenJsonMapping(dependency_policy)
         payload = {
-            "identity_version": 2,
+            "identity_version": 4,
+            "publication_contract": PUBLICATION_CONTRACT,
             "wheels": normalized,
             "python_requirement": python_requirement,
             "offline": bool(offline),
@@ -63,7 +65,8 @@ class EnvironmentIdentity:
     def to_dict(self) -> dict[str, Any]:
         """Return the serializable environment manifest."""
         return {
-            "environment_identity_version": 2,
+            "environment_identity_version": 4,
+            "publication_contract": PUBLICATION_CONTRACT,
             "environment_id": self.environment_id,
             "wheels": [copy.deepcopy(value) for value in self.wheels],
             "python_requirement": self.python_requirement,

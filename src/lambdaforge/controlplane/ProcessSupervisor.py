@@ -30,8 +30,12 @@ class ProcessSupervisor:
     _lease_wait_reason: str | None = None
 
     @classmethod
-    def launch(cls, request_path: str | Path) -> dict[str, Any]:
+    def launch(cls, request_path: str | Path, *, stdin_data: bytes | None = None) -> dict[str, Any]:
         """Detach a supervisor, wait for durable acknowledgement and return quickly."""
+        if stdin_data is not None and (
+            not isinstance(stdin_data, bytes) or not 0 < len(stdin_data) <= 4096
+        ):
+            raise ValueError("Ephemeral Job input must be 1–4096 bytes.")
         request = Path(request_path).resolve()
         job_dir = request.parent
         process = subprocess.Popen(
@@ -39,15 +43,19 @@ class ProcessSupervisor:
                 sys.executable,
                 "-m",
                 "lambdaforge.controlplane.ProcessSupervisor",
-                "serve",
+                "serve-input" if stdin_data is not None else "serve",
                 str(request),
             ),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
         )
+        if stdin_data is not None:
+            assert process.stdin is not None
+            with process.stdin as channel:
+                channel.write(stdin_data)
         state_path = job_dir / "state.json"
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
@@ -60,7 +68,7 @@ class ProcessSupervisor:
         raise RuntimeError(f"Process supervisor did not acknowledge launch for {job_dir.name}.")
 
     @classmethod
-    def serve(cls, request_path: str | Path) -> int:
+    def serve(cls, request_path: str | Path, *, stdin_data: bytes | None = None) -> int:
         """Queue resources, run the scientific child and publish authoritative state."""
         request_file = Path(request_path).resolve()
         request = cls._required_mapping(cls._read_json(request_file), "request")
@@ -77,6 +85,7 @@ class ProcessSupervisor:
             {
                 "job_state_version": 1,
                 "job_id": job_id,
+                "cluster": str(request.get("cluster", "local")),
                 "state": JobState.STAGING.value,
                 "created_at_utc": str(request.get("created_at_utc", now)),
                 "updated_at_utc": now,
@@ -104,6 +113,7 @@ class ProcessSupervisor:
         identity: ProcessIdentity | None = None
         gpu_access: Mapping[str, Any] = {}
         gpu_mode = "exclusive"
+        queue_handled = False
         try:
             from lambdaforge.runtime.ResourceSafetyPolicy import ResourceSafetyPolicy
 
@@ -111,6 +121,10 @@ class ProcessSupervisor:
             # Configure this detached supervisor before outer admission, without
             # changing the user's parent environment or provider grant.
             os.environ["LAMBDAFORGE_RESOURCE_SAFETY"] = json.dumps(resource_safety.to_dict())
+            queue_ready = cls._wait_for_execution_queue(job_dir, request, supervisor)
+            queue_handled = bool(request.get("execution_queue"))
+            if not queue_ready:
+                return 0
             if not cls._wait_for_storage(job_dir, request, supervisor):
                 return 0
             if bool(request.get("stage_source", False)):
@@ -199,12 +213,17 @@ class ProcessSupervisor:
                     command,
                     cwd=work_dir,
                     env=environment,
-                    stdin=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
                     stdout=stdout,
                     stderr=stderr,
                     start_new_session=True,
                     close_fds=True,
                 )
+                if stdin_data is not None:
+                    assert process.stdin is not None
+                    with process.stdin as channel:
+                        channel.write(stdin_data)
+                    stdin_data = None
                 identity = ProcessIdentity.create(
                     process.pid, os.getpgid(process.pid), command, job_id
                 )
@@ -244,10 +263,12 @@ class ProcessSupervisor:
             # A successful/failed main process may still leave multiprocessing, trainer or
             # dataloader descendants behind.  Always enforce the Job ownership boundary, not
             # only while the original parent PID is alive.
+            cleanup_complete = True
             if identity is not None:
                 try:
                     cls._terminate(identity)
                 except Exception as error:
+                    cleanup_complete = False
                     cls._update_state(
                         job_dir,
                         {"process_cleanup_warning": (f"{type(error).__name__}: {error}")},
@@ -258,6 +279,29 @@ class ProcessSupervisor:
             resource_root = request.get("resource_lease_root")
             if resource_root is not None:
                 cls._release_capacity(Path(str(resource_root)), job_id)
+            if cleanup_complete:
+                cls._update_state(
+                    job_dir,
+                    {"scientific_cleanup_complete": True, "resources_released_at_utc": cls._now()},
+                )
+            if cleanup_complete and (queue_handled or not request.get("execution_queue")):
+                from lambdaforge.controlplane.ExecutionQueue import ExecutionQueue
+
+                state = cls._read_json(job_dir / "state.json") or {}
+                if state.get("state") in ExecutionQueue.TERMINAL:
+                    queue_storage = cls._required_mapping(request.get("storage"), "storage")
+                    try:
+                        ExecutionQueue(
+                            queue_storage["state_root"],
+                            queue_storage["run_root"],
+                            str(request.get("cluster", "local")),
+                        ).release(job_id)
+                    except (OSError, ValueError, RuntimeError) as error:
+                        # An admission metadata failure blocks followers, never replaces
+                        # completed scientific evidence or skips the remaining retention.
+                        cls._update_state(
+                            job_dir, {"queue_release_warning": f"{type(error).__name__}: {error}"}
+                        )
             storage = request.get("storage")
             if isinstance(storage, Mapping):
                 try:
@@ -273,6 +317,113 @@ class ProcessSupervisor:
                         job_dir,
                         {"retention_warning": f"{type(error).__name__}: {error}"},
                     )
+
+    @classmethod
+    def _wait_for_execution_queue(
+        cls, job_dir: Path, request: Mapping[str, Any], supervisor: ProcessIdentity
+    ) -> bool:
+        """FIFO gate before any CPU/RAM/GPU/storage admission; independent of the controller."""
+        from lambdaforge.controlplane.ExecutionQueue import ExecutionQueue
+
+        admission = request.get("execution_queue")
+        if admission is None:
+            return True
+        if (
+            not isinstance(admission, Mapping)
+            or admission.get("version") != 1
+            or admission.get("job_id") != job_dir.name
+        ):
+            raise ValueError("Execution queue admission does not match this Job.")
+        storage = cls._required_mapping(request.get("storage"), "storage")
+        queue = ExecutionQueue(
+            storage["state_root"], storage["run_root"], str(request.get("cluster", "local"))
+        )
+        try:
+            queue.mark(job_dir.name, "dispatched")
+        except InterruptedError:
+            cls._update_state(
+                job_dir,
+                {
+                    "state": JobState.CANCELLED.value,
+                    "updated_at_utc": cls._now(),
+                    "message": "Queue ticket cancelled.",
+                },
+            )
+            return False
+
+        markers: tuple[dict[str, list[int]], list[dict[str, Any]]] | None = None
+
+        def observe(previous: str) -> Mapping[str, Any]:
+            nonlocal markers
+            directory = queue.jobs / previous
+            if directory.is_symlink():
+                raise ValueError("Unsafe execution queue predecessor path.")
+            stored = cls._read_json(directory / "state.json")
+            if stored is None:
+                return {"state": "unknown", "released": False}
+            if stored.get("state") not in ExecutionQueue.TERMINAL:
+                # Waiting does not require rescanning all host processes on every poll.
+                # Nonterminal/stale evidence blocks; it is never promoted to success.
+                return {"state": stored.get("state", "unknown"), "released": False}
+            if markers is None:
+                markers = cls._process_markers()
+            state = cls.observe(directory, markers=markers)
+            released = (
+                str(state.get("state")) in ExecutionQueue.TERMINAL
+                and state.get("provider_observation") == "terminal"
+            )
+            for key in ("supervisor_identity", "process_identity"):
+                owner = state.get(key)
+                if isinstance(owner, Mapping):
+                    released = released and ProcessIdentity.from_mapping(
+                        owner
+                    ).storage_status() in {"dead", "reused"}
+            return {"state": state.get("state"), "released": released}
+
+        previous_wait = None
+        while True:
+            markers = None
+            state = cls._read_json(job_dir / "state.json") or {}
+            if state.get("state") == JobState.CANCELLED.value:
+                return False
+            try:
+                waiting = queue.waiting_on(job_dir.name, observe)
+            except InterruptedError:
+                cls._update_state(
+                    job_dir,
+                    {
+                        "state": JobState.CANCELLED.value,
+                        "updated_at_utc": cls._now(),
+                        "message": "Queue ticket cancelled.",
+                    },
+                )
+                return False
+            if not waiting:
+                cls._update_state(
+                    job_dir,
+                    {
+                        "queue_waiting_on": [],
+                        "queue_admitted_at_utc": cls._now(),
+                        "message": "Execution queue admitted Job.",
+                    },
+                )
+                return True
+            # A bounded heartbeat, not a notification/event flood.
+            now = time.monotonic()
+            if previous_wait is None or now - previous_wait >= cls.HEARTBEAT_SECONDS:
+                cls._update_state(
+                    job_dir,
+                    {
+                        "state": JobState.QUEUED.value,
+                        "heartbeat_at_utc": cls._now(),
+                        "updated_at_utc": cls._now(),
+                        "queue_waiting_on": waiting,
+                        "supervisor_identity": supervisor.to_dict(),
+                        "message": f"Execution queue: waiting for {len(waiting)} preceding Job(s).",
+                    },
+                )
+                previous_wait = now
+            time.sleep(cls.POLL_SECONDS)
 
     @classmethod
     def _wait_for_storage(
@@ -535,6 +686,32 @@ class ProcessSupervisor:
             "provider_observation": "unknown",
             "observation_reason": "PROCESS_OWNERSHIP_UNRESOLVED",
         }
+
+    @classmethod
+    def detached_owner_absent(
+        cls,
+        owner: ProcessIdentity,
+        *,
+        markers: tuple[dict[str, list[int]], list[dict[str, Any]]] | None = None,
+    ) -> bool:
+        """Prove an operational owner absent after its Job directory was removed.
+
+        This releases only detached operational commitments, not scientific recovery or
+        deletion authority. A dead/reused controller alone is insufficient: descendants
+        bearing its Job marker or relevant inaccessible processes still protect it.
+        """
+        if (
+            not owner.job_id.startswith("job-")
+            or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in owner.job_id)
+            or not 0 < owner.create_time < float("inf")
+            or owner.storage_status() not in {"dead", "reused"}
+        ):
+            return False
+        owned, unresolved = markers if markers is not None else cls._process_markers()
+        complete = cls._marker_scope(
+            {}, unresolved, [owner.create_time], boot_time=cls._host_boot_time()
+        )
+        return complete and not owned.get(owner.job_id)
 
     @staticmethod
     def _host_boot_time() -> float | None:
@@ -1455,6 +1632,14 @@ class ProcessSupervisor:
         if len(values) < 2:
             raise SystemExit("Usage: ProcessSupervisor launch|serve|control|inventory|observe PATH")
         operation, path, *rest = values
+        if operation in {"launch-input", "serve-input"}:
+            payload = sys.stdin.buffer.read(4097)
+            if not payload or len(payload) > 4096:
+                raise ValueError("Ephemeral Job input is absent or exceeds 4096 bytes.")
+            if operation == "serve-input":
+                return cls.serve(path, stdin_data=payload)
+            print(json.dumps(cls.launch(path, stdin_data=payload), sort_keys=True))
+            return 0
         if operation == "launch":
             print(json.dumps(cls.launch(path), sort_keys=True))
             return 0

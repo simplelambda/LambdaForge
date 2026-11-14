@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import http.client
 import json
 import math
-import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -14,12 +14,15 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 from lambdaforge.runtime import CrossProcessFileLock
+from lambdaforge.work.HttpCooldownPolicy import HttpCooldownPolicy
 from lambdaforge.work.managed import ManagedFile, ManagedFileStore, owned_path
+from lambdaforge.work.models import atomic_json
 
 _RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, *range(500, 600)})
 _RETRYABLE_HTTP_PROTOCOL_ERRORS = (
@@ -28,6 +31,26 @@ _RETRYABLE_HTTP_PROTOCOL_ERRORS = (
     http.client.ResponseNotReady,
     http.client.BadStatusLine,
 )
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward a bearer token to another host, port or transport."""
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Any:
+        def origin(url: str) -> tuple[str, str | None, int]:
+            try:
+                parsed = urllib.parse.urlsplit(url)
+                if parsed.username or parsed.password:
+                    raise ValueError("Credential-bearing redirect.")
+                return parsed.scheme, parsed.hostname, parsed.port or 443
+            except ValueError:
+                raise ValueError("Malformed authenticated redirect origin.") from None
+
+        if origin(req.full_url) != origin(newurl):
+            raise ValueError("Authenticated cross-origin redirect refused.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class RateLimit:
@@ -70,8 +93,24 @@ class WorkCache:
 
     VALUE_VERSION = 1
 
-    def __init__(self, root: Path, *, hold_gc_lease: bool = False) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        hold_gc_lease: bool = False,
+        recovery_roots: tuple[Path, ...] = (),
+        recovering: bool = False,
+        dependency_root: Path | None = None,
+    ) -> None:
         self._root = root.resolve()
+        self.recovering = recovering
+        self._dependency_root = dependency_root
+        self._recovery_roots = recovery_roots
+        if any(
+            p.parent != self._root.parent or p.resolve() != p or p.is_symlink()
+            for p in recovery_roots
+        ):
+            raise ValueError("Recovery cache namespaces must be owned sibling roots.")
         self._gc_lease: CrossProcessFileLock | None = None
         if hold_gc_lease:
             self._gc_lease = CrossProcessFileLock(
@@ -101,6 +140,9 @@ class WorkCache:
     ) -> ManagedFile:
         """Return a valid cached file or atomically construct it once per key."""
         managed = self._store.file(key, build=build, validate=validate)
+        managed = replace(
+            managed, metadata={**managed.metadata, "cache_namespace": self._root.name}
+        )
         self._track(managed)
         return managed
 
@@ -154,17 +196,27 @@ class WorkCache:
         decompress: str | None = None,
         validate: Callable[[ManagedFile], bool] | None = None,
         rate_limit: RateLimit | None = None,
+        max_bytes: int | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        credential: str | None = None,
+        cooldown_policy: HttpCooldownPolicy | None = None,
+        cooldown_scope: str | None = None,
     ) -> ManagedFile:
         """Download and atomically cache one bounded HTTP(S) resource.
 
         ``retries`` counts retries after the initial attempt. ``decompress`` may
         be ``"gzip"``; the cached fingerprint describes decompressed bytes.
+        ``max_bytes`` bounds decoded bytes; cancellation is checked between reads/retries.
+        ``credential`` is an env:/keyring: bearer reference, resolved only for an HTTPS
+        request. Authenticated redirects are restricted to the exact origin. References
+        and secret values are never written into the cache record.
         """
         if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
             raise ValueError("retries must be a non-negative integer.")
         if (
             isinstance(retry_backoff, bool)
             or not isinstance(retry_backoff, int | float)
+            or not math.isfinite(float(retry_backoff))
             or retry_backoff < 0
         ):
             raise ValueError("retry_backoff must be a non-negative number.")
@@ -182,38 +234,113 @@ class WorkCache:
             raise ValueError("cache.fetch accepts only explicit HTTP or HTTPS URLs.")
         if rate_limit is not None and not isinstance(rate_limit, RateLimit):
             raise TypeError("rate_limit must come from Work.cache.rate_limit().")
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1):
+            raise ValueError("max_bytes must be a positive integer.")
+        if cancelled is not None and not callable(cancelled):
+            raise TypeError("cancelled must be a callable.")
+        parsed = urllib.parse.urlsplit(str(url))
+        if cooldown_policy is not None and not isinstance(cooldown_policy, HttpCooldownPolicy):
+            raise TypeError("cooldown_policy must be an HttpCooldownPolicy.")
+        policy = cooldown_policy or HttpCooldownPolicy()
+        port = parsed.port or (443 if scheme == "https" else 80)
+        origin = f"{parsed.scheme}://{parsed.hostname}:{port}"
+        scope = hashlib.sha256((cooldown_scope or origin).encode()).hexdigest()
+        cooldown = self._root.parent / ".http-cooldowns" / f"{scope}.json"
+
+        def cooldown_delay(seconds: float = 0.0) -> float:
+            with CrossProcessFileLock(
+                cooldown.with_suffix(".lock"),
+                shared=False,
+                timeout_seconds=30,
+                poll_interval_seconds=0.01,
+            ):
+                state = json.loads(cooldown.read_text()) if cooldown.exists() else {}
+                deadline = max(
+                    float(state.get("until", 0)), time.time() + seconds if seconds else 0
+                )
+                if seconds:
+                    atomic_json(cooldown, {"until": deadline})
+                return max(0.0, deadline - time.time())
+
+        if credential is not None and (
+            scheme != "https" or parsed.username or parsed.password or parsed.query
+        ):
+            raise ValueError("Authenticated fetch requires HTTPS without URL credentials/query.")
+        if credential is not None and not credential.startswith(("env:", "keyring:")):
+            raise ValueError("Credentials require an env: or keyring: reference.")
+
+        def check_cancelled() -> None:
+            if cancelled is not None and cancelled():
+                raise RuntimeError("Cache download cancelled; no partial content published.")
+
+        def pause(seconds: float) -> None:
+            if cancelled is None:
+                time.sleep(seconds)
+                return
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                check_cancelled()
+                time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+
+        def copy_response(source: Any, sink: Any) -> None:
+            count = 0
+            while True:
+                check_cancelled()
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                count += len(chunk)
+                if max_bytes is not None and count > max_bytes:
+                    raise ValueError("Cache download exceeds max_bytes; no content published.")
+                sink.write(chunk)
+            check_cancelled()
 
         def download(target: Path) -> None:
             last_error: BaseException | None = None
             for attempt in range(retries + 1):
+                check_cancelled()
                 # ``ManagedFileStore`` gives this builder a private unpublished path.
                 # Remove any bytes left by the preceding attempt before rate limiting and
                 # opening a fresh response.
                 target.unlink(missing_ok=True)
                 if rate_limit is not None:
                     rate_limit.acquire()
+                while remaining := cooldown_delay():
+                    pause(min(remaining, 0.1))
+                check_cancelled()
                 try:
-                    request = urllib.request.Request(
-                        str(url),
-                        headers={"User-Agent": "LambdaForge scientific cache"},
-                    )
-                    with urllib.request.urlopen(request, timeout=float(timeout)) as response:
+                    headers = {"User-Agent": "LambdaForge scientific cache"}
+                    opener: Callable[..., Any] = urllib.request.urlopen
+                    if credential is not None:
+                        from lambdaforge.controlplane.CredentialService import CredentialService
+
+                        secret = CredentialService().resolve_reference(credential)
+                        if not secret or "\r" in secret or "\n" in secret:
+                            raise ValueError("Invalid bearer credential value.")
+                        headers["Authorization"] = "Bearer " + secret
+                        opener = urllib.request.build_opener(_SameOriginRedirect()).open
+                    request = urllib.request.Request(str(url), headers=headers)
+                    with opener(request, timeout=float(timeout)) as response:
                         if decompress == "gzip":
                             with (
                                 gzip.GzipFile(fileobj=response) as decoded,
                                 target.open("wb") as sink,
                             ):
-                                shutil.copyfileobj(decoded, sink, length=1024 * 1024)
+                                copy_response(decoded, sink)
                         else:
                             with target.open("wb") as sink:
-                                shutil.copyfileobj(response, sink, length=1024 * 1024)
+                                copy_response(response, sink)
                     return
                 except urllib.error.HTTPError as error:
                     last_error = error
                     target.unlink(missing_ok=True)
+                    if error.code in _RETRYABLE_HTTP_STATUS:
+                        body = error.read(65536) if policy.json_field else b""
+                        delay = policy.delay(error.headers, body)
+                        cooldown_delay(max(delay, float(retry_backoff) * (2**attempt)))
+                    error.close()
                     if error.code not in _RETRYABLE_HTTP_STATUS or attempt == retries:
                         break
-                    time.sleep(float(retry_backoff) * (2**attempt))
                 except (
                     *_RETRYABLE_HTTP_PROTOCOL_ERRORS,
                     OSError,
@@ -224,14 +351,74 @@ class WorkCache:
                     target.unlink(missing_ok=True)
                     if attempt == retries:
                         break
-                    time.sleep(float(retry_backoff) * (2**attempt))
+                    pause(float(retry_backoff) * (2**attempt))
             assert last_error is not None
+            if credential is not None:
+                # Servers may echo authorization in an error reason. Do not retain that
+                # exception as a chained traceback or diagnostic payload.
+                raise RuntimeError(
+                    f"Authenticated fetch failed after {attempt + 1} attempt(s): "
+                    f"{type(last_error).__name__}; check endpoint/access."
+                ) from None
             raise RuntimeError(
                 f"Could not fetch {url!r} after {attempt + 1} attempt(s); final cause: "
                 f"{type(last_error).__name__}: {last_error}"
             ) from last_error
 
-        return self.file(key, build=download, validate=validate)
+        check_cancelled()
+        receipt = (
+            self._dependency_root / "cache-dependencies.json" if self._dependency_root else None
+        )
+        request_identity = hashlib.sha256(json.dumps([str(url), decompress]).encode()).hexdigest()
+        if receipt is not None and receipt.is_file():
+            reference = json.loads(receipt.read_text()).get("observations", {}).get(key)
+            if reference is not None:
+                if reference.get("request_identity", request_identity) != request_identity:
+                    raise ValueError(
+                        "Observed input key was reused for a different source contract."
+                    )
+                prior = self.restore_reference(
+                    key,
+                    sha256=reference["sha256"],
+                    size_bytes=reference["size_bytes"],
+                    namespace=reference.get("namespace"),
+                )
+                if prior is None:
+                    raise RuntimeError(
+                        "Original observed input is unavailable; refusing URL replay. "
+                        "Inspect recovery dependencies or start a new acquisition."
+                    )
+                if validate is not None and not validate(prior):
+                    raise ValueError("Original observed input failed application validation.")
+                if max_bytes is not None and prior.size_bytes > max_bytes:
+                    raise ValueError("Original observed input exceeds max_bytes.")
+                prior = replace(prior, metadata={**prior.metadata, "external_observation": True})
+                self._track(prior)
+                return prior
+        result = self.file(key, build=download, validate=validate)
+        result = replace(result, metadata={**result.metadata, "external_observation": True})
+        self._track(result)
+        if self._dependency_root is not None:
+            receipt = self._dependency_root / "cache-dependencies.json"
+            with CrossProcessFileLock(
+                receipt.with_suffix(".lock"),
+                shared=False,
+                timeout_seconds=30,
+                poll_interval_seconds=0.01,
+            ):
+                document = (
+                    json.loads(receipt.read_text()) if receipt.exists() else {"namespaces": []}
+                )
+                document["namespaces"] = sorted(set(document["namespaces"]) | {self._root.name})
+                document.setdefault("observations", {})[key] = {
+                    **result.reference(),
+                    "request_identity": request_identity,
+                }
+                atomic_json(receipt, document)
+        check_cancelled()
+        if max_bytes is not None and result.path.stat().st_size > max_bytes:
+            raise ValueError("Cached resource exceeds max_bytes.")
+        return result
 
     def rate_limit(self, name: str, *, requests_per_second: float) -> RateLimit:
         """Return one named limiter shared by threads using this Work cache instance."""
@@ -264,9 +451,18 @@ class WorkCache:
         *,
         sha256: str,
         size_bytes: int,
+        namespace: str | None = None,
     ) -> ManagedFile | None:
         """Restore a logical map dependency only when its bytes still match."""
-        return self._store.restore(key, sha256=sha256, size_bytes=size_bytes)
+        roots = (self._root, *self._recovery_roots)
+        for root in roots:
+            if namespace is not None and namespace != root.name:
+                continue
+            store = ManagedFileStore(root, scope="cache", data_root=root / "files")
+            managed = store.restore(key, sha256=sha256, size_bytes=size_bytes)
+            if managed is not None:
+                return replace(managed, metadata={**managed.metadata, "cache_namespace": root.name})
+        return None
 
     def _track(self, managed: ManagedFile) -> None:
         for collector in self._dependency_collectors.get():
@@ -332,4 +528,4 @@ class WorkCache:
             self._dependency_collectors.reset(token)
 
 
-__all__ = ["RateLimit", "WorkCache"]
+__all__ = ["HttpCooldownPolicy", "RateLimit", "WorkCache"]

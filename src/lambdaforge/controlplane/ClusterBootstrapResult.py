@@ -22,8 +22,18 @@ class ClusterBootstrapResult:
     planned: bool = False
     pruned_environments: tuple[str, ...] = ()
     cleanup_blocked_reason: str | None = None
+    tool_runtimes: tuple[Mapping[str, Any], ...] = ()
+    native_library_policy: Mapping[str, Any] | None = None
+    native_libraries: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        for name in ("native_library_policy", "native_libraries"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, FrozenJsonMapping(value))
+        object.__setattr__(
+            self, "tool_runtimes", tuple(FrozenJsonMapping(value) for value in self.tool_runtimes)
+        )
         if self.pytorch is not None:
             object.__setattr__(self, "pytorch", FrozenJsonMapping(self.pytorch))
         if self.runtime is not None:
@@ -45,7 +55,10 @@ class ClusterBootstrapResult:
             "pytorch": copy.deepcopy(self.pytorch),
             "runtime": copy.deepcopy(self.runtime),
             "native_environment": copy.deepcopy(self.native_environment),
+            "native_library_policy": copy.deepcopy(self.native_library_policy),
+            "native_libraries": copy.deepcopy(self.native_libraries),
             "planned": self.planned,
             "pruned_environments": list(self.pruned_environments),
             "cleanup_blocked_reason": self.cleanup_blocked_reason,
+            "tool_runtimes": [dict(value) for value in self.tool_runtimes],
         }
